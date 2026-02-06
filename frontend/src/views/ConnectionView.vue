@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { useConnectionStore } from '@/stores/connection'
-
-type AuthType = 'sql' | 'integrated'
+import { buildConnectionString, type AuthType } from '@/utils/connectionStringBuilder'
 
 const connectionStore = useConnectionStore()
 
@@ -15,14 +14,18 @@ const authType = ref<AuthType>('sql')
 const isSqlAuth = computed(() => authType.value === 'sql')
 
 async function handleConnect() {
-  // This is a temporary implementation. Task M2.3 will create a dedicated builder.
-  let connectionString = `server=${server.value};database=${database.value};TrustServerCertificate=true`;
-  if (isSqlAuth.value) {
-    connectionString += `;user=${username.value};password=${password.value}`;
-  } else {
-    connectionString += ';Authentication=ActiveDirectoryIntegrated';
+  try {
+    const connectionString = buildConnectionString({
+      server: server.value,
+      database: database.value,
+      authType: authType.value,
+      username: username.value,
+      password: password.value,
+    })
+    await connectionStore.connect(connectionString)
+  } catch (error: any) {
+    connectionStore.errorMessage = error.message
   }
-  await connectionStore.connect(connectionString)
 }
 </script>
 
