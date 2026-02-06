@@ -3,12 +3,16 @@ import { ref } from 'vue'
 import { useConnectionStore } from '@/stores/connection'
 
 const connectionStore = useConnectionStore()
-const connectionString = ref('server=localhost;user=sa;password=Password123;database=master;TrustServerCertificate=true')
+
+const server = ref('localhost')
+const database = ref('master')
+const username = ref('sa')
+const password = ref('Password123')
 
 async function handleConnect() {
-  if (connectionString.value) {
-    await connectionStore.connect(connectionString.value)
-  }
+  // This is a temporary implementation. Task M2.3 will create a dedicated builder.
+  const connectionString = `server=${server.value};database=${database.value};user=${username.value};password=${password.value};TrustServerCertificate=true`;
+  await connectionStore.connect(connectionString)
 }
 </script>
 
@@ -16,17 +20,53 @@ async function handleConnect() {
   <div class="connection-view">
     <form @submit.prevent="handleConnect">
       <h2>Connect to Database</h2>
+
       <div class="form-group">
-        <label for="connection-string">Connection String</label>
+        <label for="server">Server</label>
         <input
-          id="connection-string"
-          v-model="connectionString"
+          id="server"
+          v-model="server"
           type="text"
-          placeholder="server=...;user=...;password=..."
+          placeholder="localhost"
           required
           :disabled="connectionStore.isConnecting"
         />
       </div>
+
+      <div class="form-group">
+        <label for="database">Database (optional)</label>
+        <input
+          id="database"
+          v-model="database"
+          type="text"
+          placeholder="master"
+          :disabled="connectionStore.isConnecting"
+        />
+      </div>
+
+      <div class="form-group">
+        <label for="username">Username</label>
+        <input
+          id="username"
+          v-model="username"
+          type="text"
+          placeholder="sa"
+          required
+          :disabled="connectionStore.isConnecting"
+        />
+      </div>
+
+      <div class="form-group">
+        <label for="password">Password</label>
+        <input
+          id="password"
+          v-model="password"
+          type="password"
+          required
+          :disabled="connectionStore.isConnecting"
+        />
+      </div>
+
       <button type="submit" :disabled="connectionStore.isConnecting">
         {{ connectionStore.isConnecting ? 'Connecting...' : 'Connect' }}
       </button>

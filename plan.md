@@ -30,145 +30,72 @@ The application will be built using a modern web stack and wrapped in a desktop 
 
 ---
 
-## 4. Feature Breakdown & Task List
+## 4. Consolidated Project Roadmap
 
-### Epic 1: Connection Management
+This section outlines the development plan in a milestone-based format.
 
-The user must be able to save and manage connections to different SQL Server instances.
+### **Milestone 1: Core Functionality (The "Spine")**
+*   **Goal:** Establish a working end-to-end connection between the Vue.js frontend and a SQL Server database, mediated by the Rust backend. This involves creating the most basic UI needed to input a query, execute it, and see the results.
+*   **Status:** ✅ **Completed**
 
-- **Task 1.1: Connection Dialog UI**
-  - Create a modal or dedicated page to add/edit a new connection.
-  - Fields will include: Server Name/IP, Authentication Type (Windows Authentication, SQL Server Authentication), Username, Password, and an optional Connection Name.
-- **Task 1.2: Save Connection**
-  - Implement backend logic in Rust to receive connection details from the Vue frontend.
-  - Securely store connection details on the local machine. Passwords should be encrypted using a system-level secret store (e.g., Windows Credential Manager, macOS Keychain).
-- **Task 1.3: List & Select Connections**
-  - Create a UI (e.g., a dropdown or a startup page) to display and select from saved connections.
-- **Task 1.4: Test & Establish Connection**
-  - Implement a "Test Connection" button.
-  - The Rust backend will attempt to connect to the server with the provided details and return a success/error message.
-
-### Epic 2: Database Explorer
-
-A hierarchical tree view to navigate database objects.
-
-- **Task 2.1: Tree View Component**
-  - Implement a collapsible tree view component in the UI's main layout (e.g., a left-hand sidebar).
-- **Task 2.2: Backend API for Metadata**
-  - Create Rust functions exposed to the frontend to query system tables (`sys.databases`, `sys.tables`, `INFORMATION_SCHEMA.COLUMNS`, etc.).
-  - Endpoints needed:
-    - `list_databases(connection_id)`
-    - `list_schemas(database_name)`
-    - `list_tables_and_views(database_name, schema_name)`
-    - `list_columns(table_name)`
-- **Task 2.3: Populate Tree View**
-  - On successful connection, fetch the list of databases and populate the top level of the tree.
-  - Lazily load child nodes (tables, columns, etc.) as the user expands parent nodes to improve performance.
-- **Task 2.4: Context Menu Actions**
-  - Implement a right-click context menu on tree nodes.
-  - Initial actions:
-    - Table/View: `SELECT TOP 1000 Rows` (generates and opens a script in a new query tab).
-    - Table: `Script as CREATE`
-
-### Epic 3: SQL Editor
-
-A powerful, multi-tabbed editor for writing and executing queries.
-
-- **Task 3.1: Integrate Monaco Editor**
-  - Add the Monaco Editor component to the main content area.
-  - Configure it for T-SQL syntax highlighting.
-- **Task 3.2: Tabbed Editing**
-  - Implement a tab system so users can open multiple editor instances.
-  - Each tab maintains its own state (code, connection context).
-- **Task 3.3: Query Execution**
-  - Create a "Run" button (and F5 shortcut).
-  - On execution, send the query text from the active editor tab to the Rust backend.
-  - The backend will execute the query against the currently selected database connection and stream results back.
-- **Task 3.4: Status & Error Display**
-  - Add a status bar to show the current connection, execution time, and row count.
-  - Display error messages from the database driver in a clear, user-friendly format.
-
-### Epic 4: Query Results Viewer
-
-A component to display the data returned from a query.
-
-- **Task 4.1: Data Grid Component**
-  - Implement a virtualized data grid to efficiently display potentially large result sets.
-  - Columns should be dynamically generated based on the query's output.
-- **Task 4.2: Handle Multiple Result Sets**
-  - Queries can return multiple result sets. The UI should display these in separate tabs or grids.
-- **Task 4.3: Display Query Messages**
-  - Create a "Messages" tab next to the "Results" grid to show output from `PRINT` statements or other server messages.
-- **Task 4.4: Export Functionality (Post-MVP)**
-  - Add buttons to export the contents of the results grid to formats like CSV or JSON.
+#### **Completed Tasks:**
+*   **[x] M1.1 (Backend):** Add `tiberius` to `Cargo.toml`.
+*   **[x] M1.2 (Backend):** Create a `connect` Tauri Command.
+*   **[x] M1.3 (Backend):** Create an `execute_query` Tauri Command.
+*   **[x] M1.4 (Backend):** Register `connect` and `execute_query` commands in `main.rs`.
+*   **[x] M1.5 (Frontend):** Create a `ConnectionView.vue` component with a single input.
+*   **[x] M1.6 (Frontend):** Implement a Pinia store for connection state management.
+*   **[x] M1.7 (Frontend):** Create a `QueryView.vue` component with a `<textarea>` and `<table>`.
+*   **[x] M1.8 (Frontend):** Implement the logic to call the `execute_query` command and display results.
+*   **[x] M1.9 (Frontend):** Create the basic app layout to switch between `ConnectionView` and `QueryView`.
 
 ---
 
-## 5. Development Roadmap (Milestones)
+### **Milestone 2: Advanced Connection & UI**
+*   **Goal:** Enhance the connection process with a more user-friendly UI and support for different authentication methods. Improve the core editor and results view.
+*   **Status:** 🟡 **In Progress**
 
-- **Milestone 1: Core Functionality (The "Spine")**
-  The goal of this milestone is to establish a working end-to-end connection between the Vue.js frontend and a SQL Server database, mediated by the Rust backend. This involves creating the most basic UI needed to input a query, execute it, and see the results.
+#### **Outstanding Tasks:**
+*   **[x] M2.1 (Frontend):** Refactor `ConnectionView.vue` to use separate input fields for Server, Database, Username, and Password.
+*   **M2.2 (Frontend):** Add a dropdown/selector to `ConnectionView.vue` to switch between "SQL Server Authentication" and "Microsoft Entra / Integrated" authentication. The Username/Password fields should be disabled for Integrated auth.
+*   **M2.3 (Frontend):** Create a `connectionStringBuilder.ts` utility to dynamically build the correct ADO.NET connection string from the form fields and selected auth type.
+*   **M2.4 (Frontend):** Add the `monaco-editor-vue3` package (or a similar alternative) to the frontend dependencies.
+*   **M2.5 (Frontend):** Replace the `<textarea>` in `QueryView.vue` with the Monaco Editor component.
+*   **M2.6 (Frontend):** Configure the Monaco Editor for T-SQL language support (syntax highlighting).
+*   **M2.7 (Frontend):** Research and select a virtualized data grid component for Vue (e.g., from PrimeVue, TanStack Table, etc.).
+*   **M2.8 (Frontend):** Replace the simple `<table>` in `QueryView.vue` with the new virtualized grid component to improve performance with large datasets.
 
-  ### Decomposed Technical Tasks:
+---
 
-  #### 1. Backend: Establish Database Connection & Query Command
+### **Milestone 3: Database Explorer & Core Features**
+*   **Goal:** Implement the database object explorer and other core application features like saving connections and tabbed editing.
+*   **Status:** ⏳ Not Started
 
-    *   **[x] Task M1.1 (Backend): Add `tiberius` to `Cargo.toml`**
-      *   **Description:** Add the `tiberius` crate, which is the TDS driver for SQL Server, to the `backend/Cargo.toml` dependencies. This will enable the Rust backend to communicate with the database.
-      *   **Epic Connection:** Foundational for all Epics.
+#### **Outstanding Tasks:**
+*   **M3.1 (Backend):** Create new Tauri commands: `list_databases`, `list_schemas`, `list_tables`, and `list_columns`.
+*   **M3.2 (Backend):** Implement the database logic for the new metadata commands in `db.rs` by querying system views (e.g., `sys.databases`, `INFORMATION_SCHEMA.TABLES`).
+*   **M3.3 (Frontend):** Create a new `DbExplorer.vue` component containing a basic tree-view structure.
+*   **M3.4 (Frontend):** Create a new `explorerStore.ts` Pinia store to manage the tree state and fetch data from the backend metadata commands.
+*   **M3.5 (Frontend):** Implement a multi-pane layout in `App.vue` to integrate the `DbExplorer.vue` component alongside the `QueryView`.
+*   **M3.6 (Frontend):** Create a `tabsStore.ts` Pinia store to manage an array of open query tabs, where each tab has its own query text, results, and state.
+*   **M3.7 (Frontend):** Refactor `QueryView.vue` into a reusable component that represents a single tab's content, with its state driven by the `tabsStore`.
+*   **M3.8 (Backend):** Create `save_connection` and `list_connections` Tauri commands.
+*   **M3.9 (Backend):** Implement logic to save connection details to a local JSON file. For password security, integrate the `keyring` crate to use the OS secret store.
+*   **M3.10 (Frontend):** Add a "Save" button to the connection dialog and create a new view or modal to list, select, and manage saved connections.
 
-  *   **[x] Task M1.2 (Backend): Create a `connect` Tauri Command**
-      *   **Description:** In `backend/src/main.rs`, create a new Tauri command (e.g., `#[tauri::command] async fn connect(connection_string: String) -> Result<(), String>`). This function will take a connection string, use `tiberius` to establish a connection, and return a success or error message to the frontend.
-      *   **Epic Connection:** **Task 1.4 (Test & Establish Connection)**
+---
 
-  *   **[x] Task M1.3 (Backend): Create an `execute_query` Tauri Command**
-      *   **Description:** In `backend/src/main.rs`, create another Tauri command (e.g., `#[tauri::command] async fn execute_query(query: String) -> Result<JsonValue, String>`). This function will take a raw SQL string, execute it using the established `tiberius` client, and serialize the results into a JSON format that the frontend can easily render. For simplicity, it can manage a single, globally-shared client connection for now.
-      *   **Epic Connection:** **Task 3.3 (Query Execution)**
+### **Milestone 4: Advanced Features & Polish**
+*   **Goal:** Add "quality of life" features and polish the application for a better user experience.
+*   **Status:** ⏳ Not Started
 
-    *   **[x] Task M1.4 (Backend): Register Commands**
-      *   **Description:** In the `main` function of `backend/src/main.rs`, register the new `connect` and `execute_query` commands in the Tauri builder using `.invoke_handler(tauri::generate_handler![connect, execute_query])`.
+#### **Outstanding Tasks:**
+*   **M4.1 (Frontend):** Add a right-click context menu to nodes in the `DbExplorer.vue` tree.
+*   **M4.2 (Frontend):** Implement context menu actions, such as "New Query" or "Select Top 1000 Rows," which will open and pre-fill a new query tab.
+*   **M4.3 (Backend):** Update `db_execute_query` to handle multiple result sets from a single query execution and update the JSON response structure accordingly.
+*   **M4.4 (Frontend):** Update the `QueryView` results panel to display multiple result sets, for example, using tabs within the panel.
+*   **M4.5 (Backend):** Update `db_execute_query` to capture and return informational messages (e.g., from `PRINT` statements) in the JSON response.
+*   **M4.6 (Frontend):** Create a "Messages" tab in the results panel to display these informational messages.
+*   **M4.7 (Frontend):** Add an "Export to CSV" button to the results panel.
+*   **M4.8 (Frontend):** Implement client-side logic to convert the JSON result data into a CSV string and trigger a file download.
 
-  #### 2. Frontend: Build the Minimal User Interface
-
-  *   **[x] Task M1.5 (Frontend): Create a Connection View**
-      *   **Description:** Create a new Vue component (`ConnectionView.vue`) that contains a simple form with an input for a raw SQL Server connection string and a "Connect" button.
-      *   **Epic Connection:** A simplified version of **Task 1.1 (Connection Dialog UI)**. We use a raw connection string for now instead of a full dialog with separate fields to speed up initial development.
-
-    *   **[x] Task M1.6 (Frontend): Implement Connection State Management**
-      *   **Description:** Create a Pinia store (`connectionStore.ts`) to manage the application's connection state (e.g., `isConnected`, `errorMessage`). When the "Connect" button is clicked, call the `connect` backend command using Tauri's `invoke` API and update the store based on the result.
-      *   **Epic Connection:** **Task 1.4 (Test & Establish Connection)**
-
-    *   **[x] Task M1.7 (Frontend): Create a Query View**
-      *   **Description:** Create a `QueryView.vue` component that is shown only when `isConnected` is true. This component will contain:
-          1.  A basic `<textarea>` for SQL query input.
-          2.  An "Execute" button.
-          3.  A simple HTML `<table>` to display query results.
-          4.  A pre-formatted block to display any error messages.
-      *   **Epic Connection:** A minimal implementation of **Task 3.3 (Query Execution)** and **Task 4.1 (Data Grid Component)**.
-
-    *   **[x] Task M1.8 (Frontend): Implement Query Execution Logic**
-      *   **Description:** In `QueryView.vue`, when the "Execute" button is clicked, take the text from the `<textarea>` and call the `execute_query` backend command.
-      *   On success, parse the returned JSON data and dynamically generate the rows and columns for the HTML `<table>`.
-      *   On error, display the error message.
-      *   **Epic Connection:** **Task 3.3 (Query Execution)** and **Task 3.4 (Status & Error Display)**.
-
-    *   **[x] Task M1.9 (Frontend): Basic App Layout**
-      *   **Description:** Modify `App.vue` to conditionally render `ConnectionView.vue` or `QueryView.vue` based on the `isConnected` state from the Pinia store. This provides the basic single-page application flow for this milestone.
-
-- **Milestone 2: The Editor & Explorer**
-  1. Replace the `textarea` with the Monaco Editor component.
-  2. Build the database explorer tree view UI.
-  3. Implement the backend metadata queries and connect them to the explorer to display the database/table hierarchy.
-  4. Implement the tabbed interface for the editor.
-
-- **Milestone 3: The Results Grid & UX Refinements**
-  1. Replace the basic HTML table with a robust, virtualized data grid.
-  2. Implement resizable panels for the explorer, editor, and results view.
-  3. Add the "Messages" tab for server output.
-  4. Refine the connection management UI and implement secure credential storage.
-
-- **Milestone 4: Advanced Features & Polish**
-  1. Implement context-menu actions in the database explorer.
-  2. Add result set export functionality (CSV/JSON).
-  3. Begin work on IntelliSense/autocomplete in the editor by feeding it schema information from the backend.
-  4. General bug fixing, performance tuning, and UI polishing.

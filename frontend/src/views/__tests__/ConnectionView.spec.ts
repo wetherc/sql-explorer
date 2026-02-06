@@ -4,36 +4,44 @@ import { createPinia, setActivePinia } from 'pinia'
 import ConnectionView from '../ConnectionView.vue'
 import { useConnectionStore } from '@/stores/connection'
 
-// Mock the tauri invoke function
 vi.mock('@tauri-apps/api/tauri', () => ({
   invoke: vi.fn(),
 }))
 
 describe('ConnectionView.vue', () => {
   beforeEach(() => {
-    // Creates a fresh pinia and make it active so it's automatically picked
-    // up by any useStore() call without having to pass it to them
     setActivePinia(createPinia())
   })
 
-  it('renders the form correctly', () => {
+  it('renders the form with separate fields correctly', () => {
     const wrapper = mount(ConnectionView)
     expect(wrapper.find('h2').text()).toBe('Connect to Database')
-    expect(wrapper.find('input').exists()).toBe(true)
-    expect(wrapper.find('button').exists()).toBe(true)
+    expect(wrapper.find('input#server').exists()).toBe(true)
+    expect(wrapper.find('input#database').exists()).toBe(true)
+    expect(wrapper.find('input#username').exists()).toBe(true)
+    expect(wrapper.find('input#password').exists()).toBe(true)
+    expect(wrapper.find('button[type="submit"]').exists()).toBe(true)
   })
 
-  it('calls the connect action on form submission', async () => {
+  it('calls the connect action with a constructed connection string', async () => {
     const wrapper = mount(ConnectionView)
     const connectionStore = useConnectionStore()
     const connectSpy = vi.spyOn(connectionStore, 'connect')
 
-    const testString = 'server=localhost;user=test'
-    await wrapper.find('input').setValue(testString)
+    // Set values
+    await wrapper.find('input#server').setValue('test-server')
+    await wrapper.find('input#database').setValue('test-db')
+    await wrapper.find('input#username').setValue('test-user')
+    await wrapper.find('input#password').setValue('test-pass')
+
+    // Submit form
     await wrapper.find('form').trigger('submit.prevent')
 
+    const expectedConnectionString =
+      'server=test-server;database=test-db;user=test-user;password=test-pass;TrustServerCertificate=true'
+
     expect(connectSpy).toHaveBeenCalledTimes(1)
-    expect(connectSpy).toHaveBeenCalledWith(testString)
+    expect(connectSpy).toHaveBeenCalledWith(expectedConnectionString)
   })
 
   it('shows an error message when the store has an error', async () => {
@@ -49,7 +57,7 @@ describe('ConnectionView.vue', () => {
     expect(errorP.text()).toBe(errorMessage)
   })
 
-  it('disables the button and shows "Connecting..." while connecting', async () => {
+  it('disables fields and shows "Connecting..." while connecting', async () => {
     const wrapper = mount(ConnectionView)
     const connectionStore = useConnectionStore()
 
@@ -60,7 +68,9 @@ describe('ConnectionView.vue', () => {
     expect(button.attributes('disabled')).toBeDefined()
     expect(button.text()).toBe('Connecting...')
 
-    const input = wrapper.find('input')
-    expect(input.attributes('disabled')).toBeDefined()
+    const inputs = wrapper.findAll('input')
+    inputs.forEach((input) => {
+      expect(input.attributes('disabled')).toBeDefined()
+    })
   })
 })
