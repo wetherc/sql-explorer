@@ -121,7 +121,7 @@ A component to display the data returned from a query.
       *   **Description:** In `backend/src/main.rs`, create a new Tauri command (e.g., `#[tauri::command] async fn connect(connection_string: String) -> Result<(), String>`). This function will take a connection string, use `tiberius` to establish a connection, and return a success or error message to the frontend.
       *   **Epic Connection:** **Task 1.4 (Test & Establish Connection)**
 
-  *   **Task M1.3 (Backend): Create an `execute_query` Tauri Command**
+  *   **[x] Task M1.3 (Backend): Create an `execute_query` Tauri Command**
       *   **Description:** In `backend/src/main.rs`, create another Tauri command (e.g., `#[tauri::command] async fn execute_query(query: String) -> Result<JsonValue, String>`). This function will take a raw SQL string, execute it using the established `tiberius` client, and serialize the results into a JSON format that the frontend can easily render. For simplicity, it can manage a single, globally-shared client connection for now.
       *   **Epic Connection:** **Task 3.3 (Query Execution)**
 
