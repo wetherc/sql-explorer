@@ -117,7 +117,7 @@ A component to display the data returned from a query.
       *   **Description:** Add the `tiberius` crate, which is the TDS driver for SQL Server, to the `backend/Cargo.toml` dependencies. This will enable the Rust backend to communicate with the database.
       *   **Epic Connection:** Foundational for all Epics.
 
-  *   **Task M1.2 (Backend): Create a `connect` Tauri Command**
+  *   **[x] Task M1.2 (Backend): Create a `connect` Tauri Command**
       *   **Description:** In `backend/src/main.rs`, create a new Tauri command (e.g., `#[tauri::command] async fn connect(connection_string: String) -> Result<(), String>`). This function will take a connection string, use `tiberius` to establish a connection, and return a success or error message to the frontend.
       *   **Epic Connection:** **Task 1.4 (Test & Establish Connection)**
 

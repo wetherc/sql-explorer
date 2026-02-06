@@ -19,6 +19,7 @@ serde = { version = "1.0", features = ["derive"] }
 tauri = { version = "1.5", features = [] }
 tiberius = { version = "0.12.2", features = ["chrono", "tds73"] }
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["compat"] }
 
 [features]
 # by default Tauri runs in production mode
