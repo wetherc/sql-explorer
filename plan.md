@@ -125,12 +125,12 @@ A component to display the data returned from a query.
       *   **Description:** In `backend/src/main.rs`, create another Tauri command (e.g., `#[tauri::command] async fn execute_query(query: String) -> Result<JsonValue, String>`). This function will take a raw SQL string, execute it using the established `tiberius` client, and serialize the results into a JSON format that the frontend can easily render. For simplicity, it can manage a single, globally-shared client connection for now.
       *   **Epic Connection:** **Task 3.3 (Query Execution)**
 
-  *   **Task M1.4 (Backend): Register Commands**
+    *   **[x] Task M1.4 (Backend): Register Commands**
       *   **Description:** In the `main` function of `backend/src/main.rs`, register the new `connect` and `execute_query` commands in the Tauri builder using `.invoke_handler(tauri::generate_handler![connect, execute_query])`.
 
   #### 2. Frontend: Build the Minimal User Interface
 
-  *   **Task M1.5 (Frontend): Create a Connection View**
+  *   **[x] Task M1.5 (Frontend): Create a Connection View**
       *   **Description:** Create a new Vue component (`ConnectionView.vue`) that contains a simple form with an input for a raw SQL Server connection string and a "Connect" button.
       *   **Epic Connection:** A simplified version of **Task 1.1 (Connection Dialog UI)**. We use a raw connection string for now instead of a full dialog with separate fields to speed up initial development.
 
