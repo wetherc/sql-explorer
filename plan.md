@@ -134,7 +134,7 @@ A component to display the data returned from a query.
       *   **Description:** Create a new Vue component (`ConnectionView.vue`) that contains a simple form with an input for a raw SQL Server connection string and a "Connect" button.
       *   **Epic Connection:** A simplified version of **Task 1.1 (Connection Dialog UI)**. We use a raw connection string for now instead of a full dialog with separate fields to speed up initial development.
 
-  *   **Task M1.6 (Frontend): Implement Connection State Management**
+    *   **[x] Task M1.6 (Frontend): Implement Connection State Management**
       *   **Description:** Create a Pinia store (`connectionStore.ts`) to manage the application's connection state (e.g., `isConnected`, `errorMessage`). When the "Connect" button is clicked, call the `connect` backend command using Tauri's `invoke` API and update the store based on the result.
       *   **Epic Connection:** **Task 1.4 (Test & Establish Connection)**
 
@@ -152,7 +152,7 @@ A component to display the data returned from a query.
       *   On error, display the error message.
       *   **Epic Connection:** **Task 3.3 (Query Execution)** and **Task 3.4 (Status & Error Display)**.
 
-  *   **Task M1.9 (Frontend): Basic App Layout**
+    *   **[x] Task M1.9 (Frontend): Basic App Layout**
       *   **Description:** Modify `App.vue` to conditionally render `ConnectionView.vue` or `QueryView.vue` based on the `isConnected` state from the Pinia store. This provides the basic single-page application flow for this milestone.
 
 - **Milestone 2: The Editor & Explorer**

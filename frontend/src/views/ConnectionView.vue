@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import { useConnectionStore } from '@/stores/connection'
 
-const connectionString = ref('')
-const emit = defineEmits(['connect'])
+const connectionStore = useConnectionStore()
+const connectionString = ref('server=localhost;user=sa;password=Password123;database=master;TrustServerCertificate=true')
 
-function handleConnect() {
+async function handleConnect() {
   if (connectionString.value) {
-    emit('connect', connectionString.value)
+    await connectionStore.connect(connectionString.value)
   }
 }
 </script>
@@ -23,9 +24,15 @@ function handleConnect() {
           type="text"
           placeholder="server=...;user=...;password=..."
           required
+          :disabled="connectionStore.isConnecting"
         />
       </div>
-      <button type="submit">Connect</button>
+      <button type="submit" :disabled="connectionStore.isConnecting">
+        {{ connectionStore.isConnecting ? 'Connecting...' : 'Connect' }}
+      </button>
+      <p v-if="connectionStore.errorMessage" class="error-message">
+        {{ connectionStore.errorMessage }}
+      </p>
     </form>
   </div>
 </template>
@@ -84,5 +91,20 @@ button {
 
 button:hover {
   background-color: #0056b3;
+}
+
+button:disabled {
+  background-color: #5a9ed8;
+  cursor: not-allowed;
+}
+
+.error-message {
+  color: #d8000c;
+  background-color: #ffbaba;
+  border: 1px solid #d8000c;
+  border-radius: 4px;
+  padding: 0.75rem;
+  margin-top: 1rem;
+  text-align: center;
 }
 </style>
