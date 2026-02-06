@@ -1,0 +1,12 @@
+{
+  "name": "sql-explorer-monorepo",
+  "private": true,
+  "scripts": {
+    "bootstrap": "pnpm install",
+    "dev": "pnpm --filter sql-explorer tauri dev",
+    "build": "pnpm --filter sql-explorer tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^1.5.9"
+  }
+}
