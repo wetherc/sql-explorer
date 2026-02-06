@@ -138,7 +138,7 @@ A component to display the data returned from a query.
       *   **Description:** Create a Pinia store (`connectionStore.ts`) to manage the application's connection state (e.g., `isConnected`, `errorMessage`). When the "Connect" button is clicked, call the `connect` backend command using Tauri's `invoke` API and update the store based on the result.
       *   **Epic Connection:** **Task 1.4 (Test & Establish Connection)**
 
-  *   **Task M1.7 (Frontend): Create a Query View**
+    *   **[x] Task M1.7 (Frontend): Create a Query View**
       *   **Description:** Create a `QueryView.vue` component that is shown only when `isConnected` is true. This component will contain:
           1.  A basic `<textarea>` for SQL query input.
           2.  An "Execute" button.
@@ -146,7 +146,7 @@ A component to display the data returned from a query.
           4.  A pre-formatted block to display any error messages.
       *   **Epic Connection:** A minimal implementation of **Task 3.3 (Query Execution)** and **Task 4.1 (Data Grid Component)**.
 
-  *   **Task M1.8 (Frontend): Implement Query Execution Logic**
+    *   **[x] Task M1.8 (Frontend): Implement Query Execution Logic**
       *   **Description:** In `QueryView.vue`, when the "Execute" button is clicked, take the text from the `<textarea>` and call the `execute_query` backend command.
       *   On success, parse the returned JSON data and dynamically generate the rows and columns for the HTML `<table>`.
       *   On error, display the error message.
