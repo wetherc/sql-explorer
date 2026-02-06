@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { useConnectionStore } from '@/stores/connection'
+
+type AuthType = 'sql' | 'integrated'
 
 const connectionStore = useConnectionStore()
 
@@ -8,10 +10,18 @@ const server = ref('localhost')
 const database = ref('master')
 const username = ref('sa')
 const password = ref('Password123')
+const authType = ref<AuthType>('sql')
+
+const isSqlAuth = computed(() => authType.value === 'sql')
 
 async function handleConnect() {
   // This is a temporary implementation. Task M2.3 will create a dedicated builder.
-  const connectionString = `server=${server.value};database=${database.value};user=${username.value};password=${password.value};TrustServerCertificate=true`;
+  let connectionString = `server=${server.value};database=${database.value};TrustServerCertificate=true`;
+  if (isSqlAuth.value) {
+    connectionString += `;user=${username.value};password=${password.value}`;
+  } else {
+    connectionString += ';Authentication=ActiveDirectoryIntegrated';
+  }
   await connectionStore.connect(connectionString)
 }
 </script>
@@ -45,27 +55,37 @@ async function handleConnect() {
       </div>
 
       <div class="form-group">
-        <label for="username">Username</label>
-        <input
-          id="username"
-          v-model="username"
-          type="text"
-          placeholder="sa"
-          required
-          :disabled="connectionStore.isConnecting"
-        />
+        <label for="auth-type">Authentication</label>
+        <select id="auth-type" v-model="authType" :disabled="connectionStore.isConnecting">
+          <option value="sql">SQL Server Authentication</option>
+          <option value="integrated">Microsoft Entra / Integrated</option>
+        </select>
       </div>
 
-      <div class="form-group">
-        <label for="password">Password</label>
-        <input
-          id="password"
-          v-model="password"
-          type="password"
-          required
-          :disabled="connectionStore.isConnecting"
-        />
-      </div>
+      <template v-if="isSqlAuth">
+        <div class="form-group">
+          <label for="username">Username</label>
+          <input
+            id="username"
+            v-model="username"
+            type="text"
+            placeholder="sa"
+            required
+            :disabled="connectionStore.isConnecting"
+          />
+        </div>
+
+        <div class="form-group">
+          <label for="password">Password</label>
+          <input
+            id="password"
+            v-model="password"
+            type="password"
+            required
+            :disabled="connectionStore.isConnecting"
+          />
+        </div>
+      </template>
 
       <button type="submit" :disabled="connectionStore.isConnecting">
         {{ connectionStore.isConnecting ? 'Connecting...' : 'Connect' }}
@@ -109,12 +129,13 @@ label {
   margin-bottom: 0.5rem;
 }
 
-input {
+input, select {
   width: 100%;
   padding: 0.5rem;
   font-size: 1rem;
   border: 1px solid #ccc;
   border-radius: 4px;
+  background-color: white;
 }
 
 button {

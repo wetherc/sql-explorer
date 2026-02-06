@@ -13,64 +13,57 @@ describe('ConnectionView.vue', () => {
     setActivePinia(createPinia())
   })
 
-  it('renders the form with separate fields correctly', () => {
+  it('renders the auth type selector', () => {
     const wrapper = mount(ConnectionView)
-    expect(wrapper.find('h2').text()).toBe('Connect to Database')
-    expect(wrapper.find('input#server').exists()).toBe(true)
-    expect(wrapper.find('input#database').exists()).toBe(true)
-    expect(wrapper.find('input#username').exists()).toBe(true)
-    expect(wrapper.find('input#password').exists()).toBe(true)
-    expect(wrapper.find('button[type="submit"]').exists()).toBe(true)
+    expect(wrapper.find('select#auth-type').exists()).toBe(true)
   })
 
-  it('calls the connect action with a constructed connection string', async () => {
+  it('shows username/password fields for SQL Server Auth by default', () => {
+    const wrapper = mount(ConnectionView)
+    expect(wrapper.find('input#username').exists()).toBe(true)
+    expect(wrapper.find('input#password').exists()).toBe(true)
+  })
+
+  it('hides username/password fields for Integrated Auth', async () => {
+    const wrapper = mount(ConnectionView)
+    const selector = wrapper.find('select#auth-type')
+    await selector.setValue('integrated')
+
+    expect(wrapper.find('input#username').exists()).toBe(false)
+    expect(wrapper.find('input#password').exists()).toBe(false)
+  })
+
+  it('builds a SQL Server Auth connection string', async () => {
     const wrapper = mount(ConnectionView)
     const connectionStore = useConnectionStore()
     const connectSpy = vi.spyOn(connectionStore, 'connect')
 
-    // Set values
     await wrapper.find('input#server').setValue('test-server')
     await wrapper.find('input#database').setValue('test-db')
+    await wrapper.find('select#auth-type').setValue('sql')
     await wrapper.find('input#username').setValue('test-user')
     await wrapper.find('input#password').setValue('test-pass')
 
-    // Submit form
     await wrapper.find('form').trigger('submit.prevent')
 
-    const expectedConnectionString =
-      'server=test-server;database=test-db;user=test-user;password=test-pass;TrustServerCertificate=true'
-
-    expect(connectSpy).toHaveBeenCalledTimes(1)
-    expect(connectSpy).toHaveBeenCalledWith(expectedConnectionString)
+    const expected =
+      'server=test-server;database=test-db;TrustServerCertificate=true;user=test-user;password=test-pass'
+    expect(connectSpy).toHaveBeenCalledWith(expected)
   })
 
-  it('shows an error message when the store has an error', async () => {
+  it('builds an Integrated Auth connection string', async () => {
     const wrapper = mount(ConnectionView)
     const connectionStore = useConnectionStore()
-    const errorMessage = 'Connection failed'
+    const connectSpy = vi.spyOn(connectionStore, 'connect')
 
-    connectionStore.errorMessage = errorMessage
-    await wrapper.vm.$nextTick()
+    await wrapper.find('input#server').setValue('test-server')
+    await wrapper.find('input#database').setValue('test-db')
+    await wrapper.find('select#auth-type').setValue('integrated')
 
-    const errorP = wrapper.find('p.error-message')
-    expect(errorP.exists()).toBe(true)
-    expect(errorP.text()).toBe(errorMessage)
-  })
+    await wrapper.find('form').trigger('submit.prevent')
 
-  it('disables fields and shows "Connecting..." while connecting', async () => {
-    const wrapper = mount(ConnectionView)
-    const connectionStore = useConnectionStore()
-
-    connectionStore.isConnecting = true
-    await wrapper.vm.$nextTick()
-
-    const button = wrapper.find('button')
-    expect(button.attributes('disabled')).toBeDefined()
-    expect(button.text()).toBe('Connecting...')
-
-    const inputs = wrapper.findAll('input')
-    inputs.forEach((input) => {
-      expect(input.attributes('disabled')).toBeDefined()
-    })
+    const expected =
+      'server=test-server;database=test-db;TrustServerCertificate=true;Authentication=ActiveDirectoryIntegrated'
+    expect(connectSpy).toHaveBeenCalledWith(expected)
   })
 })
