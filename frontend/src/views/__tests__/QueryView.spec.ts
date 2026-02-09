@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mount } from '@vue/test-utils';
 import QueryView from '../QueryView.vue';
 import MonacoEditor from 'monaco-editor-vue3';
+import { type QueryResponse } from '@/types/query'; // New import
 
 // Mock MonacoEditor
 vi.mock('monaco-editor-vue3', () => ({
@@ -18,6 +19,8 @@ describe('QueryView.vue', () => {
   const defaultProps = {
     query: 'SELECT * FROM test;',
     isLoading: false,
+    errorMessage: null, // New prop
+    response: null, // Renamed from results
   };
 
   beforeEach(() => {
@@ -56,44 +59,50 @@ describe('QueryView.vue', () => {
   });
 
   it('displays results table when rows are present', () => {
-    const mockResults = {
-      columns: ['id', 'name'],
-      rows: [{ id: 1, name: 'Test1' }, { id: 2, name: 'Test2' }],
-      errorMessage: null,
-      isLoading: false,
+    const mockResponse: QueryResponse = {
+      results: [{
+        columns: ['id', 'name'],
+        rows: [{ id: 1, name: 'Test1' }, { id: 2, name: 'Test2' }],
+      }],
+      messages: [],
     };
     const wrapper = mount(QueryView, {
-      props: { ...defaultProps, results: mockResults },
+      props: { ...defaultProps, response: mockResponse },
     });
     expect(wrapper.find('.results-panel').exists()).toBe(true);
     expect(wrapper.findAll('th').map(th => th.text())).toEqual(['id', 'name']);
     expect(wrapper.findAll('tr').length).toBe(3); // 1 header + 2 data rows
   });
 
-  it('displays error panel when errorMessage is present', () => {
-    const mockResults = {
-      columns: [],
-      rows: [],
-      errorMessage: 'Syntax error!',
-      isLoading: false,
+  it('displays messages panel when messages are present', () => {
+    const mockResponse: QueryResponse = {
+      results: [],
+      messages: ['Info message 1', 'Info message 2'],
     };
     const wrapper = mount(QueryView, {
-      props: { ...defaultProps, results: mockResults },
+      props: { ...defaultProps, response: mockResponse },
+    });
+    expect(wrapper.find('.messages-panel').exists()).toBe(true);
+    expect(wrapper.find('.messages-panel pre').text()).toContain('Info message 1');
+    expect(wrapper.find('.messages-panel pre').text()).toContain('Info message 2');
+  });
+
+  it('displays error panel when errorMessage prop is present', () => {
+    const wrapper = mount(QueryView, {
+      props: { ...defaultProps, errorMessage: 'Syntax error!' },
     });
     expect(wrapper.find('.error-panel').exists()).toBe(true);
     expect(wrapper.find('.error-panel pre').text()).toBe('Syntax error!');
   });
 
-  it('displays "No rows returned" when no rows and no error', () => {
-    const mockResults = {
-      columns: [],
-      rows: [],
-      errorMessage: null,
-      isLoading: false,
+  it('displays "No rows returned" when no rows, no error, and response is present', () => {
+    const mockResponse: QueryResponse = {
+      results: [{ columns: [], rows: []}],
+      messages: [],
     };
     const wrapper = mount(QueryView, {
-      props: { ...defaultProps, results: mockResults, isLoading: false },
+      props: { ...defaultProps, response: mockResponse, isLoading: false },
     });
-    expect(wrapper.text()).toContain('Query executed successfully. No rows returned.');
+    expect(wrapper.find('.results-panel p').text()).toContain('Query executed successfully. No rows returned.');
   });
 });

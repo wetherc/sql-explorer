@@ -18,7 +18,7 @@ pub async fn connect(
 pub async fn execute_query(
     query: String,
     state: tauri::State<'_, AppState>,
-) -> CommandResult<JsonValue> {
+) -> CommandResult<db::QueryResponse> {
     let mut client_guard = state.db.lock().await;
     let client = client_guard.as_mut().ok_or(Error::NotConnected)?;
     db::db_execute_query(client, &query).await

@@ -1,19 +1,15 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { v4 as uuidv4 } from 'uuid'
-
-export interface QueryResult {
-  columns: string[];
-  rows: Record<string, any>[];
-  errorMessage: string | null;
-  isLoading: boolean;
-}
+import { type QueryResponse, type ResultSet } from '@/types/query' // Import new types
 
 export interface QueryTab {
   id: string;
   title: string;
   query: string;
-  results: QueryResult;
+  response: QueryResponse | null;
+  isLoading: boolean;
+  errorMessage: string | null;
   isSaved: boolean; // Future use for saving queries
 }
 
@@ -30,12 +26,9 @@ export const useTabsStore = defineStore('tabs', () => {
       id: uuidv4(),
       title: `New Query ${tabs.value.length + 1}`,
       query: queryContent,
-      results: {
-        columns: [],
-        rows: [],
-        errorMessage: null,
-        isLoading: false,
-      },
+      response: null,
+      isLoading: false,
+      errorMessage: null,
       isSaved: false,
     }
     tabs.value.push(newTab)
@@ -48,12 +41,11 @@ export const useTabsStore = defineStore('tabs', () => {
       tabs.value.splice(index, 1)
 
       // If the closed tab was active, activate another tab
-      if (activeTabId.value === id) {
-        if (tabs.value.length > 0) {
-          activeTabId.value = tabs.value[Math.max(0, index - 1)].id
-        } else {
-          activeTabId.value = null
-        }
+      if (tabs.value.length > 0) {
+        // Activate the tab at the same index if possible, otherwise the last one
+        activeTabId.value = tabs.value[Math.min(index, tabs.value.length - 1)].id
+      } else {
+        activeTabId.value = null
       }
     }
   }

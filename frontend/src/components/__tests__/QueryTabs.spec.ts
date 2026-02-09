@@ -5,6 +5,7 @@ import { useTabsStore } from '../../stores/tabs';
 import { useConnectionStore } from '../../stores/connection';
 import { useQueryStore } from '../../stores/query';
 import { createPinia, setActivePinia } from 'pinia';
+import { type QueryResponse } from '@/types/query'; // Import QueryResponse
 
 // Mock Pinia stores
 vi.mock('../../stores/tabs', () => ({
@@ -21,7 +22,7 @@ vi.mock('../../stores/query', () => ({
 vi.mock('@/views/QueryView.vue', () => ({
   default: {
     name: 'QueryView',
-    props: ['query', 'results', 'isLoading'],
+    props: ['query', 'response', 'isLoading', 'errorMessage'], // Updated props
     emits: ['update:query', 'execute-query'],
     template: '<div>Mock Query View</div>',
   },
@@ -50,8 +51,7 @@ describe('QueryTabs.vue', () => {
     queryStoreMock = {
       executeQuery: vi.fn(),
       setQueryState: vi.fn(),
-      resultColumns: [],
-      resultRows: [],
+      response: null, // Default for new structure
       errorMessage: '',
       isLoading: false,
     };
@@ -86,8 +86,8 @@ describe('QueryTabs.vue', () => {
 
   it('renders tabs and highlights the active one', async () => {
     tabsStoreMock.tabs = [
-      { id: '1', title: 'Query 1', query: '', results: { columns: [], rows: [], errorMessage: null, isLoading: false }, isSaved: false },
-      { id: '2', title: 'Query 2', query: '', results: { columns: [], rows: [], errorMessage: null, isLoading: false }, isSaved: false },
+      { id: '1', title: 'Query 1', query: '', response: null, isLoading: false, errorMessage: null, isSaved: false },
+      { id: '2', title: 'Query 2', query: '', response: null, isLoading: false, errorMessage: null, isSaved: false },
     ];
     tabsStoreMock.activeTabId = '2';
     tabsStoreMock.activeTab = tabsStoreMock.tabs[1];
@@ -111,8 +111,8 @@ describe('QueryTabs.vue', () => {
 
   it('calls setActiveTab when a tab is clicked', async () => {
     tabsStoreMock.tabs = [
-      { id: '1', title: 'Query 1', query: '', results: { columns: [], rows: [], errorMessage: null, isLoading: false }, isSaved: false },
-      { id: '2', title: 'Query 2', query: '', results: { columns: [], rows: [], errorMessage: null, isLoading: false }, isSaved: false },
+      { id: '1', title: 'Query 1', query: '', response: null, isLoading: false, errorMessage: null, isSaved: false },
+      { id: '2', title: 'Query 2', query: '', response: null, isLoading: false, errorMessage: null, isSaved: false },
     ];
     tabsStoreMock.activeTabId = '1';
     tabsStoreMock.activeTab = tabsStoreMock.tabs[0];
@@ -134,7 +134,7 @@ describe('QueryTabs.vue', () => {
 
   it('calls closeTab when close button is clicked', async () => {
     tabsStoreMock.tabs = [
-      { id: '1', title: 'Query 1', query: '', results: { columns: [], rows: [], errorMessage: null, isLoading: false }, isSaved: false },
+      { id: '1', title: 'Query 1', query: '', response: null, isLoading: false, errorMessage: null, isSaved: false },
     ];
     tabsStoreMock.activeTabId = '1';
     tabsStoreMock.activeTab = tabsStoreMock.tabs[0];
@@ -165,11 +165,17 @@ describe('QueryTabs.vue', () => {
   });
 
   it('renders QueryView for active tab and passes correct props', async () => {
+    const mockResponse: QueryResponse = {
+        results: [{ columns: ['id'], rows: [{ id: 1 }] }],
+        messages: [],
+    };
     const mockActiveTab = {
       id: 'active',
       title: 'Active Query',
       query: 'SELECT current_time;',
-      results: { columns: [], rows: [], errorMessage: null, isLoading: false },
+      response: mockResponse,
+      isLoading: false,
+      errorMessage: null,
       isSaved: false,
     };
     tabsStoreMock.tabs = [mockActiveTab];
@@ -188,8 +194,9 @@ describe('QueryTabs.vue', () => {
     const queryView = wrapper.findComponent({ name: 'QueryView' }); // Find by component name
     expect(queryView.exists()).toBe(true);
     expect(queryView.props('query')).toBe(mockActiveTab.query);
-    expect(queryView.props('results')).toEqual(mockActiveTab.results);
-    expect(queryView.props('isLoading')).toBe(mockActiveTab.results.isLoading);
+    expect(queryView.props('response')).toEqual(mockActiveTab.response); // Changed from results
+    expect(queryView.props('isLoading')).toBe(mockActiveTab.isLoading); // Changed from mockActiveTab.results.isLoading
+    expect(queryView.props('errorMessage')).toBe(mockActiveTab.errorMessage); // New assertion
   });
 
   it('updates active tab query when QueryView emits update:query', async () => {
@@ -197,7 +204,9 @@ describe('QueryTabs.vue', () => {
       id: 'active',
       title: 'Active Query',
       query: 'OLD QUERY;',
-      results: { columns: [], rows: [], errorMessage: null, isLoading: false },
+      response: null,
+      isLoading: false,
+      errorMessage: null,
       isSaved: false,
     };
     tabsStoreMock.tabs = [mockActiveTab];
@@ -219,11 +228,19 @@ describe('QueryTabs.vue', () => {
   });
 
   it('executes query and updates active tab results when QueryView emits execute-query', async () => {
+    const mockResponse: QueryResponse = {
+        results: [{ columns: ['col1'], rows: [{ col1: 'val1' }] }],
+        messages: [],
+    };
+    queryStoreMock.response = mockResponse;
+
     const mockActiveTab = {
       id: 'active',
       title: 'Active Query',
       query: 'SELECT 1;',
-      results: { columns: [], rows: [], errorMessage: null, isLoading: false },
+      response: null,
+      isLoading: false,
+      errorMessage: null,
       isSaved: false,
     };
     tabsStoreMock.tabs = [mockActiveTab];
@@ -231,8 +248,6 @@ describe('QueryTabs.vue', () => {
     tabsStoreMock.activeTab = mockActiveTab;
 
     queryStoreMock.executeQuery.mockResolvedValue(true);
-    queryStoreMock.resultColumns = ['col1'];
-    queryStoreMock.resultRows = [{ col1: 'val1' }];
 
     const wrapper = mount(QueryTabs, {
       global: {
@@ -246,10 +261,9 @@ describe('QueryTabs.vue', () => {
     const queryView = wrapper.findComponent({ name: 'QueryView' });
     await queryView.vm.$emit('execute-query');
 
-    expect(mockActiveTab.results.isLoading).toBe(false);
-    expect(mockActiveTab.results.columns).toEqual(['col1']);
-    expect(mockActiveTab.results.rows).toEqual([{ col1: 'val1' }]);
-    expect(mockActiveTab.results.errorMessage).toBeNull();
+    expect(mockActiveTab.isLoading).toBe(false);
+    expect(mockActiveTab.response).toEqual(mockResponse);
+    expect(mockActiveTab.errorMessage).toBeNull();
   });
 
   it('handles query execution error and updates active tab results', async () => {
@@ -257,7 +271,9 @@ describe('QueryTabs.vue', () => {
       id: 'active',
       title: 'Active Query',
       query: 'SELECT bad_syntax;',
-      results: { columns: [], rows: [], errorMessage: null, isLoading: false },
+      response: null,
+      isLoading: false,
+      errorMessage: null,
       isSaved: false,
     };
     tabsStoreMock.tabs = [mockActiveTab];
@@ -279,10 +295,9 @@ describe('QueryTabs.vue', () => {
     const queryView = wrapper.findComponent({ name: 'QueryView' });
     await queryView.vm.$emit('execute-query');
 
-    expect(mockActiveTab.results.isLoading).toBe(false);
-    expect(mockActiveTab.results.columns).toEqual([]);
-    expect(mockActiveTab.results.rows).toEqual([]);
-    expect(mockActiveTab.results.errorMessage).toBe('Syntax Error');
+    expect(mockActiveTab.isLoading).toBe(false);
+    expect(mockActiveTab.response).toBeNull();
+    expect(mockActiveTab.errorMessage).toBe('Syntax Error');
   });
 
   it('calls connectionStore.disconnect when disconnect button is clicked', async () => {
@@ -293,7 +308,7 @@ describe('QueryTabs.vue', () => {
         },
       },
     });
-    await wrapper.find('header > button').trigger('click'); // The first button in the header should be the disconnect button
+    await wrapper.find('header > button').trigger('click');
     expect(connectionStoreMock.disconnect).toHaveBeenCalledTimes(1);
   });
 });

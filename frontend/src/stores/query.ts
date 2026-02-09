@@ -1,40 +1,44 @@
 import { ref, computed } from 'vue'
 import { defineStore } from 'pinia'
 import { invoke } from '@tauri-apps/api/tauri'
+import { type QueryResponse, type ResultSet } from '@/types/query'
 
-type JsonValue = string | number | boolean | null | any[] | { [key: string]: any }
 
 export const useQueryStore = defineStore('query', () => {
-  const results = ref<JsonValue | null>(null)
+  const response = ref<QueryResponse | null>(null)
   const isLoading = ref(false)
   const errorMessage = ref('')
 
+  const firstResultSet = computed<ResultSet | null>(() => {
+    return response.value && response.value.results.length > 0
+      ? response.value.results[0]
+      : null
+  })
+
   const resultRows = computed(() => {
-    if (results.value && Array.isArray(results.value)) {
-      return results.value
-    }
-    return []
+    return firstResultSet.value ? firstResultSet.value.rows : []
   })
 
   const resultColumns = computed(() => {
-    if (resultRows.value.length > 0) {
-      const firstRow = resultRows.value[0]
-      if (typeof firstRow === 'object' && firstRow !== null) {
-        return Object.keys(firstRow)
-      }
-    }
-    return []
+    return firstResultSet.value ? firstResultSet.value.columns : []
+  })
+
+  const messages = computed(() => {
+    return response.value ? response.value.messages : []
   })
 
   async function executeQuery(query: string): Promise<boolean> {
     isLoading.value = true
     errorMessage.value = ''
-    results.value = null
+    response.value = null
 
     try {
-      const response = await invoke<JsonValue>('execute_query', { query })
-      results.value = response
-      return true
+      const backendResponse = await invoke<QueryResponse>('execute_query', { query })
+      response.value = backendResponse
+      errorMessage.value = response.value.messages.join('\n')
+      // If there's an error message from the backend, consider it a failure.
+      // This is a simplified check; more robust error handling might be needed.
+      return response.value.messages.every(msg => !msg.toLowerCase().includes('error'))
     } catch (error) {
       errorMessage.value = error as string
       return false
@@ -43,27 +47,25 @@ export const useQueryStore = defineStore('query', () => {
     }
   }
 
+  // This function is used by the tabs store to set the state of a specific tab.
   function setQueryState(
-    newQuery: string,
-    newColumns: string[],
-    newRows: Record<string, any>[],
+    newQuery: string, // Not directly used here, managed by tabs store
+    newResponse: QueryResponse | null,
     newErrorMessage: string | null,
     newIsLoading: boolean,
   ) {
-    // Note: The newQuery is not directly stored in the query store,
-    // as it is managed by the active tab in the tabs store.
-    // This function primarily updates the results, loading, and error states.
-    results.value = { columns: newColumns, rows: newRows }; // Simplified structure for direct assignment
+    response.value = newResponse;
     errorMessage.value = newErrorMessage || '';
     isLoading.value = newIsLoading;
   }
 
   return {
-    results,
+    response,
     isLoading,
     errorMessage,
     resultRows,
     resultColumns,
+    messages,
     executeQuery,
     setQueryState,
   }

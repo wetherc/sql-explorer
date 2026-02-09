@@ -33,6 +33,18 @@ pub struct Column {
     pub data_type: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResultSet {
+    pub columns: Vec<String>,
+    pub rows: Vec<JsonValue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryResponse {
+    pub results: Vec<ResultSet>,
+    pub messages: Vec<String>,
+}
+
 
 pub async fn db_connect(connection_string: &str) -> DbResult<DbClient> {
     info!("Attempting to connect to the database.");
@@ -121,17 +133,60 @@ pub async fn db_connect(connection_string: &str) -> DbResult<DbClient> {
     }
 }
 
-pub async fn db_execute_query(client: &mut DbClient, query: &str) -> DbResult<JsonValue> {
+pub async fn db_execute_query(client: &mut DbClient, query: &str) -> DbResult<QueryResponse> {
     let mut stream = client.simple_query(query).await?;
-    let mut results = Vec::new();
+    let mut all_results: Vec<ResultSet> = Vec::new();
+    let mut messages: Vec<String> = Vec::new();
 
-    while let Some(result) = stream.next().await {
-        if let Ok(QueryItem::Row(row)) = result {
-            results.push(row_to_json(row));
+    loop {
+        // Get columns for the current result set before processing its rows
+        let columns: Vec<String> = stream
+            .columns()
+            .to_vec()
+            .iter()
+            .map(|c| c.name().to_string())
+            .collect();
+        let mut rows: Vec<JsonValue> = Vec::new();
+        let mut has_rows_in_current_set = false;
+
+        // Iterate through rows and QueryItems of the current result set
+        // The stream yields QueryItem::Row or QueryItem::Message until QueryItem::Done for the current set
+        while let Some(result) = stream.next().await {
+            match result? {
+                QueryItem::Row(row) => {
+                    rows.push(row_to_json(row));
+                    has_rows_in_current_set = true;
+                }
+                QueryItem::Message(message) => {
+                    messages.push(message.message().to_string());
+                }
+                QueryItem::Done => {
+                    // End of current result set, break from inner loop
+                    break;
+                }
+                _ => {} // Ignore other QueryItem types
+            }
+        }
+
+        // If there were rows or columns in the current result set, add it to all_results
+        if has_rows_in_current_set || !columns.is_empty() {
+             all_results.push(ResultSet { columns, rows });
+        }
+
+        // Check if there are more result sets in the stream
+        if stream.has_more_results() {
+            // Advance to the next result set
+            stream.next_resultset().await?;
+        } else {
+            // No more result sets, break from outer loop
+            break;
         }
     }
 
-    Ok(JsonValue::Array(results))
+    Ok(QueryResponse {
+        results: all_results,
+        messages,
+    })
 }
 
 pub async fn db_list_databases(client: &mut DbClient) -> DbResult<Vec<Database>> {

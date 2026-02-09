@@ -4,6 +4,7 @@ import { useTabsStore } from '@/stores/tabs'
 import { useConnectionStore } from '@/stores/connection'
 import { useQueryStore } from '@/stores/query'
 import QueryView from '@/views/QueryView.vue'
+import { type QueryResponse } from '@/types/query'
 
 const tabsStore = useTabsStore()
 const connectionStore = useConnectionStore()
@@ -19,33 +20,32 @@ onMounted(() => {
 // Watch for activeTab changes to ensure queryStore is updated
 watch(() => tabsStore.activeTab, (newTab) => {
   if (newTab) {
-    queryStore.setQueryState(newTab.query, newTab.results.columns, newTab.results.rows, newTab.results.errorMessage, newTab.results.isLoading);
+    queryStore.setQueryState(newTab.query, newTab.response, newTab.errorMessage, newTab.isLoading);
   }
 }, { immediate: true });
 
 async function handleExecuteQuery() {
   if (!tabsStore.activeTab) return;
 
-  tabsStore.activeTab.results.isLoading = true;
-  tabsStore.activeTab.results.errorMessage = null;
+  tabsStore.activeTab.isLoading = true;
+  tabsStore.activeTab.errorMessage = null;
+  tabsStore.activeTab.response = null; // Clear previous results
 
   try {
-    const result = await queryStore.executeQuery(tabsStore.activeTab.query);
-    if (result) {
-      tabsStore.activeTab.results.columns = queryStore.resultColumns;
-      tabsStore.activeTab.results.rows = queryStore.resultRows;
-      tabsStore.activeTab.results.errorMessage = null; // Clear any previous error
+    const success = await queryStore.executeQuery(tabsStore.activeTab.query);
+    tabsStore.activeTab.isLoading = false;
+
+    if (success) {
+      tabsStore.activeTab.response = queryStore.response;
+      tabsStore.activeTab.errorMessage = null;
     } else {
-      tabsStore.activeTab.results.errorMessage = queryStore.errorMessage;
-      tabsStore.activeTab.results.rows = [];
-      tabsStore.activeTab.results.columns = [];
+      tabsStore.activeTab.errorMessage = queryStore.errorMessage;
+      tabsStore.activeTab.response = null;
     }
   } catch (error: any) {
-    tabsStore.activeTab.results.errorMessage = error.message || 'An unknown error occurred.';
-    tabsStore.activeTab.results.rows = [];
-    tabsStore.activeTab.results.columns = [];
-  } finally {
-    tabsStore.activeTab.results.isLoading = false;
+    tabsStore.activeTab.errorMessage = error.message || 'An unknown error occurred.';
+    tabsStore.activeTab.response = null;
+    tabsStore.activeTab.isLoading = false;
   }
 }
 
@@ -78,8 +78,9 @@ function updateQuery(newQuery: string) {
       <QueryView
         v-if="tabsStore.activeTab"
         :query="tabsStore.activeTab.query"
-        :results="tabsStore.activeTab.results"
-        :is-loading="tabsStore.activeTab.results.isLoading"
+        :response="tabsStore.activeTab.response"
+        :is-loading="tabsStore.activeTab.isLoading"
+        :error-message="tabsStore.activeTab.errorMessage"
         @update:query="updateQuery"
         @execute-query="handleExecuteQuery"
       />
