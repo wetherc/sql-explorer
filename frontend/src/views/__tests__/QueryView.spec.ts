@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { shallowMount } from '@vue/test-utils';
+import { mount } from '@vue/test-utils';
 import QueryView from '../QueryView.vue';
 import MonacoEditor from 'monaco-editor-vue3';
 
@@ -8,7 +8,7 @@ vi.mock('monaco-editor-vue3', () => ({
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   default: {
     name: 'MonacoEditor',
-    template: '<textarea :value="modelValue" @input="$emit('update:modelValue', ($event.target as HTMLTextAreaElement).value)"></textarea>',
+    template: '<textarea :value="modelValue" @input="$emit(\'update:modelValue\', $event.target.value)"></textarea>',
     props: ['modelValue'],
     emits: ['update:modelValue'],
   },
@@ -17,12 +17,6 @@ vi.mock('monaco-editor-vue3', () => ({
 describe('QueryView.vue', () => {
   const defaultProps = {
     query: 'SELECT * FROM test;',
-    results: {
-      columns: [],
-      rows: [],
-      errorMessage: null,
-      isLoading: false,
-    },
     isLoading: false,
   };
 
@@ -31,7 +25,7 @@ describe('QueryView.vue', () => {
   });
 
   it('renders correctly with default props', () => {
-    const wrapper = shallowMount(QueryView, { props: defaultProps });
+    const wrapper = mount(QueryView, { props: defaultProps });
     expect(wrapper.exists()).toBe(true);
     expect(wrapper.find('textarea').element.value).toBe(defaultProps.query);
     expect(wrapper.find('button[type="submit"]').text()).toBe('Execute');
@@ -40,7 +34,7 @@ describe('QueryView.vue', () => {
   });
 
   it('renders "Executing..." when isLoading is true', () => {
-    const wrapper = shallowMount(QueryView, {
+    const wrapper = mount(QueryView, {
       props: { ...defaultProps, isLoading: true },
     });
     expect(wrapper.find('button[type="submit"]').text()).toBe('Executing...');
@@ -48,7 +42,7 @@ describe('QueryView.vue', () => {
   });
 
   it('emits update:query when textarea content changes', async () => {
-    const wrapper = shallowMount(QueryView, { props: defaultProps });
+    const wrapper = mount(QueryView, { props: defaultProps });
     const textarea = wrapper.find('textarea');
     await textarea.setValue('SELECT 1;');
     expect(wrapper.emitted('update:query')).toBeTruthy();
@@ -56,7 +50,7 @@ describe('QueryView.vue', () => {
   });
 
   it('emits execute-query when execute button is clicked', async () => {
-    const wrapper = shallowMount(QueryView, { props: defaultProps });
+    const wrapper = mount(QueryView, { props: defaultProps });
     await wrapper.find('form').trigger('submit');
     expect(wrapper.emitted('execute-query')).toBeTruthy();
   });
@@ -68,7 +62,7 @@ describe('QueryView.vue', () => {
       errorMessage: null,
       isLoading: false,
     };
-    const wrapper = shallowMount(QueryView, {
+    const wrapper = mount(QueryView, {
       props: { ...defaultProps, results: mockResults },
     });
     expect(wrapper.find('.results-panel').exists()).toBe(true);
@@ -83,7 +77,7 @@ describe('QueryView.vue', () => {
       errorMessage: 'Syntax error!',
       isLoading: false,
     };
-    const wrapper = shallowMount(QueryView, {
+    const wrapper = mount(QueryView, {
       props: { ...defaultProps, results: mockResults },
     });
     expect(wrapper.find('.error-panel').exists()).toBe(true);
@@ -97,7 +91,7 @@ describe('QueryView.vue', () => {
       errorMessage: null,
       isLoading: false,
     };
-    const wrapper = shallowMount(QueryView, {
+    const wrapper = mount(QueryView, {
       props: { ...defaultProps, results: mockResults, isLoading: false },
     });
     expect(wrapper.text()).toContain('Query executed successfully. No rows returned.');

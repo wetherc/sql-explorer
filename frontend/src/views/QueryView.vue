@@ -5,7 +5,7 @@ import { QueryResult } from '@/stores/tabs' // Import QueryResult interface
 
 const props = defineProps<{
   query: string,
-  results: QueryResult,
+  results?: QueryResult | null,
   isLoading: boolean,
 }>()
 
@@ -46,12 +46,12 @@ function handleExecute() {
       </form>
     </div>
 
-    <div v-if="results.errorMessage" class="error-panel">
+    <div v-if="results?.errorMessage" class="error-panel">
       <h3>Error</h3>
       <pre>{{ results.errorMessage }}</pre>
     </div>
 
-    <div v-if="results.rows.length > 0" class="results-panel">
+    <div v-if="results?.rows.length" class="results-panel">
       <h3>Results</h3>
       <table>
         <thead>

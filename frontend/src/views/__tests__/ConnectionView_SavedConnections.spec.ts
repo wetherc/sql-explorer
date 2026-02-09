@@ -7,7 +7,7 @@ import { AuthType } from '@/types/savedConnection'
 
 // Mock child components
 const SavedConnections = {
-  template: '<div class="mock-saved-connections" @select="$emit('select', mockConnection)"></div>',
+  template: '<div class="mock-saved-connections" @select="$emit(\'select\', mockConnection)"></div>',
   props: [],
   data() {
     return {

@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { shallowMount } from '@vue/test-utils';
+import { mount } from '@vue/test-utils';
 import QueryTabs from '../QueryTabs.vue';
-import QueryView from '../../views/QueryView.vue'; // The actual component, not the mock
 import { useTabsStore } from '../../stores/tabs';
 import { useConnectionStore } from '../../stores/connection';
 import { useQueryStore } from '../../stores/query';
@@ -16,6 +15,16 @@ vi.mock('../../stores/connection', () => ({
 }));
 vi.mock('../../stores/query', () => ({
   useQueryStore: vi.fn(),
+}));
+
+// Mock QueryView
+vi.mock('@/views/QueryView.vue', () => ({
+  default: {
+    name: 'QueryView',
+    props: ['query', 'results', 'isLoading'],
+    emits: ['update:query', 'execute-query'],
+    template: '<div>Mock Query View</div>',
+  },
 }));
 
 describe('QueryTabs.vue', () => {
@@ -53,13 +62,25 @@ describe('QueryTabs.vue', () => {
   });
 
   it('renders correctly with no tabs', () => {
-    const wrapper = shallowMount(QueryTabs);
+    const wrapper = mount(QueryTabs, {
+      global: {
+        stubs: {
+          QueryView: true,
+        },
+      },
+    });
     expect(wrapper.exists()).toBe(true);
     expect(wrapper.find('.no-tab-selected').exists()).toBe(true);
   });
 
   it('adds a default tab on mounted if no tabs exist', () => {
-    shallowMount(QueryTabs);
+    mount(QueryTabs, {
+      global: {
+        stubs: {
+          QueryView: true,
+        },
+      },
+    });
     expect(tabsStoreMock.addTab).toHaveBeenCalledTimes(1);
   });
 
@@ -71,7 +92,13 @@ describe('QueryTabs.vue', () => {
     tabsStoreMock.activeTabId = '2';
     tabsStoreMock.activeTab = tabsStoreMock.tabs[1];
 
-    const wrapper = shallowMount(QueryTabs);
+    const wrapper = mount(QueryTabs, {
+      global: {
+        stubs: {
+          QueryView: true,
+        },
+      },
+    });
     await wrapper.vm.$nextTick(); // Wait for reactivity
 
     const tabItems = wrapper.findAll('.tab-item');
@@ -90,7 +117,13 @@ describe('QueryTabs.vue', () => {
     tabsStoreMock.activeTabId = '1';
     tabsStoreMock.activeTab = tabsStoreMock.tabs[0];
 
-    const wrapper = shallowMount(QueryTabs);
+    const wrapper = mount(QueryTabs, {
+      global: {
+        stubs: {
+          QueryView: true,
+        },
+      },
+    });
     await wrapper.vm.$nextTick();
 
     const tabItems = wrapper.findAll('.tab-item');
@@ -106,7 +139,13 @@ describe('QueryTabs.vue', () => {
     tabsStoreMock.activeTabId = '1';
     tabsStoreMock.activeTab = tabsStoreMock.tabs[0];
 
-    const wrapper = shallowMount(QueryTabs);
+    const wrapper = mount(QueryTabs, {
+      global: {
+        stubs: {
+          QueryView: true,
+        },
+      },
+    });
     await wrapper.vm.$nextTick();
 
     await wrapper.find('.close-tab').trigger('click');
@@ -114,7 +153,13 @@ describe('QueryTabs.vue', () => {
   });
 
   it('calls addTab when add button is clicked', async () => {
-    const wrapper = shallowMount(QueryTabs);
+    const wrapper = mount(QueryTabs, {
+      global: {
+        stubs: {
+          QueryView: true,
+        },
+      },
+    });
     await wrapper.find('.add-tab').trigger('click');
     expect(tabsStoreMock.addTab).toHaveBeenCalledTimes(2); // 1 on mounted, 1 on click
   });
@@ -131,10 +176,16 @@ describe('QueryTabs.vue', () => {
     tabsStoreMock.activeTabId = mockActiveTab.id;
     tabsStoreMock.activeTab = mockActiveTab;
 
-    const wrapper = shallowMount(QueryTabs);
+    const wrapper = mount(QueryTabs, {
+      global: {
+        stubs: {
+          QueryView: true,
+        },
+      },
+    });
     await wrapper.vm.$nextTick();
 
-    const queryView = wrapper.findComponent(QueryView);
+    const queryView = wrapper.findComponent({ name: 'QueryView' }); // Find by component name
     expect(queryView.exists()).toBe(true);
     expect(queryView.props('query')).toBe(mockActiveTab.query);
     expect(queryView.props('results')).toEqual(mockActiveTab.results);
@@ -153,10 +204,16 @@ describe('QueryTabs.vue', () => {
     tabsStoreMock.activeTabId = mockActiveTab.id;
     tabsStoreMock.activeTab = mockActiveTab;
 
-    const wrapper = shallowMount(QueryTabs);
+    const wrapper = mount(QueryTabs, {
+      global: {
+        stubs: {
+          QueryView: true,
+        },
+      },
+    });
     await wrapper.vm.$nextTick();
 
-    const queryView = wrapper.findComponent(QueryView);
+    const queryView = wrapper.findComponent({ name: 'QueryView' });
     await queryView.vm.$emit('update:query', 'NEW QUERY;');
     expect(mockActiveTab.query).toBe('NEW QUERY;');
   });
@@ -177,10 +234,16 @@ describe('QueryTabs.vue', () => {
     queryStoreMock.resultColumns = ['col1'];
     queryStoreMock.resultRows = [{ col1: 'val1' }];
 
-    const wrapper = shallowMount(QueryTabs);
+    const wrapper = mount(QueryTabs, {
+      global: {
+        stubs: {
+          QueryView: true,
+        },
+      },
+    });
     await wrapper.vm.$nextTick();
 
-    const queryView = wrapper.findComponent(QueryView);
+    const queryView = wrapper.findComponent({ name: 'QueryView' });
     await queryView.vm.$emit('execute-query');
 
     expect(mockActiveTab.results.isLoading).toBe(false);
@@ -204,10 +267,16 @@ describe('QueryTabs.vue', () => {
     queryStoreMock.executeQuery.mockResolvedValue(false);
     queryStoreMock.errorMessage = 'Syntax Error';
 
-    const wrapper = shallowMount(QueryTabs);
+    const wrapper = mount(QueryTabs, {
+      global: {
+        stubs: {
+          QueryView: true,
+        },
+      },
+    });
     await wrapper.vm.$nextTick();
 
-    const queryView = wrapper.findComponent(QueryView);
+    const queryView = wrapper.findComponent({ name: 'QueryView' });
     await queryView.vm.$emit('execute-query');
 
     expect(mockActiveTab.results.isLoading).toBe(false);
@@ -217,8 +286,14 @@ describe('QueryTabs.vue', () => {
   });
 
   it('calls connectionStore.disconnect when disconnect button is clicked', async () => {
-    const wrapper = shallowMount(QueryTabs);
-    await wrapper.find('header button').trigger('click');
+    const wrapper = mount(QueryTabs, {
+      global: {
+        stubs: {
+          QueryView: true,
+        },
+      },
+    });
+    await wrapper.find('header > button').trigger('click'); // The first button in the header should be the disconnect button
     expect(connectionStoreMock.disconnect).toHaveBeenCalledTimes(1);
   });
 });

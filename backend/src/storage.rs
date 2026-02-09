@@ -25,8 +25,8 @@ pub struct SavedConnection {
 }
 
 fn get_project_dirs() -> Result<ProjectDirs> {
-    ProjectDirs::from("com", "gemini", "SQL Explorer")
-        .context("Failed to get project directories")
+    Ok(ProjectDirs::from("com", "gemini", "SQL Explorer")
+        .context("Failed to get project directories")?)
 }
 
 fn get_connections_file_path() -> Result<PathBuf> {
@@ -89,9 +89,9 @@ pub fn save_password(connection_name: &str, password: &str) -> Result<()> {
 
 pub fn get_password(connection_name: &str) -> Result<String> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, connection_name)?;
-    entry
+    Ok(entry
         .get_password()
-        .context("Failed to get password from keyring")
+        .context("Failed to get password from keyring")?)
 }
 
 pub fn delete_password(connection_name: &str) -> Result<()> {
@@ -99,7 +99,7 @@ pub fn delete_password(connection_name: &str) -> Result<()> {
     match entry.delete_password() {
         Ok(_) => Ok(()),
         Err(keyring::Error::NoEntry) => Ok(()), // It's ok if there's no entry to delete
-        Err(e) => Err(e).context("Failed to delete password from keyring"),
+        Err(e) => Err(e.into()),
     }
 }
 
