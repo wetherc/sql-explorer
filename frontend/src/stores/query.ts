@@ -9,7 +9,7 @@ export const useQueryStore = defineStore('query', () => {
   const isLoading = ref(false)
   const errorMessage = ref('')
 
-  const firstResultSet = computed<ResultSet | null>(() => {
+  const firstResultSet = computed<ResultSet | null | undefined>(() => {
     return response.value && response.value.results.length > 0
       ? response.value.results[0]
       : null

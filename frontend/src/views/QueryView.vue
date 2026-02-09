@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import MonacoEditor from 'monaco-editor-vue3'
 import { type QueryResponse, type ResultSet } from '@/types/query'
+import { exportToCsv, downloadCsv } from '../utils/csvExporter'
 
 const props = defineProps<{
   query: string,
@@ -20,7 +21,7 @@ const localQuery = computed({
   set: (value) => emit('update:query', value),
 })
 
-const firstResultSet = computed<ResultSet | null>(() => {
+const firstResultSet = computed<ResultSet | null | undefined>(() => {
   return props.response && props.response.results.length > 0
     ? props.response.results[0]
     : null
@@ -28,6 +29,12 @@ const firstResultSet = computed<ResultSet | null>(() => {
 
 function handleExecute() {
   emit('execute-query')
+}
+
+function handleExportCsv(resultSet: ResultSet) {
+  const filename = `query_results_${new Date().toISOString().slice(0, 10)}.csv`;
+  const csv = exportToCsv(resultSet.rows);
+  downloadCsv(csv, filename);
 }
 </script>
 
@@ -64,7 +71,10 @@ function handleExecute() {
     </div>
 
     <div v-if="firstResultSet?.rows.length" class="results-panel">
-      <h3>Results</h3>
+      <div class="results-header">
+        <h3>Results</h3>
+        <button @click="handleExportCsv(firstResultSet)" class="export-button">Export to CSV</button>
+      </div>
       <table>
         <thead>
           <tr>
@@ -85,3 +95,26 @@ function handleExecute() {
     </div>
   </div>
 </template>
+
+<style scoped>
+.results-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.export-button {
+  padding: 8px 12px;
+  background-color: #007bff;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9em;
+}
+
+.export-button:hover {
+  background-color: #0056b3;
+}
+</style>

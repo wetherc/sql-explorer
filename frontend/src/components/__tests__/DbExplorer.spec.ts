@@ -1,7 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import DbExplorer from '../DbExplorer.vue'
+import { default as DbExplorer } from '../DbExplorer.vue'
 import { useExplorerStore } from '../../stores/explorer'
 import { useTabsStore } from '../../stores/tabs'
 
@@ -20,6 +20,9 @@ describe('DbExplorer.vue', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
 
+    const tempPinia = createPinia();
+
+    const tempExplorerStore = useExplorerStore(tempPinia);
     explorerStoreMock = {
       databases: [{ name: 'db1' }],
       schemas: [{ name: 'dbo' }],
@@ -31,13 +34,33 @@ describe('DbExplorer.vue', () => {
       fetchSchemas: vi.fn().mockResolvedValue(true),
       fetchTables: vi.fn().mockResolvedValue(true),
       fetchColumns: vi.fn().mockResolvedValue(true),
-    };
-    (useExplorerStore as vi.Mock).mockReturnValue(explorerStoreMock)
+      $state: tempExplorerStore.$state,
+      $patch: tempExplorerStore.$patch,
+      $reset: tempExplorerStore.$reset,
+      $subscribe: tempExplorerStore.$subscribe,
+      $onAction: tempExplorerStore.$onAction,
+      $id: tempExplorerStore.$id,
+      $dispose: tempExplorerStore.$dispose,
+    } as unknown as ReturnType<typeof useExplorerStore>; // Cast to bypass strict type checking for complex Pinia mocks
+    (useExplorerStore as Mock).mockReturnValue(explorerStoreMock)
 
+    const tempTabsStore = useTabsStore(tempPinia);
     tabsStoreMock = {
+      tabs: [],
+      activeTabId: null,
+      activeTab: null,
       addTab: vi.fn(),
-    };
-    (useTabsStore as vi.Mock).mockReturnValue(tabsStoreMock)
+      closeTab: vi.fn(),
+      setActiveTab: vi.fn(),
+      $state: tempTabsStore.$state,
+      $patch: tempTabsStore.$patch,
+      $reset: tempTabsStore.$reset,
+      $subscribe: tempTabsStore.$subscribe,
+      $onAction: tempTabsStore.$onAction,
+      $id: tempTabsStore.$id,
+      $dispose: tempTabsStore.$dispose,
+    } as unknown as ReturnType<typeof useTabsStore>; // Cast to bypass strict type checking
+    (useTabsStore as Mock).mockReturnValue(tabsStoreMock)
   })
 
   it('fetches databases on mount and renders them', async () => {

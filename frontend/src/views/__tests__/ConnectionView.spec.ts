@@ -3,7 +3,6 @@ import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import ConnectionView from '../ConnectionView.vue'
 import { useConnectionStore } from '@/stores/connection'
-import { useSavedConnectionsStore } from '@/stores/savedConnections'
 import * as connBuilder from '@/utils/connectionStringBuilder'
 import { AuthType } from '@/types/savedConnection'
 

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { mount } from '@vue/test-utils';
 import QueryTabs from '../QueryTabs.vue';
 import { useTabsStore } from '../../stores/tabs';
@@ -37,6 +37,8 @@ describe('QueryTabs.vue', () => {
     setActivePinia(createPinia());
     vi.clearAllMocks();
 
+    const tempPinia = createPinia();
+    const tempTabsStore = useTabsStore(tempPinia);
     tabsStoreMock = {
       tabs: [],
       activeTabId: null,
@@ -44,21 +46,53 @@ describe('QueryTabs.vue', () => {
       addTab: vi.fn(),
       closeTab: vi.fn(),
       setActiveTab: vi.fn(),
-    };
+      $state: tempTabsStore.$state,
+      $patch: tempTabsStore.$patch,
+      $reset: tempTabsStore.$reset,
+      $subscribe: tempTabsStore.$subscribe,
+      $onAction: tempTabsStore.$onAction,
+      $id: tempTabsStore.$id,
+      $dispose: tempTabsStore.$dispose,
+    } as unknown as ReturnType<typeof useTabsStore>;
+
+    const tempConnectionStore = useConnectionStore(tempPinia);
     connectionStoreMock = {
       disconnect: vi.fn(),
-    };
+      isConnected: tempConnectionStore.isConnected,
+      isConnecting: tempConnectionStore.isConnecting,
+      errorMessage: tempConnectionStore.errorMessage,
+      connect: tempConnectionStore.connect,
+      $state: tempConnectionStore.$state,
+      $patch: tempConnectionStore.$patch,
+      $reset: tempConnectionStore.$reset,
+      $subscribe: tempConnectionStore.$subscribe,
+      $onAction: tempConnectionStore.$onAction,
+      $id: tempConnectionStore.$id,
+      $dispose: tempConnectionStore.$dispose,
+    } as unknown as ReturnType<typeof useConnectionStore>;
+
+    const tempQueryStore = useQueryStore(tempPinia);
     queryStoreMock = {
       executeQuery: vi.fn(),
       setQueryState: vi.fn(),
       response: null, // Default for new structure
       errorMessage: '',
       isLoading: false,
-    };
+      resultRows: tempQueryStore.resultRows,
+      resultColumns: tempQueryStore.resultColumns,
+      messages: tempQueryStore.messages,
+      $state: tempQueryStore.$state,
+      $patch: tempQueryStore.$patch,
+      $reset: tempQueryStore.$reset,
+      $subscribe: tempQueryStore.$subscribe,
+      $onAction: tempQueryStore.$onAction,
+      $id: tempQueryStore.$id,
+      $dispose: tempQueryStore.$dispose,
+    } as unknown as ReturnType<typeof useQueryStore>;
 
-    (useTabsStore as vi.Mock).mockReturnValue(tabsStoreMock);
-    (useConnectionStore as vi.Mock).mockReturnValue(connectionStoreMock);
-    (useQueryStore as vi.Mock).mockReturnValue(queryStoreMock);
+    (useTabsStore as Mock).mockReturnValue(tabsStoreMock);
+    (useConnectionStore as Mock).mockReturnValue(connectionStoreMock);
+    (useQueryStore as Mock).mockReturnValue(queryStoreMock);
   });
 
   it('renders correctly with no tabs', () => {

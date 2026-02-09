@@ -2,7 +2,6 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import ConnectionView from '../ConnectionView.vue'
-import { useSavedConnectionsStore } from '@/stores/savedConnections'
 import { AuthType } from '@/types/savedConnection'
 
 // Mock child components

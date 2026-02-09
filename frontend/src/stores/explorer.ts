@@ -11,7 +11,7 @@ interface Schema {
 }
 
 interface Table {
-  name: string;
+  TABLE_NAME: string;
 }
 
 interface Column {

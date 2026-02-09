@@ -4,11 +4,19 @@ import { useExplorerStore } from '@/stores/explorer';
 import { useTabsStore } from '@/stores/tabs';
 import ContextMenu, { type MenuItem } from './ContextMenu.vue';
 
+interface TreeNode {
+  name: string;
+  type: 'database' | 'folder' | 'schema' | 'table';
+  expanded: boolean;
+  children?: TreeNode[];
+  parent?: any;
+}
+
 const explorerStore = useExplorerStore();
 const tabsStore = useTabsStore();
 
 // Local state for the tree structure
-const tree = ref<any[]>([]);
+const tree = ref<TreeNode[]>([]);
 
 // Context menu state
 const contextMenu = reactive({
@@ -16,7 +24,7 @@ const contextMenu = reactive({
   x: 0,
   y: 0,
   items: [] as MenuItem[],
-  node: null as any,
+  node: null as TreeNode | null,
 });
 
 onMounted(async () => {
@@ -25,14 +33,14 @@ onMounted(async () => {
     name: db.name,
     type: 'database',
     children: [
-      { name: 'Schemas', type: 'folder', children: [], parent: db },
+      { name: 'Schemas', type: 'folder', children: [], parent: db, expanded: false },
       // Other folders like 'Users' can be added here
     ],
     expanded: false,
   }));
 });
 
-async function toggleNode(node: any) {
+async function toggleNode(node: TreeNode) {
   node.expanded = !node.expanded;
   if (node.expanded) {
     if (node.type === 'folder' && node.name === 'Schemas') {
@@ -41,12 +49,13 @@ async function toggleNode(node: any) {
         name: s.name,
         type: 'schema',
         children: [
-          { name: 'Tables', type: 'folder', children: [], parent: { database: node.parent, schema: s } },
+          { name: 'Tables', type: 'folder', children: [], parent: { database: node.parent, schema: s }, expanded: false },
         ],
         expanded: false,
       }));
     } else if (node.type === 'folder' && node.name === 'Tables') {
-        await explorerStore.fetchTables(node.parent.schema.name);
+      if (node.parent && 'schema' in node.parent && typeof node.parent.schema === 'object' && node.parent.schema !== null && 'name' in node.parent.schema) {
+        await explorerStore.fetchTables(node.parent.schema.name as string);
         node.children = explorerStore.tables.map(t => ({
             name: t.TABLE_NAME,
             type: 'table',
@@ -58,7 +67,7 @@ async function toggleNode(node: any) {
 }
 
 
-function showContextMenu(event: MouseEvent, node: any) {
+function showContextMenu(event: MouseEvent, node: TreeNode) {
   contextMenu.visible = true;
   contextMenu.x = event.clientX;
   contextMenu.y = event.clientY;
@@ -94,8 +103,10 @@ function handleContextMenuAction(action: string) {
       break;
     case 'select-top-1000':
       if (node.type === 'table') {
-        const query = `SELECT TOP (1000) * FROM [${node.parent.schema.name}].[${node.name}]`;
-        tabsStore.addTab(query);
+        if (node.parent && 'schema' in node.parent && typeof node.parent.schema === 'object' && node.parent.schema !== null && 'name' in node.parent.schema) {
+          const query = `SELECT TOP (1000) * FROM [${node.parent.schema.name as string}].[${node.name}]`;
+          tabsStore.addTab(query);
+        }
       }
       break;
   }

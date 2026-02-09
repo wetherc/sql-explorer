@@ -1,11 +1,11 @@
 // backend/src/db.rs
 use crate::error::Error as AppError;
-use futures_util::StreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::error::Error;
-use tiberius::{Client, Config, QueryItem, Row};
+use tiberius::{Client, Config, QueryItem, Row, Column, numeric::Numeric as TiberiusNumeric};
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
@@ -28,7 +28,7 @@ pub struct Table {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Column {
+pub struct AppColumn {
     pub name: String,
     pub data_type: String,
 }
@@ -136,51 +136,44 @@ pub async fn db_connect(connection_string: &str) -> DbResult<DbClient> {
 pub async fn db_execute_query(client: &mut DbClient, query: &str) -> DbResult<QueryResponse> {
     let mut stream = client.simple_query(query).await?;
     let mut all_results: Vec<ResultSet> = Vec::new();
-    let mut messages: Vec<String> = Vec::new();
+    let mut current_result_set: Option<ResultSet> = None;
+    let messages: Vec<String> = Vec::new(); // Will remain empty for now
 
-    loop {
-        // Get columns for the current result set before processing its rows
-        let columns: Vec<String> = stream
-            .columns()
-            .to_vec()
-            .iter()
-            .map(|c| c.name().to_string())
-            .collect();
-        let mut rows: Vec<JsonValue> = Vec::new();
-        let mut has_rows_in_current_set = false;
+    while let Some(item) = stream.try_next().await? {
+        match item {
+            QueryItem::Metadata(metadata) => {
+                // If there's an active result set, save it before starting a new one
+                if let Some(rs) = current_result_set.take() {
+                    all_results.push(rs);
+                }
 
-        // Iterate through rows and QueryItems of the current result set
-        // The stream yields QueryItem::Row or QueryItem::Message until QueryItem::Done for the current set
-        while let Some(result) = stream.next().await {
-            match result? {
-                QueryItem::Row(row) => {
-                    rows.push(row_to_json(row));
-                    has_rows_in_current_set = true;
+                // Start a new result set with the new metadata
+                let columns: Vec<String> = metadata
+                    .columns()
+                    .iter()
+                    .map(|c| c.name().to_string())
+                    .collect();
+                current_result_set = Some(ResultSet {
+                    columns,
+                    rows: Vec::new(),
+                });
+            }
+            QueryItem::Row(row) => {
+                // Add row to the current result set
+                if let Some(ref mut rs) = current_result_set {
+                    rs.rows.push(row_to_json(&row, row.columns()));
+                } else {
+                    // Row received before any metadata, this is an unexpected state
+                    error!("Row received before any result set metadata.");
+                    // Decide how to handle, e.g., create a default result set
                 }
-                QueryItem::Message(message) => {
-                    messages.push(message.message().to_string());
-                }
-                QueryItem::Done => {
-                    // End of current result set, break from inner loop
-                    break;
-                }
-                _ => {} // Ignore other QueryItem types
             }
         }
+    }
 
-        // If there were rows or columns in the current result set, add it to all_results
-        if has_rows_in_current_set || !columns.is_empty() {
-             all_results.push(ResultSet { columns, rows });
-        }
-
-        // Check if there are more result sets in the stream
-        if stream.has_more_results() {
-            // Advance to the next result set
-            stream.next_resultset().await?;
-        } else {
-            // No more result sets, break from outer loop
-            break;
-        }
+    // Push the last active result set if any
+    if let Some(rs) = current_result_set.take() {
+        all_results.push(rs);
     }
 
     Ok(QueryResponse {
@@ -244,7 +237,7 @@ pub async fn db_list_columns(
     client: &mut DbClient,
     schema_name: &str,
     table_name: &str,
-) -> DbResult<Vec<Column>> {
+) -> DbResult<Vec<AppColumn>> {
     let query = format!(
         "SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}' ORDER BY ORDINAL_POSITION",
         schema_name, table_name
@@ -255,7 +248,7 @@ pub async fn db_list_columns(
     while let Some(result) = stream.next().await {
         if let Ok(QueryItem::Row(row)) = result {
             if let (Some(name), Some(data_type)) = (row.get::<&str, _>(0), row.get::<&str, _>(1)) {
-                columns.push(Column {
+                columns.push(AppColumn {
                     name: name.to_string(),
                     data_type: data_type.to_string(),
                 });
@@ -265,14 +258,23 @@ pub async fn db_list_columns(
     Ok(columns)
 }
 
-fn row_to_json(row: Row) -> JsonValue {
+fn row_to_json(row: &Row, columns: &[Column]) -> JsonValue {
     let mut map = serde_json::Map::new();
-    for (i, col) in row.columns().iter().enumerate() {
+    for (i, col) in columns.iter().enumerate() {
         let col_name = col.name().to_string();
         // This is a simplified conversion. A more robust solution would handle different types.
-        let val = match row.get::<&str, _>(i) {
-            Some(s) => JsonValue::String(s.to_string()),
-            None => JsonValue::Null,
+        let val = match col.column_type() {
+            tiberius::ColumnType::Bit => row.get::<bool, _>(i).map(JsonValue::Bool).unwrap_or(JsonValue::Null),
+            tiberius::ColumnType::Intn | tiberius::ColumnType::Int4 => row.get::<i32, _>(i).map(JsonValue::from).unwrap_or(JsonValue::Null),
+            tiberius::ColumnType::Int8 => row.get::<i64, _>(i).map(JsonValue::from).unwrap_or(JsonValue::Null),
+            tiberius::ColumnType::Float4 => row.get::<f32, _>(i).map(JsonValue::from).unwrap_or(JsonValue::Null),
+            tiberius::ColumnType::Float8 => row.get::<f64, _>(i).map(JsonValue::from).unwrap_or(JsonValue::Null),
+            tiberius::ColumnType::Numericn => {
+                let s: Option<TiberiusNumeric> = row.get(i);
+                s.map(|d| JsonValue::from(f64::from(d))).unwrap_or(JsonValue::Null)
+            },
+            // Add more type conversions as needed
+            _ => row.get::<&str, _>(i).map(|s| JsonValue::String(s.to_string())).unwrap_or(JsonValue::Null),
         };
         map.insert(col_name, val);
     }

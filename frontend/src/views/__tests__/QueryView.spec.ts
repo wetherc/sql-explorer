@@ -1,12 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mount } from '@vue/test-utils';
 import QueryView from '../QueryView.vue';
-import MonacoEditor from 'monaco-editor-vue3';
 import { type QueryResponse } from '@/types/query'; // New import
 
 // Mock MonacoEditor
 vi.mock('monaco-editor-vue3', () => ({
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   default: {
     name: 'MonacoEditor',
     template: '<textarea :value="modelValue" @input="$emit(\'update:modelValue\', $event.target.value)"></textarea>',

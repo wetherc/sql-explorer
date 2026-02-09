@@ -4,7 +4,7 @@ import { useTabsStore } from '@/stores/tabs'
 import { useConnectionStore } from '@/stores/connection'
 import { useQueryStore } from '@/stores/query'
 import QueryView from '@/views/QueryView.vue'
-import { type QueryResponse } from '@/types/query'
+
 
 const tabsStore = useTabsStore()
 const connectionStore = useConnectionStore()
@@ -42,8 +42,8 @@ async function handleExecuteQuery() {
       tabsStore.activeTab.errorMessage = queryStore.errorMessage;
       tabsStore.activeTab.response = null;
     }
-  } catch (error: any) {
-    tabsStore.activeTab.errorMessage = error.message || 'An unknown error occurred.';
+  } catch (error: unknown) {
+    tabsStore.activeTab.errorMessage = error instanceof Error ? error.message : 'An unknown error occurred.';
     tabsStore.activeTab.response = null;
     tabsStore.activeTab.isLoading = false;
   }

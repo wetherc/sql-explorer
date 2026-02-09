@@ -1,6 +1,6 @@
 export interface ResultSet {
   columns: string[];
-  rows: Record<string, any>[];
+  rows: Record<string, unknown>[];
 }
 
 export interface QueryResponse {

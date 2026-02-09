@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { v4 as uuidv4 } from 'uuid'
-import { type QueryResponse, type ResultSet } from '@/types/query' // Import new types
+import { type QueryResponse } from '@/types/query'
 
 export interface QueryTab {
   id: string;

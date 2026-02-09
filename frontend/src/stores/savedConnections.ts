@@ -2,7 +2,6 @@ import { ref } from 'vue'
 import { defineStore } from 'pinia'
 import { invoke } from '@tauri-apps/api/tauri'
 import type { SavedConnection } from '@/types/savedConnection'
-import { AuthType } from '@/types/savedConnection'
 
 export const useSavedConnectionsStore = defineStore('savedConnections', () => {
   const connections = ref<SavedConnection[]>([])

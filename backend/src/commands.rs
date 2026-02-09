@@ -1,6 +1,6 @@
 // backend/src/commands.rs
 use crate::{db, error::Error, state::AppState, storage};
-use serde_json::Value as JsonValue;
+
 
 type CommandResult<T> = Result<T, Error>;
 
@@ -53,7 +53,7 @@ pub async fn list_columns(
     schema_name: String,
     table_name: String,
     state: tauri::State<'_, AppState>,
-) -> CommandResult<Vec<db::Column>> {
+) -> CommandResult<Vec<db::AppColumn>> {
     let mut client_guard = state.db.lock().await;
     let client = client_guard.as_mut().ok_or(Error::NotConnected)?;
     db::db_list_columns(client, &schema_name, &table_name).await

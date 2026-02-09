@@ -69,8 +69,8 @@ async function handleConnect() {
       trustServerCertificate: trustServerCertificate.value
     })
     await connectionStore.connect(connectionString)
-  } catch (error: any) {
-    connectionStore.errorMessage = error.message
+  } catch (error: unknown) {
+    connectionStore.errorMessage = error instanceof Error ? error.message : 'An unknown error occurred.'
   }
 }
 

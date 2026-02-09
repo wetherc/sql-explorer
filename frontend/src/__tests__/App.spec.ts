@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia } from 'pinia'
 import App from '../App.vue'
@@ -35,12 +35,25 @@ describe('App', () => {
   let connectionStoreMock: ReturnType<typeof useConnectionStore>;
 
   beforeEach(() => {
+    const tempPinia = createPinia();
+    const tempStore = useConnectionStore(tempPinia);
+
     connectionStoreMock = {
-      isConnected: false,
-      isConnecting: false,
-      errorMessage: '',
+      isConnected: tempStore.isConnected,
+      isConnecting: tempStore.isConnecting,
+      errorMessage: tempStore.errorMessage,
+
       connect: vi.fn(),
       disconnect: vi.fn(),
+
+      $state: tempStore.$state,
+      $patch: tempStore.$patch,
+      $reset: tempStore.$reset,
+      $subscribe: tempStore.$subscribe,
+      $onAction: tempStore.$onAction,
+      $id: tempStore.$id,
+      $dispose: tempStore.$dispose,
+      // _p: tempStore._p, // Private property, may not be directly accessible or needed
     };
     (useConnectionStore as vi.Mock).mockReturnValue(connectionStoreMock);
   });
