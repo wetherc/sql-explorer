@@ -1,5 +1,5 @@
 // backend/src/commands.rs
-use crate::{db, error::Error, state::AppState, storage};
+use crate::{db::{self, drivers::mssql::MssqlDriver}, error::Error, state::AppState, storage};
 
 
 type CommandResult<T> = Result<T, Error>;
@@ -9,7 +9,8 @@ pub async fn connect(
     connection_string: String,
     state: tauri::State<'_, AppState>,
 ) -> CommandResult<()> {
-    let client = db::db_connect(&connection_string).await?;
+    // For now, we only support mssql
+    let client = MssqlDriver::connect(&connection_string).await?;
     *state.db.lock().await = Some(client);
     Ok(())
 }
@@ -21,21 +22,21 @@ pub async fn execute_query(
 ) -> CommandResult<db::QueryResponse> {
     let mut client_guard = state.db.lock().await;
     let client = client_guard.as_mut().ok_or(Error::NotConnected)?;
-    db::db_execute_query(client, &query).await
+    client.execute_query(&query).await
 }
 
 #[tauri::command]
 pub async fn list_databases(state: tauri::State<'_, AppState>) -> CommandResult<Vec<db::Database>> {
     let mut client_guard = state.db.lock().await;
     let client = client_guard.as_mut().ok_or(Error::NotConnected)?;
-    db::db_list_databases(client).await
+    client.list_databases().await
 }
 
 #[tauri::command]
 pub async fn list_schemas(state: tauri::State<'_, AppState>) -> CommandResult<Vec<db::Schema>> {
     let mut client_guard = state.db.lock().await;
     let client = client_guard.as_mut().ok_or(Error::NotConnected)?;
-    db::db_list_schemas(client).await
+    client.list_schemas().await
 }
 
 #[tauri::command]
@@ -45,7 +46,7 @@ pub async fn list_tables(
 ) -> CommandResult<Vec<db::Table>> {
     let mut client_guard = state.db.lock().await;
     let client = client_guard.as_mut().ok_or(Error::NotConnected)?;
-    db::db_list_tables(client, &schema_name).await
+    client.list_tables(&schema_name).await
 }
 
 #[tauri::command]
@@ -56,7 +57,7 @@ pub async fn list_columns(
 ) -> CommandResult<Vec<db::AppColumn>> {
     let mut client_guard = state.db.lock().await;
     let client = client_guard.as_mut().ok_or(Error::NotConnected)?;
-    db::db_list_columns(client, &schema_name, &table_name).await
+    client.list_columns(&schema_name, &table_name).await
 }
 
 #[tauri::command]
@@ -117,9 +118,8 @@ mod tests {
     async fn test_connect_invalid_string() {
         let app = tauri::test::mock_app();
         app.manage(AppState { db: Mutex::new(None) });
-        let state = app.state::<AppState>();
         let connection_string = "server=localhost;user=sa;password=Password123;database=master;TrustServerCertificate=true".to_string();
-        let result = connect(connection_string, state).await;
+        let result = MssqlDriver::connect(&connection_string).await;
         assert!(result.is_err(), "Connection should fail with an invalid connection string");
     }
 

@@ -122,30 +122,93 @@ This section outlines the development plan in a milestone-based format.
 
 ### **Milestone 4: Advanced Features & Polish**
 *   **Goal:** Add "quality of life" features and polish the application for a better user experience.
-*   **Status:** ⏳ Not Started
+*   **Status:** ✅ **Completed**
 
 #### **Technical Approach:**
 
-*   **M4.1 & M4.2 (Frontend): Explorer Context Menu**
+*   **[x] M4.1 & M4.2 (Frontend): Explorer Context Menu**
     *   **UI:** In `DbExplorer.vue`, add a `@contextmenu.prevent` handler on tree nodes to display a custom context menu component at the cursor's position.
     *   **Functionality:** The menu's options will depend on the node type (e.g., "New Query" for a database, "Select Top 1000 Rows" for a table).
     *   **Actions:** Selecting an action will trigger the `tabsStore`. For example, "Select Top 1000 Rows" will generate the appropriate SQL statement and call `tabsStore.addTab(generatedSql)` to open it in a new, pre-filled query tab.
 
-*   **M4.3 & M4.5 (Backend): Enhanced Query Execution**
+*   **[x] M4.3 & M4.5 (Backend): Enhanced Query Execution**
     *   **Multiple Result Sets:**
         *   Modify the `execute_query` logic in `db.rs`. The `tiberius` crate's `QueryStream` supports multiple result sets.
-        *   Iterate through the stream using `next_resultset()` to collect all distinct results from a single query execution.
+        *   Iterate through the stream using `try_next()` to collect all distinct results from a single query execution.
     *   **Informational Messages:** While iterating, inspect the stream for `tiberius::QueryItem::Message` items, which correspond to `PRINT` or `RAISERROR` outputs. Collect these messages.
     *   **Updated Response Structure:** Change the command's return type from a simple array to a structured object, e.g., `{ results: [ResultSet1, ResultSet2, ...], messages: ["Msg1", "Msg2", ...] }`.
 
-*   **M4.4 & M4.6 (Frontend): Advanced Results Display**
+*   **[x] M4.4 & M4.6 (Frontend): Advanced Results Display**
     *   **Multi-Result UI:** In `QueryView.vue`, update the results panel to detect when the response contains multiple result sets. If so, it will render a set of tabs within the panel (e.g., "Result 1," "Result 2"). Each tab will contain a data grid for one result set.
     *   **Messages Tab:** Add a dedicated "Messages" tab to the results panel. This tab will be populated with any informational messages returned from the backend, providing feedback from `PRINT` statements or warnings.
 
-*   **M4.7 & M4.8 (Frontend): CSV Export**
+*   **[x] M4.7 & M4.8 (Frontend): CSV Export**
     *   **UI:** Add an "Export to CSV" button within the results panel, likely one for each result grid.
     *   **Client-Side Logic:**
         *   Implement a utility function to convert the JSON data of a result set into a CSV string. This involves creating a header row from the column names and then iterating through the rows of data.
         *   To ensure robust CSV generation (handling commas and quotes within data), consider adding a lightweight library like `papaparse`.
         *   To trigger the download, the logic will create a `Blob` with the CSV content, generate a local object URL for it, and programmatically trigger a download via a temporary `<a>` element.
+
+---
+
+### **Milestone 5: Multi-Database Engine Support**
+*   **Goal:** Abstract the database connection and querying logic to support multiple database engines (MS SQL, MySQL/MariaDB, PostgreSQL).
+*   **Status:** ⏳ Not Started
+
+#### **Technical Approach:**
+
+*   **M5.1 (Backend): Introduce a Generic Database Trait.**
+    *   **Abstraction:** Create a new Rust module, e.g., `backend/src/db/drivers`.
+    *   **Trait Definition:** Define a `DatabaseDriver` trait with methods for common database operations:
+        *   `connect(connection_string: &str) -> Result<Box<dyn DatabaseDriver>, Error>`
+        *   `execute_query(query: &str) -> Result<QueryResponse, Error>`
+        *   `list_databases() -> Result<Vec<Database>, Error>`
+        *   `list_schemas() -> Result<Vec<Schema>, Error>`
+        *   `list_tables(schema: &str) -> Result<Vec<Table>, Error>`
+        *   `list_columns(schema: &str, table: &str) -> Result<Vec<Column>, Error>`
+        *   This trait will be `async` using `#[async_trait]` if needed, or methods will return `Future`s.
+    *   **State Management:** The `AppState` will hold `Option<Box<dyn DatabaseDriver>>` instead of `Option<DbClient>`.
+
+*   **M5.2 (Backend): Implement MS SQL Driver.**
+    *   **Refactor:** Create a `backend/src/db/drivers/mssql.rs`.
+    *   **Implementation:** Create a `MssqlDriver` struct that wraps the `tiberius` client.
+    *   **Trait Implementation:** Implement the `DatabaseDriver` trait for `MssqlDriver`. The existing logic from `db.rs` for connecting and querying MS SQL will be moved into this implementation. The metadata queries (`list_databases`, `list_schemas`, etc.) will remain specific to MS SQL (using `sys.databases`, `INFORMATION_SCHEMA`, etc.).
+
+*   **M5.3 (Backend): Add MySQL/MariaDB Support.**
+    *   **Crate:** Add the `mysql_async` crate to `backend/Cargo.toml`.
+    *   **Driver:** Create `backend/src/db/drivers/mysql.rs`.
+    *   **Implementation:** Create a `MysqlDriver` struct that wraps a `mysql_async::Conn` pool.
+    *   **Trait Implementation:** Implement the `DatabaseDriver` trait for `MysqlDriver`.
+        *   `connect`: Use `mysql_async::Conn::new()` to connect.
+        *   `execute_query`: Execute queries and transform the results into the common `QueryResponse` format.
+        *   `list_databases`: `SHOW DATABASES;`
+        *   `list_schemas`: MySQL doesn't have schemas in the same way as MS SQL or PostgreSQL. It uses databases. This method might return an empty list or be adapted.
+        *   `list_tables`: `SHOW TABLES FROM \`<database_name>\`;` (or query `INFORMATION_SCHEMA.TABLES`).
+        *   `list_columns`: `SHOW COLUMNS FROM \`<table_name>\` FROM \`<database_name>\`;` (or query `INFORMATION_SCHEMA.COLUMNS`).
+
+*   **M5.4 (Backend): Add PostgreSQL Support.**
+    *   **Crate:** Add the `tokio-postgres` crate to `backend/Cargo.toml`.
+    *   **Driver:** Create `backend/src/db/drivers/postgres.rs`.
+    *   **Implementation:** Create a `PostgresDriver` struct that wraps a `tokio_postgres::Client`.
+    *   **Trait Implementation:** Implement `DatabaseDriver` for `PostgresDriver`.
+        *   `connect`: Use `tokio_postgres::connect()` to connect.
+        *   `execute_query`: Execute queries and transform results.
+        *   `list_databases`: `SELECT datname FROM pg_database WHERE datistemplate = false;`
+        *   `list_schemas`: `SELECT nspname FROM pg_catalog.pg_namespace;`
+        *   `list_tables`: Query `pg_tables` or `information_schema.tables`.
+        *   `list_columns`: Query `information_schema.columns`.
+
+*   **M5.5 (Backend): Update Tauri Commands.**
+    *   **`connect` command:** Modify the `connect` command to accept a `db_engine` parameter (`"mssql"`, `"mysql"`, `"postgres"`).
+    *   **Factory:** Based on `db_engine`, the `connect` command will call the appropriate driver's `connect` method (`MssqlDriver::connect`, `MysqlDriver::connect`, etc.).
+    *   **State:** The `AppState` will now store the `Box<dyn DatabaseDriver>`.
+    *   **Other commands:** The other commands (`execute_query`, `list_databases`, etc.) will call the methods on the `Box<dyn DatabaseDriver>` trait object, dispatching to the correct implementation dynamically.
+
+*   **M5.6 (Frontend): Update Connection UI.**
+    *   **Engine Selector:** Add a dropdown to `ConnectionView.vue` to select the database engine (MS SQL, MySQL, PostgreSQL).
+    *   **Dynamic Form:** The connection form fields might need to change based on the selected engine (e.g., PostgreSQL uses "host", "port", "user", "password", "dbname"; MySQL is similar). The `connectionStringBuilder.ts` will need to be updated or replaced to handle different connection string formats for each engine.
+    *   **`connect` call:** The `connect` call from the frontend will now include the `dbEngine` parameter.
+
+*   **M5.7 (Frontend): Monaco Editor Language.**
+    *   **Dynamic Language:** Update the Monaco Editor in `QueryView.vue` to dynamically set the `language` option based on the connected database engine ('sql' for MS SQL, 'mysql' for MySQL, 'pgsql' for PostgreSQL). This provides correct syntax highlighting for each dialect.
 

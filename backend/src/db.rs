@@ -1,4 +1,6 @@
 // backend/src/db.rs
+pub mod drivers;
+
 use crate::error::Error as AppError;
 use futures_util::{StreamExt, TryStreamExt};
 use log::{debug, error, info, warn};

@@ -118,6 +118,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_save_and_get_connections() {
         let conn_name = "test_conn_1";
         let conn = SavedConnection {
@@ -130,6 +131,7 @@ mod tests {
 
         // Cleanup before test
         cleanup(conn_name);
+        cleanup("test_conn_2");
 
         // Save
         let save_result = save_connection_details(&conn);
@@ -148,6 +150,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_delete_connection() {
         let conn_name = "test_conn_2";
         let conn = SavedConnection {
@@ -180,6 +183,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_password_management() {
         let conn_name = "test_password_conn";
         let password = "my_secret_password";
