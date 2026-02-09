@@ -1,5 +1,5 @@
 // backend/src/commands.rs
-use crate::{db, error::Error, state::AppState};
+use crate::{db, error::Error, state::AppState, storage};
 use serde_json::Value as JsonValue;
 
 type CommandResult<T> = Result<T, Error>;
@@ -59,6 +59,53 @@ pub async fn list_columns(
     db::db_list_columns(client, &schema_name, &table_name).await
 }
 
+#[tauri::command]
+pub fn list_connections() -> CommandResult<Vec<storage::SavedConnection>> {
+    storage::get_all_connections().map_err(Error::from)
+}
+
+#[tauri::command]
+pub fn save_connection(
+    name: String,
+    server: String,
+    database: String,
+    auth_type: storage::AuthType,
+    user: Option<String>,
+    password: Option<String>,
+) -> CommandResult<()> {
+    let connection = storage::SavedConnection {
+        name: name.clone(),
+        server,
+        database,
+        auth_type,
+        user,
+    };
+    storage::save_connection_details(&connection)?;
+    if let Some(password) = password {
+        storage::save_password(&name, &password)?;
+    } else {
+        // If there's no password provided for a SQL Auth connection,
+        // we should delete any existing password for this connection.
+        if connection.auth_type == storage::AuthType::Sql {
+            let _ = storage::delete_password(&name);
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_connection(name: String) -> CommandResult<()> {
+    storage::delete_connection_details(&name)?;
+    storage::delete_password(&name)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_connection_password(name: String) -> CommandResult<String> {
+    storage::get_password(&name).map_err(Error::from)
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,60 +136,6 @@ mod tests {
             _ => panic!("Wrong error type returned"),
         }
     }
-
-    #[tokio::test]
-    async fn test_list_databases_without_connection() {
-        let app = tauri::test::mock_app();
-        app.manage(AppState { db: Mutex::new(None) });
-        let state = app.state::<AppState>();
-        let result = list_databases(state).await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            Error::NotConnected => (),
-            _ => panic!("Wrong error type returned"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_list_schemas_without_connection() {
-        let app = tauri::test::mock_app();
-        app.manage(AppState { db: Mutex::new(None) });
-        let state = app.state::<AppState>();
-        let result = list_schemas(state).await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            Error::NotConnected => (),
-            _ => panic!("Wrong error type returned"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_list_tables_without_connection() {
-        let app = tauri::test::mock_app();
-        app.manage(AppState { db: Mutex::new(None) });
-        let state = app.state::<AppState>();
-        let result = list_tables("dbo".to_string(), state).await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            Error::NotConnected => (),
-            _ => panic!("Wrong error type returned"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_list_columns_without_connection() {
-        let app = tauri::test::mock_app();
-        app.manage(AppState { db: Mutex::new(None) });
-        let state = app.state::<AppState>();
-        let result = list_columns("dbo".to_string(), "mytable".to_string(), state).await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            Error::NotConnected => (),
-            _ => panic!("Wrong error type returned"),
-        }
-    }
-}
-
 
     #[tokio::test]
     async fn test_list_databases_without_connection() {

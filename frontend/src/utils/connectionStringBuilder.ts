@@ -1,3 +1,4 @@
+
 export type AuthType = 'sql' | 'integrated'
 
 export interface ConnectionOptions {
@@ -12,6 +13,7 @@ export interface ConnectionOptions {
   applicationName?: string
   connectTimeout?: number
 }
+
 
 export function buildConnectionString(options: ConnectionOptions): string {
   if (!options.server) {

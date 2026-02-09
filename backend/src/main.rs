@@ -7,6 +7,7 @@ mod commands;
 mod db;
 mod error;
 mod state;
+mod storage;
 
 use state::AppState;
 use tokio::sync::Mutex;
@@ -23,7 +24,11 @@ fn main() {
             commands::list_databases,
             commands::list_schemas,
             commands::list_tables,
-            commands::list_columns
+            commands::list_columns,
+            commands::list_connections,
+            commands::save_connection,
+            commands::delete_connection,
+            commands::get_connection_password
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

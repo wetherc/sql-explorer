@@ -24,6 +24,9 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 futures-util = "0.3"
 thiserror = "1.0"
+keyring = "2.3"
+anyhow = "1.0"
+directories = "5.0"
 
 [features]
 # by default Tauri runs in production mode
