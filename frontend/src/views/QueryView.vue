@@ -1,33 +1,36 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-import { useConnectionStore } from '@/stores/connection'
-import { useQueryStore } from '@/stores/query'
+import { computed } from 'vue'
 import MonacoEditor from 'monaco-editor-vue3'
+import { QueryResult } from '@/stores/tabs' // Import QueryResult interface
 
-const connectionStore = useConnectionStore()
-const queryStore = useQueryStore()
+const props = defineProps<{
+  query: string,
+  results: QueryResult,
+  isLoading: boolean,
+}>()
 
-const query = ref('SELECT 1')
+const emit = defineEmits<{
+  (e: 'update:query', value: string): void,
+  (e: 'execute-query'): void,
+}>()
 
-async function handleExecute() {
-  if (query.value) {
-    await queryStore.executeQuery(query.value)
-  }
+const localQuery = computed({
+  get: () => props.query,
+  set: (value) => emit('update:query', value),
+})
+
+function handleExecute() {
+  emit('execute-query')
 }
 </script>
 
 <template>
   <div class="query-view">
-    <header>
-      <h1>SQL Explorer</h1>
-      <button @click="connectionStore.disconnect()">Disconnect</button>
-    </header>
-
     <div class="editor-panel">
       <form @submit.prevent="handleExecute">
         <div class="editor-container">
           <MonacoEditor
-            v-model="query"
+            v-model="localQuery"
             theme="vs-dark"
             lang="sql"
             :options="{
@@ -37,35 +40,35 @@ async function handleExecute() {
             }"
           />
         </div>
-        <button type="submit" :disabled="queryStore.isLoading">
-          {{ queryStore.isLoading ? 'Executing...' : 'Execute' }}
+        <button type="submit" :disabled="isLoading">
+          {{ isLoading ? 'Executing...' : 'Execute' }}
         </button>
       </form>
     </div>
 
-    <div v-if="queryStore.errorMessage" class="error-panel">
+    <div v-if="results.errorMessage" class="error-panel">
       <h3>Error</h3>
-      <pre>{{ queryStore.errorMessage }}</pre>
+      <pre>{{ results.errorMessage }}</pre>
     </div>
 
-    <div v-if="queryStore.resultRows.length > 0" class="results-panel">
+    <div v-if="results.rows.length > 0" class="results-panel">
       <h3>Results</h3>
       <table>
         <thead>
           <tr>
-            <th v-for="col in queryStore.resultColumns" :key="col">{{ col }}</th>
+            <th v-for="col in results.columns" :key="col">{{ col }}</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="(row, rowIndex) in queryStore.resultRows" :key="rowIndex">
-            <td v-for="col in queryStore.resultColumns" :key="col">
+          <tr v-for="(row, rowIndex) in results.rows" :key="rowIndex">
+            <td v-for="col in results.columns" :key="col">
               {{ row[col] }}
             </td>
           </tr>
         </tbody>
       </table>
     </div>
-    <div v-else-if="!queryStore.isLoading && queryStore.results" class="results-panel">
+    <div v-else-if="!isLoading && results" class="results-panel">
         <p>Query executed successfully. No rows returned.</p>
     </div>
   </div>
@@ -75,24 +78,11 @@ async function handleExecute() {
 .query-view {
   display: flex;
   flex-direction: column;
-  height: 100vh;
-  overflow: hidden; /* Prevent body scrolling */
+  height: 100%; /* Changed from 100vh to 100% to fit parent */
+  overflow: hidden;
 }
 
-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 0.5rem 1rem;
-  background-color: #343a40;
-  color: white;
-  flex-shrink: 0;
-}
-
-header h1 {
-  margin: 0;
-  font-size: 1.25rem;
-}
+/* Removed header styles as it's no longer in this component */
 
 .editor-panel {
   padding: 1rem;

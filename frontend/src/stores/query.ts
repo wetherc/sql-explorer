@@ -26,7 +26,7 @@ export const useQueryStore = defineStore('query', () => {
     return []
   })
 
-  async function executeQuery(query: string) {
+  async function executeQuery(query: string): Promise<boolean> {
     isLoading.value = true
     errorMessage.value = ''
     results.value = null
@@ -34,11 +34,28 @@ export const useQueryStore = defineStore('query', () => {
     try {
       const response = await invoke<JsonValue>('execute_query', { query })
       results.value = response
+      return true
     } catch (error) {
       errorMessage.value = error as string
+      return false
     } finally {
       isLoading.value = false
     }
+  }
+
+  function setQueryState(
+    newQuery: string,
+    newColumns: string[],
+    newRows: Record<string, any>[],
+    newErrorMessage: string | null,
+    newIsLoading: boolean,
+  ) {
+    // Note: The newQuery is not directly stored in the query store,
+    // as it is managed by the active tab in the tabs store.
+    // This function primarily updates the results, loading, and error states.
+    results.value = { columns: newColumns, rows: newRows }; // Simplified structure for direct assignment
+    errorMessage.value = newErrorMessage || '';
+    isLoading.value = newIsLoading;
   }
 
   return {
@@ -48,5 +65,6 @@ export const useQueryStore = defineStore('query', () => {
     resultRows,
     resultColumns,
     executeQuery,
+    setQueryState,
   }
 })

@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import { useConnectionStore } from '@/stores/connection'
 import ConnectionView from '@/views/ConnectionView.vue'
-import QueryView from '@/views/QueryView.vue'
-import DbExplorer from '@/components/DbExplorer.vue' // Placeholder for now
+import QueryTabs from '@/components/QueryTabs.vue' // Import QueryTabs
 
 const connectionStore = useConnectionStore()
 </script>
@@ -18,7 +17,7 @@ const connectionStore = useConnectionStore()
     </aside>
     <main class="content-area">
       <ConnectionView v-if="!connectionStore.isConnected" />
-      <QueryView v-else />
+      <QueryTabs v-else />
     </main>
   </div>
 </template>
