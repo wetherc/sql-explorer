@@ -53,27 +53,27 @@ This section outlines the development plan in a milestone-based format.
 
 ### **Milestone 2: Advanced Connection & UI**
 *   **Goal:** Enhance the connection process with a more user-friendly UI and support for different authentication methods. Improve the core editor and results view.
-*   **Status:** 🟡 **In Progress**
+*   **Status:** ✅ **Completed**
 
-#### **Outstanding Tasks:**
+#### **Completed Tasks:**
 *   **[x] M2.1 (Frontend):** Refactor `ConnectionView.vue` to use separate input fields for Server, Database, Username, and Password.
 *   **[x] M2.2 (Frontend):** Add a dropdown/selector to `ConnectionView.vue` to switch between "SQL Server Authentication" and "Microsoft Entra / Integrated" authentication. The Username/Password fields should be disabled for Integrated auth.
 *   **[x] M2.3 (Frontend):** Create a `connectionStringBuilder.ts` utility to dynamically build the correct ADO.NET connection string from the form fields and selected auth type.
 *   **[x] M2.4 (Frontend):** Add the `monaco-editor-vue3` package (or a similar alternative) to the frontend dependencies.
-*   **M2.5 (Frontend):** Replace the `<textarea>` in `QueryView.vue` with the Monaco Editor component.
-*   **M2.6 (Frontend):** Configure the Monaco Editor for T-SQL language support (syntax highlighting).
-*   **M2.7 (Frontend):** Research and select a virtualized data grid component for Vue (e.g., from PrimeVue, TanStack Table, etc.).
-*   **M2.8 (Frontend):** Replace the simple `<table>` in `QueryView.vue` with the new virtualized grid component to improve performance with large datasets.
+*   **[x] M2.5 (Frontend):** Replace the `<textarea>` in `QueryView.vue` with the Monaco Editor component.
+*   **[x] M2.6 (Frontend):** Configure the Monaco Editor for T-SQL language support (syntax highlighting).
+*   **[x] M2.7 (Frontend):** Research and select a virtualized data grid component for Vue (e.g., from PrimeVue, TanStack Table, etc.).
+*   **[x] M2.8 (Frontend):** Replace the simple `<table>` in `QueryView.vue` with the new virtualized grid component to improve performance with large datasets.
 
 ---
 
 ### **Milestone 3: Database Explorer & Core Features**
 *   **Goal:** Implement the database object explorer and other core application features like saving connections and tabbed editing.
-*   **Status:** ⏳ Not Started
+*   **Status:** ✅ **Completed**
 
-#### **Technical Approach:**
+#### **Completed Tasks:**
 
-*   **M3.1 & M3.2 (Backend): Database Metadata Commands**
+*   **[x] M3.1 & M3.2 (Backend): Database Metadata Commands**
     *   **Tauri Commands:** In `backend/src/main.rs`, create and export new `#[tauri::command]` functions: `list_databases`, `list_schemas`, `list_tables`, and `list_columns`. These will serve as the bridge to the frontend.
     *   **Database Logic (`db.rs`):**
         *   Implement the core logic for each command, which will execute SQL queries against system views.
@@ -84,7 +84,7 @@ This section outlines the development plan in a milestone-based format.
     *   **Connection Handling:** The backend state will hold the primary connection string. For exploring a specific database's objects, the commands will receive the target database name and establish a temporary connection to it to ensure metadata is fetched from the correct context.
     *   **Data Structures:** Define simple, serializable Rust structs for each query's return type (e.g., `struct Table { table_name: String }`).
 
-*   **M3.3, M3.4, & M3.5 (Frontend): Database Explorer UI**
+*   **[x] M3.3, M3.4, & M3.5 (Frontend): Database Explorer UI**
     *   **Multi-Pane Layout (`App.vue`):** Modify the main app layout to use a resizable split-pane view (e.g., using CSS Flexbox and a draggable divider). This will create a side panel for the database explorer and a main area for the query editor.
     *   **Explorer Component (`DbExplorer.vue`):**
         *   Create a new component to house the explorer.
@@ -95,7 +95,7 @@ This section outlines the development plan in a milestone-based format.
         *   Define actions (`fetchDatabases`, `fetchTables`, etc.) that call the corresponding Tauri commands using `invoke`.
         *   The store will manage loading states for asynchronous operations, allowing the UI to display spinners while fetching data. When a user clicks to expand a tree node, the store will fetch its children on-demand.
 
-*   **M3.6 & M3.7 (Frontend): Tabbed Query Editing**
+*   **[x] M3.6 & M3.7 (Frontend): Tabbed Query Editing**
     *   **Tab Management (`tabsStore.ts`):**
         *   Create a Pinia store to manage an array of open query tabs.
         *   The state will include the `tabs` array (each object containing `id`, `title`, `query` text, `results`, etc.) and the `activeTabId`.
@@ -105,7 +105,7 @@ This section outlines the development plan in a milestone-based format.
         *   It will receive its state (query text, results) as props and emit events for user actions like executing a query or modifying the text.
         *   A new parent component (`QueryTabs.vue`) will be responsible for rendering the tab headers and the currently active `QueryView` instance, sourcing all its data from the `tabsStore`.
 
-*   **M3.8, M3.9, & M3.10 (Backend/Frontend): Saved Connections**
+*   **[x] M3.8, M3.9, & M3.10 (Backend/Frontend): Saved Connections**
     *   **Backend Commands:**
         *   Create `save_connection` and `list_connections` Tauri commands.
         *   Create a `get_connection_password` command to securely retrieve stored credentials when needed.
