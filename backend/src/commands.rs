@@ -86,6 +86,63 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             Error::NotConnected => (), // Correct error
+            _ => panic!("Wrong error type returned"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_databases_without_connection() {
+        let app = tauri::test::mock_app();
+        app.manage(AppState { db: Mutex::new(None) });
+        let state = app.state::<AppState>();
+        let result = list_databases(state).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Error::NotConnected => (),
+            _ => panic!("Wrong error type returned"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_schemas_without_connection() {
+        let app = tauri::test::mock_app();
+        app.manage(AppState { db: Mutex::new(None) });
+        let state = app.state::<AppState>();
+        let result = list_schemas(state).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Error::NotConnected => (),
+            _ => panic!("Wrong error type returned"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_tables_without_connection() {
+        let app = tauri::test::mock_app();
+        app.manage(AppState { db: Mutex::new(None) });
+        let state = app.state::<AppState>();
+        let result = list_tables("dbo".to_string(), state).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Error::NotConnected => (),
+            _ => panic!("Wrong error type returned"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_columns_without_connection() {
+        let app = tauri::test::mock_app();
+        app.manage(AppState { db: Mutex::new(None) });
+        let state = app.state::<AppState>();
+        let result = list_columns("dbo".to_string(), "mytable".to_string(), state).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Error::NotConnected => (),
+            _ => panic!("Wrong error type returned"),
+        }
+    }
+}
+
 
     #[tokio::test]
     async fn test_list_databases_without_connection() {
