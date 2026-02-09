@@ -1,7 +1,8 @@
 import { ref, computed } from 'vue'
 import { defineStore } from 'pinia'
 import { invoke } from '@tauri-apps/api/tauri'
-import type { Value as JsonValue } from 'serde_json'
+
+type JsonValue = string | number | boolean | null | any[] | { [key: string]: any }
 
 export const useQueryStore = defineStore('query', () => {
   const results = ref<JsonValue | null>(null)

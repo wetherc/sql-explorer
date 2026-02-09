@@ -6,6 +6,11 @@ export interface ConnectionOptions {
   authType: AuthType
   username?: string
   password?: string
+  encrypt?: 'false' | 'true'
+  trustServerCertificate?: boolean
+  port?: number
+  applicationName?: string
+  connectTimeout?: number
 }
 
 export function buildConnectionString(options: ConnectionOptions): string {
@@ -13,14 +18,32 @@ export function buildConnectionString(options: ConnectionOptions): string {
     throw new Error('Server name is required.')
   }
 
-  let connectionString = `server=${options.server};`
+  let serverIdentifier = options.server
+  if (options.port) {
+    serverIdentifier += `,${options.port}`
+  }
+
+  let connectionString = `server=${serverIdentifier};`
 
   if (options.database) {
     connectionString += `database=${options.database};`
   }
 
-  // Always include this for modern SQL Server versions
-  connectionString += 'TrustServerCertificate=true;'
+  if (options.applicationName) {
+    connectionString += `Application Name=${options.applicationName};`
+  }
+
+  if (options.connectTimeout) {
+    connectionString += `Connect Timeout=${options.connectTimeout};`
+  }
+
+  if (options.encrypt) {
+    connectionString += `Encrypt=${options.encrypt};`
+  }
+
+  if (options.trustServerCertificate !== undefined) {
+    connectionString += `TrustServerCertificate=${options.trustServerCertificate};`
+  }
 
   if (options.authType === 'sql') {
     if (!options.username) {
@@ -29,7 +52,7 @@ export function buildConnectionString(options: ConnectionOptions): string {
     connectionString += `user=${options.username};`
     connectionString += `password=${options.password || ''};`
   } else {
-    connectionString += 'Authentication=ActiveDirectoryIntegrated;'
+    connectionString += 'Integrated Security=true;'
   }
 
   return connectionString

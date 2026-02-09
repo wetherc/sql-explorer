@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "bootstrap": "pnpm install",
-    "dev": "cd backend && tauri dev",
+    "dev": "cd backend && RUST_LOG=debug tauri dev",
     "build": "cd backend && tauri build"
   },
   "devDependencies": {

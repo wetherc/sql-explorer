@@ -12,13 +12,18 @@ use state::AppState;
 use tokio::sync::Mutex;
 
 fn main() {
+    env_logger::init();
     tauri::Builder::default()
         .manage(AppState {
             db: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             commands::connect,
-            commands::execute_query
+            commands::execute_query,
+            commands::list_databases,
+            commands::list_schemas,
+            commands::list_tables,
+            commands::list_columns
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

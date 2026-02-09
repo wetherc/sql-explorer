@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import { useConnectionStore } from '@/stores/connection'
 import { useQueryStore } from '@/stores/query'
+import MonacoEditor from 'monaco-editor-vue3'
 
 const connectionStore = useConnectionStore()
 const queryStore = useQueryStore()
@@ -24,12 +25,18 @@ async function handleExecute() {
 
     <div class="editor-panel">
       <form @submit.prevent="handleExecute">
-        <textarea
-          v-model="query"
-          placeholder="Enter your SQL query here..."
-          rows="10"
-          :disabled="queryStore.isLoading"
-        ></textarea>
+        <div class="editor-container">
+          <MonacoEditor
+            v-model="query"
+            theme="vs-dark"
+            lang="sql"
+            :options="{
+              automaticLayout: true,
+              minimap: { enabled: false },
+              wordWrap: 'on',
+            }"
+          />
+        </div>
         <button type="submit" :disabled="queryStore.isLoading">
           {{ queryStore.isLoading ? 'Executing...' : 'Execute' }}
         </button>
@@ -69,6 +76,7 @@ async function handleExecute() {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  overflow: hidden; /* Prevent body scrolling */
 }
 
 header {
@@ -78,6 +86,7 @@ header {
   padding: 0.5rem 1rem;
   background-color: #343a40;
   color: white;
+  flex-shrink: 0;
 }
 
 header h1 {
@@ -88,16 +97,17 @@ header h1 {
 .editor-panel {
   padding: 1rem;
   border-bottom: 1px solid #ccc;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
 }
 
-textarea {
-  width: 100%;
-  padding: 0.5rem;
-  font-family: 'Courier New', Courier, monospace;
-  font-size: 1rem;
+.editor-container {
+  height: 200px; /* Or any desired height */
   border: 1px solid #ccc;
   border-radius: 4px;
   margin-bottom: 0.5rem;
+  overflow: hidden; /* Ensures the editor respects the border-radius */
 }
 
 button {
@@ -108,6 +118,7 @@ button {
   border: none;
   border-radius: 4px;
   cursor: pointer;
+  align-self: flex-start;
 }
 
 button:disabled {

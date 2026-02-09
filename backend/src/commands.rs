@@ -24,6 +24,41 @@ pub async fn execute_query(
     db::db_execute_query(client, &query).await
 }
 
+#[tauri::command]
+pub async fn list_databases(state: tauri::State<'_, AppState>) -> CommandResult<Vec<db::Database>> {
+    let mut client_guard = state.db.lock().await;
+    let client = client_guard.as_mut().ok_or(Error::NotConnected)?;
+    db::db_list_databases(client).await
+}
+
+#[tauri::command]
+pub async fn list_schemas(state: tauri::State<'_, AppState>) -> CommandResult<Vec<db::Schema>> {
+    let mut client_guard = state.db.lock().await;
+    let client = client_guard.as_mut().ok_or(Error::NotConnected)?;
+    db::db_list_schemas(client).await
+}
+
+#[tauri::command]
+pub async fn list_tables(
+    schema_name: String,
+    state: tauri::State<'_, AppState>,
+) -> CommandResult<Vec<db::Table>> {
+    let mut client_guard = state.db.lock().await;
+    let client = client_guard.as_mut().ok_or(Error::NotConnected)?;
+    db::db_list_tables(client, &schema_name).await
+}
+
+#[tauri::command]
+pub async fn list_columns(
+    schema_name: String,
+    table_name: String,
+    state: tauri::State<'_, AppState>,
+) -> CommandResult<Vec<db::Column>> {
+    let mut client_guard = state.db.lock().await;
+    let client = client_guard.as_mut().ok_or(Error::NotConnected)?;
+    db::db_list_columns(client, &schema_name, &table_name).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

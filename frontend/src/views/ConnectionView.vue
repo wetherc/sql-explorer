@@ -1,26 +1,48 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useConnectionStore } from '@/stores/connection'
-import { buildConnectionString, type AuthType } from '@/utils/connectionStringBuilder'
+import {
+  buildConnectionString,
+  type AuthType,
+} from '@/utils/connectionStringBuilder'
 
 const connectionStore = useConnectionStore()
 
 const server = ref('localhost')
+const port = ref<number | undefined>(1433)
 const database = ref('master')
+const applicationName = ref('sql-explorer')
+const connectTimeout = ref(15)
 const username = ref('sa')
 const password = ref('Password123')
 const authType = ref<AuthType>('sql')
+const encrypt = ref<'false' | 'true'>('true')
+const trustServerCertificate = ref(true)
 
 const isSqlAuth = computed(() => authType.value === 'sql')
+const isNamedInstance = computed(() => server.value.includes('\\'))
+
+watch(isNamedInstance, (isNamed) => {
+  if (isNamed) {
+    port.value = undefined
+  } else {
+    port.value = 1433
+  }
+})
 
 async function handleConnect() {
   try {
     const connectionString = buildConnectionString({
       server: server.value,
+      port: port.value,
       database: database.value,
+      applicationName: applicationName.value,
+      connectTimeout: connectTimeout.value,
       authType: authType.value,
-      username: username.value,
-      password: password.value,
+      username: authType.value === 'sql' ? username.value : undefined,
+      password: authType.value === 'sql' ? password.value : undefined,
+      encrypt: encrypt.value,
+      trustServerCertificate: trustServerCertificate.value,
     })
     await connectionStore.connect(connectionString)
   } catch (error: any) {
@@ -35,14 +57,26 @@ async function handleConnect() {
       <h2>Connect to Database</h2>
 
       <div class="form-group">
-        <label for="server">Server</label>
+        <label for="server">Server or Server\Instance</label>
         <input
           id="server"
           v-model="server"
           type="text"
-          placeholder="localhost"
+          placeholder="localhost or localhost\\SQLEXPRESS"
           required
           :disabled="connectionStore.isConnecting"
+        />
+      </div>
+
+      <div class="form-group">
+        <label for="port">Port</label>
+        <input
+          id="port"
+          v-model.number="port"
+          type="number"
+          placeholder="1433"
+          :required="!isNamedInstance"
+          :disabled="connectionStore.isConnecting || isNamedInstance"
         />
       </div>
 
@@ -55,6 +89,46 @@ async function handleConnect() {
           placeholder="master"
           :disabled="connectionStore.isConnecting"
         />
+      </div>
+
+      <div class="form-group">
+        <label for="appName">Application Name</label>
+        <input
+          id="appName"
+          v-model="applicationName"
+          type="text"
+          :disabled="connectionStore.isConnecting"
+        />
+      </div>
+
+      <div class="form-group">
+        <label for="timeout">Connect Timeout (seconds)</label>
+        <input
+          id="timeout"
+          v-model.number="connectTimeout"
+          type="number"
+          required
+          :disabled="connectionStore.isConnecting"
+        />
+      </div>
+
+      <div class="form-group">
+        <label for="encrypt">Encryption</label>
+        <select id="encrypt" v-model="encrypt" :disabled="connectionStore.isConnecting">
+          <option value="true">On</option>
+          <option value="false">Off</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label class="checkbox-label">
+          <input
+            type="checkbox"
+            v-model="trustServerCertificate"
+            :disabled="connectionStore.isConnecting"
+          />
+          Trust server certificate
+        </label>
       </div>
 
       <div class="form-group">
@@ -116,6 +190,8 @@ form {
   border: 1px solid #ccc;
   border-radius: 8px;
   background-color: #f9f9f9;
+  overflow-y: auto;
+  max-height: 90vh;
 }
 
 h2 {
@@ -132,7 +208,19 @@ label {
   margin-bottom: 0.5rem;
 }
 
-input, select {
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+
+input[type='checkbox'] {
+  width: auto;
+}
+
+input,
+select {
   width: 100%;
   padding: 0.5rem;
   font-size: 1rem;
