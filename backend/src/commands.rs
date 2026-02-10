@@ -1,6 +1,15 @@
 // backend/src/commands.rs
-use crate::{db::{self, drivers::{mssql::MssqlDriver, mysql::MysqlDriver, DatabaseDriver}}, error::Error, state::AppState, storage};
-
+use crate::{
+    db::{
+        self,
+        drivers::{
+            mssql::MssqlDriver, mysql::MysqlDriver, postgres::PostgresDriver, DatabaseDriver,
+        },
+    },
+    error::Error,
+    state::AppState,
+    storage,
+};
 
 type CommandResult<T> = Result<T, Error>;
 
@@ -13,6 +22,7 @@ pub async fn connect(
     let client = match db_type {
         storage::DbType::Mssql => MssqlDriver::connect(&connection_string).await,
         storage::DbType::Mysql => MysqlDriver::connect(&connection_string).await,
+        storage::DbType::Postgres => PostgresDriver::connect(&connection_string).await,
     }?;
 
     *state.db.lock().await = Some(client);
@@ -195,8 +205,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_save_connection_with_db_type() {
+    #[tokio::test]
+    async fn test_save_connection_with_db_type() {
         // cleanup before test
         let _ = storage::delete_connection_details("test_mysql");
         // This test mainly checks that the command can be called without panicking.
@@ -213,5 +223,84 @@ mod tests {
         assert!(result.is_ok());
         // cleanup after test
         let _ = storage::delete_connection_details("test_mysql");
+    }
+
+    // --- M5.5 Connection Tests ---
+
+    // Helper to get connection string from env
+    fn get_env_conn_string(env_var: &str, db_type: storage::DbType) -> Option<String> {
+        match std::env::var(env_var) {
+            Ok(s) => Some(s),
+            Err(_) => {
+                eprintln!(
+                    "Skipping connect test for {:?}: {} not set.",
+                    db_type, env_var
+                );
+                None
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_connect_mssql_successful() {
+        let connection_string = match get_env_conn_string("MSSQL_TEST_DB_URL", storage::DbType::Mssql) {
+            Some(s) => s,
+            None => return, // Skip test
+        };
+
+        let app = tauri::test::mock_app();
+        app.manage(AppState { db: Mutex::new(None) });
+        
+        let result = connect(
+            connection_string,
+            storage::DbType::Mssql,
+            app.state::<AppState>(), // Get a new state instance for the command
+        ).await;
+
+        let state_for_assertion = app.state::<AppState>(); // Get a fresh state for assertion
+        assert!(result.is_ok(), "Failed to connect to MS SQL: {:?}", result.unwrap_err());
+        assert!(state_for_assertion.db.lock().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_connect_mysql_successful() {
+        let connection_string = match get_env_conn_string("MYSQL_TEST_DB_URL", storage::DbType::Mysql) {
+            Some(s) => s,
+            None => return, // Skip test
+        };
+
+        let app = tauri::test::mock_app();
+        app.manage(AppState { db: Mutex::new(None) });
+        
+        let result = connect(
+            connection_string,
+            storage::DbType::Mysql,
+            app.state::<AppState>(), // Get a new state instance for the command
+        ).await;
+
+        let state_for_assertion = app.state::<AppState>(); // Get a fresh state for assertion
+        assert!(result.is_ok(), "Failed to connect to MySQL: {:?}", result.unwrap_err());
+        assert!(state_for_assertion.db.lock().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_connect_postgres_successful() {
+        let connection_string = match get_env_conn_string("POSTGRES_TEST_DB_URL", storage::DbType::Postgres) {
+            Some(s) => s,
+            None => return, // Skip test
+        };
+
+        let app = tauri::test::mock_app();
+        app.manage(AppState { db: Mutex::new(None) });
+        
+        let result = connect(
+            connection_string,
+            storage::DbType::Postgres,
+            app.state::<AppState>(), // Get a new state instance for the command
+        ).await;
+
+        let state_for_assertion = app.state::<AppState>(); // Get a fresh state for assertion
+        assert!(result.is_ok(), "Failed to connect to PostgreSQL: {:?}", result.unwrap_err());
+        assert!(state_for_assertion.db.lock().await.is_some());
     }
 }

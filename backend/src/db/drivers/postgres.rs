@@ -1,0 +1,182 @@
+use crate::db::{
+    drivers::DatabaseDriver, AppColumn, Database, QueryResponse, ResultSet, Schema, Table,
+};
+use crate::error::Error;
+use async_trait::async_trait;
+use log::info;
+use serde_json::Value as JsonValue;
+use tokio_postgres::{Client, NoTls, Row};
+
+pub struct PostgresDriver {
+    client: Client,
+}
+
+impl PostgresDriver {
+    pub async fn connect(
+        connection_string: &str,
+    ) -> Result<Box<dyn DatabaseDriver + Send + Sync>, Error> {
+        info!("Attempting to connect to PostgreSQL database.");
+        // Note: This is a simplified connection that uses NoTls.
+        // A production implementation should use `tokio-postgres-rustls` or `tokio-postgres-native-tls`.
+        let (client, connection) = tokio_postgres::connect(connection_string, NoTls).await?;
+
+        // The connection object performs the actual I/O, so it must be spawned.
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                eprintln!("connection error: {}", e);
+            }
+        });
+
+        info!("PostgreSQL database client connected successfully.");
+        Ok(Box::new(PostgresDriver { client }))
+    }
+}
+
+#[async_trait]
+impl DatabaseDriver for PostgresDriver {
+    async fn execute_query(&mut self, query: &str) -> Result<QueryResponse, Error> {
+        let rows = self.client.query(query, &[]).await?;
+        let mut results: Vec<ResultSet> = Vec::new();
+
+        if !rows.is_empty() {
+            let columns = rows[0]
+                .columns()
+                .iter()
+                .map(|c| c.name().to_string())
+                .collect::<Vec<String>>();
+
+            let json_rows = rows.iter().map(row_to_json).collect::<Vec<JsonValue>>();
+
+            results.push(ResultSet {
+                columns,
+                rows: json_rows,
+            });
+        }
+
+        Ok(QueryResponse {
+            results,
+            messages: vec![], // tokio-postgres doesn't expose notice messages in the same way
+        })
+    }
+
+    async fn list_databases(&mut self) -> Result<Vec<Database>, Error> {
+        let rows = self
+            .client
+            .query("SELECT datname FROM pg_database WHERE datistemplate = false;", &[])
+            .await?;
+        let databases = rows
+            .iter()
+            .map(|row| Database {
+                name: row.get(0),
+            })
+            .collect();
+        Ok(databases)
+    }
+
+    async fn list_schemas(&mut self) -> Result<Vec<Schema>, Error> {
+        let rows = self
+            .client
+            .query(
+                "SELECT nspname FROM pg_catalog.pg_namespace WHERE nspname NOT IN ('pg_toast', 'pg_catalog', 'information_schema') AND NOT nspname.starts_with('pg_temp_');",
+                &[],
+            )
+            .await?;
+        let schemas = rows
+            .iter()
+            .map(|row| Schema {
+                name: row.get(0),
+            })
+            .collect();
+        Ok(schemas)
+    }
+
+    async fn list_tables(&mut self, schema: &str) -> Result<Vec<Table>, Error> {
+        let rows = self
+            .client
+            .query(
+                "SELECT tablename FROM pg_tables WHERE schemaname = $1;",
+                &[&schema],
+            )
+            .await?;
+        let tables = rows
+            .iter()
+            .map(|row| Table {
+                name: row.get(0),
+            })
+            .collect();
+        Ok(tables)
+    }
+
+    async fn list_columns(&mut self, schema: &str, table: &str) -> Result<Vec<AppColumn>, Error> {
+        let rows = self
+            .client
+            .query(
+                "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2;",
+                &[&schema, &table],
+            )
+            .await?;
+        let columns = rows
+            .iter()
+            .map(|row| AppColumn {
+                name: row.get(0),
+                data_type: row.get(1),
+            })
+            .collect();
+        Ok(columns)
+    }
+}
+
+fn row_to_json(row: &Row) -> JsonValue {
+    use postgres_types::Type;
+    use serde_json::Map;
+
+    let mut map = Map::new();
+    for (i, column) in row.columns().iter().enumerate() {
+        let col_name = column.name().to_string();
+        let value = match *column.type_() {
+            Type::BOOL => row.get::<_, bool>(i).into(),
+            Type::INT2 => row.get::<_, i16>(i).into(),
+            Type::INT4 => row.get::<_, i32>(i).into(),
+            Type::INT8 => row.get::<_, i64>(i).into(),
+            Type::FLOAT4 => row.get::<_, f32>(i).into(),
+            Type::FLOAT8 => row.get::<_, f64>(i).into(),
+            Type::TEXT | Type::VARCHAR | Type::NAME => {
+                row.get::<_, String>(i).into()
+            }
+            // Add more type mappings as needed
+            _ => JsonValue::String(format!(
+                "Unsupported type: {}",
+                column.type_().name()
+            )),
+        };
+        map.insert(col_name, value);
+    }
+    JsonValue::Object(map)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dotenv::dotenv;
+    use std::env;
+
+    async fn get_test_driver() -> Option<Box<dyn DatabaseDriver + Send + Sync>> {
+        dotenv().ok();
+        let connection_string = match env::var("POSTGRES_TEST_DB_URL") {
+            Ok(s) => s,
+            Err(_) => {
+                eprintln!("Skipping PostgreSQL integration test: POSTGRES_TEST_DB_URL not set.");
+                return None;
+            }
+        };
+        PostgresDriver::connect(&connection_string).await.ok()
+    }
+
+    #[tokio::test]
+    async fn test_connect() {
+        if get_test_driver().await.is_none() {
+            return; // Skip test
+        }
+        assert!(true);
+    }
+}

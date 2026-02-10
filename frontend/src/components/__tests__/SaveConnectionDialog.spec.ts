@@ -1,7 +1,13 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount } from '@vue/test-utils'
+import PrimeVue from 'primevue/config'
+import ToastService from 'primevue/toastservice'
 import SaveConnectionDialog from '../SaveConnectionDialog.vue'
 import { AuthType, DbType } from '@/types/savedConnection'
+import { useToast } from 'primevue/usetoast'
+
+// Mock the useToast composable
+vi.mock('primevue/usetoast')
 
 describe('SaveConnectionDialog.vue', () => {
   const connectionProps = {
@@ -12,75 +18,59 @@ describe('SaveConnectionDialog.vue', () => {
     user: 'test-user',
   }
 
-  it('renders correctly when show is true', () => {
-    const wrapper = mount(SaveConnectionDialog, {
-      props: {
-        show: true,
-        connection: connectionProps,
-        password: 'test-password',
+  const mockToastAdd = vi.fn();
+
+  const mountOptions = (visible = true) => ({
+    props: {
+      visible: visible,
+      connection: connectionProps,
+      password: 'test-password',
+    },
+    global: {
+      plugins: [PrimeVue, ToastService],
+      stubs: {
+        Dialog: {
+          template: '<div v-if="visible" class="p-dialog-stub"><slot /><slot name="footer" /></div>',
+          props: ['visible'],
+        },
       },
-    })
-    expect(wrapper.find('.modal-overlay').exists()).toBe(true)
-    expect(wrapper.find('h3').text()).toBe('Save Connection')
+    },
   })
 
-  it('does not render when show is false', () => {
-    const wrapper = mount(SaveConnectionDialog, {
-      props: {
-        show: false,
-        connection: connectionProps,
-      },
-    })
-    expect(wrapper.find('.modal-overlay').exists()).toBe(false)
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(useToast).mockReturnValue({ add: mockToastAdd } as any);
   })
 
-  it('emits a close event when Cancel button is clicked', async () => {
-    const wrapper = mount(SaveConnectionDialog, {
-      props: {
-        show: true,
-        connection: connectionProps,
-      },
-    })
-    await wrapper.find('button[type="button"]').trigger('click')
-    expect(wrapper.emitted().close).toBeTruthy()
+  it('renders correctly when visible is true', () => {
+    const wrapper = mount(SaveConnectionDialog, mountOptions(true))
+    expect(wrapper.find('.p-dialog-stub').exists()).toBe(true)
   })
 
-  it('emits a close event when overlay is clicked', async () => {
-    const wrapper = mount(SaveConnectionDialog, {
-      props: {
-        show: true,
-        connection: connectionProps,
-      },
-    })
-    await wrapper.find('.modal-overlay').trigger('click')
-    expect(wrapper.emitted().close).toBeTruthy()
+  it('does not render when visible is false', () => {
+    const wrapper = mount(SaveConnectionDialog, mountOptions(false))
+    expect(wrapper.find('.p-dialog-stub').exists()).toBe(false)
+  })
+
+  it('emits update:visible when Cancel button is clicked', async () => {
+    const wrapper = mount(SaveConnectionDialog, mountOptions(true))
+    // The cancel button is the first button in the footer
+    await wrapper.findAll('button')[0].trigger('click')
+    expect(wrapper.emitted()['update:visible'][0]).toEqual([false])
   })
 
   it('emits a save event with name when save button is clicked', async () => {
-    const wrapper = mount(SaveConnectionDialog, {
-      props: {
-        show: true,
-        connection: connectionProps,
-      },
-    })
-
-    await wrapper.find('input#connection-name').setValue('My Test Connection')
+    const wrapper = mount(SaveConnectionDialog, mountOptions(true))
+    await wrapper.find('input[type="text"]').setValue('My Test Connection')
     await wrapper.find('form').trigger('submit.prevent')
 
     expect(wrapper.emitted().save).toBeTruthy()
     expect(wrapper.emitted().save![0]).toEqual(['My Test Connection', undefined])
   })
-  
-  it('emits a save event with name and password when save button is clicked and checkbox is checked', async () => {
-    const wrapper = mount(SaveConnectionDialog, {
-      props: {
-        show: true,
-        connection: { ...connectionProps, auth_type: AuthType.Sql },
-        password: 'test-password',
-      },
-    })
 
-    await wrapper.find('input#connection-name').setValue('My Test Connection')
+  it('emits a save event with name and password when checkbox is checked', async () => {
+    const wrapper = mount(SaveConnectionDialog, mountOptions(true))
+    await wrapper.find('input[type="text"]').setValue('My Test Connection')
     await wrapper.find('input[type="checkbox"]').setValue(true)
     await wrapper.find('form').trigger('submit.prevent')
 
@@ -88,28 +78,19 @@ describe('SaveConnectionDialog.vue', () => {
     expect(wrapper.emitted().save![0]).toEqual(['My Test Connection', 'test-password'])
   })
 
-  it('shows an alert if connection name is empty', async () => {
-    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {})
-    const wrapper = mount(SaveConnectionDialog, {
-      props: {
-        show: true,
-        connection: connectionProps,
-      },
-    })
-
+  it('shows a toast if connection name is empty', async () => {
+    const wrapper = mount(SaveConnectionDialog, mountOptions(true))
     await wrapper.find('form').trigger('submit.prevent')
 
-    expect(alertSpy).toHaveBeenCalledWith('Please enter a name for the connection.')
+    expect(mockToastAdd).toHaveBeenCalledWith(expect.objectContaining({
+      severity: 'warn',
+      summary: 'Validation Error',
+    }))
     expect(wrapper.emitted().save).toBeFalsy()
   })
 
   it('shows save password checkbox only for SQL auth', async () => {
-    const wrapper = mount(SaveConnectionDialog, {
-      props: {
-        show: true,
-        connection: { ...connectionProps, auth_type: AuthType.Sql },
-      },
-    })
+    const wrapper = mount(SaveConnectionDialog, mountOptions(true))
     expect(wrapper.find('input[type="checkbox"]').exists()).toBe(true)
 
     await wrapper.setProps({

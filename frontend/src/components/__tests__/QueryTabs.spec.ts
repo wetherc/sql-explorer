@@ -1,41 +1,27 @@
-import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
-import { mount } from '@vue/test-utils';
-import QueryTabs from '../QueryTabs.vue';
-import { useTabsStore } from '../../stores/tabs';
-import { useConnectionStore } from '../../stores/connection';
-import { useQueryStore } from '../../stores/query';
-import { createPinia, setActivePinia } from 'pinia';
-import { type QueryResponse } from '@/types/query'; // Import QueryResponse
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest'
+import { mount } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
+import PrimeVue from 'primevue/config'
+import QueryTabs from '../QueryTabs.vue'
+import { useTabsStore } from '../../stores/tabs'
+import { useConnectionStore } from '../../stores/connection'
+import { useQueryStore } from '../../stores/query'
+import { type QueryResponse } from '@/types/query'
 
 // Mock Pinia stores
-vi.mock('../../stores/tabs', () => ({
-  useTabsStore: vi.fn(),
-}));
-vi.mock('../../stores/connection', () => ({
-  useConnectionStore: vi.fn(),
-}));
-vi.mock('../../stores/query', () => ({
-  useQueryStore: vi.fn(),
-}));
-
-// Mock QueryView
-vi.mock('@/views/QueryView.vue', () => ({
-  default: {
-    name: 'QueryView',
-    props: ['query', 'response', 'isLoading', 'errorMessage'], // Updated props
-    emits: ['update:query', 'execute-query'],
-    template: '<div>Mock Query View</div>',
-  },
-}));
+vi.mock('../../stores/tabs', () => ({ useTabsStore: vi.fn() }))
+vi.mock('../../stores/connection', () => ({ useConnectionStore: vi.fn() }))
+vi.mock('../../stores/query', () => ({ useQueryStore: vi.fn() }))
 
 describe('QueryTabs.vue', () => {
-  let tabsStoreMock: ReturnType<typeof useTabsStore>;
-  let connectionStoreMock: ReturnType<typeof useConnectionStore>;
-  let queryStoreMock: ReturnType<typeof useQueryStore>;
+  let tabsStoreMock: ReturnType<typeof useTabsStore>
+  let connectionStoreMock: ReturnType<typeof useConnectionStore>
+  let queryStoreMock: ReturnType<typeof useQueryStore>
 
-  beforeEach(() => {
-    vi.clearAllMocks();
-
+  const mountComponent = () => {
+    setActivePinia(createPinia())
+    
+    // Mock stores
     tabsStoreMock = {
       tabs: [],
       activeTabId: null,
@@ -54,6 +40,7 @@ describe('QueryTabs.vue', () => {
       $id: 'tabs',
       $dispose: vi.fn(),
     } as any;
+    (useTabsStore as Mock).mockReturnValue(tabsStoreMock)
 
     connectionStoreMock = {
       disconnect: vi.fn(),
@@ -73,6 +60,7 @@ describe('QueryTabs.vue', () => {
       $id: 'connection',
       $dispose: vi.fn(),
     } as any;
+    (useConnectionStore as Mock).mockReturnValue(connectionStoreMock)
 
     queryStoreMock = {
       executeQuery: vi.fn(),
@@ -98,34 +86,167 @@ describe('QueryTabs.vue', () => {
       $id: 'query',
       $dispose: vi.fn(),
     } as any;
+    (useQueryStore as Mock).mockReturnValue(queryStoreMock)
 
-    (useTabsStore as Mock).mockReturnValue(tabsStoreMock);
-    (useConnectionStore as Mock).mockReturnValue(connectionStoreMock);
-    (useQueryStore as Mock).mockReturnValue(queryStoreMock);
+    // Mock JSDOM environment for PrimeVue
+    Object.defineProperty(window, 'matchMedia', {
+      writable: true,
+      value: vi.fn().mockImplementation(query => ({
+        matches: false,
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    })
 
-    setActivePinia(createPinia()); // Activate Pinia after mocks are set up
-  });
-
-  it('renders correctly with no tabs', () => {
-    const wrapper = mount(QueryTabs, {
+    return mount(QueryTabs, {
       global: {
+        plugins: [PrimeVue],
         stubs: {
-          QueryView: true,
+          QueryView: true, // Stub QueryView as it's a child component
+          TabView: {
+            props: ['activeIndex', 'closable'],
+            emits: ['update:activeIndex', 'tab-remove'],
+            template: `
+              <div class="p-tabview-stub">
+                <div class="p-tabview-nav-container">
+                  <ul class="p-tabview-nav">
+                    <li v-for="(tab, index) in $slots.default()" :key="index" :class="{'p-highlight': activeIndex === index}">
+                      <a @click="$emit('update:activeIndex', index)">{{ tab.props.header }}</a>
+                      <i v-if="closable" class="p-tabview-close pi pi-times" @click="$emit('tab-remove', { index: index })"></i>
+                    </li>
+                  </ul>
+                </div>
+                <div class="p-tabview-panels">
+                  <slot />
+                </div>
+              </div>
+            `,
+          },
+          TabPanel: {
+            props: ['header'],
+            template: '<div><slot /></div>',
+          },
+          Button: {
+            props: ['icon', 'label'],
+            template: '<button @click="$emit(\'click\')"><i v-if="icon" :class="icon"></i><span v-if="label">{{label}}</span></button>',
+          },
         },
       },
-    });
-    expect(wrapper.exists()).toBe(true);
+    })
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    setActivePinia(createPinia()) // Re-activate Pinia for each test to ensure fresh store instances
+    
+    // Re-mock stores for each test to ensure clean state
+    tabsStoreMock = {
+      tabs: [],
+      activeTabId: null,
+      activeTab: null,
+      addTab: vi.fn(),
+      closeTab: vi.fn(),
+      setActiveTab: vi.fn(),
+      $state: {
+        tabs: [],
+        activeTabId: null,
+      },
+      $patch: vi.fn(),
+      $reset: vi.fn(),
+      $subscribe: vi.fn(),
+      $onAction: vi.fn(),
+      $id: 'tabs',
+      $dispose: vi.fn(),
+    } as any;
+    (useTabsStore as Mock).mockReturnValue(tabsStoreMock)
+
+    connectionStoreMock = {
+      disconnect: vi.fn(),
+      isConnected: false,
+      isConnecting: false,
+      errorMessage: '',
+      connect: vi.fn(),
+      $state: {
+        isConnected: false,
+        isConnecting: false,
+        errorMessage: '',
+      },
+      $patch: vi.fn(),
+      $reset: vi.fn(),
+      $subscribe: vi.fn(),
+      $onAction: vi.fn(),
+      $id: 'connection',
+      $dispose: vi.fn(),
+    } as any;
+    (useConnectionStore as Mock).mockReturnValue(connectionStoreMock)
+
+    queryStoreMock = {
+      executeQuery: vi.fn(),
+      setQueryState: vi.fn(),
+      response: null,
+      errorMessage: '',
+      isLoading: false,
+      resultRows: [],
+      resultColumns: [],
+      messages: [],
+      $state: {
+        response: null,
+        errorMessage: '',
+        isLoading: false,
+        resultRows: [],
+        resultColumns: [],
+        messages: [],
+      },
+      $patch: vi.fn(),
+      $reset: vi.fn(),
+      $subscribe: vi.fn(),
+      $onAction: vi.fn(),
+      $id: 'query',
+      $dispose: vi.fn(),
+    } as any;
+    (useQueryStore as Mock).mockReturnValue(queryStoreMock)
+
+    Object.defineProperty(window, 'matchMedia', {
+      writable: true,
+      value: vi.fn().mockImplementation(query => ({
+        matches: false,
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    })
+  })
+
+  it('renders correctly with no tabs', async () => {
+    // Force tabs to be empty initially for this test
+    tabsStoreMock.tabs = [];
+    tabsStoreMock.activeTabId = null;
+    tabsStoreMock.activeTab = null;
+    const wrapper = mountComponent();
+    await wrapper.vm.$nextTick(); // Wait for onMounted
+    await wrapper.vm.$nextTick(); // Wait for reactivity
+
+    // Expect addTab to be called once by onMounted
+    expect(tabsStoreMock.addTab).toHaveBeenCalledTimes(1);
     expect(wrapper.find('.no-tab-selected').exists()).toBe(true);
   });
 
-  it('adds a default tab on mounted if no tabs exist', () => {
-    mount(QueryTabs, {
-      global: {
-        stubs: {
-          QueryView: true,
-        },
-      },
-    });
+  it('adds a default tab on mounted if no tabs exist', async () => {
+    tabsStoreMock.tabs = []; // Ensure tabs are empty
+    tabsStoreMock.activeTabId = null;
+    tabsStoreMock.activeTab = null;
+
+    mountComponent(); // Mount the component
+
     expect(tabsStoreMock.addTab).toHaveBeenCalledTimes(1);
   });
 
@@ -137,21 +258,15 @@ describe('QueryTabs.vue', () => {
     tabsStoreMock.activeTabId = '2';
     tabsStoreMock.activeTab = tabsStoreMock.tabs[1];
 
-    const wrapper = mount(QueryTabs, {
-      global: {
-        stubs: {
-          QueryView: true,
-        },
-      },
-    });
+    const wrapper = mountComponent();
     await wrapper.vm.$nextTick(); // Wait for reactivity
 
-    const tabItems = wrapper.findAll('.tab-item');
+    const tabItems = wrapper.findAll('.p-tabview-nav li');
     expect(tabItems.length).toBe(2);
     expect(tabItems[0].text()).toContain('Query 1');
-    expect(tabItems[0].classes()).not.toContain('active');
+    expect(tabItems[0].classes()).not.toContain('p-highlight');
     expect(tabItems[1].text()).toContain('Query 2');
-    expect(tabItems[1].classes()).toContain('active');
+    expect(tabItems[1].classes()).toContain('p-highlight');
   });
 
   it('calls setActiveTab when a tab is clicked', async () => {
@@ -162,17 +277,11 @@ describe('QueryTabs.vue', () => {
     tabsStoreMock.activeTabId = '1';
     tabsStoreMock.activeTab = tabsStoreMock.tabs[0];
 
-    const wrapper = mount(QueryTabs, {
-      global: {
-        stubs: {
-          QueryView: true,
-        },
-      },
-    });
+    const wrapper = mountComponent();
     await wrapper.vm.$nextTick();
 
-    const tabItems = wrapper.findAll('.tab-item');
-    await tabItems[1].trigger('click'); // Click Query 2
+    const tabItems = wrapper.findAll('.p-tabview-nav li');
+    await tabItems[1].find('a').trigger('click'); // Click Query 2 tab header
 
     expect(tabsStoreMock.setActiveTab).toHaveBeenCalledWith('2');
   });
@@ -184,28 +293,18 @@ describe('QueryTabs.vue', () => {
     tabsStoreMock.activeTabId = '1';
     tabsStoreMock.activeTab = tabsStoreMock.tabs[0];
 
-    const wrapper = mount(QueryTabs, {
-      global: {
-        stubs: {
-          QueryView: true,
-        },
-      },
-    });
+    const wrapper = mountComponent();
     await wrapper.vm.$nextTick();
 
-    await wrapper.find('.close-tab').trigger('click');
+    const tabCloseButton = wrapper.find('.p-tabview-close');
+    await tabCloseButton.trigger('click');
     expect(tabsStoreMock.closeTab).toHaveBeenCalledWith('1');
   });
 
   it('calls addTab when add button is clicked', async () => {
-    const wrapper = mount(QueryTabs, {
-      global: {
-        stubs: {
-          QueryView: true,
-        },
-      },
-    });
-    await wrapper.find('.add-tab').trigger('click');
+    const wrapper = mountComponent();
+    const addTabButton = wrapper.find('.pi-plus'); // Find by icon class
+    await addTabButton.trigger('click');
     expect(tabsStoreMock.addTab).toHaveBeenCalledTimes(2); // 1 on mounted, 1 on click
   });
 
@@ -227,21 +326,15 @@ describe('QueryTabs.vue', () => {
     tabsStoreMock.activeTabId = mockActiveTab.id;
     tabsStoreMock.activeTab = mockActiveTab;
 
-    const wrapper = mount(QueryTabs, {
-      global: {
-        stubs: {
-          QueryView: true,
-        },
-      },
-    });
+    const wrapper = mountComponent();
     await wrapper.vm.$nextTick();
 
     const queryView = wrapper.findComponent({ name: 'QueryView' }); // Find by component name
     expect(queryView.exists()).toBe(true);
     expect(queryView.props('query')).toBe(mockActiveTab.query);
-    expect(queryView.props('response')).toEqual(mockActiveTab.response); // Changed from results
-    expect(queryView.props('isLoading')).toBe(mockActiveTab.isLoading); // Changed from mockActiveTab.results.isLoading
-    expect(queryView.props('errorMessage')).toBe(mockActiveTab.errorMessage); // New assertion
+    expect(queryView.props('response')).toEqual(mockActiveTab.response);
+    expect(queryView.props('isLoading')).toBe(mockActiveTab.isLoading);
+    expect(queryView.props('errorMessage')).toBe(mockActiveTab.errorMessage);
   });
 
   it('updates active tab query when QueryView emits update:query', async () => {
@@ -258,13 +351,7 @@ describe('QueryTabs.vue', () => {
     tabsStoreMock.activeTabId = mockActiveTab.id;
     tabsStoreMock.activeTab = mockActiveTab;
 
-    const wrapper = mount(QueryTabs, {
-      global: {
-        stubs: {
-          QueryView: true,
-        },
-      },
-    });
+    const wrapper = mountComponent();
     await wrapper.vm.$nextTick();
 
     const queryView = wrapper.findComponent({ name: 'QueryView' });
@@ -294,13 +381,7 @@ describe('QueryTabs.vue', () => {
 
     queryStoreMock.executeQuery.mockResolvedValue(true);
 
-    const wrapper = mount(QueryTabs, {
-      global: {
-        stubs: {
-          QueryView: true,
-        },
-      },
-    });
+    const wrapper = mountComponent();
     await wrapper.vm.$nextTick();
 
     const queryView = wrapper.findComponent({ name: 'QueryView' });
@@ -328,13 +409,7 @@ describe('QueryTabs.vue', () => {
     queryStoreMock.executeQuery.mockResolvedValue(false);
     queryStoreMock.errorMessage = 'Syntax Error';
 
-    const wrapper = mount(QueryTabs, {
-      global: {
-        stubs: {
-          QueryView: true,
-        },
-      },
-    });
+    const wrapper = mountComponent();
     await wrapper.vm.$nextTick();
 
     const queryView = wrapper.findComponent({ name: 'QueryView' });
@@ -346,14 +421,10 @@ describe('QueryTabs.vue', () => {
   });
 
   it('calls connectionStore.disconnect when disconnect button is clicked', async () => {
-    const wrapper = mount(QueryTabs, {
-      global: {
-        stubs: {
-          QueryView: true,
-        },
-      },
-    });
-    await wrapper.find('header > button').trigger('click');
+    const wrapper = mountComponent();
+    // Find the disconnect button by its icon
+    const disconnectButton = wrapper.find('.pi-power-off');
+    await disconnectButton.trigger('click');
     expect(connectionStoreMock.disconnect).toHaveBeenCalledTimes(1);
   });
 });

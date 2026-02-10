@@ -13,6 +13,7 @@ use crate::error::Result;
 pub enum DbType {
     Mssql,
     Mysql,
+    Postgres,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -198,8 +199,8 @@ mod tests {
         }
     }
     
-    #[test]
-    fn test_save_and_get_connections() {
+    #[tokio::test]
+    async fn test_save_and_get_connections() {
         let test_suffix = "_test_sgc";
         let conn_name_base = "test_conn_1";
         let conn_name = format!("{}{}", conn_name_base, test_suffix);
@@ -232,8 +233,8 @@ mod tests {
         cleanup(&conn_name_base, test_suffix);
     }
 
-    #[test]
-    fn test_delete_connection() {
+    #[tokio::test]
+    async fn test_delete_connection() {
         let test_suffix = "_test_dc";
         let conn_name_base = "test_conn_2";
         let conn_name = format!("{}{}", conn_name_base, test_suffix);
@@ -267,8 +268,8 @@ mod tests {
         cleanup(&conn_name_base, test_suffix);
     }
 
-    #[test]
-    fn test_password_management() {
+    #[tokio::test]
+    async fn test_password_management() {
         let test_suffix = "_test_pm";
         let conn_name_base = "test_password_conn";
         let conn_name = format!("{}{}", conn_name_base, test_suffix);

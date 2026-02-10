@@ -1,6 +1,7 @@
 // backend/src/db/drivers.rs
 pub mod mssql;
 pub mod mysql;
+pub mod postgres;
 
 use crate::db::{Database, Schema, Table, AppColumn, QueryResponse};
 use crate::error::Error;

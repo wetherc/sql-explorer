@@ -1,101 +1,85 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
+import { useToast } from 'primevue/usetoast'
 import type { SavedConnection } from '@/types/savedConnection'
+import { AuthType } from '@/types/savedConnection'
+
+import Button from 'primevue/button'
+import Checkbox from 'primevue/checkbox'
+import Dialog from 'primevue/dialog'
+import FloatLabel from 'primevue/floatlabel'
+import InputText from 'primevue/inputtext'
+
 
 const props = defineProps<{
-  show: boolean
+  visible: boolean
   connection: Omit<SavedConnection, 'name'>
   password?: string
 }>()
 
 const emit = defineEmits<{
-  (e: 'close'): void
+  (e: 'update:visible', value: boolean): void
   (e: 'save', name: string, password?: string): void
 }>()
 
+const toast = useToast()
 const connectionName = ref('')
 const savePassword = ref(false)
+
+watch(() => props.visible, (newValue) => {
+  if (!newValue) {
+    // Reset local state when dialog is closed
+    connectionName.value = ''
+    savePassword.value = false
+  }
+})
 
 function onSave() {
   if (connectionName.value.trim()) {
     emit('save', connectionName.value.trim(), savePassword.value ? props.password : undefined)
-    onClose()
+    closeDialog()
   } else {
-    alert('Please enter a name for the connection.')
+    toast.add({ severity: 'warn', summary: 'Validation Error', detail: 'Please enter a name for the connection.', life: 3000 });
   }
 }
 
-function onClose() {
-  connectionName.value = ''
-  savePassword.value = false
-  emit('close')
+function closeDialog() {
+  emit('update:visible', false)
 }
 </script>
 
 <template>
-  <div v-if="show" class="modal-overlay" @click.self="onClose">
-    <div class="modal-content">
-      <h3>Save Connection</h3>
-      <form @submit.prevent="onSave">
-        <div class="form-group">
-          <label for="connection-name">Connection Name</label>
-          <input
+  <Dialog
+    :visible="visible"
+    modal
+    header="Save Connection"
+    :style="{ width: '25rem' }"
+    @update:visible="closeDialog"
+  >
+    <form @submit.prevent="onSave" class="p-fluid">
+      <div class="field mt-4">
+        <FloatLabel>
+          <InputText
             id="connection-name"
             v-model="connectionName"
-            type="text"
             required
-            placeholder="e.g., My Local DB"
+            autofocus
           />
-        </div>
-        <div v-if="connection.auth_type === 'Sql'" class="form-group">
-          <label>
-            <input type="checkbox" v-model="savePassword" />
-            Save Password (insecure, for local development only)
-          </label>
-        </div>
-        <div class="form-actions">
-          <button type="button" @click="onClose">Cancel</button>
-          <button type="submit">Save</button>
-        </div>
-      </form>
-    </div>
-  </div>
+          <label for="connection-name">Connection Name</label>
+        </FloatLabel>
+      </div>
+      <div v-if="connection.auth_type === AuthType.Sql" class="field-checkbox">
+        <Checkbox v-model="savePassword" input-id="savePassword" :binary="true" />
+        <label for="savePassword" class="ml-2"> Save Password (insecure) </label>
+      </div>
+      <div class="form-actions flex justify-content-end gap-2 mt-4">
+        <Button type="button" label="Cancel" severity="secondary" @click="closeDialog" />
+        <Button type="submit" label="Save" />
+      </div>
+    </form>
+  </Dialog>
 </template>
 
 <style scoped>
-.modal-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background-color: rgba(0, 0, 0, 0.5);
-  display: flex;
-  justify-content: center;
-  align-items: center;
-}
-.modal-content {
-  background: white;
-  padding: 20px;
-  border-radius: 8px;
-  min-width: 300px;
-}
-.form-group {
-  margin-bottom: 15px;
-}
-label {
-  display: block;
-  margin-bottom: 5px;
-}
-input[type='text'] {
-  width: 100%;
-  padding: 8px;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-}
-.form-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-}
+/* Scoped styles can be removed if not needed, as PrimeVue handles most styling */
 </style>

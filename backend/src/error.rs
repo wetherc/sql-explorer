@@ -1,5 +1,8 @@
 // backend/src/error.rs
 use serde::Serialize;
+use tiberius;
+use mysql_async;
+use tokio_postgres;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -25,6 +28,9 @@ pub enum Error {
 
     #[error(transparent)]
     MySql(#[from] mysql_async::Error),
+
+    #[error(transparent)]
+    Postgres(#[from] tokio_postgres::Error),
 
     #[error("Database not connected")]
     NotConnected,

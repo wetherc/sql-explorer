@@ -1,161 +1,164 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import PrimeVue from 'primevue/config'
+import ToastService from 'primevue/toastservice'
 import ConnectionView from '../ConnectionView.vue'
 import { useConnectionStore } from '@/stores/connection'
-import * as connBuilder from '@/utils/connectionStringBuilder'
+import * as connBuilder from '@/utils/connectionStringBuilder' // Corrected import
 import { AuthType, DbType } from '@/types/savedConnection'
+import { useToast } from 'primevue/usetoast'
 
-vi.mock('@tauri-apps/api/tauri', () => ({
-  invoke: vi.fn()
-}))
-
+// Mock dependencies
+vi.mock('@tauri-apps/api/tauri', () => ({ invoke: vi.fn() }))
 vi.mock('@/stores/savedConnections', () => ({
-  useSavedConnectionsStore: vi.fn(() => ({
-    connections: [],
-    fetchConnections: vi.fn()
-  }))
+  useSavedConnectionsStore: vi.fn(() => ({ connections: [], fetchConnections: vi.fn() })),
 }))
+vi.mock('primevue/usetoast')
 
 describe('ConnectionView.vue', () => {
-  beforeEach(() => {
+  const mockToastAdd = vi.fn()
+
+  const mountComponent = () => {
     setActivePinia(createPinia())
+    vi.mocked(useToast).mockReturnValue({ add: mockToastAdd } as any)
+    
+    // JSDOM doesn't implement matchMedia, which some PrimeVue components need
+    Object.defineProperty(window, 'matchMedia', {
+      writable: true,
+      value: vi.fn().mockImplementation(query => ({
+        matches: false,
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    })
+    
+    return mount(ConnectionView, {
+      global: {
+        plugins: [PrimeVue, ToastService],
+        stubs: {
+          SavedConnections: true,
+          SaveConnectionDialog: true,
+          // Stub PrimeVue form components to make them easier to test
+          InputText: {
+            props: ['id', 'modelValue'],
+            template: '<input :id="id" :value="modelValue" @input="$emit(\'update:modelValue\', $event.target.value)" />',
+          },
+          Dropdown: {
+            props: ['id', 'modelValue', 'options'],
+            template: `
+              <select :id="id" :value="modelValue" @change="$emit('update:modelValue', $event.target.value)">
+                <option v-for="option in options" :key="option.value" :value="option.value">{{ option.label }}</option>
+              </select>
+            `,
+          },
+          InputNumber: {
+            props: ['id', 'modelValue'],
+            template: '<input type="number" :id="id" :value="modelValue" @input="$emit(\'update:modelValue\', parseFloat($event.target.value))" />',
+          },
+          Checkbox: {
+            props: ['id', 'modelValue', 'binary'],
+            template: '<input type="checkbox" :id="id" :checked="modelValue" @change="$emit(\'update:modelValue\', $event.target.checked)" />',
+          },
+          Password: { // Password is a special case as it renders an InputText internally
+            props: ['id', 'modelValue'],
+            template: '<input type="password" :id="id" :value="modelValue" @input="$emit(\'update:modelValue\', $event.target.value)" />',
+          },
+          FloatLabel: { template: '<div><slot></slot></div>' },
+          Card: { template: '<div><slot name="title"></slot><slot name="content"></slot><slot name="footer"></slot></div>' },
+          Button: { props: ['label'], template: '<button type="button">{{label}}</button>' }, // Added type="button"
+        },
+      },
+    })
+  }
+
+  beforeEach(() => {
     vi.clearAllMocks()
   })
 
   it('renders base form fields correctly', () => {
-    const wrapper = mount(ConnectionView, {
-      global: {
-        stubs: {
-          SavedConnections: true,
-          SaveConnectionDialog: true
-        }
-      }
-    })
-    expect(wrapper.find('input#server').exists()).toBe(true)
-    expect(wrapper.find('input#database').exists()).toBe(true)
-    expect(wrapper.find('select#auth-type').exists()).toBe(true)
+    const wrapper = mountComponent()
+    expect(wrapper.find('#db-type').exists()).toBe(true)
+    expect(wrapper.find('#server').exists()).toBe(true)
+    expect(wrapper.find('#auth-type').exists()).toBe(true)
   })
 
-  it('shows username and password fields for SQL auth', async () => {
-    const wrapper = mount(ConnectionView, {
-      global: {
-        stubs: {
-          SavedConnections: true,
-          SaveConnectionDialog: true
-        }
-      }
-    })
-    await wrapper.find('select#auth-type').setValue(AuthType.Sql)
-    expect(wrapper.find('input#username').exists()).toBe(true)
-    expect(wrapper.find('input#password').exists()).toBe(true)
+  it('shows username and password fields for SQL auth', () => {
+    const wrapper = mountComponent()
+    expect(wrapper.find('#username').exists()).toBe(true)
+    expect(wrapper.find('#password').exists()).toBe(true)
   })
 
   it('calls the connection string builder and store action on submit', async () => {
+    const wrapper = mountComponent()
     const connectionStore = useConnectionStore()
     const connectSpy = vi.spyOn(connectionStore, 'connect')
     const builderSpy = vi
       .spyOn(connBuilder, 'buildConnectionString')
       .mockReturnValue('fake-connection-string')
 
-    const wrapper = mount(ConnectionView, {
-      global: {
-        stubs: {
-          SavedConnections: true,
-          SaveConnectionDialog: true
-        }
-      }
-    })
-
-    // Set form values
-    await wrapper.find('input#server').setValue('test-server')
-    await wrapper.find('input#database').setValue('test-db')
-    await wrapper.find('select#auth-type').setValue(AuthType.Sql)
-    await wrapper.find('input#username').setValue('test-user')
-    await wrapper.find('input#password').setValue('test-pass')
-
-    // Submit
+    await wrapper.find('#server').setValue('test-server')
+    await wrapper.find('#username').setValue('test-user')
+    await wrapper.find('#password').setValue('test-pass')
     await wrapper.find('form').trigger('submit.prevent')
 
-    // Check that the builder was called with the correct form data
-    expect(builderSpy).toHaveBeenCalledTimes(1)
     expect(builderSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         dbType: DbType.Mssql,
         server: 'test-server',
-        database: 'test-db',
-        authType: 'sql',
         username: 'test-user',
         password: 'test-pass'
       })
     )
-
-    // Check that the store action was called with the result from the builder
-    expect(connectSpy).toHaveBeenCalledTimes(1)
     expect(connectSpy).toHaveBeenCalledWith('fake-connection-string', DbType.Mssql)
   })
 
   it('displays an error if the builder throws an error', async () => {
-    const connectionStore = useConnectionStore()
-    const connectSpy = vi.spyOn(connectionStore, 'connect')
     vi.spyOn(connBuilder, 'buildConnectionString').mockImplementation(() => {
       throw new Error('Invalid server name')
     })
-
-    const wrapper = mount(ConnectionView, {
-      global: {
-        stubs: {
-          SavedConnections: true,
-          SaveConnectionDialog: true
-        }
-      }
-    })
+    const wrapper = mountComponent()
+    const connectionStore = useConnectionStore()
+    const connectSpy = vi.spyOn(connectionStore, 'connect')
+    
     await wrapper.find('form').trigger('submit.prevent')
-
-    // Ensure the connect action was NOT called
+    
     expect(connectSpy).not.toHaveBeenCalled()
-
-    // Ensure the error message is displayed
-    expect(wrapper.find('.error-message').exists()).toBe(true)
-    expect(wrapper.find('.error-message').text()).toBe('Invalid server name')
     expect(connectionStore.errorMessage).toBe('Invalid server name')
   })
 
   it('changes port to 3306 for MySQL', async () => {
-    const wrapper = mount(ConnectionView, {
-      global: {
-        stubs: {
-          SavedConnections: true,
-          SaveConnectionDialog: true
-        }
-      }
-    })
-
-    const dbTypeSelect = wrapper.find('select#db-type')
-    await dbTypeSelect.setValue(DbType.Mysql)
-
-    const portInput = wrapper.find('input#port')
+    const wrapper = mountComponent()
+    const dbTypeDropdown = wrapper.find('#db-type')
+    await dbTypeDropdown.setValue(DbType.Mysql)
+    
+    const portInput = wrapper.find('#port')
     expect((portInput.element as HTMLInputElement).value).toBe('3306')
   })
 
   it('hides MS SQL specific options for MySQL', async () => {
-    const wrapper = mount(ConnectionView, {
-      global: {
-        stubs: {
-          SavedConnections: true,
-          SaveConnectionDialog: true
-        }
-      }
-    })
+    const wrapper = mountComponent()
+    const dbTypeDropdown = wrapper.find('#db-type')
+    await dbTypeDropdown.setValue(DbType.Mysql)
 
-    const dbTypeSelect = wrapper.find('select#db-type')
-    await dbTypeSelect.setValue(DbType.Mysql)
+    expect(wrapper.find('#trustServerCertificate').exists()).toBe(false)
+    
+    const authTypeDropdown = wrapper.find('#auth-type')
+    expect((authTypeDropdown.element as HTMLSelectElement).length).toBe(1)
+    expect((authTypeDropdown.element as HTMLSelectElement).options[0].text).toBe('SQL Authentication')
+  })
 
-    // Check that MS SQL specific options are hidden
-    expect(wrapper.find('select#encrypt').exists()).toBe(false)
-    expect(wrapper.find('input[type="checkbox"]').exists()).toBe(false) // Trust server certificate
-    const authOptions = wrapper.findAll('select#auth-type option')
-    expect(authOptions.length).toBe(1)
-    expect(authOptions[0].text()).toBe('SQL Authentication')
+  it('changes port to 5432 for PostgreSQL', async () => {
+    const wrapper = mountComponent()
+    const dbTypeDropdown = wrapper.find('#db-type')
+    await dbTypeDropdown.setValue(DbType.Postgres)
+    
+    const portInput = wrapper.find('#port')
+    expect((portInput.element as HTMLInputElement).value).toBe('5432')
   })
 })

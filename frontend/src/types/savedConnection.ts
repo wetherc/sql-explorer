@@ -1,6 +1,7 @@
 export enum DbType {
   Mssql = 'Mssql',
-  Mysql = 'Mysql'
+  Mysql = 'Mysql',
+  Postgres = 'Postgres'
 }
 
 export enum AuthType {

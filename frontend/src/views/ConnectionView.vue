@@ -247,7 +247,7 @@ async function handleSaveConnection(name: string, passwordToSave?: string) {
     </div>
 
     <SaveConnectionDialog
-      :show="showSaveDialog"
+      v-model:visible="showSaveDialog"
       :connection="{
         db_type: dbType,
         server,
@@ -256,7 +256,6 @@ async function handleSaveConnection(name: string, passwordToSave?: string) {
         user: isSqlAuth ? username : undefined
       }"
       :password="isSqlAuth ? password : undefined"
-      @close="showSaveDialog = false"
       @save="handleSaveConnection"
     />
   </div>

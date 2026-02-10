@@ -20,6 +20,9 @@ export function buildConnectionString(options: ConnectionOptions): string {
   if (options.dbType === DbType.Mysql) {
     return buildMysqlConnectionString(options)
   }
+  if (options.dbType === DbType.Postgres) {
+    return buildPostgresConnectionString(options)
+  }
   return buildMssqlConnectionString(options)
 }
 
@@ -83,4 +86,21 @@ function buildMysqlConnectionString(options: ConnectionOptions): string {
   const database = options.database || ''
 
   return `mysql://${user}:${password}@${server}:${port}/${database}`
+}
+
+function buildPostgresConnectionString(options: ConnectionOptions): string {
+  if (!options.server) {
+    throw new Error('Server name is required.')
+  }
+  if (!options.username) {
+    throw new Error('Username is required for PostgreSQL Authentication.')
+  }
+
+  const user = encodeURIComponent(options.username)
+  const password = encodeURIComponent(options.password || '')
+  const server = options.server
+  const port = options.port || 5432
+  const database = options.database || ''
+
+  return `postgresql://${user}:${password}@${server}:${port}/${database}`
 }

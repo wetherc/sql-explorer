@@ -111,4 +111,17 @@ describe('connectionStringBuilder', () => {
       })
     ).toThrow('Username is required for MySQL Authentication.')
   })
+
+  // PostgreSQL tests
+  it('builds a correct PostgreSQL connection string', () => {
+    const result = buildConnectionString({
+      dbType: DbType.Postgres,
+      server: 'my-server',
+      database: 'my-db',
+      authType: 'sql',
+      username: 'my-user',
+      password: 'my-password'
+    })
+    expect(result).toBe('postgresql://my-user:my-password@my-server:5432/my-db')
+  })
 })
