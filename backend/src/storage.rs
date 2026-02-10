@@ -24,11 +24,16 @@ pub enum AuthType {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SavedConnection {
     pub name: String,
+    #[serde(default = "default_db_type")]
     pub db_type: DbType,
     pub server: String,
     pub database: String,
     pub auth_type: AuthType,
     pub user: Option<String>,
+}
+
+fn default_db_type() -> DbType {
+    DbType::Mssql
 }
 
 fn get_project_dirs() -> Result<ProjectDirs> {
