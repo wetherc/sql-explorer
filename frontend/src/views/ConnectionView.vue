@@ -4,7 +4,7 @@ import { useConnectionStore } from '@/stores/connection'
 import { useSavedConnectionsStore } from '@/stores/savedConnections'
 import { buildConnectionString } from '@/utils/connectionStringBuilder'
 import type { SavedConnection } from '@/types/savedConnection'
-import { AuthType } from '@/types/savedConnection'
+import { AuthType, DbType } from '@/types/savedConnection'
 
 import SavedConnections from '@/components/SavedConnections.vue'
 import SaveConnectionDialog from '@/components/SaveConnectionDialog.vue'
@@ -12,6 +12,7 @@ import SaveConnectionDialog from '@/components/SaveConnectionDialog.vue'
 const connectionStore = useConnectionStore()
 const savedConnectionsStore = useSavedConnectionsStore()
 
+const dbType = ref<DbType>(DbType.Mssql)
 const server = ref('localhost')
 const port = ref<number | undefined>(1433)
 const database = ref('master')
@@ -26,11 +27,20 @@ const trustServerCertificate = ref(true)
 const showSaveDialog = ref(false)
 
 const isSqlAuth = computed(() => authType.value === AuthType.Sql)
-const isNamedInstance = computed(() => server.value.includes('\\'))
+const isNamedInstance = computed(() => dbType.value === DbType.Mssql && server.value.includes('\\'))
 
 watch(isNamedInstance, (isNamed) => {
   if (isNamed) {
     port.value = undefined
+  } else if (dbType.value === DbType.Mssql) {
+    port.value = 1433
+  }
+})
+
+watch(dbType, (newDbType) => {
+  if (newDbType === DbType.Mysql) {
+    port.value = 3306
+    authType.value = AuthType.Sql // MySQL doesn't have integrated auth
   } else {
     port.value = 1433
   }
@@ -43,6 +53,7 @@ async function handleConnect() {
   if (isSqlAuth.value && !password.value) {
     const matchingSavedConn = savedConnectionsStore.connections.find(
       (c) =>
+        c.db_type === dbType.value &&
         c.server === server.value &&
         c.database === database.value &&
         c.user === username.value
@@ -57,6 +68,7 @@ async function handleConnect() {
 
   try {
     const connectionString = buildConnectionString({
+      dbType: dbType.value,
       server: server.value,
       port: port.value,
       database: database.value,
@@ -68,13 +80,15 @@ async function handleConnect() {
       encrypt: encrypt.value,
       trustServerCertificate: trustServerCertificate.value
     })
-    await connectionStore.connect(connectionString)
+    await connectionStore.connect(connectionString, dbType.value)
   } catch (error: unknown) {
-    connectionStore.errorMessage = error instanceof Error ? error.message : 'An unknown error occurred.'
+    connectionStore.errorMessage =
+      error instanceof Error ? error.message : 'An unknown error occurred.'
   }
 }
 
 function handleSelectSavedConnection(connection: SavedConnection) {
+  dbType.value = connection.db_type
   server.value = connection.server
   database.value = connection.database
   authType.value = connection.auth_type
@@ -93,6 +107,7 @@ function openSaveDialog() {
 
 async function handleSaveConnection(name: string, passwordToSave?: string) {
   const connectionToSave: Omit<SavedConnection, 'name'> = {
+    db_type: dbType.value,
     server: server.value,
     database: database.value,
     auth_type: authType.value,
@@ -113,6 +128,14 @@ async function handleSaveConnection(name: string, passwordToSave?: string) {
         <h2>Connect to Database</h2>
 
         <div class="form-group">
+          <label for="db-type">Database Type</label>
+          <select id="db-type" v-model="dbType" :disabled="connectionStore.isConnecting">
+            <option :value="DbType.Mssql">Microsoft SQL Server</option>
+            <option :value="DbType.Mysql">MySQL</option>
+          </select>
+        </div>
+
+        <div class="form-group">
           <label for="server">Server or Server\Instance</label>
           <input
             id="server"
@@ -130,7 +153,7 @@ async function handleSaveConnection(name: string, passwordToSave?: string) {
             id="port"
             v-model.number="port"
             type="number"
-            placeholder="1433"
+            :placeholder="dbType === DbType.Mssql ? '1433' : '3306'"
             :required="!isNamedInstance"
             :disabled="connectionStore.isConnecting || isNamedInstance"
           />
@@ -168,30 +191,34 @@ async function handleSaveConnection(name: string, passwordToSave?: string) {
           />
         </div>
 
-        <div class="form-group">
-          <label for="encrypt">Encryption</label>
-          <select id="encrypt" v-model="encrypt" :disabled="connectionStore.isConnecting">
-            <option value="true">On</option>
-            <option value="false">Off</option>
-          </select>
-        </div>
+        <div v-if="dbType === DbType.Mssql">
+          <div class="form-group">
+            <label for="encrypt">Encryption</label>
+            <select id="encrypt" v-model="encrypt" :disabled="connectionStore.isConnecting">
+              <option value="true">On</option>
+              <option value="false">Off</option>
+            </select>
+          </div>
 
-        <div class="form-group">
-          <label class="checkbox-label">
-            <input
-              type="checkbox"
-              v-model="trustServerCertificate"
-              :disabled="connectionStore.isConnecting"
-            />
-            Trust server certificate
-          </label>
+          <div class="form-group">
+            <label class="checkbox-label">
+              <input
+                type="checkbox"
+                v-model="trustServerCertificate"
+                :disabled="connectionStore.isConnecting"
+              />
+              Trust server certificate
+            </label>
+          </div>
         </div>
 
         <div class="form-group">
           <label for="auth-type">Authentication</label>
           <select id="auth-type" v-model="authType" :disabled="connectionStore.isConnecting">
-            <option :value="AuthType.Sql">SQL Server Authentication</option>
-            <option :value="AuthType.Integrated">Microsoft Entra / Integrated</option>
+            <option :value="AuthType.Sql">SQL Authentication</option>
+            <option v-if="dbType === DbType.Mssql" :value="AuthType.Integrated">
+              Microsoft Entra / Integrated
+            </option>
           </select>
         </div>
 
@@ -240,6 +267,7 @@ async function handleSaveConnection(name: string, passwordToSave?: string) {
     <SaveConnectionDialog
       :show="showSaveDialog"
       :connection="{
+        db_type: dbType,
         server,
         database,
         auth_type: authType,

@@ -1,18 +1,19 @@
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
 import { invoke } from '@tauri-apps/api/tauri'
+import type { DbType } from '@/types/savedConnection'
 
 export const useConnectionStore = defineStore('connection', () => {
   const isConnected = ref(false)
   const isConnecting = ref(false)
   const errorMessage = ref('')
 
-  async function connect(connectionString: string) {
+  async function connect(connectionString: string, dbType: DbType) {
     isConnecting.value = true
     errorMessage.value = ''
 
     try {
-      await invoke('connect', { connectionString })
+      await invoke('connect', { connectionString, dbType })
       isConnected.value = true
     } catch (error) {
       isConnected.value = false

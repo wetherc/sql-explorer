@@ -62,6 +62,7 @@ async function toggleNode(node: TreeNode) {
             parent: node.parent,
             expanded: false,
         }));
+      } // <--- Added this closing brace
     }
   }
 }

@@ -34,11 +34,8 @@ describe('QueryTabs.vue', () => {
   let queryStoreMock: ReturnType<typeof useQueryStore>;
 
   beforeEach(() => {
-    setActivePinia(createPinia());
     vi.clearAllMocks();
 
-    const tempPinia = createPinia();
-    const tempTabsStore = useTabsStore(tempPinia);
     tabsStoreMock = {
       tabs: [],
       activeTabId: null,
@@ -46,53 +43,67 @@ describe('QueryTabs.vue', () => {
       addTab: vi.fn(),
       closeTab: vi.fn(),
       setActiveTab: vi.fn(),
-      $state: tempTabsStore.$state,
-      $patch: tempTabsStore.$patch,
-      $reset: tempTabsStore.$reset,
-      $subscribe: tempTabsStore.$subscribe,
-      $onAction: tempTabsStore.$onAction,
-      $id: tempTabsStore.$id,
-      $dispose: tempTabsStore.$dispose,
-    } as unknown as ReturnType<typeof useTabsStore>;
+      $state: {
+        tabs: [],
+        activeTabId: null,
+      },
+      $patch: vi.fn(),
+      $reset: vi.fn(),
+      $subscribe: vi.fn(),
+      $onAction: vi.fn(),
+      $id: 'tabs',
+      $dispose: vi.fn(),
+    } as any;
 
-    const tempConnectionStore = useConnectionStore(tempPinia);
     connectionStoreMock = {
       disconnect: vi.fn(),
-      isConnected: tempConnectionStore.isConnected,
-      isConnecting: tempConnectionStore.isConnecting,
-      errorMessage: tempConnectionStore.errorMessage,
-      connect: tempConnectionStore.connect,
-      $state: tempConnectionStore.$state,
-      $patch: tempConnectionStore.$patch,
-      $reset: tempConnectionStore.$reset,
-      $subscribe: tempConnectionStore.$subscribe,
-      $onAction: tempConnectionStore.$onAction,
-      $id: tempConnectionStore.$id,
-      $dispose: tempConnectionStore.$dispose,
-    } as unknown as ReturnType<typeof useConnectionStore>;
+      isConnected: false,
+      isConnecting: false,
+      errorMessage: '',
+      connect: vi.fn(),
+      $state: {
+        isConnected: false,
+        isConnecting: false,
+        errorMessage: '',
+      },
+      $patch: vi.fn(),
+      $reset: vi.fn(),
+      $subscribe: vi.fn(),
+      $onAction: vi.fn(),
+      $id: 'connection',
+      $dispose: vi.fn(),
+    } as any;
 
-    const tempQueryStore = useQueryStore(tempPinia);
     queryStoreMock = {
       executeQuery: vi.fn(),
       setQueryState: vi.fn(),
-      response: null, // Default for new structure
+      response: null,
       errorMessage: '',
       isLoading: false,
-      resultRows: tempQueryStore.resultRows,
-      resultColumns: tempQueryStore.resultColumns,
-      messages: tempQueryStore.messages,
-      $state: tempQueryStore.$state,
-      $patch: tempQueryStore.$patch,
-      $reset: tempQueryStore.$reset,
-      $subscribe: tempQueryStore.$subscribe,
-      $onAction: tempQueryStore.$onAction,
-      $id: tempQueryStore.$id,
-      $dispose: tempQueryStore.$dispose,
-    } as unknown as ReturnType<typeof useQueryStore>;
+      resultRows: [],
+      resultColumns: [],
+      messages: [],
+      $state: {
+        response: null,
+        errorMessage: '',
+        isLoading: false,
+        resultRows: [],
+        resultColumns: [],
+        messages: [],
+      },
+      $patch: vi.fn(),
+      $reset: vi.fn(),
+      $subscribe: vi.fn(),
+      $onAction: vi.fn(),
+      $id: 'query',
+      $dispose: vi.fn(),
+    } as any;
 
     (useTabsStore as Mock).mockReturnValue(tabsStoreMock);
     (useConnectionStore as Mock).mockReturnValue(connectionStoreMock);
     (useQueryStore as Mock).mockReturnValue(queryStoreMock);
+
+    setActivePinia(createPinia()); // Activate Pinia after mocks are set up
   });
 
   it('renders correctly with no tabs', () => {

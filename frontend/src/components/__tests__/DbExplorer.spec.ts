@@ -18,11 +18,8 @@ describe('DbExplorer.vue', () => {
   let tabsStoreMock: ReturnType<typeof useTabsStore>
 
   beforeEach(() => {
-    setActivePinia(createPinia())
+    vi.clearAllMocks()
 
-    const tempPinia = createPinia();
-
-    const tempExplorerStore = useExplorerStore(tempPinia);
     explorerStoreMock = {
       databases: [{ name: 'db1' }],
       schemas: [{ name: 'dbo' }],
@@ -34,17 +31,23 @@ describe('DbExplorer.vue', () => {
       fetchSchemas: vi.fn().mockResolvedValue(true),
       fetchTables: vi.fn().mockResolvedValue(true),
       fetchColumns: vi.fn().mockResolvedValue(true),
-      $state: tempExplorerStore.$state,
-      $patch: tempExplorerStore.$patch,
-      $reset: tempExplorerStore.$reset,
-      $subscribe: tempExplorerStore.$subscribe,
-      $onAction: tempExplorerStore.$onAction,
-      $id: tempExplorerStore.$id,
-      $dispose: tempExplorerStore.$dispose,
-    } as unknown as ReturnType<typeof useExplorerStore>; // Cast to bypass strict type checking for complex Pinia mocks
+      $state: {
+        databases: [{ name: 'db1' }],
+        schemas: [{ name: 'dbo' }],
+        tables: [{ TABLE_NAME: 'table1' }],
+        columns: [],
+        loading: false,
+        error: null,
+      },
+      $patch: vi.fn(),
+      $reset: vi.fn(),
+      $subscribe: vi.fn(),
+      $onAction: vi.fn(),
+      $id: 'explorer',
+      $dispose: vi.fn(),
+    } as any; // Cast to any for partial mock
     (useExplorerStore as Mock).mockReturnValue(explorerStoreMock)
 
-    const tempTabsStore = useTabsStore(tempPinia);
     tabsStoreMock = {
       tabs: [],
       activeTabId: null,
@@ -52,15 +55,20 @@ describe('DbExplorer.vue', () => {
       addTab: vi.fn(),
       closeTab: vi.fn(),
       setActiveTab: vi.fn(),
-      $state: tempTabsStore.$state,
-      $patch: tempTabsStore.$patch,
-      $reset: tempTabsStore.$reset,
-      $subscribe: tempTabsStore.$subscribe,
-      $onAction: tempTabsStore.$onAction,
-      $id: tempTabsStore.$id,
-      $dispose: tempTabsStore.$dispose,
-    } as unknown as ReturnType<typeof useTabsStore>; // Cast to bypass strict type checking
+      $state: {
+        tabs: [],
+        activeTabId: null,
+      },
+      $patch: vi.fn(),
+      $reset: vi.fn(),
+      $subscribe: vi.fn(),
+      $onAction: vi.fn(),
+      $id: 'tabs',
+      $dispose: vi.fn(),
+    } as any; // Cast to any for partial mock
     (useTabsStore as Mock).mockReturnValue(tabsStoreMock)
+
+    setActivePinia(createPinia()); // Activate Pinia after mocks are set up
   })
 
   it('fetches databases on mount and renders them', async () => {

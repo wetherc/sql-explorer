@@ -26,6 +26,7 @@ export const useSavedConnectionsStore = defineStore('savedConnections', () => {
     try {
       await invoke('save_connection', {
         name: connection.name,
+        dbType: connection.db_type,
         server: connection.server,
         database: connection.database,
         authType: connection.auth_type,

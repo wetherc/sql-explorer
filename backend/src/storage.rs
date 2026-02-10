@@ -10,6 +10,12 @@ use std::{
 use crate::error::Result;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum DbType {
+    Mssql,
+    Mysql,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum AuthType {
     Sql,
     Integrated,
@@ -18,6 +24,7 @@ pub enum AuthType {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SavedConnection {
     pub name: String,
+    pub db_type: DbType,
     pub server: String,
     pub database: String,
     pub auth_type: AuthType,
@@ -193,6 +200,7 @@ mod tests {
         let conn_name = format!("{}{}", conn_name_base, test_suffix);
         let conn = SavedConnection {
             name: conn_name.clone(),
+            db_type: DbType::Mssql,
             server: "localhost".to_string(),
             database: "master".to_string(),
             auth_type: AuthType::Sql,
@@ -226,6 +234,7 @@ mod tests {
         let conn_name = format!("{}{}", conn_name_base, test_suffix);
         let conn = SavedConnection {
             name: conn_name.clone(),
+            db_type: DbType::Mssql,
             server: "localhost".to_string(),
             database: "master".to_string(),
             auth_type: AuthType::Integrated,

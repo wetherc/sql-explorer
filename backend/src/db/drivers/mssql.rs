@@ -20,7 +20,7 @@ pub struct MssqlDriver {
 }
 
 impl MssqlDriver {
-    pub async fn connect(connection_string: &str) -> DbResult<Box<dyn DatabaseDriver + Send>> {
+    pub async fn connect(connection_string: &str) -> DbResult<Box<dyn DatabaseDriver + Send + Sync>> {
         info!("Attempting to connect to the database.");
         debug!("Connection string: {}", connection_string);
 

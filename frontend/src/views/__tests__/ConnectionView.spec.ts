@@ -4,7 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import ConnectionView from '../ConnectionView.vue'
 import { useConnectionStore } from '@/stores/connection'
 import * as connBuilder from '@/utils/connectionStringBuilder'
-import { AuthType } from '@/types/savedConnection'
+import { AuthType, DbType } from '@/types/savedConnection'
 
 vi.mock('@tauri-apps/api/tauri', () => ({
   invoke: vi.fn()
@@ -81,6 +81,7 @@ describe('ConnectionView.vue', () => {
     expect(builderSpy).toHaveBeenCalledTimes(1)
     expect(builderSpy).toHaveBeenCalledWith(
       expect.objectContaining({
+        dbType: DbType.Mssql,
         server: 'test-server',
         database: 'test-db',
         authType: 'sql',
@@ -91,7 +92,7 @@ describe('ConnectionView.vue', () => {
 
     // Check that the store action was called with the result from the builder
     expect(connectSpy).toHaveBeenCalledTimes(1)
-    expect(connectSpy).toHaveBeenCalledWith('fake-connection-string')
+    expect(connectSpy).toHaveBeenCalledWith('fake-connection-string', DbType.Mssql)
   })
 
   it('displays an error if the builder throws an error', async () => {

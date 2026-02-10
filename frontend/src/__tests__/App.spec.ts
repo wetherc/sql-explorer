@@ -8,59 +8,59 @@ import { useConnectionStore } from '../stores/connection'
 vi.mock('@/views/ConnectionView.vue', () => ({
   default: {
     name: 'ConnectionView',
-    template: '<div>Mock Connection View</div>',
-  },
-}));
+    template: '<div>Mock Connection View</div>'
+  }
+}))
 
 vi.mock('@/components/QueryTabs.vue', () => ({
   default: {
     name: 'QueryTabs',
-    template: '<div>Mock Query Tabs</div>',
-  },
-}));
+    template: '<div>Mock Query Tabs</div>'
+  }
+}))
 
 vi.mock('@/components/DbExplorer.vue', () => ({
   default: {
     name: 'DbExplorer',
-    template: '<div>Mock DbExplorer</div>',
-  },
-}));
+    template: '<div>Mock DbExplorer</div>'
+  }
+}))
 
 // Mock Pinia store
 vi.mock('@/stores/connection', () => ({
-  useConnectionStore: vi.fn(),
-}));
+  useConnectionStore: vi.fn()
+}))
 
 describe('App', () => {
-  let connectionStoreMock: ReturnType<typeof useConnectionStore>;
+  let connectionStoreMock: ReturnType<typeof useConnectionStore>
 
   beforeEach(() => {
-    const tempPinia = createPinia();
-    const tempStore = useConnectionStore(tempPinia);
-
     connectionStoreMock = {
-      isConnected: tempStore.isConnected,
-      isConnecting: tempStore.isConnecting,
-      errorMessage: tempStore.errorMessage,
+      isConnected: false, // Default mock state
+      isConnecting: false,
+      errorMessage: '',
 
       connect: vi.fn(),
       disconnect: vi.fn(),
 
-      $state: tempStore.$state,
-      $patch: tempStore.$patch,
-      $reset: tempStore.$reset,
-      $subscribe: tempStore.$subscribe,
-      $onAction: tempStore.$onAction,
-      $id: tempStore.$id,
-      $dispose: tempStore.$dispose,
-      // _p: tempStore._p, // Private property, may not be directly accessible or needed
-    };
-    (useConnectionStore as vi.Mock).mockReturnValue(connectionStoreMock);
-  });
+      $state: {
+        isConnected: false,
+        isConnecting: false,
+        errorMessage: ''
+      }, // Minimal mock for $state
+      $patch: vi.fn(),
+      $reset: vi.fn(),
+      $subscribe: vi.fn(),
+      $onAction: vi.fn(),
+      $id: 'connection',
+      $dispose: vi.fn()
+    } as any // Cast to any to satisfy the ReturnType<typeof useConnectionStore> for partial mock
+    ;(useConnectionStore as vi.Mock).mockReturnValue(connectionStoreMock)
+  })
 
   it('renders ConnectionView by default if not connected', () => {
-    const pinia = createPinia();
-    connectionStoreMock.isConnected = false;
+    const pinia = createPinia()
+    connectionStoreMock.isConnected = false // Ensure mock is not connected
 
     const wrapper = mount(App, {
       global: {
@@ -68,18 +68,18 @@ describe('App', () => {
         stubs: {
           ConnectionView: true,
           QueryTabs: true,
-          DbExplorer: true, // Explicitly stub DbExplorer
-        },
-      },
-    });
+          DbExplorer: true // Explicitly stub DbExplorer
+        }
+      }
+    })
 
-    expect(wrapper.findComponent({ name: 'ConnectionView' }).exists()).toBe(true);
-    expect(wrapper.findComponent({ name: 'QueryTabs' }).exists()).toBe(false);
-  });
+    expect(wrapper.findComponent({ name: 'ConnectionView' }).exists()).toBe(true)
+    expect(wrapper.findComponent({ name: 'QueryTabs' }).exists()).toBe(false)
+  })
 
   it('renders QueryTabs if connected', async () => {
-    const pinia = createPinia();
-    connectionStoreMock.isConnected = true; // Simulate connected state
+    const pinia = createPinia()
+    connectionStoreMock.isConnected = true // Simulate connected state
 
     const wrapper = mount(App, {
       global: {
@@ -87,13 +87,13 @@ describe('App', () => {
         stubs: {
           ConnectionView: true,
           QueryTabs: true,
-          DbExplorer: true, // Explicitly stub DbExplorer
-        },
-      },
-    });
-    await wrapper.vm.$nextTick(); // Wait for state change to propagate
+          DbExplorer: true // Explicitly stub DbExplorer
+        }
+      }
+    })
+    await wrapper.vm.$nextTick() // Wait for state change to propagate
 
-    expect(wrapper.findComponent({ name: 'ConnectionView' }).exists()).toBe(false);
-    expect(wrapper.findComponent({ name: 'QueryTabs' }).exists()).toBe(true);
-  });
-});
+    expect(wrapper.findComponent({ name: 'ConnectionView' }).exists()).toBe(false)
+    expect(wrapper.findComponent({ name: 'QueryTabs' }).exists()).toBe(true)
+  })
+})

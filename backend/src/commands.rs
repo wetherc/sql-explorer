@@ -1,5 +1,5 @@
 // backend/src/commands.rs
-use crate::{db::{self, drivers::mssql::MssqlDriver}, error::Error, state::AppState, storage};
+use crate::{db::{self, drivers::{mssql::MssqlDriver, mysql::MysqlDriver, DatabaseDriver}}, error::Error, state::AppState, storage};
 
 
 type CommandResult<T> = Result<T, Error>;
@@ -7,10 +7,14 @@ type CommandResult<T> = Result<T, Error>;
 #[tauri::command]
 pub async fn connect(
     connection_string: String,
+    db_type: storage::DbType,
     state: tauri::State<'_, AppState>,
 ) -> CommandResult<()> {
-    // For now, we only support mssql
-    let client = MssqlDriver::connect(&connection_string).await?;
+    let client = match db_type {
+        storage::DbType::Mssql => MssqlDriver::connect(&connection_string).await,
+        storage::DbType::Mysql => MysqlDriver::connect(&connection_string).await,
+    }?;
+
     *state.db.lock().await = Some(client);
     Ok(())
 }
@@ -68,6 +72,7 @@ pub fn list_connections() -> CommandResult<Vec<storage::SavedConnection>> {
 #[tauri::command]
 pub fn save_connection(
     name: String,
+    db_type: storage::DbType,
     server: String,
     database: String,
     auth_type: storage::AuthType,
@@ -76,6 +81,7 @@ pub fn save_connection(
 ) -> CommandResult<()> {
     let connection = storage::SavedConnection {
         name: name.clone(),
+        db_type,
         server,
         database,
         auth_type,
@@ -187,5 +193,23 @@ mod tests {
             Error::NotConnected => (),
             _ => panic!("Wrong error type returned"),
         }
+    }
+
+    #[test]
+    fn test_save_connection_with_db_type() {
+        // This test mainly checks that the command can be called without panicking.
+        // A more thorough test would involve checking the filesystem, which is out of scope here.
+        let result = save_connection(
+            "test_mysql".to_string(),
+            storage::DbType::Mysql,
+            "localhost".to_string(),
+            "test_db".to_string(),
+            storage::AuthType::Sql,
+            Some("user".to_string()),
+            Some("password".to_string()),
+        );
+        assert!(result.is_ok());
+        // cleanup
+        let _ = storage::delete_connection_details("test_mysql");
     }
 }
