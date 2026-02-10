@@ -1,24 +1,36 @@
 <script setup lang="ts">
 import { useConnectionStore } from '@/stores/connection'
 import ConnectionView from '@/views/ConnectionView.vue'
-import QueryTabs from '@/components/QueryTabs.vue' // Import QueryTabs
+import QueryTabs from '@/components/QueryTabs.vue'
+import DbExplorer from '@/components/DbExplorer.vue'
+import Splitter from 'primevue/splitter'
+import SplitterPanel from 'primevue/splitterpanel'
+import Toast from 'primevue/toast'
+import ProgressBar from 'primevue/progressbar'
 
 const connectionStore = useConnectionStore()
 </script>
 
 <template>
   <div class="app-container">
-    <aside class="sidebar">
-      <!-- Database Explorer will go here -->
-      <DbExplorer v-if="connectionStore.isConnected" />
-      <div v-else class="sidebar-placeholder">
-        Connect to a database to see the explorer.
-      </div>
-    </aside>
-    <main class="content-area">
-      <ConnectionView v-if="!connectionStore.isConnected" />
-      <QueryTabs v-else />
-    </main>
+    <ProgressBar v-if="connectionStore.isConnecting" mode="indeterminate" style="height: .5em" class="fixed top-0 left-0 w-full" />
+    <Splitter style="height: 100vh">
+      <SplitterPanel :size="20" :min-size="10">
+        <div class="sidebar">
+          <DbExplorer v-if="connectionStore.isConnected" />
+          <div v-else class="sidebar-placeholder">
+            Connect to a database to see the explorer.
+          </div>
+        </div>
+      </SplitterPanel>
+      <SplitterPanel :size="80">
+        <main class="content-area">
+          <ConnectionView v-if="!connectionStore.isConnected" />
+          <QueryTabs v-else />
+        </main>
+      </SplitterPanel>
+    </Splitter>
+    <Toast />
   </div>
 </template>
 
@@ -27,41 +39,24 @@ const connectionStore = useConnectionStore()
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  background-color: #e9ecef;
-  color: #212529;
-  height: 100vh; /* Ensure body takes full viewport height */
-  overflow: hidden; /* Prevent scrollbars on body */
-}
-
-#app {
-  height: 100%; /* Ensure #app takes full height */
-}
-
-.app-container {
-  display: flex;
-  height: 100vh; /* Full viewport height */
+  height: 100vh;
   overflow: hidden;
 }
 
-.sidebar {
-  width: 250px; /* Initial width for the sidebar */
-  background-color: #f8f9fa;
-  border-right: 1px solid #dee2e6;
-  padding: 10px;
-  overflow-y: auto; /* Allow scrolling if explorer content is tall */
-  flex-shrink: 0; /* Prevent sidebar from shrinking */
+#app {
+  height: 100%;
+}
+
+.sidebar, .content-area {
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  padding: 1rem;
 }
 
 .sidebar-placeholder {
-  color: #6c757d;
+  color: var(--p-text-color);
   text-align: center;
   padding-top: 20px;
-}
-
-.content-area {
-  flex-grow: 1; /* Main content area takes remaining space */
-  display: flex;
-  flex-direction: column;
-  overflow: hidden; /* Ensure content doesn't overflow */
 }
 </style>
