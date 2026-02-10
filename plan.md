@@ -211,4 +211,44 @@ This section outlines the development plan in a milestone-based format.
 
 *   **M5.7 (Frontend): Monaco Editor Language.**
     *   **Dynamic Language:** Update the Monaco Editor in `QueryView.vue` to dynamically set the `language` option based on the connected database engine ('sql' for MS SQL, 'mysql' for MySQL, 'pgsql' for PostgreSQL). This provides correct syntax highlighting for each dialect.
+---
 
+### **Milestone 6: UI/UX Polish**
+*   **Goal:** Elevate the application from a functional tool to a polished, professional-grade product by integrating a comprehensive UI framework, improving user feedback, and refining the overall aesthetic.
+*   **Status:** ⏳ Not Started
+
+#### **Phase 1: Foundation - PrimeVue Integration**
+*   **M6.1: Integrate PrimeVue Framework.**
+    *   **Action:** Add `primevue`, `primeflex`, and `primeicons` to `frontend/package.json` using `pnpm`.
+    *   **Configuration:** In `frontend/src/main.ts`, configure the PrimeVue plugin, register the `ToastService`, and import a modern theme like `aura-dark-green`.
+*   **M6.2: Refactor Core Layout (`App.vue`).**
+    *   **Action:** Replace the current `div`-based split-pane with PrimeVue's `<Splitter>` and `<SplitterPanel>` components.
+    *   **Context:** This provides robust, theme-consistent resizing and layout management.
+*   **M6.3: Refactor Connection View (`ConnectionView.vue`).**
+    *   **Action:** Replace all basic HTML form elements (`<input>`, `<select>`, `<button>`) with their PrimeVue counterparts (`<InputText>`, `<Dropdown>`, `<Checkbox>`, `<Button>`).
+    *   **Context:** Use `<FloatLabel>` to improve form aesthetics and user experience. Wrap the form in a `<Card>` component to visually group connection settings.
+*   **M6.4: Refactor Database Explorer (`DbExplorer.vue`).**
+    *   **Action:** Replace the custom `<ul>`-based tree with PrimeVue's `<Tree>` component.
+    *   **Context:** The `<Tree>` component offers a professional look, lazy-loading for performance, and better state management for node expansion. It will be configured to use `primeicons` for different node types (e.g., `pi-database`, `pi-folder`, `pi-table`).
+*   **M6.5: Refactor Query Tabs (`QueryTabs.vue`).**
+    *   **Action:** Replace the custom tab implementation with PrimeVue's `<TabView>` and `<TabPanel>`.
+    *   **Context:** This ensures theme consistency and provides built-in accessibility and state management for tabs.
+*   **M6.6: Refactor Results View (`QueryView.vue`).**
+    *   **Action:** Replace the `<table>` with PrimeVue's `<DataTable>`.
+    *   **Context:** This is a major UX upgrade, providing out-of-the-box features like virtual scrolling, column resizing, sorting, and pagination via the `<Paginator>` component.
+
+#### **Phase 2: Enhanced User Experience (UX)**
+*   **M6.7: Implement Advanced Loading States.**
+    *   **Action:** Use PrimeVue's `<ProgressBar>` (for global loading) and `<Skeleton>` (for placeholder content in the explorer and data table) components.
+    *   **Context:** Replace simple "Loading..." text with these components to provide better visual feedback and reduce perceived waiting time.
+*   **M6.8: Implement Toast Notifications.**
+    *   **Action:** Integrate `<Toast />` into the root `App.vue`. Refactor all `alert()` calls and error message blocks to use the `useToast()` service.
+    *   **Context:** This provides non-blocking, professional-looking notifications for success and error states.
+*   **M6.9: Refactor Modals and Menus.**
+    *   **Action:** Replace the custom context menu with `<ContextMenu>` and the save dialog with `<Dialog>`.
+    *   **Context:** Ensures all overlays and interactive menus are consistent with the PrimeVue theme.
+
+#### **Phase 3: Visual Polish**
+*   **M6.10: Final Theming and Layout Review.**
+    *   **Action:** Conduct a final review of the application to ensure consistent use of the chosen theme's color palette, typography, and spacing.
+    *   **Context:** Use `primeflex` utilities to fine-tune alignment and spacing for a pixel-perfect finish. Remove any remaining custom styles that conflict with the new design system.
