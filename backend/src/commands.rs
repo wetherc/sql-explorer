@@ -197,6 +197,8 @@ mod tests {
 
     #[test]
     fn test_save_connection_with_db_type() {
+        // cleanup before test
+        let _ = storage::delete_connection_details("test_mysql");
         // This test mainly checks that the command can be called without panicking.
         // A more thorough test would involve checking the filesystem, which is out of scope here.
         let result = save_connection(
@@ -209,7 +211,7 @@ mod tests {
             Some("password".to_string()),
         );
         assert!(result.is_ok());
-        // cleanup
+        // cleanup after test
         let _ = storage::delete_connection_details("test_mysql");
     }
 }

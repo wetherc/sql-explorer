@@ -23,25 +23,33 @@ impl MysqlDriver {
         info!("MySQL database client connected successfully.");
         Ok(Box::new(MysqlDriver { conn: Some(conn) }))
     }
+
+    async fn with_conn<F, T, Fut>(&mut self, op: F) -> Result<T, Error>
+    where
+        F: FnOnce(Conn) -> Fut + Send,
+        Fut: std::future::Future<Output = Result<(Conn, T), Error>> + Send,
+    {
+        let conn = self.conn.take().ok_or(Error::NotConnected)?;
+        let (conn_after, result) = op(conn).await?;
+        self.conn = Some(conn_after);
+        Ok(result)
+    }
 }
 
 #[async_trait]
 impl super::DatabaseDriver for MysqlDriver {
     async fn execute_query(&mut self, query: &str) -> Result<QueryResponse, Error> {
         info!("Executing MySQL query: {}", query);
-        let conn = self.conn.take().ok_or(Error::NotConnected)?;
-        let (conn_updated, response) = execute_internal(conn, query.to_string()).await?;
-        self.conn = Some(conn_updated);
-        Ok(response)
+        self.with_conn(|conn| execute_internal(conn, query.to_string())).await
     }
 
     async fn list_databases(&mut self) -> Result<Vec<Database>, Error> {
         info!("Listing MySQL databases.");
-        let conn = self.conn.take().ok_or(Error::NotConnected)?;
-        let (conn_updated, response) = execute_internal(conn, "SHOW DATABASES".to_string()).await?;
-        self.conn = Some(conn_updated);
-        let databases: Vec<String> = response.results.into_iter().flat_map(|rs| rs.rows).flat_map(|row| row.get(0).and_then(|v| v.as_str().map(|s| s.to_string()))).collect();
-        Ok(databases.into_iter().map(|name| Database { name }).collect())
+        self.with_conn(|conn| async {
+            let (conn, response) = execute_internal(conn, "SHOW DATABASES".to_string()).await?;
+            let databases: Vec<String> = response.results.into_iter().flat_map(|rs| rs.rows).flat_map(|row| row.get(0).and_then(|v| v.as_str().map(|s| s.to_string()))).collect();
+            Ok((conn, databases.into_iter().map(|name| Database { name }).collect()))
+        }).await
     }
 
     async fn list_schemas(&mut self) -> Result<Vec<Schema>, Error> {
@@ -53,25 +61,25 @@ impl super::DatabaseDriver for MysqlDriver {
 
     async fn list_tables(&mut self, database: &str) -> Result<Vec<Table>, Error> {
         info!("Listing MySQL tables for database: {}", database);
-        let conn = self.conn.take().ok_or(Error::NotConnected)?;
         let query = format!("SHOW TABLES FROM `{}`", database);
-        let (conn_updated, response) = execute_internal(conn, query).await?;
-        self.conn = Some(conn_updated);
-        let tables: Vec<String> = response.results.into_iter().flat_map(|rs| rs.rows).flat_map(|row| row.get(0).and_then(|v| v.as_str().map(|s| s.to_string()))).collect();
-        Ok(tables.into_iter().map(|name| Table { name }).collect())
+        self.with_conn(|conn| async {
+            let (conn, response) = execute_internal(conn, query).await?;
+            let tables: Vec<String> = response.results.into_iter().flat_map(|rs| rs.rows).flat_map(|row| row.get(0).and_then(|v| v.as_str().map(|s| s.to_string()))).collect();
+            Ok((conn, tables.into_iter().map(|name| Table { name }).collect()))
+        }).await
     }
 
     async fn list_columns(&mut self, database: &str, table: &str) -> Result<Vec<AppColumn>, Error> {
         info!("Listing MySQL columns for database: {} and table: {}", database, table);
-        let conn = self.conn.take().ok_or(Error::NotConnected)?;
         let query = format!("SHOW COLUMNS FROM `{}` FROM `{}`", table, database);
-        let (conn_updated, response) = execute_internal(conn, query).await?;
-        self.conn = Some(conn_updated);
-        let columns: Vec<AppColumn> = response.results.into_iter().flat_map(|rs| rs.rows).map(|row| AppColumn {
-            name: row.get(0).and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default(),
-            data_type: row.get(1).and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default(),
-        }).collect();
-        Ok(columns)
+        self.with_conn(|conn| async {
+            let (conn, response) = execute_internal(conn, query).await?;
+            let columns: Vec<AppColumn> = response.results.into_iter().flat_map(|rs| rs.rows).map(|row| AppColumn {
+                name: row.get(0).and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default(),
+                data_type: row.get(1).and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default(),
+            }).collect();
+            Ok((conn, columns))
+        }).await
     }
 }
 

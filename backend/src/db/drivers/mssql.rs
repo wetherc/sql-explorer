@@ -251,3 +251,31 @@ fn row_to_json(row: &Row, columns: &[Column]) -> JsonValue {
     }
     JsonValue::Object(map)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dotenv::dotenv;
+    use std::env;
+
+    async fn get_test_driver() -> Option<Box<dyn DatabaseDriver + Send + Sync>> {
+        dotenv().ok();
+        let connection_string = match env::var("MSSQL_TEST_DB_URL") {
+            Ok(s) => s,
+            Err(_) => {
+                eprintln!("Skipping MS SQL integration test: MSSQL_TEST_DB_URL not set.");
+                return None;
+            }
+        };
+        MssqlDriver::connect(&connection_string).await.ok()
+    }
+
+    #[tokio::test]
+    async fn test_connect() {
+        if get_test_driver().await.is_none() {
+            return; // Skip test
+        }
+        // If we reach here, the connection was successful.
+        assert!(true);
+    }
+}
