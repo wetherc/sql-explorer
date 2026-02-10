@@ -20,6 +20,12 @@ pub enum Error {
     #[error(transparent)]
     Keyring(#[from] keyring::Error),
 
+    #[error(transparent)]
+    MySqlUrl(#[from] mysql_async::UrlError),
+
+    #[error(transparent)]
+    MySql(#[from] mysql_async::Error),
+
     #[error("Database not connected")]
     NotConnected,
 }
