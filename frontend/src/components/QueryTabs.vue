@@ -1,19 +1,39 @@
 <script setup lang="ts">
-import { onMounted, watch } from 'vue'
+import { onMounted, watch, ref } from 'vue'
 import { useTabsStore } from '@/stores/tabs'
 import { useConnectionStore } from '@/stores/connection'
 import { useQueryStore } from '@/stores/query'
 import QueryView from '@/views/QueryView.vue'
 
+import TabView from 'primevue/tabview'
+import TabPanel from 'primevue/tabpanel'
+import Button from 'primevue/button'
 
 const tabsStore = useTabsStore()
 const connectionStore = useConnectionStore()
 const queryStore = useQueryStore()
 
+const activeTabIndex = ref(0) // Local state for active tab index
+
 // Add a default tab when the component mounts if none exist
 onMounted(() => {
   if (tabsStore.tabs.length === 0) {
     tabsStore.addTab()
+  }
+})
+
+// Watch for activeTabId changes to update activeTabIndex
+watch(() => tabsStore.activeTabId, (newId) => {
+  const index = tabsStore.tabs.findIndex(tab => tab.id === newId)
+  if (index !== -1) {
+    activeTabIndex.value = index
+  }
+}, { immediate: true })
+
+// Watch for activeTabIndex changes to update activeTabId in store
+watch(activeTabIndex, (newIndex) => {
+  if (tabsStore.tabs[newIndex]) {
+    tabsStore.setActiveTab(tabsStore.tabs[newIndex].id)
   }
 })
 
@@ -54,27 +74,27 @@ function updateQuery(newQuery: string) {
     tabsStore.activeTab.query = newQuery;
   }
 }
+
+function onTabClose(event: { index: number }) {
+  const tabIdToClose = tabsStore.tabs[event.index].id
+  tabsStore.closeTab(tabIdToClose)
+}
+
 </script>
 
 <template>
   <div class="query-tabs-container">
-    <header class="tab-header">
-      <div class="tabs">
-        <div
-          v-for="tab in tabsStore.tabs"
-          :key="tab.id"
-          :class="['tab-item', { active: tab.id === tabsStore.activeTabId }]"
-          @click="tabsStore.setActiveTab(tab.id)"
-        >
-          <span>{{ tab.title }}</span>
-          <button class="close-tab" @click.stop="tabsStore.closeTab(tab.id)">x</button>
-        </div>
-        <button class="add-tab" @click="tabsStore.addTab()">+</button>
+    <header class="tab-header flex justify-content-between align-items-center p-2 surface-500">
+      <TabView v-model:activeIndex="activeTabIndex" @tab-remove="onTabClose" :closable="true" class="flex-grow-1">
+        <TabPanel v-for="tab in tabsStore.tabs" :key="tab.id" :header="tab.title" />
+      </TabView>
+      <div class="p-ml-2">
+        <Button icon="pi pi-plus" class="p-button-rounded p-button-text p-button-sm" @click="tabsStore.addTab()" />
+        <Button icon="pi pi-power-off" class="p-button-rounded p-button-text p-button-sm p-button-danger" @click="connectionStore.disconnect()" />
       </div>
-      <button @click="connectionStore.disconnect()">Disconnect</button>
     </header>
 
-    <div class="tab-content">
+    <div class="tab-content flex-grow-1">
       <QueryView
         v-if="tabsStore.activeTab"
         :query="tabsStore.activeTab.query"
@@ -84,7 +104,7 @@ function updateQuery(newQuery: string) {
         @update:query="updateQuery"
         @execute-query="handleExecuteQuery"
       />
-      <div v-else class="no-tab-selected">
+      <div v-else class="no-tab-selected p-4 text-center text-500">
         Please open a new query tab.
       </div>
     </div>
@@ -100,94 +120,43 @@ function updateQuery(newQuery: string) {
 }
 
 .tab-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  background-color: #343a40;
-  color: white;
-  padding: 0.5rem 1rem;
+  background-color: var(--p-content-background);
+  color: var(--p-text-color);
   flex-shrink: 0;
-  border-bottom: 1px solid #212529;
-}
-
-.tabs {
-  display: flex;
-  overflow-x: auto;
-  flex-grow: 1;
-}
-
-.tab-item {
-  display: flex;
-  align-items: center;
-  padding: 0.5rem 1rem;
-  cursor: pointer;
-  border: 1px solid transparent;
-  border-bottom: none;
-  background-color: #495057;
-  margin-right: 2px;
-  border-radius: 5px 5px 0 0;
-}
-
-.tab-item.active {
-  background-color: #f8f9fa;
-  color: #212529;
-  border-color: #dee2e6;
-  border-bottom-color: #f8f9fa; /* Hide bottom border */
-}
-
-.close-tab {
-  margin-left: 10px;
-  background: none;
-  border: none;
-  color: white;
-  font-weight: bold;
-  cursor: pointer;
-  padding: 0;
-  line-height: 1;
-}
-
-.tab-item.active .close-tab {
-  color: #212529;
-}
-
-.close-tab:hover {
-  color: #dc3545;
-}
-
-.add-tab {
-  background-color: #007bff;
-  color: white;
-  border: none;
-  border-radius: 5px;
-  padding: 0.5rem 1rem;
-  margin-left: 5px;
-  cursor: pointer;
+  border-bottom: 1px solid var(--p-surface-border);
 }
 
 .tab-content {
+  background-color: var(--p-component-background);
+  color: var(--p-text-color);
   flex-grow: 1;
   overflow: hidden;
-  background-color: #f8f9fa;
+  padding: 0.5rem;
 }
 
-.no-tab-selected {
-  padding: 20px;
-  text-align: center;
-  color: #6c757d;
-}
-
-button {
-  padding: 0.5rem 1rem;
-  font-size: 1rem;
-  color: #fff;
-  background-color: #007bff;
+:deep(.p-tabview .p-tabview-nav) {
   border: none;
-  border-radius: 4px;
-  cursor: pointer;
+  background: transparent;
 }
 
-button:disabled {
-  background-color: #5a9ed8;
-  cursor: not-allowed;
+:deep(.p-tabview .p-tabview-nav-link) {
+  background: var(--p-surface-400);
+  margin-right: 2px;
+  border-top-left-radius: 4px;
+  border-top-right-radius: 4px;
+}
+
+:deep(.p-tabview .p-tabview-nav-link.p-highlight) {
+  background: var(--p-content-background);
+  border-color: var(--p-surface-border);
+  border-bottom-color: var(--p-content-background);
+}
+
+:deep(.p-tabview-nav-container) {
+  border-bottom: 1px solid var(--p-surface-border);
+}
+
+:deep(.p-tabview-panels) {
+  padding: 0;
 }
 </style>
