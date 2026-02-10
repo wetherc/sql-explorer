@@ -20,6 +20,15 @@ Before you begin, ensure you have the following installed:
     -   The backend is powered by Rust. Install the Rust toolchain via `rustup`.
     -   [Install Rust](https://www.rust-lang.org/tools/install)
 
+### System Prerequisites (Ubuntu/Debian)
+
+For building the Rust backend and its Tauri dependencies on Ubuntu/Debian-based systems, you will need to install several development libraries. Open your terminal and run the following command:
+
+```sh
+sudo apt update
+sudo apt install -y pkg-config libssl-dev libsoup2.4-dev libjavascriptcoregtk-4.0-dev libgtk-3-dev libkrb5-dev libwebkit2gtk-4.0-dev libclang-dev
+```
+
 3.  **Tauri System Dependencies**
     -   Tauri requires system-level dependencies for building and webview rendering. Follow the official guide for your operating system:
     -   [Tauri Prerequisites Guide](https://tauri.app/v1/guides/getting-started/prerequisites)
