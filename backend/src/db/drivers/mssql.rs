@@ -35,8 +35,14 @@ impl MssqlDriver {
             }
         };
 
-        // Enforce encryption for MSSQL connections
-        config.encryption(EncryptionLevel::Required);
+        // Make encryption optional based on connection string
+        if config.get_encryption() == EncryptionLevel::NotSupported {
+            info!("Connecting without TLS as Encryption=false is specified in connection string.");
+            config.encryption(EncryptionLevel::NotSupported);
+        } else {
+            info!("Connecting with TLS (defaulting to Required).");
+            config.encryption(EncryptionLevel::Required);
+        }
 
         let addr = config.get_addr();
         info!("Connecting to TCP socket at {}", addr);

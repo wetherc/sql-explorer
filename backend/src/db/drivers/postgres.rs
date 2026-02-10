@@ -5,7 +5,7 @@ use crate::error::Error;
 use async_trait::async_trait;
 use log::info;
 use serde_json::Value as JsonValue;
-use tokio_postgres::{Client, Row};
+use tokio_postgres::{Client, Row, NoTls, Config as PgConfig};
 use tokio_postgres_rustls::MakeTlsConnector;
 use rustls::{ClientConfig, Error as RustlsError, RootCertStore};
 use webpki_roots::TLS_SERVER_ROOTS;
@@ -18,22 +18,29 @@ impl PostgresDriver {
     pub async fn connect(
         connection_string: &str,
     ) -> Result<Box<dyn DatabaseDriver + Send + Sync>, Error> {
-        info!("Attempting to connect to PostgreSQL database with TLS.");
-
-        let mut root_cert_store = RootCertStore::empty();
-        root_cert_store.add_server_trust_anchors(TLS_SERVER_ROOTS.iter().map(|ta| {
-            rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(
-                ta.subject,
-                ta.spki,
-                ta.name_constraints,
-            )
-        }));
-        let tls_config = ClientConfig::builder()
-            .with_root_certificates(root_cert_store)
-            .no_client_auth();
-        let tls_connector = MakeTlsConnector::new(tls_config);
+        info!("Attempting to connect to PostgreSQL database.");
         
-        let (client, connection) = tokio_postgres::connect(connection_string, tls_connector).await?;
+        let pg_config = PgConfig::from_str(connection_string)?;
+
+        let (client, connection) = if pg_config.get_ssl_mode() == tokio_postgres::config::SslMode::Disable {
+            info!("Connecting without TLS as sslmode=disable is specified.");
+            tokio_postgres::connect(connection_string, NoTls).await?
+        } else {
+            info!("Connecting with TLS.");
+            let mut root_cert_store = RootCertStore::empty();
+            root_cert_store.add_server_trust_anchors(TLS_SERVER_ROOTS.iter().map(|ta| {
+                rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(
+                    ta.subject,
+                    ta.spki,
+                    ta.name_constraints,
+                )
+            }));
+            let tls_config = ClientConfig::builder()
+                .with_root_certificates(root_cert_store)
+                .no_client_auth();
+            let tls_connector = MakeTlsConnector::new(tls_config);
+            tokio_postgres::connect(connection_string, tls_connector).await?
+        };
 
         // The connection object performs the actual I/O, so it must be spawned.
         tokio::spawn(async move {
@@ -42,7 +49,7 @@ impl PostgresDriver {
             }
         });
 
-        info!("PostgreSQL database client connected successfully with TLS.");
+        info!("PostgreSQL database client connected successfully.");
         Ok(Box::new(PostgresDriver { client }))
     }
 }
