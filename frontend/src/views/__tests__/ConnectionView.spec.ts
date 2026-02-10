@@ -120,4 +120,42 @@ describe('ConnectionView.vue', () => {
     expect(wrapper.find('.error-message').text()).toBe('Invalid server name')
     expect(connectionStore.errorMessage).toBe('Invalid server name')
   })
+
+  it('changes port to 3306 for MySQL', async () => {
+    const wrapper = mount(ConnectionView, {
+      global: {
+        stubs: {
+          SavedConnections: true,
+          SaveConnectionDialog: true
+        }
+      }
+    })
+
+    const dbTypeSelect = wrapper.find('select#db-type')
+    await dbTypeSelect.setValue(DbType.Mysql)
+
+    const portInput = wrapper.find('input#port')
+    expect((portInput.element as HTMLInputElement).value).toBe('3306')
+  })
+
+  it('hides MS SQL specific options for MySQL', async () => {
+    const wrapper = mount(ConnectionView, {
+      global: {
+        stubs: {
+          SavedConnections: true,
+          SaveConnectionDialog: true
+        }
+      }
+    })
+
+    const dbTypeSelect = wrapper.find('select#db-type')
+    await dbTypeSelect.setValue(DbType.Mysql)
+
+    // Check that MS SQL specific options are hidden
+    expect(wrapper.find('select#encrypt').exists()).toBe(false)
+    expect(wrapper.find('input[type="checkbox"]').exists()).toBe(false) // Trust server certificate
+    const authOptions = wrapper.findAll('select#auth-type option')
+    expect(authOptions.length).toBe(1)
+    expect(authOptions[0].text()).toBe('SQL Authentication')
+  })
 })
