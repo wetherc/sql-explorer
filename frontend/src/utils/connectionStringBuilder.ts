@@ -14,6 +14,7 @@ export interface ConnectionOptions {
   port?: number
   applicationName?: string
   connectTimeout?: number
+  sslMode?: string // New property for general SSL/TLS mode
 }
 
 export function buildConnectionString(options: ConnectionOptions): string {
@@ -58,6 +59,10 @@ function buildMssqlConnectionString(options: ConnectionOptions): string {
     connectionString += `TrustServerCertificate=${options.trustServerCertificate};`
   }
 
+  // TODO: Process options.sslMode for MSSQL connection string.
+  // This will likely involve mapping values like 'Disable', 'Required' to 'Encrypt=false', 'Encrypt=true'
+  // and potentially overriding trustServerCertificate based on the chosen sslMode.
+
   if (options.authType === 'sql') {
     if (!options.username) {
       throw new Error('Username is required for SQL Server Authentication.')
@@ -85,7 +90,17 @@ function buildMysqlConnectionString(options: ConnectionOptions): string {
   const port = options.port || 3306
   const database = options.database || ''
 
-  return `mysql://${user}:${password}@${server}:${port}/${database}`
+  // TODO: Process options.sslMode for MySQL connection string.
+  // This will likely involve mapping values like 'Disable', 'Required', 'Verify CA' to `ssl-mode=DISABLED`, `ssl-mode=REQUIRED`, `ssl-mode=VERIFY_CA` in the URL.
+  let queryString = '';
+  if (options.sslMode) {
+    queryString += `ssl-mode=${options.sslMode}`; // Placeholder, actual mapping will be more complex
+  }
+
+  const finalDatabase = database ? `/${database}` : '';
+  const finalQueryString = queryString ? `?${queryString}` : '';
+
+  return `mysql://${user}:${password}@${server}:${port}${finalDatabase}${finalQueryString}`
 }
 
 function buildPostgresConnectionString(options: ConnectionOptions): string {
@@ -102,5 +117,15 @@ function buildPostgresConnectionString(options: ConnectionOptions): string {
   const port = options.port || 5432
   const database = options.database || ''
 
-  return `postgresql://${user}:${password}@${server}:${port}/${database}`
+  // TODO: Process options.sslMode for PostgreSQL connection string.
+  // This will likely involve mapping values like 'Disable', 'Require', 'Verify CA' to `sslmode=disable`, `sslmode=require`, `sslmode=verify-ca` in the URL.
+  let queryString = '';
+  if (options.sslMode) {
+    queryString += `sslmode=${options.sslMode}`; // Placeholder, actual mapping will be more complex
+  }
+
+  const finalDatabase = database ? `/${database}` : '';
+  const finalQueryString = queryString ? `?${queryString}` : '';
+
+  return `postgresql://${user}:${password}@${server}:${port}${finalDatabase}${finalQueryString}`
 }

@@ -96,6 +96,7 @@ async function handleConnect() {
   }
 
   try {
+    // TODO: Pass the selected TLS/SSL mode (from the new UI element) to buildConnectionString
     const connectionString = buildConnectionString({
       dbType: dbType.value,
       server: server.value,
@@ -208,6 +209,9 @@ async function handleSaveConnection(name: string, passwordToSave?: string) {
               <Checkbox v-model="trustServerCertificate" input-id="trustServerCertificate" :binary="true" :disabled="connectionStore.isConnecting" />
               <label for="trustServerCertificate" class="ml-2"> Trust server certificate </label>
             </div>
+            
+            <!-- TODO: Add UI element (e.g., Dropdown) for TLS/SSL mode selection (Disabled, Preferred, Required, Verify CA, Verify Full) -->
+            <!-- This will allow users to configure the new optional TLS features in the backend. -->
             
             <div class="field">
               <FloatLabel>
