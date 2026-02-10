@@ -19,7 +19,7 @@ env_logger = "0.10"
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 tauri = { version = "1.5", features = ["test"] }
-tiberius = { version = "0.12.2", features = ["chrono", "tds73", "integrated-auth-gssapi", "sql-browser-tokio"] }
+tiberius = { version = "0.12.2", features = ["chrono", "tds73", "integrated-auth-gssapi", "sql-browser-tokio", "rustls"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 futures-util = "0.3"
@@ -28,10 +28,11 @@ keyring = "2.3"
 anyhow = "1.0"
 directories = "5.0"
 async-trait = "0.1.89"
-mysql_async = "0.36.1"
+mysql_async = { version = "0.36.1", features = ["native-tls-tls"] }
 tokio-postgres = "0.7.13"
 tokio-postgres-rustls = "0.13.0"
 postgres-types = { version = "0.2.9", features = ["derive"] }
+rustls = { version = "0.22", features = ["client", "dangerous_configuration"] }
 
 [features]
 # by default Tauri runs in production mode

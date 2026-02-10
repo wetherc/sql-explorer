@@ -5,7 +5,10 @@ use crate::error::Error;
 use async_trait::async_trait;
 use log::info;
 use serde_json::Value as JsonValue;
-use tokio_postgres::{Client, NoTls, Row};
+use tokio_postgres::{Client, Row};
+use tokio_postgres_rustls::MakeTlsConnector;
+use rustls::{ClientConfig, Error as RustlsError, RootCertStore};
+use webpki_roots::TLS_SERVER_ROOTS;
 
 pub struct PostgresDriver {
     client: Client,
@@ -15,10 +18,22 @@ impl PostgresDriver {
     pub async fn connect(
         connection_string: &str,
     ) -> Result<Box<dyn DatabaseDriver + Send + Sync>, Error> {
-        info!("Attempting to connect to PostgreSQL database.");
-        // Note: This is a simplified connection that uses NoTls.
-        // A production implementation should use `tokio-postgres-rustls` or `tokio-postgres-native-tls`.
-        let (client, connection) = tokio_postgres::connect(connection_string, NoTls).await?;
+        info!("Attempting to connect to PostgreSQL database with TLS.");
+
+        let mut root_cert_store = RootCertStore::empty();
+        root_cert_store.add_server_trust_anchors(TLS_SERVER_ROOTS.iter().map(|ta| {
+            rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(
+                ta.subject,
+                ta.spki,
+                ta.name_constraints,
+            )
+        }));
+        let tls_config = ClientConfig::builder()
+            .with_root_certificates(root_cert_store)
+            .no_client_auth();
+        let tls_connector = MakeTlsConnector::new(tls_config);
+        
+        let (client, connection) = tokio_postgres::connect(connection_string, tls_connector).await?;
 
         // The connection object performs the actual I/O, so it must be spawned.
         tokio::spawn(async move {
@@ -27,7 +42,7 @@ impl PostgresDriver {
             }
         });
 
-        info!("PostgreSQL database client connected successfully.");
+        info!("PostgreSQL database client connected successfully with TLS.");
         Ok(Box::new(PostgresDriver { client }))
     }
 }

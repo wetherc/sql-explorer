@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use futures_util::{StreamExt, TryStreamExt};
 use log::{debug, error, info, warn};
 use serde_json::Value as JsonValue;
-use tiberius::{Client, Config, QueryItem, Row, Column, numeric::Numeric as TiberiusNumeric};
+use tiberius::{Client, Config, QueryItem, Row, Column, numeric::Numeric as TiberiusNumeric, EncryptionLevel};
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use std::error::Error as StdError;
@@ -24,7 +24,7 @@ impl MssqlDriver {
         info!("Attempting to connect to the database.");
         debug!("Connection string: {}", connection_string);
 
-        let config = match Config::from_ado_string(connection_string) {
+        let mut config = match Config::from_ado_string(connection_string) {
             Ok(config) => {
                 info!("Database configuration parsed successfully.");
                 debug!("Configuration details: {:?}", config);
@@ -35,6 +35,9 @@ impl MssqlDriver {
                 return Err(e.into());
             }
         };
+
+        // Enforce encryption for MSSQL connections
+        config.encryption(EncryptionLevel::Required);
 
         let addr = config.get_addr();
         info!("Connecting to TCP socket at {}", addr);
