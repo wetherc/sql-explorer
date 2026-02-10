@@ -1,5 +1,5 @@
 use crate::db::{
-    drivers::DatabaseDriver, AppColumn, Database, QueryResponse, ResultSet, Schema, Table,
+    drivers::DatabaseDriver, AppColumn, Database, QueryResponse, ResultSet, Schema, Table, QueryParams,
 };
 use crate::error::Error;
 use async_trait::async_trait;
@@ -49,8 +49,33 @@ impl PostgresDriver {
 
 #[async_trait]
 impl DatabaseDriver for PostgresDriver {
-    async fn execute_query(&mut self, query: &str) -> Result<QueryResponse, Error> {
-        let rows = self.client.query(query, &[]).await?;
+    async fn execute_query(&mut self, query: &str, query_params: Option<&QueryParams>) -> Result<QueryResponse, Error> {
+        info!("Executing PostgreSQL query: {}", query);
+        debug!("Parameters: {:?}", query_params);
+
+        let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync>> = Vec::new();
+        if let Some(qp) = query_params {
+            for param in qp {
+                match &param.value {
+                    JsonValue::String(s) => params.push(Box::new(s.clone())),
+                    JsonValue::Number(n) => {
+                        if let Some(i) = n.as_i64() {
+                            params.push(Box::new(i));
+                        } else if let Some(f) = n.as_f64() {
+                            params.push(Box::new(f));
+                        } else {
+                            return Err(Error::Anyhow(anyhow::anyhow!("Unsupported number type for parameter")));
+                        }
+                    },
+                    JsonValue::Bool(b) => params.push(Box::new(b.clone())),
+                    JsonValue::Null => params.push(Box::new(Option::<String>::None)),
+                    _ => return Err(Error::Anyhow(anyhow::anyhow!("Unsupported parameter type"))),
+                }
+            }
+        }
+        let borrowed_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = params.iter().map(|p| p.as_ref()).collect();
+
+        let rows = self.client.query(query, borrowed_params.as_slice()).await?;
         let mut results: Vec<ResultSet> = Vec::new();
 
         if !rows.is_empty() {

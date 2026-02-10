@@ -1,13 +1,12 @@
 use crate::db::{
-    AppColumn, Database, QueryResponse, ResultSet, Schema, Table,
-    drivers::DatabaseDriver,
+    AppColumn, Database, QueryResponse, ResultSet, Schema, Table, QueryParams,
 };
 use crate::error::Error; // Use crate::error::Error directly
 use async_trait::async_trait;
 use futures_util::{StreamExt, TryStreamExt};
 use log::{debug, error, info, warn};
 use serde_json::Value as JsonValue;
-use tiberius::{Client, Config, QueryItem, Row, Column, numeric::Numeric as TiberiusNumeric, EncryptionLevel};
+use tiberius::{Client, Config, QueryItem, Row, Column, numeric::Numeric as TiberiusNumeric, EncryptionLevel, Into<td>};
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use std::error::Error as StdError;
@@ -113,52 +112,58 @@ impl MssqlDriver {
 
 #[async_trait]
 impl DatabaseDriver for MssqlDriver {
-    async fn execute_query(&mut self, query: &str) -> Result<QueryResponse, Error> {
-        let mut stream = self.client.simple_query(query).await?;
+    async fn execute_query(&mut self, query: &str, query_params: Option<&QueryParams>) -> Result<QueryResponse, Error> {
+        info!("Executing MSSQL query: {}", query);
+        debug!("Parameters: {:?}", query_params);
+
+        let mut params: Vec<Box<dyn Into<td>>> = Vec::new();
+        if let Some(qp) = query_params {
+            for param in qp {
+                match &param.value {
+                    JsonValue::String(s) => params.push(Box::new(s.clone())),
+                    JsonValue::Number(n) => {
+                        if let Some(i) = n.as_i64() {
+                            params.push(Box::new(i));
+                        } else if let Some(f) = n.as_f64() {
+                            params.push(Box::new(f));
+                        } else {
+                            return Err(Error::Anyhow(anyhow::anyhow!("Unsupported number type for parameter")));
+                        }
+                    },
+                    JsonValue::Bool(b) => params.push(Box::new(b.clone())),
+                    JsonValue::Null => params.push(Box::new(Option::<String>::None)), // Represent null as Option<String>::None
+                    _ => return Err(Error::Anyhow(anyhow::anyhow!("Unsupported parameter type"))),
+                }
+            }
+        }
+        let borrowed_params: Vec<&dyn Into<td>> = params.iter().map(|p| p.as_ref()).collect();
+
+        let mut stream = self.client.query(query, borrowed_params.as_slice()).await?;
         let mut all_results: Vec<ResultSet> = Vec::new();
-        let mut current_result_set: Option<ResultSet> = None;
-        let messages: Vec<String> = Vec::new(); // Will remain empty for now
 
         while let Some(item) = stream.try_next().await? {
             match item {
                 QueryItem::Metadata(metadata) => {
-                    // If there's an active result set, save it before starting a new one
-                    if let Some(rs) = current_result_set.take() {
-                        all_results.push(rs);
-                    }
-
-                    // Start a new result set with the new metadata
                     let columns: Vec<String> = metadata
                         .columns()
                         .iter()
                         .map(|c| c.name().to_string())
                         .collect();
-                    current_result_set = Some(ResultSet {
-                        columns,
-                        rows: Vec::new(),
-                    });
-                }
-                QueryItem::Row(row) => {
-                    // Add row to the current result set
-                    if let Some(ref mut rs) = current_result_set {
-                        rs.rows.push(row_to_json(&row, row.columns()));
-                    } else {
-                        // Row received before any metadata, this is an unexpected state
-                        error!("Row received before any result set metadata.");
-                        // Decide how to handle, e.g., create a default result set
-                    }
-                }
-            }
-        }
+                    let rows_stream = stream.rows().await?;
+                    let rows: Vec<JsonValue> = rows_stream
+                        .into_iter()
+                        .map(|row| row_to_json(&row, metadata.columns()))
+                        .collect();
 
-        // Push the last active result set if any
-        if let Some(rs) = current_result_set.take() {
-            all_results.push(rs);
+                    all_results.push(ResultSet { columns, rows });
+                },
+                _ => { /* Ignore other QueryItem types for now, e.g., ReturnValue, Done */ }
+            }
         }
 
         Ok(QueryResponse {
             results: all_results,
-            messages,
+            messages: Vec::new(),
         })
     }
 
@@ -193,39 +198,45 @@ impl DatabaseDriver for MssqlDriver {
     }
 
     async fn list_tables(&mut self, schema: &str) -> Result<Vec<Table>, Error> {
-        let query = format!(
-            "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '{}' ORDER BY TABLE_NAME",
-            schema
-        );
-        let mut stream = self.client.simple_query(query.as_str()).await?;
+        let query = "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = @p1 ORDER BY TABLE_NAME";
+        let mut stream = self.client.query(query, &[&schema]).await?;
         let mut tables = Vec::new();
 
-        while let Some(result) = stream.next().await {
-            if let Ok(QueryItem::Row(row)) = result {
-                if let Some(name) = row.get::<&str, _>(0) {
-                    tables.push(Table { name: name.to_string() });
-                }
+        while let Some(item) = stream.try_next().await? {
+            match item {
+                QueryItem::Metadata(metadata) => {
+                    let rows_stream = stream.rows().await?;
+                    for row in rows_stream {
+                        if let Some(name) = row.get::<&str, _>(0) {
+                            tables.push(Table { name: name.to_string() });
+                        }
+                    }
+                },
+                _ => {}
             }
         }
         Ok(tables)
     }
 
     async fn list_columns(&mut self, schema: &str, table: &str) -> Result<Vec<AppColumn>, Error> {
-        let query = format!(
-            "SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}' ORDER BY ORDINAL_POSITION",
-            schema, table
-        );
-        let mut stream = self.client.simple_query(query.as_str()).await?;
+        let query = "SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = @p1 AND TABLE_NAME = @p2 ORDER BY ORDINAL_POSITION";
+        let mut stream = self.client.query(query, &[&schema, &table]).await?;
         let mut columns = Vec::new();
 
-        while let Some(result) = stream.next().await {
-            if let Ok(QueryItem::Row(row)) = result {
-                if let (Some(name), Some(data_type)) = (row.get::<&str, _>(0), row.get::<&str, _>(1)) {
-                    columns.push(AppColumn {
-                        name: name.to_string(),
-                        data_type: data_type.to_string(),
-                    });
-                }
+        while let Some(item) = stream.try_next().await? {
+            match item {
+                QueryItem::Metadata(metadata) => {
+                    let rows_stream = stream.rows().await?;
+                    for row in rows_stream {
+                        if let (Some(name), Some(data_type)) = (row.get::<&str, _>(0), row.get::<&str, _>(1)) {
+                            columns.push(AppColumn {
+                                name: name.to_string(),
+                                data_type: data_type.to_string(),
+                            });
+                        }
+                    }
+                },
+                _ => {}
             }
         }
         Ok(columns)

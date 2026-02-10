@@ -42,6 +42,16 @@ impl Serialize for Error {
     where
         S: serde::ser::Serializer,
     {
-        serializer.serialize_str(self.to_string().as_ref())
+        let error_message = match self {
+            Error::Tiberius(_) | Error::MySql(_) | Error::Postgres(_) => "Database error occurred.".to_string(),
+            Error::Io(_) | Error::MySqlUrl(_) => "Connection error occurred.".to_string(),
+            Error::NotConnected => self.to_string(), // Keep specific message for NotConnected
+            _ => "An unexpected error occurred.".to_string(),
+        };
+        
+        // Log the full error for backend debugging
+        log::error!("Backend Error: {}", self);
+
+        serializer.serialize_str(&error_message)
     }
 }

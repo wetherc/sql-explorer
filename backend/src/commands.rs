@@ -4,7 +4,7 @@ use crate::{
         self,
         drivers::{
             mssql::MssqlDriver, mysql::MysqlDriver, postgres::PostgresDriver, DatabaseDriver,
-        },
+        }, QueryParams,
     },
     error::Error,
     state::AppState,
@@ -19,24 +19,43 @@ pub async fn connect(
     db_type: storage::DbType,
     state: tauri::State<'_, AppState>,
 ) -> CommandResult<()> {
-    let client = match db_type {
+    // Only log the database type and server, not the full connection string
+    // to avoid logging sensitive information like credentials.
+    let (logged_server, logged_db_type) = {
+        let temp_config = tiberius::Config::from_ado_string(&connection_string).ok();
+        let server = temp_config.as_ref().and_then(|c| c.host().map(|h| h.to_string())).unwrap_or_else(|| "unknown".to_string());
+        (server, format!("{:?}", db_type))
+    };
+
+
+    let client_result = match db_type {
         storage::DbType::Mssql => MssqlDriver::connect(&connection_string).await,
         storage::DbType::Mysql => MysqlDriver::connect(&connection_string).await,
         storage::DbType::Postgres => PostgresDriver::connect(&connection_string).await,
-    }?;
+    };
 
-    *state.db.lock().await = Some(client);
-    Ok(())
+    match client_result {
+        Ok(client) => {
+            *state.db.lock().await = Some(client);
+            log::info!("Successfully connected to {} database on server '{}'.", logged_db_type, logged_server);
+            Ok(())
+        },
+        Err(e) => {
+            log::error!("Failed to connect to {} database on server '{}': {:?}", logged_db_type, logged_server, e);
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]
 pub async fn execute_query(
     query: String,
+    query_params: Option<QueryParams>,
     state: tauri::State<'_, AppState>,
 ) -> CommandResult<db::QueryResponse> {
     let mut client_guard = state.db.lock().await;
     let client = client_guard.as_mut().ok_or(Error::NotConnected)?;
-    client.execute_query(&query).await
+    client.execute_query(&query, query_params.as_ref()).await
 }
 
 #[tauri::command]
@@ -97,14 +116,24 @@ pub fn save_connection(
         auth_type,
         user,
     };
-    storage::save_connection_details(&connection)?;
+    let result = storage::save_connection_details(&connection);
+    if let Err(e) = result {
+        log::error!("Failed to save connection details for '{}': {:?}", connection.name, e);
+        return Err(e.into());
+    }
+    log::info!("Connection details for '{}' saved successfully.", connection.name);
+
     if let Some(password) = password {
-        storage::save_password(&name, &password)?;
+        let result = storage::save_password(&name, &password);
+        if let Err(e) = result {
+            log::error!("Failed to save password for connection '{}': {:?}", name, e);
+            return Err(e.into());
+        }
+        log::info!("Password for connection '{}' saved successfully (password not logged).", name);
     } else {
-        // If there's no password provided for a SQL Auth connection,
-        // we should delete any existing password for this connection.
         if connection.auth_type == storage::AuthType::Sql {
             let _ = storage::delete_password(&name);
+            log::info!("Existing password for SQL Auth connection '{}' deleted (no new password provided).", name);
         }
     }
     Ok(())
@@ -112,14 +141,35 @@ pub fn save_connection(
 
 #[tauri::command]
 pub fn delete_connection(name: String) -> CommandResult<()> {
-    storage::delete_connection_details(&name)?;
-    storage::delete_password(&name)?;
+    let result_details = storage::delete_connection_details(&name);
+    let result_password = storage::delete_password(&name);
+
+    if let Err(e) = result_details {
+        log::error!("Failed to delete connection details for '{}': {:?}", name, e);
+        return Err(e.into());
+    }
+    if let Err(e) = result_password {
+        log::error!("Failed to delete password for connection '{}': {:?}", name, e);
+        return Err(e.into());
+    }
+
+    log::info!("Connection '{}' and its associated password successfully deleted.", name);
     Ok(())
 }
 
 #[tauri::command]
 pub fn get_connection_password(name: String) -> CommandResult<String> {
-    storage::get_password(&name).map_err(Error::from)
+    let password_result = storage::get_password(&name);
+    match password_result {
+        Ok(password) => {
+            log::info!("Password successfully retrieved for connection '{}' (password not logged).", name);
+            Ok(password)
+        },
+        Err(e) => {
+            log::error!("Failed to retrieve password for connection '{}': {:?}", name, e);
+            Err(e.into())
+        }
+    }
 }
 
 

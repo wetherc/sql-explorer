@@ -5,7 +5,12 @@ pub mod drivers;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryParam {
+    pub value: JsonValue,
+}
 
+pub type QueryParams = Vec<QueryParam>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Database {

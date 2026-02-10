@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::db::{AppColumn, Database, QueryResponse, ResultSet, Schema, Table};
+use crate::db::{AppColumn, Database, QueryResponse, ResultSet, Schema, Table, QueryParams};
 use crate::error::Error;
 use async_trait::async_trait;
 use log::{debug, info};
@@ -54,9 +54,9 @@ impl MysqlDriver {
 
 #[async_trait]
 impl super::DatabaseDriver for MysqlDriver {
-    async fn execute_query(&mut self, query: &str) -> Result<QueryResponse, Error> {
+    async fn execute_query(&mut self, query: &str, query_params: Option<&QueryParams>) -> Result<QueryResponse, Error> {
         info!("Executing MySQL query: {}", query);
-        self.with_conn(|conn| execute_internal(conn, query.to_string())).await
+        self.with_conn(|conn| execute_internal(conn, query.to_string(), query_params)).await
     }
 
     async fn list_databases(&mut self) -> Result<Vec<Database>, Error> {
@@ -99,12 +99,39 @@ impl super::DatabaseDriver for MysqlDriver {
     }
 }
 
-pub(crate) async fn execute_internal(mut conn: Conn, query: String) -> Result<(Conn, QueryResponse), Error> {
-    // Explicitly type the result of query_iter.await
-    let mut query_result: QueryResult<'_, '_, TextProtocol> = conn.query_iter(&query).await?;
-
+pub(crate) async fn execute_internal(
+    mut conn: Conn,
+    query: String,
+    query_params: Option<&QueryParams>,
+) -> Result<(Conn, QueryResponse), Error> {
     let mut all_results: Vec<ResultSet> = Vec::new();
     let messages: Vec<String> = Vec::new(); // MySQL doesn't have direct messages like MSSQL
+
+    let params = if let Some(qp) = query_params {
+        let mut mysql_params: Vec<mysql_async::Value> = Vec::new();
+        for param in qp {
+            match &param.value {
+                JsonValue::String(s) => mysql_params.push(mysql_async::Value::from(s.clone())),
+                JsonValue::Number(n) => {
+                    if let Some(i) = n.as_i64() {
+                        mysql_params.push(mysql_async::Value::from(i));
+                    } else if let Some(f) = n.as_f64() {
+                        mysql_params.push(mysql_async::Value::from(f));
+                    } else {
+                        return Err(Error::Anyhow(anyhow::anyhow!("Unsupported number type for parameter")));
+                    }
+                },
+                JsonValue::Bool(b) => mysql_params.push(mysql_async::Value::from(b.clone())),
+                JsonValue::Null => mysql_params.push(mysql_async::Value::NULL),
+                _ => return Err(Error::Anyhow(anyhow::anyhow!("Unsupported parameter type"))),
+            }
+        }
+        mysql_async::Params::Positional(mysql_params)
+    } else {
+        mysql_async::Params::Empty
+    };
+
+    let mut query_result: QueryResult<'_, '_, TextProtocol> = conn.exec_iter(&query, params).await?;
 
     while !query_result.is_empty() {
         let columns: Vec<String> = query_result.columns().unwrap_or_default().iter().map(|c: &mysql_async::Column| c.name_str().to_string()).collect();
