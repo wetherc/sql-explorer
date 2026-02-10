@@ -2,6 +2,7 @@
 import { ref, computed, watch } from 'vue'
 import { useConnectionStore } from '@/stores/connection'
 import { useSavedConnectionsStore } from '@/stores/savedConnections'
+import { useToast } from 'primevue/usetoast'
 import { buildConnectionString } from '@/utils/connectionStringBuilder'
 import type { SavedConnection } from '@/types/savedConnection'
 import { AuthType, DbType } from '@/types/savedConnection'
@@ -9,8 +10,19 @@ import { AuthType, DbType } from '@/types/savedConnection'
 import SavedConnections from '@/components/SavedConnections.vue'
 import SaveConnectionDialog from '@/components/SaveConnectionDialog.vue'
 
+import Button from 'primevue/button'
+import Card from 'primevue/card'
+import Checkbox from 'primevue/checkbox'
+import Dropdown from 'primevue/dropdown'
+import FloatLabel from 'primevue/floatlabel'
+import InputNumber from 'primevue/inputnumber'
+import InputText from 'primevue/inputtext'
+import Message from 'primevue/message'
+import Password from 'primevue/password'
+
 const connectionStore = useConnectionStore()
 const savedConnectionsStore = useSavedConnectionsStore()
+const toast = useToast()
 
 const dbType = ref<DbType>(DbType.Mssql)
 const server = ref('localhost')
@@ -21,13 +33,27 @@ const connectTimeout = ref(15)
 const username = ref('sa')
 const password = ref('')
 const authType = ref<AuthType>(AuthType.Sql)
-const encrypt = ref<'false' | 'true'>('true')
 const trustServerCertificate = ref(true)
 
 const showSaveDialog = ref(false)
 
 const isSqlAuth = computed(() => authType.value === AuthType.Sql)
 const isNamedInstance = computed(() => dbType.value === DbType.Mssql && server.value.includes('\\'))
+
+const dbTypeOptions = ref([
+  { label: 'Microsoft SQL Server', value: DbType.Mssql },
+  { label: 'MySQL', value: DbType.Mysql },
+  { label: 'PostgreSQL', value: DbType.Postgres },
+])
+
+const authTypeOptions = computed(() => {
+  const options = [{ label: 'SQL Authentication', value: AuthType.Sql }]
+  if (dbType.value === DbType.Mssql) {
+    options.push({ label: 'Microsoft Entra / Integrated', value: AuthType.Integrated })
+  }
+  return options
+})
+
 
 watch(isNamedInstance, (isNamed) => {
   if (isNamed) {
@@ -41,6 +67,9 @@ watch(dbType, (newDbType) => {
   if (newDbType === DbType.Mysql) {
     port.value = 3306
     authType.value = AuthType.Sql // MySQL doesn't have integrated auth
+  } else if (newDbType === DbType.Postgres) {
+    port.value = 5432
+    authType.value = AuthType.Sql // Postgres also uses standard user/pass
   } else {
     port.value = 1433
   }
@@ -74,13 +103,15 @@ async function handleConnect() {
       database: database.value,
       applicationName: applicationName.value,
       connectTimeout: connectTimeout.value,
-      authType: authType.value === AuthType.Sql ? 'sql' : 'integrated',
+      authType: authType.value,
       username: isSqlAuth.value ? username.value : undefined,
       password: isSqlAuth.value ? finalPassword : undefined,
-      encrypt: encrypt.value,
       trustServerCertificate: trustServerCertificate.value
     })
     await connectionStore.connect(connectionString, dbType.value)
+    if (connectionStore.isConnected) {
+      toast.add({ severity: 'success', summary: 'Connected', detail: `Successfully connected to ${server.value}`, life: 3000 });
+    }
   } catch (error: unknown) {
     connectionStore.errorMessage =
       error instanceof Error ? error.message : 'An unknown error occurred.'
@@ -115,8 +146,9 @@ async function handleSaveConnection(name: string, passwordToSave?: string) {
   }
   try {
     await savedConnectionsStore.saveConnection({ name, ...connectionToSave }, passwordToSave)
+    toast.add({ severity: 'success', summary: 'Saved', detail: `Connection '${name}' saved.`, life: 3000 });
   } catch (error) {
-    alert(`Error saving connection: ${error}`)
+    toast.add({ severity: 'error', summary: 'Error', detail: `Failed to save connection: ${error}`, life: 5000 });
   }
 }
 </script>
@@ -124,141 +156,91 @@ async function handleSaveConnection(name: string, passwordToSave?: string) {
 <template>
   <div class="connection-view-wrapper">
     <div class="connection-view">
-      <form @submit.prevent="handleConnect">
-        <h2>Connect to Database</h2>
-
-        <div class="form-group">
-          <label for="db-type">Database Type</label>
-          <select id="db-type" v-model="dbType" :disabled="connectionStore.isConnecting">
-            <option :value="DbType.Mssql">Microsoft SQL Server</option>
-            <option :value="DbType.Mysql">MySQL</option>
-          </select>
-        </div>
-
-        <div class="form-group">
-          <label for="server">Server or Server\Instance</label>
-          <input
-            id="server"
-            v-model="server"
-            type="text"
-            placeholder="localhost or localhost\\SQLEXPRESS"
-            required
-            :disabled="connectionStore.isConnecting"
-          />
-        </div>
-
-        <div class="form-group">
-          <label for="port">Port</label>
-          <input
-            id="port"
-            v-model.number="port"
-            type="number"
-            :placeholder="dbType === DbType.Mssql ? '1433' : '3306'"
-            :required="!isNamedInstance"
-            :disabled="connectionStore.isConnecting || isNamedInstance"
-          />
-        </div>
-
-        <div class="form-group">
-          <label for="database">Database (optional)</label>
-          <input
-            id="database"
-            v-model="database"
-            type="text"
-            placeholder="master"
-            :disabled="connectionStore.isConnecting"
-          />
-        </div>
-
-        <div class="form-group">
-          <label for="appName">Application Name</label>
-          <input
-            id="appName"
-            v-model="applicationName"
-            type="text"
-            :disabled="connectionStore.isConnecting"
-          />
-        </div>
-
-        <div class="form-group">
-          <label for="timeout">Connect Timeout (seconds)</label>
-          <input
-            id="timeout"
-            v-model.number="connectTimeout"
-            type="number"
-            required
-            :disabled="connectionStore.isConnecting"
-          />
-        </div>
-
-        <div v-if="dbType === DbType.Mssql">
-          <div class="form-group">
-            <label for="encrypt">Encryption</label>
-            <select id="encrypt" v-model="encrypt" :disabled="connectionStore.isConnecting">
-              <option value="true">On</option>
-              <option value="false">Off</option>
-            </select>
-          </div>
-
-          <div class="form-group">
-            <label class="checkbox-label">
-              <input
-                type="checkbox"
-                v-model="trustServerCertificate"
-                :disabled="connectionStore.isConnecting"
-              />
-              Trust server certificate
-            </label>
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label for="auth-type">Authentication</label>
-          <select id="auth-type" v-model="authType" :disabled="connectionStore.isConnecting">
-            <option :value="AuthType.Sql">SQL Authentication</option>
-            <option v-if="dbType === DbType.Mssql" :value="AuthType.Integrated">
-              Microsoft Entra / Integrated
-            </option>
-          </select>
-        </div>
-
-        <template v-if="isSqlAuth">
-          <div class="form-group">
-            <label for="username">Username</label>
-            <input
-              id="username"
-              v-model="username"
-              type="text"
-              placeholder="sa"
-              required
-              :disabled="connectionStore.isConnecting"
-            />
-          </div>
-
-          <div class="form-group">
-            <label for="password">Password</label>
-            <input
-              id="password"
-              v-model="password"
-              type="password"
-              :disabled="connectionStore.isConnecting"
-              placeholder="Leave blank for saved password"
-            />
-          </div>
+      <Card>
+        <template #title>
+          <div class="text-center">Connect to Database</div>
         </template>
+        <template #content>
+          <form @submit.prevent="handleConnect" class="p-fluid">
+            <div class="field">
+              <FloatLabel>
+                <Dropdown id="db-type" v-model="dbType" :options="dbTypeOptions" option-label="label" option-value="value" :disabled="connectionStore.isConnecting" />
+                <label for="db-type">Database Type</label>
+              </FloatLabel>
+            </div>
 
-        <div class="form-actions">
-          <button type="submit" :disabled="connectionStore.isConnecting">
-            {{ connectionStore.isConnecting ? 'Connecting...' : 'Connect' }}
-          </button>
-          <button type="button" @click="openSaveDialog" :disabled="connectionStore.isConnecting">
-            Save Connection
-          </button>
-        </div>
-        <p v-if="connectionStore.errorMessage" class="error-message">
-          {{ connectionStore.errorMessage }}
-        </p>
-      </form>
+            <div class="field">
+              <FloatLabel>
+                <InputText id="server" v-model="server" required :disabled="connectionStore.isConnecting" />
+                <label for="server">Server or Server\Instance</label>
+              </FloatLabel>
+            </div>
+
+            <div class="field">
+              <FloatLabel>
+                <InputNumber id="port" v-model="port" :required="!isNamedInstance" :disabled="connectionStore.isConnecting || isNamedInstance" />
+                <label for="port">Port</label>
+              </FloatLabel>
+            </div>
+
+            <div class="field">
+              <FloatLabel>
+                <InputText id="database" v-model="database" :disabled="connectionStore.isConnecting" />
+                <label for="database">Database (optional)</label>
+              </FloatLabel>
+            </div>
+
+            <div class="field">
+              <FloatLabel>
+                <InputText id="appName" v-model="applicationName" :disabled="connectionStore.isConnecting" />
+                <label for="appName">Application Name</label>
+              </FloatLabel>
+            </div>
+
+             <div class="field">
+              <FloatLabel>
+                <InputNumber id="timeout" v-model="connectTimeout" required :disabled="connectionStore.isConnecting" />
+                <label for="timeout">Connect Timeout (seconds)</label>
+              </FloatLabel>
+            </div>
+
+            <div v-if="dbType === DbType.Mssql" class="field-checkbox">
+              <Checkbox v-model="trustServerCertificate" input-id="trustServerCertificate" :binary="true" :disabled="connectionStore.isConnecting" />
+              <label for="trustServerCertificate" class="ml-2"> Trust server certificate </label>
+            </div>
+            
+            <div class="field">
+              <FloatLabel>
+                <Dropdown id="auth-type" v-model="authType" :options="authTypeOptions" option-label="label" option-value="value" :disabled="connectionStore.isConnecting" />
+                <label for="auth-type">Authentication</label>
+              </FloatLabel>
+            </div>
+
+            <template v-if="isSqlAuth">
+              <div class="field">
+                <FloatLabel>
+                  <InputText id="username" v-model="username" required :disabled="connectionStore.isConnecting" />
+                  <label for="username">Username</label>
+                </FloatLabel>
+              </div>
+
+              <div class="field">
+                <FloatLabel>
+                  <Password id="password" v-model="password" :feedback="false" toggle-mask :disabled="connectionStore.isConnecting" />
+                  <label for="password">Password</label>
+                </FloatLabel>
+              </div>
+            </template>
+
+            <div class="form-actions">
+              <Button type="submit" label="Connect" :loading="connectionStore.isConnecting" icon="pi pi-check" class="p-button-success" />
+              <Button type="button" label="Save" @click="openSaveDialog" :disabled="connectionStore.isConnecting" icon="pi pi-save" class="p-button-secondary" />
+            </div>
+
+            <Message v-if="connectionStore.errorMessage" severity="error" :closable="false">{{ connectionStore.errorMessage }}</Message>
+          </form>
+        </template>
+      </Card>
     </div>
     <div class="saved-connections-panel">
       <SavedConnections @select="handleSelectSavedConnection" />
@@ -285,8 +267,8 @@ async function handleSaveConnection(name: string, passwordToSave?: string) {
   display: grid;
   grid-template-columns: 2fr 1fr;
   height: 100vh;
-  gap: 20px;
-  padding: 20px;
+  gap: 1rem;
+  padding: 1rem;
 }
 .connection-view {
   display: flex;
@@ -295,90 +277,19 @@ async function handleSaveConnection(name: string, passwordToSave?: string) {
   overflow-y: auto;
 }
 
-form {
-  width: 100%;
-  max-width: 500px;
-  padding: 2rem;
-  border: 1px solid #ccc;
-  border-radius: 8px;
-  background-color: #f9f9f9;
-}
-
-h2 {
-  text-align: center;
+.field, .field-checkbox {
   margin-bottom: 1.5rem;
-}
-
-.form-group {
-  margin-bottom: 1rem;
-}
-
-label {
-  display: block;
-  margin-bottom: 0.5rem;
-}
-
-.checkbox-label {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  cursor: pointer;
-}
-
-input[type='checkbox'] {
-  width: auto;
-}
-
-input,
-select {
-  width: 100%;
-  padding: 0.5rem;
-  font-size: 1rem;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  background-color: white;
 }
 
 .form-actions {
   display: flex;
-  gap: 10px;
-  margin-top: 1rem;
-}
-
-button {
-  flex: 1;
-  padding: 0.75rem;
-  font-size: 1rem;
-  color: #fff;
-  background-color: #007bff;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: background-color 0.2s;
-}
-
-button:hover {
-  background-color: #0056b3;
-}
-
-button:disabled {
-  background-color: #5a9ed8;
-  cursor: not-allowed;
-}
-
-.error-message {
-  color: #d8000c;
-  background-color: #ffbaba;
-  border: 1px solid #d8000c;
-  border-radius: 4px;
-  padding: 0.75rem;
-  margin-top: 1rem;
-  text-align: center;
+  gap: 1rem;
+  margin-top: 1.5rem;
 }
 
 .saved-connections-panel {
-  border-left: 1px solid #ccc;
-  padding-left: 20px;
+  border-left: 1px solid var(--p-surface-border);
+  padding-left: 1rem;
   overflow-y: auto;
 }
 </style>
