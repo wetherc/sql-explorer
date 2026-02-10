@@ -2,6 +2,8 @@
 
 A lightweight, modern, and cross-platform desktop application for interacting with Microsoft SQL Server. Built with Vue.js and [Tauri](https://tauri.app/).
 
+This is vibe coded slop. Because I want to be a better informed hater.
+
 ## Prerequisites
 
 Before you begin, ensure you have the following installed:
