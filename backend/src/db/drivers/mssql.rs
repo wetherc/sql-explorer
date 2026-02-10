@@ -1,15 +1,16 @@
 use crate::db::{
-    AppColumn, Database, QueryResponse, ResultSet, Schema, Table, QueryParams,
+    AppColumn, Database, QueryResponse, ResultSet, Schema, Table, QueryParams
 };
 use crate::error::Error; // Use crate::error::Error directly
 use async_trait::async_trait;
 use futures_util::{StreamExt, TryStreamExt};
 use log::{debug, error, info, warn};
 use serde_json::Value as JsonValue;
-use tiberius::{Client, Config, QueryItem, Row, Column, numeric::Numeric as TiberiusNumeric, EncryptionLevel, Into<td>};
+use tiberius::{Client, Config, QueryItem, Row, Column, numeric::Numeric as TiberiusNumeric, EncryptionLevel, IntoSql}; // Changed to IntoSql
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use std::error::Error as StdError;
+use crate::db::drivers::DatabaseDriver; // Added back DatabaseDriver import
 
 pub type DbClient = Client<Compat<TcpStream>>; // Defined locally
 pub type DbResult<T> = Result<T, Error>; // Use crate::error::Error for DbResult
@@ -36,7 +37,7 @@ impl MssqlDriver {
         };
 
         // Make encryption optional based on connection string
-        if config.get_encryption() == EncryptionLevel::NotSupported {
+        if config.encryption == EncryptionLevel::NotSupported {
             info!("Connecting without TLS as Encryption=false is specified in connection string.");
             config.encryption(EncryptionLevel::NotSupported);
         } else {
@@ -122,7 +123,7 @@ impl DatabaseDriver for MssqlDriver {
         info!("Executing MSSQL query: {}", query);
         debug!("Parameters: {:?}", query_params);
 
-        let mut params: Vec<Box<dyn Into<td>>> = Vec::new();
+        let mut params: Vec<Box<dyn tiberius::ToSql>> = Vec::new(); // Changed to tiberius::ToSql
         if let Some(qp) = query_params {
             for param in qp {
                 match &param.value {
@@ -142,29 +143,36 @@ impl DatabaseDriver for MssqlDriver {
                 }
             }
         }
-        let borrowed_params: Vec<&dyn Into<td>> = params.iter().map(|p| p.as_ref()).collect();
+        let borrowed_params: Vec<&dyn tiberius::ToSql> = params.iter().map(|p| p.as_ref()).collect(); // Changed to tiberius::ToSql
 
         let mut stream = self.client.query(query, borrowed_params.as_slice()).await?;
         let mut all_results: Vec<ResultSet> = Vec::new();
+        let mut current_result_set: Option<ResultSet> = None;
 
         while let Some(item) = stream.try_next().await? {
             match item {
                 QueryItem::Metadata(metadata) => {
-                    let columns: Vec<String> = metadata
-                        .columns()
-                        .iter()
-                        .map(|c| c.name().to_string())
-                        .collect();
-                    let rows_stream = stream.rows().await?;
-                    let rows: Vec<JsonValue> = rows_stream
-                        .into_iter()
-                        .map(|row| row_to_json(&row, metadata.columns()))
-                        .collect();
-
-                    all_results.push(ResultSet { columns, rows });
+                    if let Some(rs) = current_result_set.take() {
+                        all_results.push(rs);
+                    }
+                    current_result_set = Some(ResultSet {
+                        columns: metadata.columns().iter().map(|c| c.name().to_string()).collect(),
+                        rows: Vec::new(),
+                    });
+                },
+                QueryItem::Row(row) => {
+                    if let Some(ref mut rs) = current_result_set {
+                        rs.rows.push(row_to_json(&row, row.columns()));
+                    } else {
+                        // This case should ideally not happen if metadata always precedes rows for a result set.
+                        error!("Row received before any result set metadata in execute_query.");
+                    }
                 },
                 _ => { /* Ignore other QueryItem types for now, e.g., ReturnValue, Done */ }
             }
+        }
+        if let Some(rs) = current_result_set.take() {
+            all_results.push(rs);
         }
 
         Ok(QueryResponse {
@@ -210,12 +218,10 @@ impl DatabaseDriver for MssqlDriver {
 
         while let Some(item) = stream.try_next().await? {
             match item {
-                QueryItem::Metadata(metadata) => {
-                    let rows_stream = stream.rows().await?;
-                    for row in rows_stream {
-                        if let Some(name) = row.get::<&str, _>(0) {
-                            tables.push(Table { name: name.to_string() });
-                        }
+                QueryItem::Metadata(_metadata) => {}, // Metadata handled internally by client
+                QueryItem::Row(row) => {
+                    if let Some(name) = row.get::<&str, _>(0) {
+                        tables.push(Table { name: name.to_string() });
                     }
                 },
                 _ => {}
@@ -231,15 +237,13 @@ impl DatabaseDriver for MssqlDriver {
 
         while let Some(item) = stream.try_next().await? {
             match item {
-                QueryItem::Metadata(metadata) => {
-                    let rows_stream = stream.rows().await?;
-                    for row in rows_stream {
-                        if let (Some(name), Some(data_type)) = (row.get::<&str, _>(0), row.get::<&str, _>(1)) {
-                            columns.push(AppColumn {
-                                name: name.to_string(),
-                                data_type: data_type.to_string(),
-                            });
-                        }
+                QueryItem::Metadata(_metadata) => {}, // Metadata handled internally by client
+                QueryItem::Row(row) => {
+                    if let (Some(name), Some(data_type)) = (row.get::<&str, _>(0), row.get::<&str, _>(1)) {
+                        columns.push(AppColumn {
+                            name: name.to_string(),
+                            data_type: data_type.to_string(),
+                        });
                     }
                 },
                 _ => {}

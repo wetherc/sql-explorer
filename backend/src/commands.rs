@@ -3,7 +3,7 @@ use crate::{
     db::{
         self,
         drivers::{
-            mssql::MssqlDriver, mysql::MysqlDriver, postgres::PostgresDriver, DatabaseDriver,
+            mssql::MssqlDriver, mysql::MysqlDriver, postgres::PostgresDriver,
         }, QueryParams,
     },
     error::Error,
@@ -19,14 +19,9 @@ pub async fn connect(
     db_type: storage::DbType,
     state: tauri::State<'_, AppState>,
 ) -> CommandResult<()> {
-    // Only log the database type and server, not the full connection string
+    // Only log the database type, not the full connection string or server
     // to avoid logging sensitive information like credentials.
-    let (logged_server, logged_db_type) = {
-        let temp_config = tiberius::Config::from_ado_string(&connection_string).ok();
-        let server = temp_config.as_ref().and_then(|c| c.host().map(|h| h.to_string())).unwrap_or_else(|| "unknown".to_string());
-        (server, format!("{:?}", db_type))
-    };
-
+    let logged_db_type = format!("{:?}", db_type);
 
     let client_result = match db_type {
         storage::DbType::Mssql => MssqlDriver::connect(&connection_string).await,
@@ -37,11 +32,11 @@ pub async fn connect(
     match client_result {
         Ok(client) => {
             *state.db.lock().await = Some(client);
-            log::info!("Successfully connected to {} database on server '{}'.", logged_db_type, logged_server);
+            log::info!("Successfully connected to {} database.", logged_db_type);
             Ok(())
         },
         Err(e) => {
-            log::error!("Failed to connect to {} database on server '{}': {:?}", logged_db_type, logged_server, e);
+            log::error!("Failed to connect to {} database: {:?}", logged_db_type, e);
             Err(e)
         }
     }

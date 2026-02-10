@@ -6,7 +6,6 @@ pub mod postgres;
 use crate::db::{Database, Schema, Table, AppColumn, QueryResponse, QueryParams};
 use crate::error::Error;
 use async_trait::async_trait;
-use serde_json::Value as JsonValue;
 
 #[async_trait]
 pub trait DatabaseDriver: Send + Sync {

@@ -3,12 +3,14 @@ use crate::db::{
 };
 use crate::error::Error;
 use async_trait::async_trait;
-use log::info;
+use log::{info, debug}; // Import debug macro
 use serde_json::Value as JsonValue;
 use tokio_postgres::{Client, Row, NoTls, Config as PgConfig};
-use tokio_postgres_rustls::MakeTlsConnector;
-use rustls::{ClientConfig, Error as RustlsError, RootCertStore};
-use webpki_roots::TLS_SERVER_ROOTS;
+use tokio_postgres::tls::MakeTlsConnect;
+use rustls::{ClientConfig, RootCertStore}; // Removed Error as RustlsError
+use rustls_pki_types::OwnedTrustAnchor; // New import path for OwnedTrustAnchor
+use webpki_roots::{self, TLS_SERVER_ROOTS}; // Import webpki_roots crate and TLS_SERVER_ROOTS
+use std::str::FromStr; // Import FromStr trait
 
 pub struct PostgresDriver {
     client: Client,
@@ -28,17 +30,21 @@ impl PostgresDriver {
         } else {
             info!("Connecting with TLS.");
             let mut root_cert_store = RootCertStore::empty();
-            root_cert_store.add_server_trust_anchors(TLS_SERVER_ROOTS.iter().map(|ta| {
-                rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(
-                    ta.subject,
-                    ta.spki,
-                    ta.name_constraints,
-                )
-            }));
+            root_cert_store.add_trust_anchors(
+                TLS_SERVER_ROOTS
+                    .iter()
+                    .map(|ta| {
+                        OwnedTrustAnchor::from_subject_spki_name_constraints(
+                            ta.subject,
+                            ta.subject_public_key_info, // Changed from ta.spki
+                            ta.name_constraints,
+                        )
+                    })
+            );
             let tls_config = ClientConfig::builder()
                 .with_root_certificates(root_cert_store)
-                .no_client_auth();
-            let tls_connector = MakeTlsConnector::new(tls_config);
+                .with_no_client_auth(); // Changed from no_client_auth
+            let tls_connector = MakeTlsConnect::new(tls_config); // Changed to MakeTlsConnect
             tokio_postgres::connect(connection_string, tls_connector).await?
         };
 
@@ -60,7 +66,7 @@ impl DatabaseDriver for PostgresDriver {
         info!("Executing PostgreSQL query: {}", query);
         debug!("Parameters: {:?}", query_params);
 
-        let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync>> = Vec::new();
+        let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Send + Sync>> = Vec::new(); // Added Send
         if let Some(qp) = query_params {
             for param in qp {
                 match &param.value {

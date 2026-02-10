@@ -4,7 +4,7 @@ use crate::db::{AppColumn, Database, QueryResponse, ResultSet, Schema, Table, Qu
 use crate::error::Error;
 use async_trait::async_trait;
 use log::{debug, info};
-use mysql_async::{prelude::*, Conn, Opts, OptsBuilder, Row as MySqlRow, QueryResult, TextProtocol, Value as MySqlValue, SslMode, SslOpts};
+use mysql_async::{prelude::*, Conn, Opts, OptsBuilder, Row as MySqlRow, QueryResult, SslOpts, Value as MySqlValue, BinaryProtocol};
 use serde_json::Value as JsonValue;
 
 
@@ -18,15 +18,15 @@ impl MysqlDriver {
         debug!("Connection string: {}", connection_string);
 
         let opts = Opts::from_url(connection_string)?;
-        let mut opts_builder = OptsBuilder::from_opts(opts);
+        let mut opts_builder = OptsBuilder::from_opts(opts.clone()); // Clone opts to keep the original for ssl_mode()
 
         // Enforce SSL if not explicitly disabled or already set to a secure mode
-        match opts_builder.ssl_mode() {
-            None | Some(SslMode::Preferred) => {
+        match opts.ssl_opts().as_ref().and_then(|so| Some(so.ssl_mode())) {
+            None | Some(mysql_async::SslMode::Preferred) => { // Changed SslMode to mysql_async::SslMode
                 info!("No explicit SSL mode or preferred mode specified, defaulting to required SSL.");
                 opts_builder.ssl_opts(Some(SslOpts::default()));
             },
-            Some(SslMode::Disabled) => {
+            Some(mysql_async::SslMode::Disabled) => { // Changed SslMode to mysql_async::SslMode
                 info!("SSL explicitly disabled in connection string.");
             },
             _ => {
@@ -62,7 +62,7 @@ impl super::DatabaseDriver for MysqlDriver {
     async fn list_databases(&mut self) -> Result<Vec<Database>, Error> {
         info!("Listing MySQL databases.");
         self.with_conn(|conn| async {
-            let (conn, response) = execute_internal(conn, "SHOW DATABASES".to_string()).await?;
+            let (conn, response) = execute_internal(conn, "SHOW DATABASES".to_string(), None).await?;
             let databases: Vec<String> = response.results.into_iter().flat_map(|rs| rs.rows).flat_map(|row| row.get(0).and_then(|v| v.as_str().map(|s| s.to_string()))).collect();
             Ok((conn, databases.into_iter().map(|name| Database { name }).collect()))
         }).await
@@ -79,7 +79,7 @@ impl super::DatabaseDriver for MysqlDriver {
         info!("Listing MySQL tables for database: {}", database);
         let query = format!("SHOW TABLES FROM `{}`", database);
         self.with_conn(|conn| async {
-            let (conn, response) = execute_internal(conn, query).await?;
+            let (conn, response) = execute_internal(conn, query, None).await?;
             let tables: Vec<String> = response.results.into_iter().flat_map(|rs| rs.rows).flat_map(|row| row.get(0).and_then(|v| v.as_str().map(|s| s.to_string()))).collect();
             Ok((conn, tables.into_iter().map(|name| Table { name }).collect()))
         }).await
@@ -89,7 +89,7 @@ impl super::DatabaseDriver for MysqlDriver {
         info!("Listing MySQL columns for database: {} and table: {}", database, table);
         let query = format!("SHOW COLUMNS FROM `{}` FROM `{}`", table, database);
         self.with_conn(|conn| async {
-            let (conn, response) = execute_internal(conn, query).await?;
+            let (conn, response) = execute_internal(conn, query, None).await?;
             let columns: Vec<AppColumn> = response.results.into_iter().flat_map(|rs| rs.rows).map(|row| AppColumn {
                 name: row.get(0).and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default(),
                 data_type: row.get(1).and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default(),
@@ -131,7 +131,7 @@ pub(crate) async fn execute_internal(
         mysql_async::Params::Empty
     };
 
-    let mut query_result: QueryResult<'_, '_, TextProtocol> = conn.exec_iter(&query, params).await?;
+    let mut query_result: QueryResult<'_, '_, BinaryProtocol> = conn.exec_iter(&query, params).await?;
 
     while !query_result.is_empty() {
         let columns: Vec<String> = query_result.columns().unwrap_or_default().iter().map(|c: &mysql_async::Column| c.name_str().to_string()).collect();
