@@ -1,11 +1,12 @@
+#![allow(dead_code)]
+
 use crate::db::{AppColumn, Database, QueryResponse, ResultSet, Schema, Table};
 use crate::error::Error;
 use async_trait::async_trait;
 use log::{debug, info};
 use mysql_async::{prelude::*, Conn, Opts, Row as MySqlRow, QueryResult, TextProtocol, Value as MySqlValue};
 use serde_json::Value as JsonValue;
-use futures_util::stream::StreamExt; // Import StreamExt for next()
-use anyhow::anyhow;
+
 
 pub struct MysqlDriver {
     conn: Option<Conn>,
@@ -74,32 +75,26 @@ impl super::DatabaseDriver for MysqlDriver {
     }
 }
 
-async fn execute_internal(mut conn: Conn, query: String) -> Result<(Conn, QueryResponse), Error> {
+pub(crate) async fn execute_internal(mut conn: Conn, query: String) -> Result<(Conn, QueryResponse), Error> {
     // Explicitly type the result of query_iter.await
-    let result: (Conn, QueryResult<'static, 'static, TextProtocol>) = conn.query_iter(&query).await?;
-    let (conn_updated, query_result) = result; // Destructure explicitly typed result
-    conn = conn_updated;
+    let mut query_result: QueryResult<'_, '_, TextProtocol> = conn.query_iter(&query).await?;
 
     let mut all_results: Vec<ResultSet> = Vec::new();
     let messages: Vec<String> = Vec::new(); // MySQL doesn't have direct messages like MSSQL
 
-    let mut result_sets_stream = query_result.into_result_sets();
-
-    while let Some(result_set_result) = result_sets_stream.next().await {
-        let result_set = result_set_result?;
-        let columns: Vec<String> = result_set.columns().iter().map(|c| c.name_str().to_string()).collect();
-        let rows: Vec<JsonValue> = result_set
+    while !query_result.is_empty() {
+        let columns: Vec<String> = query_result.columns().unwrap_or_default().iter().map(|c: &mysql_async::Column| c.name_str().to_string()).collect();
+        let rows: Vec<JsonValue> = query_result
             .map(|row| row_to_json(&row, &columns))
-            .collect::<Vec<JsonValue>>()
             .await?;
 
-        all_results.push(ResultSet { columns, rows });
+        all_results.push(crate::db::ResultSet { columns, rows });
     }
 
     Ok((conn, QueryResponse { results: all_results, messages }))
 }
 
-fn row_to_json(row: &MySqlRow, columns: &[String]) -> JsonValue {
+pub(crate) fn row_to_json(row: &MySqlRow, columns: &[String]) -> JsonValue {
     let mut map = serde_json::Map::new();
     for (i, col_name) in columns.iter().enumerate() {
         let value: Option<MySqlValue> = row.get(i); // Use get(i)

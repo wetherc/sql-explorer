@@ -107,6 +107,12 @@ pub fn delete_password(connection_name: &str) -> Result<()> {
     }
 }
 
+#[cfg(test)]
+#[allow(dead_code)] // Allow dead code within the test module
+mod tests {
+    use super::*;
+    use anyhow::Context; // Import Context for test helpers
+
     fn cleanup(connection_name: &str, test_suffix: &str) {
         if let Ok(path) = get_connections_file_path(Some(test_suffix)) {
             if path.exists() {
@@ -116,6 +122,70 @@ pub fn delete_password(connection_name: &str) -> Result<()> {
         let _ = delete_password(&format!("{}{}", connection_name, test_suffix));
     }
 
+    fn get_all_connections_for_test(test_suffix: Option<&str>) -> Result<Vec<SavedConnection>> {
+        let path = get_connections_file_path(test_suffix)?;
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let file = File::open(path).context("Failed to open connections file")?;
+        let reader = BufReader::new(file);
+        let connections: Vec<SavedConnection> =
+            serde_json::from_reader(reader).context("Failed to deserialize connections")?;
+        Ok(connections)
+    }
+
+    fn save_connection_details_for_test(connection: &SavedConnection, test_suffix: Option<&str>) -> Result<()> {
+        let mut connections = get_all_connections_for_test(test_suffix)?;
+        connections.retain(|c| c.name != connection.name);
+        connections.push(connection.clone());
+
+        let path = get_connections_file_path(test_suffix)?;
+        let file = File::create(path).context("Failed to create connections file")?;
+        let writer = BufWriter::new(file);
+        serde_json::to_writer_pretty(writer, &connections)
+            .context("Failed to serialize and save connections")?;
+        Ok(())
+    }
+
+    fn delete_connection_details_for_test(connection_name: &str, test_suffix: Option<&str>) -> Result<()> {
+        let mut connections = get_all_connections_for_test(test_suffix)?;
+        connections.retain(|c| c.name != connection_name);
+
+        let path = get_connections_file_path(test_suffix)?;
+        let file = File::create(path).context("Failed to create connections file")?;
+        let writer = BufWriter::new(file);
+        serde_json::to_writer_pretty(writer, &connections)
+            .context("Failed to serialize and save connections")?;
+        Ok(())
+    }
+
+    fn save_password_for_test(connection_name: &str, password: &str, test_suffix: Option<&str>) -> Result<()> {
+        let entry_name = format!("{}{}", connection_name, test_suffix.unwrap_or(""));
+        let entry = keyring::Entry::new(KEYRING_SERVICE, &entry_name)?;
+        entry
+            .set_password(password)
+            .context("Failed to save password to keyring")?;
+        Ok(())
+    }
+
+    fn get_password_for_test(connection_name: &str, test_suffix: Option<&str>) -> Result<String> {
+        let entry_name = format!("{}{}", connection_name, test_suffix.unwrap_or(""));
+        let entry = keyring::Entry::new(KEYRING_SERVICE, &entry_name)?;
+        Ok(entry
+            .get_password()
+            .context("Failed to get password from keyring")?)
+    }
+
+    fn delete_password_for_test(connection_name: &str, test_suffix: Option<&str>) -> Result<()> {
+        let entry_name = format!("{}{}", connection_name, test_suffix.unwrap_or(""));
+        let entry = keyring::Entry::new(KEYRING_SERVICE, &entry_name)?;
+        match entry.delete_password() {
+            Ok(_) => Ok(()),
+            Err(keyring::Error::NoEntry) => Ok(()), // It's ok if there's no entry to delete
+            Err(e) => Err(e.into()),
+        }
+    }
+    
     #[test]
     fn test_save_and_get_connections() {
         let test_suffix = "_test_sgc";
@@ -211,68 +281,4 @@ pub fn delete_password(connection_name: &str) -> Result<()> {
         // Cleanup after test
         cleanup(&conn_name_base, test_suffix);
     }
-
-    // Helper functions for tests to pass test_suffix
-    fn get_all_connections_for_test(test_suffix: Option<&str>) -> Result<Vec<SavedConnection>> {
-        let path = get_connections_file_path(test_suffix)?;
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let file = File::open(path).context("Failed to open connections file")?;
-        let reader = BufReader::new(file);
-        let connections: Vec<SavedConnection> =
-            serde_json::from_reader(reader).context("Failed to deserialize connections")?;
-        Ok(connections)
-    }
-
-    fn save_connection_details_for_test(connection: &SavedConnection, test_suffix: Option<&str>) -> Result<()> {
-        let mut connections = get_all_connections_for_test(test_suffix)?;
-        connections.retain(|c| c.name != connection.name);
-        connections.push(connection.clone());
-
-        let path = get_connections_file_path(test_suffix)?;
-        let file = File::create(path).context("Failed to create connections file")?;
-        let writer = BufWriter::new(file);
-        serde_json::to_writer_pretty(writer, &connections)
-            .context("Failed to serialize and save connections")?;
-        Ok(())
-    }
-
-    fn delete_connection_details_for_test(connection_name: &str, test_suffix: Option<&str>) -> Result<()> {
-        let mut connections = get_all_connections_for_test(test_suffix)?;
-        connections.retain(|c| c.name != connection_name);
-
-        let path = get_connections_file_path(test_suffix)?;
-        let file = File::create(path).context("Failed to create connections file")?;
-        let writer = BufWriter::new(file);
-        serde_json::to_writer_pretty(writer, &connections)
-            .context("Failed to serialize and save connections")?;
-        Ok(())
-    }
-
-    fn save_password_for_test(connection_name: &str, password: &str, test_suffix: Option<&str>) -> Result<()> {
-        let entry_name = format!("{}{}", connection_name, test_suffix.unwrap_or(""));
-        let entry = keyring::Entry::new(KEYRING_SERVICE, &entry_name)?;
-        entry
-            .set_password(password)
-            .context("Failed to save password to keyring")?;
-        Ok(())
-    }
-
-    fn get_password_for_test(connection_name: &str, test_suffix: Option<&str>) -> Result<String> {
-        let entry_name = format!("{}{}", connection_name, test_suffix.unwrap_or(""));
-        let entry = keyring::Entry::new(KEYRING_SERVICE, &entry_name)?;
-        Ok(entry
-            .get_password()
-            .context("Failed to get password from keyring")?)
-    }
-
-    fn delete_password_for_test(connection_name: &str, test_suffix: Option<&str>) -> Result<()> {
-        let entry_name = format!("{}{}", connection_name, test_suffix.unwrap_or(""));
-        let entry = keyring::Entry::new(KEYRING_SERVICE, &entry_name)?;
-        match entry.delete_password() {
-            Ok(_) => Ok(()),
-            Err(keyring::Error::NoEntry) => Ok(()), // It's ok if there's no entry to delete
-            Err(e) => Err(e.into()),
-        }
-    }
+}

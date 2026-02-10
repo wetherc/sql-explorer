@@ -1,11 +1,11 @@
 // backend/src/db.rs
 pub mod drivers;
 
-use crate::error::Error as AppError;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-pub type DbResult<T> = Result<T, AppError>;
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Database {
