@@ -4,7 +4,7 @@ use crate::db::{AppColumn, Database, QueryResponse, ResultSet, Schema, Table, Qu
 use crate::error::Error;
 use async_trait::async_trait;
 use log::{debug, info};
-use mysql_async::{prelude::*, Conn, Opts, OptsBuilder, Row as MySqlRow, QueryResult, SslOpts, Value as MySqlValue, BinaryProtocol};
+use mysql_async::{prelude::*, Conn, Opts, OptsBuilder, Row as MySqlRow, QueryResult, Value as MySqlValue, BinaryProtocol};
 use serde_json::Value as JsonValue;
 
 
@@ -18,22 +18,8 @@ impl MysqlDriver {
         debug!("Connection string: {}", connection_string);
 
         let opts = Opts::from_url(connection_string)?;
-        let mut opts_builder = OptsBuilder::from_opts(opts.clone()); // Clone opts to keep the original for ssl_mode()
+        let opts_builder = OptsBuilder::from_opts(opts.clone());
 
-        // Enforce SSL if not explicitly disabled or already set to a secure mode
-        match opts.ssl_opts().as_ref().and_then(|so| Some(so.ssl_mode())) {
-            None | Some(mysql_async::SslMode::Preferred) => { // Changed SslMode to mysql_async::SslMode
-                info!("No explicit SSL mode or preferred mode specified, defaulting to required SSL.");
-                opts_builder.ssl_opts(Some(SslOpts::default()));
-            },
-            Some(mysql_async::SslMode::Disabled) => { // Changed SslMode to mysql_async::SslMode
-                info!("SSL explicitly disabled in connection string.");
-            },
-            _ => {
-                info!("Secure SSL mode already specified in connection string.");
-            }
-        }
-        
         let conn = Conn::new(opts_builder).await?;
 
         info!("MySQL database client connected successfully.");

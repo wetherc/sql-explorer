@@ -42,8 +42,14 @@ export const useTabsStore = defineStore('tabs', () => {
 
       // If the closed tab was active, activate another tab
       if (tabs.value.length > 0) {
-        // Activate the tab at the same index if possible, otherwise the last one
-        activeTabId.value = tabs.value[Math.min(index, tabs.value.length - 1)].id
+        const newActiveTabIndex = Math.min(index, tabs.value.length - 1);
+        const newActiveTab = tabs.value[newActiveTabIndex];
+        if (newActiveTab) { // Explicit check
+          activeTabId.value = newActiveTab.id;
+        } else {
+          // This case theoretically shouldn't happen if tabs.value.length > 0
+          activeTabId.value = null;
+        }
       } else {
         activeTabId.value = null
       }

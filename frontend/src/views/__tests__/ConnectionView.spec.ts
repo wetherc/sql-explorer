@@ -150,7 +150,7 @@ describe('ConnectionView.vue', () => {
     
     const authTypeDropdown = wrapper.find('#auth-type')
     expect((authTypeDropdown.element as HTMLSelectElement).length).toBe(1)
-    expect((authTypeDropdown.element as HTMLSelectElement).options[0].text).toBe('SQL Authentication')
+    expect((authTypeDropdown.element as HTMLSelectElement).options[0]!.text).toBe('SQL Authentication')
   })
 
   it('changes port to 5432 for PostgreSQL', async () => {

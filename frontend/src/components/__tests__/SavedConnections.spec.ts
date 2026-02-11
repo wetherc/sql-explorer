@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest'
+import { describe, it, expect, vi, beforeEach, type Mock, type MockInstance } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import SavedConnections from '../SavedConnections.vue'
@@ -25,7 +25,7 @@ describe('SavedConnections.vue', () => {
       saveConnection: vi.fn(),
       getPassword: vi.fn(),
     } as any
-    ;(useSavedConnectionsStore as Mock).mockReturnValue(savedConnectionsStoreMock)
+    ;(useSavedConnectionsStore as any).mockReturnValue(savedConnectionsStoreMock) // TODO: Fix TS2707 Generic type 'MockInstance<T>'
   })
 
   it('fetches connections on mount', () => {
@@ -53,10 +53,10 @@ describe('SavedConnections.vue', () => {
     const wrapper = mount(SavedConnections)
     const items = wrapper.findAll('li')
     expect(items.length).toBe(2)
-    expect(items[0].text()).toContain('Conn 1')
-    expect(items[0].text()).toContain('(s1)')
-    expect(items[1].text()).toContain('Conn 2')
-    expect(items[1].text()).toContain('(s2)')
+    expect(items[0]!.text()).toContain('Conn 1')
+    expect(items[0]!.text()).toContain('(s1)')
+    expect(items[1]!.text()).toContain('Conn 2')
+    expect(items[1]!.text()).toContain('(s2)')
   })
 
   it('emits "select" event when a connection is clicked', async () => {

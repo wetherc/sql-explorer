@@ -1,6 +1,4 @@
-import { DbType } from '@/types/savedConnection'
-
-export type AuthType = 'sql' | 'integrated'
+import { AuthType, DbType } from '@/types/savedConnection'
 
 export interface ConnectionOptions {
   dbType: DbType
@@ -63,13 +61,13 @@ function buildMssqlConnectionString(options: ConnectionOptions): string {
   // This will likely involve mapping values like 'Disable', 'Required' to 'Encrypt=false', 'Encrypt=true'
   // and potentially overriding trustServerCertificate based on the chosen sslMode.
 
-  if (options.authType === 'sql') {
+  if (options.authType === AuthType.Sql) {
     if (!options.username) {
       throw new Error('Username is required for SQL Server Authentication.')
     }
     connectionString += `user=${options.username};`
     connectionString += `password=${options.password || ''};`
-  } else {
+  } else if (options.authType === AuthType.Integrated) { // Explicitly check for Integrated
     connectionString += 'Integrated Security=true;'
   }
 

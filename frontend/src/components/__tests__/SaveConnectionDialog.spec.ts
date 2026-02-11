@@ -55,8 +55,13 @@ describe('SaveConnectionDialog.vue', () => {
   it('emits update:visible when Cancel button is clicked', async () => {
     const wrapper = mount(SaveConnectionDialog, mountOptions(true))
     // The cancel button is the first button in the footer
-    await wrapper.findAll('button')[0].trigger('click')
-    expect(wrapper.emitted()['update:visible'][0]).toEqual([false])
+    const cancelButton = wrapper.findAll('button').find(b => b.text() === 'Cancel');
+    if (cancelButton) {
+      await cancelButton.trigger('click');
+    }
+    const emitted = wrapper.emitted('update:visible');
+    expect(emitted).toBeTruthy(); // Ensure the event was emitted
+    expect(emitted![0]).toEqual([false]);
   })
 
   it('emits a save event with name when save button is clicked', async () => {

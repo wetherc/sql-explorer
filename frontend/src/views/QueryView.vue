@@ -85,7 +85,7 @@ function handleExportCsv(resultSet: ResultSet, index: number) {
 
       <div v-if="response && (response.results.length > 0 || response.messages.length > 0)" class="h-full">
         <TabView v-model:activeIndex="activeResultTabIndex" class="h-full">
-          <TabPanel v-for="(resultSet, index) in response.results" :key="index" :header="`Result ${index + 1}`" class="h-full flex flex-column">
+          <TabPanel v-for="(resultSet, index) in response.results" :key="index" :value="`result-${index}`" :header="`Result ${index + 1}`" class="h-full flex flex-column">
             <div class="results-panel flex-grow-1 overflow-auto">
               <div class="results-header flex justify-content-between align-items-center mb-2">
                 <h4>Result Set {{ index + 1 }} ({{ resultSet.rows.length }} rows)</h4>
@@ -105,14 +105,14 @@ function handleExportCsv(resultSet: ResultSet, index: number) {
             </div>
           </TabPanel>
 
-          <TabPanel v-if="response.messages.length > 0" header="Messages" class="h-full flex flex-column">
+          <TabPanel v-if="response.messages.length > 0" value="messages" header="Messages" class="h-full flex flex-column">
             <div class="messages-panel flex-grow-1 overflow-auto">
               <h4>Messages</h4>
               <pre class="p-2 border-1 surface-border border-round bg-gray-900 text-white">{{ response.messages.join('\n') }}</pre>
             </div>
           </TabPanel>
           
-          <TabPanel v-if="response.results.length === 0 && response.messages.length === 0 && !isLoading && !errorMessage" header="Status">
+          <TabPanel v-if="response.results.length === 0 && response.messages.length === 0 && !isLoading && !errorMessage" value="status" header="Status">
             <div class="p-4 text-center">Query executed successfully. No rows returned and no messages.</div>
           </TabPanel>
         </TabView>
