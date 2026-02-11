@@ -24,7 +24,7 @@ impl MssqlDriver {
         info!("Attempting to connect to the database.");
         debug!("Connection string: {}", connection_string);
 
-        let config = match Config::from_ado_string(connection_string) {
+        let mut config = match Config::from_ado_string(connection_string) {
             Ok(config) => {
                 info!("Database configuration parsed successfully.");
                 debug!("Configuration details: {:?}", config);
@@ -36,6 +36,14 @@ impl MssqlDriver {
             }
         };
 
+        // Explicitly check for encryption setting in the connection string and override
+        let conn_string_lower = connection_string.to_lowercase();
+        if conn_string_lower.contains("encrypt=true") || conn_string_lower.contains("encrypt=yes") {
+            info!("Connection string specified encryption (Encrypt=True/Yes). Setting encryption to Required.");
+            config.encryption(tiberius::EncryptionLevel::Required); // Set it unconditionally if specified in string
+        } else {
+            info!("Connection string did not explicitly specify encryption. Current configuration: {:?}", config); // Log full config
+        }
 
 
         let addr = config.get_addr();

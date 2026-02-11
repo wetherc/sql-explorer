@@ -179,7 +179,7 @@ async function handleSaveConnection(name: string, passwordToSave?: string) {
 
             <div class="field">
               <FloatLabel>
-                <InputNumber id="port" v-model="port" :required="!isNamedInstance" :disabled="connectionStore.isConnecting || isNamedInstance" />
+                <InputNumber id="port" v-model="port" :required="!isNamedInstance" :disabled="connectionStore.isConnecting || isNamedInstance" :useGrouping="false" />
                 <label for="port">Port</label>
               </FloatLabel>
             </div>
@@ -215,7 +215,7 @@ async function handleSaveConnection(name: string, passwordToSave?: string) {
             
             <div class="field">
               <FloatLabel>
-                <Dropdown id="auth-type" v-model="authType" :options="authTypeOptions" option-label="label" option-value="value" :disabled="connectionStore.isConnecting" />
+                <Dropdown id="auth-type" v-model="authType" :options="authTypeOptions" option-label="label" option-value="value" :disabled="authTypeOptions.length <= 1 || connectionStore.isConnecting" />
                 <label for="auth-type">Authentication</label>
               </FloatLabel>
             </div>
