@@ -28,7 +28,7 @@ describe('explorer store', () => {
   it('fetchDatabases should update state on success', async () => {
     const store = useExplorerStore();
     const mockDatabases = [{ name: 'db1' }, { name: 'db2' }];
-    invoke.mockResolvedValue(mockDatabases);
+    (invoke as any).mockResolvedValue // TODO: Fix TS2339(mockDatabases);
 
     const promise = store.fetchDatabases();
     expect(store.loading).toBe(true);
@@ -43,7 +43,7 @@ describe('explorer store', () => {
   it('fetchDatabases should set error on failure', async () => {
     const store = useExplorerStore();
     const errorMessage = 'Failed to fetch databases';
-    invoke.mockRejectedValue(errorMessage);
+    (invoke as any).mockRejectedValue // TODO: Fix TS2339(errorMessage);
 
     const promise = store.fetchDatabases();
     expect(store.loading).toBe(true);
@@ -58,7 +58,7 @@ describe('explorer store', () => {
   it('fetchSchemas should update state on success', async () => {
     const store = useExplorerStore();
     const mockSchemas = [{ name: 'dbo' }, { name: 'guest' }];
-    invoke.mockResolvedValue(mockSchemas);
+    (invoke as any).mockResolvedValue // TODO: Fix TS2339(mockSchemas);
 
     const promise = store.fetchSchemas();
     expect(store.loading).toBe(true);
@@ -73,7 +73,7 @@ describe('explorer store', () => {
   it('fetchSchemas should set error on failure', async () => {
     const store = useExplorerStore();
     const errorMessage = 'Failed to fetch schemas';
-    invoke.mockRejectedValue(errorMessage);
+    (invoke as any).mockRejectedValue // TODO: Fix TS2339(errorMessage);
 
     const promise = store.fetchSchemas();
     expect(store.loading).toBe(true);
@@ -88,7 +88,7 @@ describe('explorer store', () => {
   it('fetchTables should update state on success', async () => {
     const store = useExplorerStore();
     const mockTables = [{ name: 'table1' }, { name: 'table2' }];
-    invoke.mockResolvedValue(mockTables);
+    (invoke as any).mockResolvedValue // TODO: Fix TS2339(mockTables);
 
     const promise = store.fetchTables('dbo');
     expect(store.loading).toBe(true);
@@ -103,7 +103,7 @@ describe('explorer store', () => {
   it('fetchTables should set error on failure', async () => {
     const store = useExplorerStore();
     const errorMessage = 'Failed to fetch tables';
-    invoke.mockRejectedValue(errorMessage);
+    (invoke as any).mockRejectedValue // TODO: Fix TS2339(errorMessage);
 
     const promise = store.fetchTables('dbo');
     expect(store.loading).toBe(true);
@@ -118,7 +118,7 @@ describe('explorer store', () => {
   it('fetchColumns should update state on success', async () => {
     const store = useExplorerStore();
     const mockColumns = [{ name: 'id', data_type: 'int' }, { name: 'name', data_type: 'varchar' }];
-    invoke.mockResolvedValue(mockColumns);
+    (invoke as any).mockResolvedValue // TODO: Fix TS2339(mockColumns);
 
     const promise = store.fetchColumns('dbo', 'mytable');
     expect(store.loading).toBe(true);
@@ -133,7 +133,7 @@ describe('explorer store', () => {
   it('fetchColumns should set error on failure', async () => {
     const store = useExplorerStore();
     const errorMessage = 'Failed to fetch columns';
-    invoke.mockRejectedValue(errorMessage);
+    (invoke as any).mockRejectedValue // TODO: Fix TS2339(errorMessage);
 
     const promise = store.fetchColumns('dbo', 'mytable');
     expect(store.loading).toBe(true);

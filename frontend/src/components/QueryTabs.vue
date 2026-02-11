@@ -76,8 +76,11 @@ function updateQuery(newQuery: string) {
 }
 
 function onTabClose(event: { index: number }) {
-  const tabIdToClose = tabsStore.tabs[event.index].id
-  tabsStore.closeTab(tabIdToClose)
+  const tab = tabsStore.tabs[event.index];
+  if (tab) {
+    const tabIdToClose = tab.id
+    tabsStore.closeTab(tabIdToClose)
+  }
 }
 
 </script>
@@ -86,7 +89,7 @@ function onTabClose(event: { index: number }) {
   <div class="query-tabs-container">
     <header class="tab-header flex justify-content-between align-items-center p-2 surface-500">
       <TabView v-model:activeIndex="activeTabIndex" @tab-remove="onTabClose" :closable="true" class="flex-grow-1">
-        <TabPanel v-for="tab in tabsStore.tabs" :key="tab.id" :header="tab.title" />
+        <TabPanel v-for="tab in tabsStore.tabs" :key="tab.id" :value="tab.id" :header="tab.title" />
       </TabView>
       <div class="p-ml-2">
         <Button icon="pi pi-plus" class="p-button-rounded p-button-text p-button-sm" @click="tabsStore.addTab()" />

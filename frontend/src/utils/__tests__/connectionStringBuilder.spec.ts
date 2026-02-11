@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { buildConnectionString } from '../connectionStringBuilder'
-import { DbType } from '@/types/savedConnection'
+import { DbType, AuthType } from '@/types/savedConnection'
 
 describe('connectionStringBuilder', () => {
   it('builds a correct SQL Server Auth string', () => {
@@ -8,7 +8,7 @@ describe('connectionStringBuilder', () => {
       dbType: DbType.Mssql,
       server: 'my-server',
       database: 'my-db',
-      authType: 'sql',
+      authType: AuthType.Sql,
       username: 'my-user',
       password: 'my-password'
     })
@@ -20,7 +20,7 @@ describe('connectionStringBuilder', () => {
       dbType: DbType.Mssql,
       server: 'my-server',
       database: 'my-db',
-      authType: 'integrated'
+      authType: AuthType.Integrated
     })
     expect(result).toBe('server=my-server;database=my-db;Integrated Security=true;')
   })
@@ -29,7 +29,7 @@ describe('connectionStringBuilder', () => {
     const result = buildConnectionString({
       dbType: DbType.Mssql,
       server: 'my-server',
-      authType: 'integrated'
+      authType: AuthType.Integrated
     })
     expect(result).toBe('server=my-server;Integrated Security=true;')
   })
@@ -38,7 +38,7 @@ describe('connectionStringBuilder', () => {
     const result = buildConnectionString({
       dbType: DbType.Mssql,
       server: 'my-server',
-      authType: 'sql',
+      authType: AuthType.Sql,
       username: 'my-user'
     })
     expect(result).toBe('server=my-server;user=my-user;password=;')
@@ -49,7 +49,7 @@ describe('connectionStringBuilder', () => {
       buildConnectionString({
         dbType: DbType.Mssql,
         server: '',
-        authType: 'sql',
+        authType: AuthType.Sql,
         username: 'user'
       })
     ).toThrow('Server name is required.')
@@ -60,7 +60,7 @@ describe('connectionStringBuilder', () => {
       buildConnectionString({
         dbType: DbType.Mssql,
         server: 'my-server',
-        authType: 'sql'
+        authType: AuthType.Sql
       })
     ).toThrow('Username is required for SQL Server Authentication.')
   })
@@ -71,7 +71,7 @@ describe('connectionStringBuilder', () => {
       dbType: DbType.Mysql,
       server: 'my-server',
       database: 'my-db',
-      authType: 'sql',
+      authType: AuthType.Sql,
       username: 'my-user',
       password: 'my-password'
     })
@@ -84,7 +84,7 @@ describe('connectionStringBuilder', () => {
       server: 'my-server',
       port: 3307,
       database: 'my-db',
-      authType: 'sql',
+      authType: AuthType.Sql,
       username: 'my-user',
       password: 'my-password'
     })
@@ -96,7 +96,7 @@ describe('connectionStringBuilder', () => {
       buildConnectionString({
         dbType: DbType.Mysql,
         server: '',
-        authType: 'sql',
+        authType: AuthType.Sql,
         username: 'user'
       })
     ).toThrow('Server name is required.')
@@ -107,7 +107,7 @@ describe('connectionStringBuilder', () => {
       buildConnectionString({
         dbType: DbType.Mysql,
         server: 'my-server',
-        authType: 'sql'
+        authType: AuthType.Sql
       })
     ).toThrow('Username is required for MySQL Authentication.')
   })
@@ -118,7 +118,7 @@ describe('connectionStringBuilder', () => {
       dbType: DbType.Postgres,
       server: 'my-server',
       database: 'my-db',
-      authType: 'sql',
+      authType: AuthType.Sql,
       username: 'my-user',
       password: 'my-password'
     })

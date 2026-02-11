@@ -55,7 +55,7 @@ describe('App', () => {
       $id: 'connection',
       $dispose: vi.fn()
     } as any // Cast to any to satisfy the ReturnType<typeof useConnectionStore> for partial mock
-    ;(useConnectionStore as vi.Mock).mockReturnValue(connectionStoreMock)
+    ;(useConnectionStore as any).mockReturnValue(connectionStoreMock) // TODO: Fix type error related to vi.Mock
   })
 
   it('renders ConnectionView by default if not connected', () => {

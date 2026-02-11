@@ -4,7 +4,8 @@ import { useExplorerStore } from '@/stores/explorer'
 import { useTabsStore } from '@/stores/tabs'
 import { useConnectionStore } from '@/stores/connection'
 import { DbType } from '@/types/savedConnection'
-import Tree, { type TreeNode } from 'primevue/tree'
+import Tree from 'primevue/tree'
+import { type TreeNode } from 'primevue/treenode' // Changed import for TreeNode
 import ContextMenu from 'primevue/contextmenu'
 import Skeleton from 'primevue/skeleton'
 
@@ -13,7 +14,7 @@ const tabsStore = useTabsStore()
 const connectionStore = useConnectionStore()
 
 const nodes = ref<TreeNode[]>([])
-const contextMenu = ref<ContextMenu | null>(null)
+const contextMenu = ref<InstanceType<typeof ContextMenu> | null>(null)
 const selectedNode = ref<TreeNode | null>(null)
 
 const isMySql = computed(() => connectionStore.dbType === DbType.Mysql)

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest'
+import { describe, it, expect, vi, beforeEach, type Mock, type MockInstance } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import PrimeVue from 'primevue/config'
@@ -28,13 +28,13 @@ describe('DbExplorer.vue', () => {
     setActivePinia(createPinia())
     
     explorerStoreMock = createExplorerStoreMock(initialExplorerState.databases) as any;
-    (useExplorerStore as Mock).mockReturnValue(explorerStoreMock)
+    (useExplorerStore as any).mockReturnValue(explorerStoreMock) // TODO: Fix TS2707 Generic type 'MockInstance<T>'
 
     tabsStoreMock = { addTab: vi.fn() } as any
-    ;(useTabsStore as Mock).mockReturnValue(tabsStoreMock)
+    ;(useTabsStore as any).mockReturnValue(tabsStoreMock) // TODO: Fix TS2707 Generic type 'MockInstance<T>'
     
     connectionStoreMock = { dbType: 'Mssql' } as any
-    ;(useConnectionStore as Mock).mockReturnValue(connectionStoreMock)
+    ;(useConnectionStore as any).mockReturnValue(connectionStoreMock) // TODO: Fix TS2707 Generic type 'MockInstance<T>'
 
     // Mock JSDOM environment for PrimeVue
     Object.defineProperty(window, 'matchMedia', {
