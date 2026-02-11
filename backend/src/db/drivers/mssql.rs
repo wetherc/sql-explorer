@@ -27,7 +27,7 @@ impl MssqlDriver {
         let mut config = match Config::from_ado_string(connection_string) {
             Ok(config) => {
                 info!("Database configuration parsed successfully.");
-                debug!("Configuration details: {:?}", config);
+        
                 config
             }
             Err(e) => {
@@ -36,14 +36,27 @@ impl MssqlDriver {
             }
         };
 
-        // Explicitly check for encryption setting in the connection string and override
         let conn_string_lower = connection_string.to_lowercase();
+        let mut encryption_level_to_set = tiberius::EncryptionLevel::NotSupported; // Default from Tiberius if not specified
+
+        // Prioritize explicit 'encrypt' settings
         if conn_string_lower.contains("encrypt=true") || conn_string_lower.contains("encrypt=yes") {
             info!("Connection string specified encryption (Encrypt=True/Yes). Setting encryption to Required.");
-            config.encryption(tiberius::EncryptionLevel::Required); // Set it unconditionally if specified in string
+            encryption_level_to_set = tiberius::EncryptionLevel::Required;
+        } else if conn_string_lower.contains("encrypt=false") || conn_string_lower.contains("encrypt=no") {
+            info!("Connection string specified encryption (Encrypt=False/No). Setting encryption to NotSupported.");
+            encryption_level_to_set = tiberius::EncryptionLevel::NotSupported;
+        } else if conn_string_lower.contains("integrated security=true") {
+            // If Integrated Security is present and no explicit 'encrypt' setting, default to Required
+            info!("Integrated Security is present and no explicit 'encrypt' setting. Defaulting encryption to Required.");
+            encryption_level_to_set = tiberius::EncryptionLevel::Required;
         } else {
-            info!("Connection string did not explicitly specify encryption. Current configuration: {:?}", config); // Log full config
+            info!("No explicit 'Encrypt' setting or 'Integrated Security' found in connection string. Using default encryption level (NotSupported).");
         }
+
+        config.encryption(encryption_level_to_set);
+
+        debug!("Final Configuration details before connecting: {:?}", config);
 
 
         let addr = config.get_addr();
