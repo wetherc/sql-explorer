@@ -35,8 +35,8 @@ const contextMenuItems = computed(() => {
 })
 
 onMounted(async () => {
-  const fetchedDatabases = await explorerStore.fetchDatabases()
-  nodes.value = fetchedDatabases.map((db) => ({
+  await explorerStore.fetchDatabases()
+  nodes.value = explorerStore.databases.map((db) => ({
     key: db.name,
     label: db.name,
     icon: 'pi pi-fw pi-database',

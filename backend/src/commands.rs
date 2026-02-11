@@ -190,7 +190,7 @@ mod tests {
         app.manage(AppState { db: Mutex::new(None) });
         let state = app.state::<AppState>();
         let query = "SELECT 1".to_string();
-        let result = execute_query(query, state).await;
+        let result = execute_query(query, None, state).await;
         assert!(result.is_err());
         match result.unwrap_err() {
             Error::NotConnected => (), // Correct error

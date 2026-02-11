@@ -17,66 +17,59 @@ const activeTabIndex = ref(0) // Local state for active tab index
 
 // Add a default tab when the component mounts if none exist
 onMounted(() => {
-  if (tabsStore.tabs.length === 0) {
+  if (tabsStore.tabs.value.length === 0) {
     tabsStore.addTab()
   }
 })
 
 // Watch for activeTabId changes to update activeTabIndex
-watch(() => tabsStore.activeTabId, (newId) => {
-  const index = tabsStore.tabs.findIndex(tab => tab.id === newId)
+watch(() => tabsStore.activeTabId.value, (newId) => { // .value added here
+  const index = tabsStore.tabs.value.findIndex(tab => tab.id === newId)
   if (index !== -1) {
     activeTabIndex.value = index
   }
 }, { immediate: true })
 
-// Watch for activeTabIndex changes to update activeTabId in store
-watch(activeTabIndex, (newIndex) => {
-  if (tabsStore.tabs[newIndex]) {
-    tabsStore.setActiveTab(tabsStore.tabs[newIndex].id)
-  }
-})
-
 // Watch for activeTab changes to ensure queryStore is updated
-watch(() => tabsStore.activeTab, (newTab) => {
+watch(() => tabsStore.activeTab.value, (newTab) => {
   if (newTab) {
     queryStore.setQueryState(newTab.query, newTab.response, newTab.errorMessage, newTab.isLoading);
   }
 }, { immediate: true });
 
 async function handleExecuteQuery() {
-  if (!tabsStore.activeTab) return;
+  if (!tabsStore.activeTab.value) return;
 
-  tabsStore.activeTab.isLoading = true;
-  tabsStore.activeTab.errorMessage = null;
-  tabsStore.activeTab.response = null; // Clear previous results
+  tabsStore.activeTab.value.isLoading = true;
+  tabsStore.activeTab.value.errorMessage = null;
+  tabsStore.activeTab.value.response = null; // Clear previous results
 
   try {
-    const success = await queryStore.executeQuery(tabsStore.activeTab.query);
-    tabsStore.activeTab.isLoading = false;
+    const success = await queryStore.executeQuery(tabsStore.activeTab.value.query);
+    tabsStore.activeTab.value.isLoading = false;
 
     if (success) {
-      tabsStore.activeTab.response = queryStore.response;
-      tabsStore.activeTab.errorMessage = null;
+      tabsStore.activeTab.value.response = queryStore.response;
+      tabsStore.activeTab.value.errorMessage = null;
     } else {
-      tabsStore.activeTab.errorMessage = queryStore.errorMessage;
-      tabsStore.activeTab.response = null;
+      tabsStore.activeTab.value.errorMessage = queryStore.errorMessage;
+      tabsStore.activeTab.value.response = null;
     }
   } catch (error: unknown) {
-    tabsStore.activeTab.errorMessage = error instanceof Error ? error.message : 'An unknown error occurred.';
-    tabsStore.activeTab.response = null;
-    tabsStore.activeTab.isLoading = false;
+    tabsStore.activeTab.value.errorMessage = error instanceof Error ? error.message : 'An unknown error occurred.';
+    tabsStore.activeTab.value.response = null;
+    tabsStore.activeTab.value.isLoading = false;
   }
 }
 
 function updateQuery(newQuery: string) {
-  if (tabsStore.activeTab) {
-    tabsStore.activeTab.query = newQuery;
+  if (tabsStore.activeTab.value) {
+    tabsStore.activeTab.value.query = newQuery;
   }
 }
 
 function onTabClose(event: { index: number }) {
-  const tab = tabsStore.tabs[event.index];
+  const tab = tabsStore.tabs.value[event.index];
   if (tab) {
     const tabIdToClose = tab.id
     tabsStore.closeTab(tabIdToClose)
@@ -89,7 +82,7 @@ function onTabClose(event: { index: number }) {
   <div class="query-tabs-container">
     <header class="tab-header flex justify-content-between align-items-center p-2 surface-500">
       <TabView v-model:activeIndex="activeTabIndex" @tab-remove="onTabClose" :closable="true" class="flex-grow-1">
-        <TabPanel v-for="tab in tabsStore.tabs" :key="tab.id" :value="tab.id" :header="tab.title" />
+        <TabPanel v-for="tab in tabsStore.tabs.value" :key="tab.id" :value="tab.id" :header="tab.title" />
       </TabView>
       <div class="p-ml-2">
         <Button icon="pi pi-plus" class="p-button-rounded p-button-text p-button-sm" @click="tabsStore.addTab()" />
@@ -99,11 +92,11 @@ function onTabClose(event: { index: number }) {
 
     <div class="tab-content flex-grow-1">
       <QueryView
-        v-if="tabsStore.activeTab"
-        :query="tabsStore.activeTab.query"
-        :response="tabsStore.activeTab.response"
-        :is-loading="tabsStore.activeTab.isLoading"
-        :error-message="tabsStore.activeTab.errorMessage"
+        v-if="tabsStore.activeTab.value"
+        :query="tabsStore.activeTab.value.query"
+        :response="tabsStore.activeTab.value.response"
+        :is-loading="tabsStore.activeTab.value.isLoading"
+        :error-message="tabsStore.activeTab.value.errorMessage"
         @update:query="updateQuery"
         @execute-query="handleExecuteQuery"
       />
@@ -129,27 +122,24 @@ function onTabClose(event: { index: number }) {
   border-bottom: 1px solid var(--p-surface-border);
 }
 
-.tab-content {
-  background-color: var(--p-component-background);
-  color: var(--p-text-color);
-  flex-grow: 1;
-  overflow: hidden;
-  padding: 0.5rem;
-}
-
-:deep(.p-tabview .p-tabview-nav) {
+:deep(.p-tabview) {
   border: none;
   background: transparent;
 }
 
-:deep(.p-tabview .p-tabview-nav-link) {
+:deep(.p-tabview-nav) {
+  border: none;
+  background: transparent;
+}
+
+:deep(.p-tabview-nav-link) {
   background: var(--p-surface-400);
   margin-right: 2px;
   border-top-left-radius: 4px;
   border-top-right-radius: 4px;
 }
 
-:deep(.p-tabview .p-tabview-nav-link.p-highlight) {
+:deep(.p-tabview-nav-link.p-highlight) {
   background: var(--p-content-background);
   border-color: var(--p-surface-border);
   border-bottom-color: var(--p-content-background);
