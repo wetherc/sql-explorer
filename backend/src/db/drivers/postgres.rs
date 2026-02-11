@@ -9,7 +9,7 @@ use tokio_postgres::{Client, Row, Config as PgConfig};
 
 use rustls::{ClientConfig, RootCertStore};
 
-use webpki_roots::{self};
+use webpki_roots;
 use std::str::FromStr; // Import FromStr trait
 
 pub struct PostgresDriver {

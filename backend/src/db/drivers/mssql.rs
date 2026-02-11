@@ -161,7 +161,7 @@ impl DatabaseDriver for MssqlDriver {
                         error!("Row received before any result set metadata in execute_query.");
                     }
                 },
-                _ => { /* Ignore other QueryItem types for now, e.g., ReturnValue, Done */ }
+
             }
         }
         if let Some(rs) = current_result_set.take() {
@@ -210,15 +210,7 @@ impl DatabaseDriver for MssqlDriver {
         let mut tables = Vec::new();
 
         while let Some(item) = stream.try_next().await? {
-            match item {
-                QueryItem::Metadata(_metadata) => {}, // Metadata handled internally by client
-                QueryItem::Row(row) => {
-                    if let Some(name) = row.get::<&str, _>(0) {
-                        tables.push(Table { name: name.to_string() });
-                    }
-                },
-                _ => {}
-            }
+
         }
         Ok(tables)
     }
@@ -229,18 +221,7 @@ impl DatabaseDriver for MssqlDriver {
         let mut columns = Vec::new();
 
         while let Some(item) = stream.try_next().await? {
-            match item {
-                QueryItem::Metadata(_metadata) => {}, // Metadata handled internally by client
-                QueryItem::Row(row) => {
-                    if let (Some(name), Some(data_type)) = (row.get::<&str, _>(0), row.get::<&str, _>(1)) {
-                        columns.push(AppColumn {
-                            name: name.to_string(),
-                            data_type: data_type.to_string(),
-                        });
-                    }
-                },
-                _ => {}
-            }
+
         }
         Ok(columns)
     }
