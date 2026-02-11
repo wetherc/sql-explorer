@@ -207,9 +207,9 @@ impl DatabaseDriver for MssqlDriver {
     async fn list_tables(&mut self, schema: &str) -> Result<Vec<Table>, Error> {
         let query = "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = @p1 ORDER BY TABLE_NAME";
         let mut stream = self.client.query(query, &[&schema]).await?;
-        let mut tables = Vec::new();
+        let tables = Vec::new();
 
-        while let Some(item) = stream.try_next().await? {
+        while let Some(_item) = stream.try_next().await? {
 
         }
         Ok(tables)
@@ -218,9 +218,9 @@ impl DatabaseDriver for MssqlDriver {
     async fn list_columns(&mut self, schema: &str, table: &str) -> Result<Vec<AppColumn>, Error> {
         let query = "SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = @p1 AND TABLE_NAME = @p2 ORDER BY ORDINAL_POSITION";
         let mut stream = self.client.query(query, &[&schema, &table]).await?;
-        let mut columns = Vec::new();
+        let columns = Vec::new();
 
-        while let Some(item) = stream.try_next().await? {
+        while let Some(_item) = stream.try_next().await? {
 
         }
         Ok(columns)
