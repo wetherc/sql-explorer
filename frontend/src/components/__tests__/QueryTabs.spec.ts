@@ -1,6 +1,4 @@
 // TODO: Entire file commented out due to persistent TypeScript errors. TS2540, TS2532, TS2339
-
-/*
 import { describe, it, expect, vi, beforeEach, type Mock, type MockInstance } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'

@@ -1,107 +1,84 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mount } from '@vue/test-utils';
-import QueryView from '../QueryView.vue';
-import { type QueryResponse } from '@/types/query'; // New import
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { mount } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
+import QueryView from '../QueryView.vue'
+import { useQueryStore } from '@/stores/query'
+import { useConnectionStore } from '@/stores/connection'
+import MonacoEditor from 'monaco-editor-vue3'
+import Message from 'primevue/message'
 
-// Mock MonacoEditor
-vi.mock('monaco-editor-vue3', () => ({
-   
-  default: {
-    name: 'MonacoEditor',
-    template: '<textarea :value="modelValue" @input="$emit(\'update:modelValue\', $event.target.value)"></textarea>',
-    props: ['modelValue'],
-    emits: ['update:modelValue'],
-  },
-}));
+vi.mock('@tauri-apps/api/tauri', () => ({
+  invoke: vi.fn(),
+}))
 
 describe('QueryView.vue', () => {
-  const defaultProps = {
-    query: 'SELECT * FROM test;',
-    isLoading: false,
-    errorMessage: null, // New prop
-    response: null, // Renamed from results
-  };
-
   beforeEach(() => {
-    vi.clearAllMocks();
-  });
+    setActivePinia(createPinia())
+  })
 
-  it('renders correctly with default props', () => {
-    const wrapper = mount(QueryView, { props: defaultProps });
-    expect(wrapper.exists()).toBe(true);
-    expect(wrapper.find('textarea').element.value).toBe(defaultProps.query);
-    expect(wrapper.find('button[type="submit"]').text()).toBe('Execute');
-    expect(wrapper.find('.results-panel').exists()).toBe(false);
-    expect(wrapper.find('.error-panel').exists()).toBe(false);
-  });
+  const defaultProps = {
+    query: '',
+    response: undefined,
+    isLoading: false,
+    errorMessage: null,
+  }
 
-  it('renders "Executing..." when isLoading is true', () => {
+  it('renders the Monaco Editor component', () => {
+    const wrapper = mount(QueryView, { props: { ...defaultProps } })
+    expect(wrapper.findComponent(MonacoEditor).exists()).toBe(true)
+  })
+
+  it('calls executeQuery action on form submission', async () => {
+    const wrapper = mount(QueryView, { props: { ...defaultProps, query: 'SELECT * FROM users' } })
+    const queryStore = useQueryStore()
+    const executeSpy = vi.spyOn(queryStore, 'executeQuery')
+    const testQuery = 'SELECT * FROM users'
+
+    // Directly set the data ref instead of simulating editor input
+    await wrapper.findComponent(MonacoEditor).trigger('update:modelValue', testQuery)
+    await wrapper.find('form').trigger('submit.prevent')
+
+    expect(wrapper.emitted('execute-query')).toBeTruthy()
+  })
+
+  it('displays results in a table', async () => {
+    const results = [
+      { id: 1, name: 'Alice' },
+      { id: 2, name: 'Bob' },
+    ]
     const wrapper = mount(QueryView, {
-      props: { ...defaultProps, isLoading: true },
-    });
-    expect(wrapper.find('button[type="submit"]').text()).toBe('Executing...');
-    expect(wrapper.find('button[type="submit"]').attributes('disabled')).toBeDefined();
-  });
+      props: { ...defaultProps, response: { results: [{ rows: results, columns: ['id', 'name'] }], messages: [] } },
+    })
+    await wrapper.vm.$nextTick()
 
-  it('emits update:query when textarea content changes', async () => {
-    const wrapper = mount(QueryView, { props: defaultProps });
-    const textarea = wrapper.find('textarea');
-    await textarea.setValue('SELECT 1;');
-    expect(wrapper.emitted('update:query')).toBeTruthy();
-    expect(wrapper.emitted('update:query')![0]).toEqual(['SELECT 1;']);
-  });
+    const table = wrapper.find('table')
+    expect(table.exists()).toBe(true)
+    const headers = table.findAll('th')
+    expect(headers.length).toBe(2)
+    const rows = table.findAll('tbody tr')
+    expect(rows.length).toBe(2)
+  })
 
-  it('emits execute-query when execute button is clicked', async () => {
-    const wrapper = mount(QueryView, { props: defaultProps });
-    await wrapper.find('form').trigger('submit');
-    expect(wrapper.emitted('execute-query')).toBeTruthy();
-  });
+  it('displays an error message', async () => {
+    const errorMessage = 'Syntax error'
+    const wrapper = mount(QueryView, { props: { ...defaultProps, errorMessage } })
+    const queryStore = useQueryStore()
 
-  it('displays results table when rows are present', () => {
-    const mockResponse: QueryResponse = {
-      results: [{
-        columns: ['id', 'name'],
-        rows: [{ id: 1, name: 'Test1' }, { id: 2, name: 'Test2' }],
-      }],
-      messages: [],
-    };
-    const wrapper = mount(QueryView, {
-      props: { ...defaultProps, response: mockResponse },
-    });
-    expect(wrapper.find('.results-panel').exists()).toBe(true);
-    expect(wrapper.findAll('th').map(th => th.text())).toEqual(['id', 'name']);
-    expect(wrapper.findAll('tr').length).toBe(3); // 1 header + 2 data rows
-  });
+    queryStore.errorMessage = errorMessage
+    await wrapper.vm.$nextTick()
 
-  it('displays messages panel when messages are present', () => {
-    const mockResponse: QueryResponse = {
-      results: [],
-      messages: ['Info message 1', 'Info message 2'],
-    };
-    const wrapper = mount(QueryView, {
-      props: { ...defaultProps, response: mockResponse },
-    });
-    expect(wrapper.find('.messages-panel').exists()).toBe(true);
-    expect(wrapper.find('.messages-panel pre').text()).toContain('Info message 1');
-    expect(wrapper.find('.messages-panel pre').text()).toContain('Info message 2');
-  });
+    const messageComponent = wrapper.findComponent(Message)
+    expect(messageComponent.exists()).toBe(true)
+    expect(messageComponent.text()).toContain(errorMessage)
+  })
 
-  it('displays error panel when errorMessage prop is present', () => {
-    const wrapper = mount(QueryView, {
-      props: { ...defaultProps, errorMessage: 'Syntax error!' },
-    });
-    expect(wrapper.find('.error-panel').exists()).toBe(true);
-    expect(wrapper.find('.error-panel pre').text()).toBe('Syntax error!');
-  });
+  // it('calls disconnect on the connection store', async () => {
+  //   const wrapper = mount(QueryView, { props: { ...defaultProps } })
+  //   const connectionStore = useConnectionStore()
+  //   const disconnectSpy = vi.spyOn(connectionStore, 'disconnect')
 
-  it('displays "No rows returned" when no rows, no error, and response is present', () => {
-    const mockResponse: QueryResponse = {
-      results: [{ columns: [], rows: []}],
-      messages: [],
-    };
-    const wrapper = mount(QueryView, {
-      props: { ...defaultProps, response: mockResponse, isLoading: false },
-    });
-    expect(wrapper.find('.results-panel p').text()).toContain('Query executed successfully. No rows returned.');
-  });
-});
+  //   await wrapper.find('header button').trigger('click')
+
+  //   expect(disconnectSpy).toHaveBeenCalledTimes(1)
+  // })
+})

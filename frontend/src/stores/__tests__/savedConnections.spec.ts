@@ -1,13 +1,10 @@
-// TODO: Entire file commented out due to persistent TypeScript errors. TS2741
-
-/*
 import { setActivePinia, createPinia } from 'pinia'
 import { useSavedConnectionsStore } from '../savedConnections'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { invoke } from '@tauri-apps/api/tauri'
 import { AuthType, type SavedConnection } from '@/types/savedConnection'
 
-// Mock the tauri invoke function
+// Mock the tauri API invoke function
 vi.mock('@tauri-apps/api/tauri', () => ({
   invoke: vi.fn()
 }))
@@ -100,4 +97,3 @@ describe('Saved Connections Store', () => {
     expect(store.connections).toEqual([])
   })
 })
-*/
