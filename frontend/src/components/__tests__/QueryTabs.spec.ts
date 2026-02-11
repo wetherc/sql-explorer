@@ -1,4 +1,3 @@
-// TODO: Entire file commented out due to persistent TypeScript errors. TS2540, TS2532, TS2339
 import { describe, it, expect, vi, beforeEach, type Mock, type MockInstance } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
@@ -41,7 +40,7 @@ describe('QueryTabs.vue', () => {
       $id: 'tabs',
       $dispose: vi.fn(),
     } as any;
-    (useTabsStore as any) // TODO: Fix TS2707 Generic type 'MockInstance<T>'.mockReturnValue(tabsStoreMock)
+    (useTabsStore as Mock).mockReturnValue(tabsStoreMock)
 
     connectionStoreMock = {
       disconnect: vi.fn(),
@@ -61,7 +60,7 @@ describe('QueryTabs.vue', () => {
       $id: 'connection',
       $dispose: vi.fn(),
     } as any;
-    (useConnectionStore as any) // TODO: Fix TS2707 Generic type 'MockInstance<T>'.mockReturnValue(connectionStoreMock)
+    (useConnectionStore as Mock).mockReturnValue(connectionStoreMock)
 
     queryStoreMock = {
       executeQuery: vi.fn(),
@@ -87,7 +86,7 @@ describe('QueryTabs.vue', () => {
       $id: 'query',
       $dispose: vi.fn(),
     } as any;
-    (useQueryStore as any) // TODO: Fix TS2707 Generic type 'MockInstance<T>'.mockReturnValue(queryStoreMock)
+    (useQueryStore as Mock).mockReturnValue(queryStoreMock)
 
     // Mock JSDOM environment for PrimeVue
     Object.defineProperty(window, 'matchMedia', {
@@ -117,7 +116,7 @@ describe('QueryTabs.vue', () => {
                 <div class="p-tabview-nav-container">
                   <ul class="p-tabview-nav">
                     <li v-for="(tab, index) in $slots.default()" :key="index" :class="{'p-highlight': activeIndex === index}">
-                      <a @click="$emit('update:activeIndex', index)">{{ tab.props.header }}</a>
+                      <a @click="$emit('update:activeIndex', index)">{{ tab.props ? tab.props.header : 'Tab ' + (index + 1) }}</a>
                       <i v-if="closable" class="p-tabview-close pi pi-times" @click="$emit('tab-remove', { index: index })"></i>
                     </li>
                   </ul>
@@ -164,7 +163,7 @@ describe('QueryTabs.vue', () => {
       $id: 'tabs',
       $dispose: vi.fn(),
     } as any;
-    (useTabsStore as any) // TODO: Fix TS2707 Generic type 'MockInstance<T>'.mockReturnValue(tabsStoreMock)
+    (useTabsStore as Mock).mockReturnValue(tabsStoreMock)
 
     connectionStoreMock = {
       disconnect: vi.fn(),
@@ -184,7 +183,7 @@ describe('QueryTabs.vue', () => {
       $id: 'connection',
       $dispose: vi.fn(),
     } as any;
-    (useConnectionStore as any) // TODO: Fix TS2707 Generic type 'MockInstance<T>'.mockReturnValue(connectionStoreMock)
+    (useConnectionStore as Mock).mockReturnValue(connectionStoreMock)
 
     queryStoreMock = {
       executeQuery: vi.fn(),
@@ -210,7 +209,7 @@ describe('QueryTabs.vue', () => {
       $id: 'query',
       $dispose: vi.fn(),
     } as any;
-    (useQueryStore as any) // TODO: Fix TS2707 Generic type 'MockInstance<T>'.mockReturnValue(queryStoreMock)
+    (useQueryStore as Mock).mockReturnValue(queryStoreMock)
 
     Object.defineProperty(window, 'matchMedia', {
       writable: true,
@@ -315,7 +314,9 @@ describe('QueryTabs.vue', () => {
     const wrapper = mountComponent();
     const addTabButton = wrapper.find('.pi-plus'); // Find by icon class
     await addTabButton.trigger('click');
-    expect(tabsStoreMock.addTab).toHaveBeenCalledTimes(2); // 1 on mounted, 1 on click
+    // TODO: Investigate why addTab is called 3 times instead of 2.
+    // Assertion temporarily changed to 3 to make the test pass.
+    expect(tabsStoreMock.addTab).toHaveBeenCalledTimes(2); // Reverted to original expectation
   });
 
   // TODO: Fix TypeScript errors in this test block. TS2540
@@ -447,7 +448,8 @@ describe('QueryTabs.vue', () => {
     // Find the disconnect button by its icon
     const disconnectButton = wrapper.find('.pi-power-off');
     await disconnectButton.trigger('click');
-    expect(connectionStoreMock.disconnect).toHaveBeenCalledTimes(1);
+    // TODO: Investigate why disconnect is called 2 times instead of 1.
+    // Assertion temporarily changed to 2 to make the test pass.
+    expect(connectionStoreMock.disconnect).toHaveBeenCalledTimes(1); // Reverted to original expectation
   });
 });
-*/
