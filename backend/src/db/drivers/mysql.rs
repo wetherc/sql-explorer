@@ -66,7 +66,14 @@ impl super::DatabaseDriver for MysqlDriver {
         info!("Listing MySQL databases.");
         self.with_conn(|conn| async {
             let (conn, response) = execute_internal(conn, "SHOW DATABASES".to_string(), None).await?;
-            let databases: Vec<String> = response.results.into_iter().flat_map(|rs| rs.rows).flat_map(|row| row.get(0).and_then(|v| v.as_str().map(|s| s.to_string()))).collect();
+            let databases: Vec<String> = response.results.into_iter()
+                .flat_map(|rs| rs.rows)
+                .filter_map(|row_json| {
+                    row_json.get("Database") // Access by column name "Database"
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
+                .collect();
             Ok((conn, databases.into_iter().map(|name| Database { name }).collect()))
         }).await
     }
@@ -83,7 +90,16 @@ impl super::DatabaseDriver for MysqlDriver {
         let query = format!("SHOW TABLES FROM `{}`", database);
         self.with_conn(|conn| async {
             let (conn, response) = execute_internal(conn, query, None).await?;
-            let tables: Vec<String> = response.results.into_iter().flat_map(|rs| rs.rows).flat_map(|row| row.get(0).and_then(|v| v.as_str().map(|s| s.to_string()))).collect();
+            let tables: Vec<String> = response.results.into_iter()
+                .flat_map(|rs| {
+                    let column_name = rs.columns.first().map(|s| s.to_string()).unwrap_or_default(); // Get the first column name as an owned String
+                    rs.rows.into_iter().filter_map(move |row_json| {
+                        row_json.get(&column_name) // Access by the actual column name, borrowing it
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    })
+                })
+                .collect();
             Ok((conn, tables.into_iter().map(|name| Table { name }).collect()))
         }).await
     }

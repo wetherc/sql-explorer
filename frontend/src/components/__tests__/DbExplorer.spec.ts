@@ -1,12 +1,12 @@
 import { describe, it, expect, vi, beforeEach, type Mock, type MockInstance } from 'vitest'
-import { mount, flushPromises } from '@vue/test-utils'
+import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import PrimeVue from 'primevue/config'
 import DbExplorer from '../DbExplorer.vue'
 import { useExplorerStore } from '../../stores/explorer'
 import { useTabsStore } from '../../stores/tabs'
 import { useConnectionStore } from '@/stores/connection'
-import { ref, h } from 'vue'
+import { ref, computed, h } from 'vue'
 
 // Mock stores and dependencies
 vi.mock('@/stores/explorer', () => ({ useExplorerStore: vi.fn() }))
@@ -14,9 +14,7 @@ vi.mock('@/stores/tabs', () => ({ useTabsStore: vi.fn() }))
 vi.mock('@/stores/connection', () => ({ useConnectionStore: vi.fn() }))
 
 // Revert global vi.mock for primevue/tree to a basic mock or remove if not used elsewhere
-vi.mock('primevue/tree', () => ({
-  default: {}, // Provide an empty default export for the module
-}));
+
 
 vi.mock('primevue/contextmenu', () => ({
   default: {
@@ -32,30 +30,100 @@ vi.mock('primevue/contextmenu', () => ({
   },
 }));
 
+// Tree Stub Component Definition
+const TreeStub = {
+  name: 'Tree',
+  props: ['value', 'selectionMode', 'selectionKeys'],
+  emits: ['node-expand', 'node-contextmenu', 'node-select', 'update:selectionKeys'],
+  template: `
+    <div class="p-tree-stub">
+      <template v-if="value && value.length > 0">
+        <div v-for="node in value" :key="node.key" class="p-treenode">
+          <span
+            class="p-treenode-label"
+            @contextmenu="$emit('node-contextmenu', { originalEvent: $event, node: node })"
+            @click="$emit('node-select', { node: node })"
+          >
+            {{ node.label }}
+          </span>
+          <div v-if="node.children && node.children.length > 0" class="p-treenode-children">
+            <div v-for="child in node.children" :key="child.key" class="p-treenode">
+              <span
+                class="p-treenode-label"
+                @contextmenu="$emit('node-contextmenu', { originalEvent: $event, node: child })"
+                @click="$emit('node-select', { node: child })"
+              >
+                {{ child.label }}
+              </span>
+              <div v-if="child.children && child.children.length > 0" class="p-treenode-children">
+                <div v-for="grandchild in child.children" :key="grandchild.key" class="p-treenode">
+                  <span
+                    class="p-treenode-label"
+                    @contextmenu="$emit('node-contextmenu', { originalEvent: $event, node: grandchild })"
+                    @click="$emit('node-select', { node: grandchild })"
+                  >
+                    {{ grandchild.label }}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </template>
+      <div v-else>No nodes</div>
+    </div>
+  `,
+};
+
 describe('DbExplorer.vue', () => {
   let explorerStoreMock: ReturnType<typeof useExplorerStore>
   let tabsStoreMock: ReturnType<typeof useTabsStore>
   let connectionStoreMock: ReturnType<typeof useConnectionStore>
 
-  const createExplorerStoreMock = (databases: any[] = []) => {
+  const createExplorerStoreMock = (mockDatabases: any[] = [], mockSchemas: any[] = [], mockTables: any[] = []) => {
     const store = {
-      databases: ref(databases), // Make databases reactive
+      databases: ref(mockDatabases),
+      schemas: ref(mockSchemas),
+      tables: ref(mockTables),
       loading: ref(false),
       error: ref(null),
-      fetchDatabases: vi.fn().mockImplementation(async () => {
+      nodes: ref<TreeNode[]>([]), // Initialize nodes as a ref
+      fetchDatabases: vi.fn().mockImplementation(() => { // Removed async
         store.loading.value = true;
-        await new Promise(resolve => setTimeout(resolve, 1)); // Simulate async
         store.loading.value = false;
-        return databases; // Directly return the databases
+        
+        // Manually construct nodes based on mock data and set it to the reactive nodes ref
+        store.nodes.value = mockDatabases.map(db => ({
+          key: db.name,
+          label: db.name,
+          icon: 'pi pi-fw pi-database',
+          data: { type: 'database', db: db.name },
+          children: mockSchemas.filter(schema => schema.database_name === db.name).map(schema => ({
+            key: `${db.name}-${schema.name}`,
+            label: schema.name,
+            icon: 'pi pi-fw pi-folder',
+            data: { type: 'schema', db: db.name, schema: schema.name },
+            children: mockTables.filter(table => table.database_name === db.name && table.schema_name === schema.name).map(table => ({
+              key: `${db.name}-${schema.name}-${table.name}`,
+              label: table.name,
+              icon: 'pi pi-fw pi-table',
+              data: { type: 'table', db: db.name, schema: schema.name, table: table.name }
+            }))
+          }))
+        }));
       }),
     };
     return store;
   };
 
-  const mountComponent = (initialExplorerState: any = {}) => {
+  const mountComponent = async (initialExplorerState: any = {}) => {
     setActivePinia(createPinia())
     
-    explorerStoreMock = createExplorerStoreMock(initialExplorerState.databases) as any;
+    explorerStoreMock = createExplorerStoreMock(
+      initialExplorerState.databases,
+      initialExplorerState.schemas,
+      initialExplorerState.tables
+    ) as any;
     (useExplorerStore as Mock).mockReturnValue(explorerStoreMock)
 
     tabsStoreMock = { addTab: vi.fn() } as any
@@ -64,41 +132,18 @@ describe('DbExplorer.vue', () => {
     connectionStoreMock = { dbType: 'Mssql' } as any
     ;(useConnectionStore as Mock).mockReturnValue(connectionStoreMock)
 
-    // Mock JSDOM environment for PrimeVue
-    Object.defineProperty(window, 'matchMedia', {
-      writable: true,
-      value: vi.fn().mockImplementation(query => ({
-        matches: false,
-        media: query,
-        onchange: null,
-        addListener: vi.fn(),
-        removeListener: vi.fn(),
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-        dispatchEvent: vi.fn(),
-      })),
-    })
+    // Manually trigger fetchDatabases to populate nodes in the mock store
+    // This is crucial because DbExplorer.vue calls fetchDatabases in onMounted
+    // await explorerStoreMock.fetchDatabases(); // Removed: DbExplorer.vue calls this itself in onMounted
+    // await flushPromises(); // Removed: fetchDatabases is now synchronous
 
     return mount(DbExplorer, {
       global: {
         plugins: [PrimeVue],
         stubs: {
           QueryView: true,
-          Tree: { // Define Tree stub directly in global.stubs
-            name: 'Tree',
-            props: ['value'],
-            template: `
-              <div class="p-tree-stub">
-                <template v-if="value && value.length > 0">
-                  <div v-for="node in value" :key="node.key" class="p-treenode">
-                    <span class="p-treenode-label" @contextmenu="$emit('node-contextmenu', { originalEvent: $event, node: node })">{{ node.label }}</span>
-                  </div>
-                </template>
-                <div v-else>No nodes</div>
-              </div>
-            `,
-          },
-          ContextMenu: { // Keep ContextMenu stub as it was working
+          Tree: TreeStub,
+          ContextMenu: {
             name: 'ContextMenu',
             props: ['model'],
             template: `
@@ -121,57 +166,85 @@ describe('DbExplorer.vue', () => {
     vi.clearAllMocks()
   })
 
-  // TODO: These tests are commented out due to persistent issues with stubbing PrimeVue's Tree and ContextMenu components.
-  // The Tree component does not seem to render correctly in the test environment, leading to errors
-  // with findComponent and DOMWrapper. Strategies tried include:
-  // 1. Using vi.mock with a render function and explicit name.
-  // 2. Using vi.mock with a template property and explicit name.
-  // 3. Defining the stub directly in global.stubs with a template and explicit name.
-  // All attempts result in the Tree component not being found by findComponent, or its internal
-  // elements not being rendered, leading to 'Cannot call trigger on an empty DOMWrapper'.
-  // Further investigation is needed into PrimeVue testing best practices or specific vue-test-utils
-  // configurations for complex component libraries.
-
-  /*
   it('fetches databases on mount and renders them', async () => {
-    const wrapper = mountComponent({ databases: [{ key: 'db1', label: 'db1' }] })
-    await flushPromises()
+    const mockDatabases = [{ name: 'TestDB1' }]
+    const wrapper = await mountComponent({ databases: mockDatabases })
     await wrapper.vm.$nextTick() // Ensure reactivity is flushed and component re-rendered
 
     expect(explorerStoreMock.fetchDatabases).toHaveBeenCalledTimes(1)
-    const treeComponent = wrapper.findComponent({ name: 'Tree' })
+    const treeComponent = wrapper.findComponent(TreeStub)
     expect(treeComponent.exists()).toBe(true)
   })
 
   it('shows context menu for a database node', async () => {
-    const wrapper = mountComponent({ databases: [{ key: 'db1', label: 'db1' }] })
-    await wrapper.vm.$nextTick()
+    const mockDatabases = [{ name: 'TestDB1' }]
+    const mockSchemas = [{ name: 'Schema1', database_name: 'TestDB1' }]
+    const mockTables = [{ name: 'TableA', database_name: 'TestDB1', schema_name: 'Schema1' }]
+    const wrapper = await mountComponent({ 
+      databases: mockDatabases,
+      schemas: mockSchemas,
+      tables: mockTables
+    })
     await wrapper.vm.$nextTick()
     
+    // Find the tree node label and simulate a right-click
     const treeNode = wrapper.find('.p-treenode-label')
-    await treeNode.trigger('contextmenu', { node: { key: 'db1', label: 'db1' } }) // Pass a mock node
+    await treeNode.trigger('contextmenu', { 
+      originalEvent: new MouseEvent('contextmenu'), 
+      node: { key: 'TestDB1', label: 'TestDB1', data: { type: 'database', db: 'TestDB1' } } 
+    }) 
 
     const contextMenu = wrapper.findComponent({ name: 'ContextMenu' })
     expect(contextMenu.props('model')).toEqual([
       expect.objectContaining({ label: 'New Query' }),
     ])
-    expect(contextMenu.vm.show).toHaveBeenCalledWith(expect.any(MouseEvent)) // Verify show was called
+    // Assuming the show method is mocked as vi.fn()
+    expect(contextMenu.vm.show).toHaveBeenCalledWith(expect.any(MouseEvent))
   })
 
   it('calls addTab when "New Query" is selected from context menu', async () => {
-    const wrapper = mountComponent({ databases: [{ key: 'db1', label: 'db1' }] })
-    await wrapper.vm.$nextTick()
+    const mockDatabases = [{ name: 'TestDB1' }]
+    const mockSchemas = [{ name: 'Schema1', database_name: 'TestDB1' }]
+    const mockTables = [{ name: 'TableA', database_name: 'TestDB1', schema_name: 'Schema1' }]
+    const wrapper = await mountComponent({ 
+      databases: mockDatabases,
+      schemas: mockSchemas,
+      tables: mockTables
+    })
     await wrapper.vm.$nextTick()
 
     const treeNode = wrapper.find('.p-treenode-label')
-    await treeNode.trigger('contextmenu', { node: { key: 'db1', label: 'db1' } })
+    await treeNode.trigger('contextmenu', { 
+      originalEvent: new MouseEvent('contextmenu'), 
+      node: { key: 'TestDB1', label: 'TestDB1', data: { type: 'database', db: 'TestDB1' } } 
+    })
 
     const contextMenu = wrapper.findComponent({ name: 'ContextMenu' })
-    const newQueryItem = contextMenu.find('div') // Assuming the first div is the "New Query" item
+    // Simulate clicking the "New Query" item in the context menu
+    // The stub for ContextMenu renders items as divs and calls item.command() on click
+    const newQueryItem = contextMenu.findAll('div')[0] // Assuming the first div is "New Query"
     await newQueryItem.trigger('click')
 
-    expect(tabsStoreMock.addTab).toHaveBeenCalledWith('')
-    expect(contextMenu.vm.hide).toHaveBeenCalledTimes(1) // Verify hide was called
+    expect(tabsStoreMock.addTab).toHaveBeenCalledWith()
   })
-  */
+
+  it('calls addTab with correct query when a table node is clicked', async () => {
+    const mockDatabases = [{ name: 'TestDB1' }]
+    const mockSchemas = [{ name: 'Schema1', database_name: 'TestDB1' }]
+    const mockTables = [{ name: 'TableA', database_name: 'TestDB1', schema_name: 'Schema1' }]
+    const wrapper = await mountComponent({
+      databases: mockDatabases,
+      schemas: mockSchemas,
+      tables: mockTables
+    })
+    await wrapper.vm.$nextTick()
+
+    // Simulate clicking on the table node
+    // The TreeStub renders .p-treenode-label for each node
+    const tableNodeLabel = wrapper.findAll('.p-treenode-label')[2] // Assuming TableA is the third label in the flat list
+    await tableNodeLabel.trigger('click')
+
+    const expectedQuery = 'SELECT TOP (1000) * FROM [Schema1].[TableA]'
+    expect(tabsStoreMock.addTab).toHaveBeenCalledWith(expectedQuery)
+  })
 })

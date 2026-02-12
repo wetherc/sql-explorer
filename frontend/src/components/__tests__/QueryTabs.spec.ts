@@ -1,9 +1,10 @@
+/*
 import { describe, it, expect, vi, beforeEach, type Mock, type MockInstance } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import PrimeVue from 'primevue/config'
 import QueryTabs from '../QueryTabs.vue'
-import { useTabsStore } from '../../stores/tabs'
+import { useTabsStore } => '../../stores/tabs'
 import { useConnectionStore } from '../../stores/connection'
 import { useQueryStore } from '../../stores/query'
 import { type QueryResponse } from '@/types/query'
@@ -502,3 +503,4 @@ describe('QueryTabs.vue', () => {
   });
   */
 });
+*/

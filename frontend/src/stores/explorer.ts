@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { invoke } from '@tauri-apps/api/tauri'
 
 interface Database {
@@ -8,10 +8,13 @@ interface Database {
 
 interface Schema {
   name: string;
+  database_name: string;
 }
 
 interface Table {
-  TABLE_NAME: string;
+  name: string;
+  database_name: string;
+  schema_name: string;
 }
 
 interface Column {
@@ -26,6 +29,27 @@ export const useExplorerStore = defineStore('explorer', () => {
   const columns = ref<Column[]>([])
   const loading = ref(false)
   const error = ref<string | null>(null)
+
+  const nodes = computed<TreeNode[]>(() => {
+    return databases.value.map(db => ({
+      key: db.name,
+      label: db.name,
+      icon: 'pi pi-fw pi-database',
+      data: { type: 'database', db: db.name },
+      children: schemas.value.filter(schema => schema.database_name === db.name).map(schema => ({
+        key: `${db.name}-${schema.name}`,
+        label: schema.name,
+        icon: 'pi pi-fw pi-folder',
+        data: { type: 'schema', db: db.name, schema: schema.name },
+        children: tables.value.filter(table => table.database_name === db.name && table.schema_name === schema.name).map(table => ({
+          key: `${db.name}-${schema.name}-${table.name}`,
+          label: table.name,
+          icon: 'pi pi-fw pi-table',
+          data: { type: 'table', db: db.name, schema: schema.name, table: table.name }
+        }))
+      }))
+    }))
+  })
 
   async function fetchDatabases() {
     loading.value = true
