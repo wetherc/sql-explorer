@@ -12,7 +12,11 @@ vi.mock('@tauri-apps/api/tauri', () => ({
 
 // Mock uuid
 vi.mock('uuid', () => ({
+  v1: vi.fn(),
+  v3: vi.fn(),
   v4: vi.fn(),
+  v5: vi.fn(),
+  NIL: vi.fn(),
 }))
 
 describe('connectionManager store', () => {
