@@ -35,6 +35,7 @@ postgres-types = { version = "0.2.9", features = ["derive"] }
 rustls = { version = "0.23" }
 rustls-pki-types = "1.14.0"
 webpki-roots = "1.0.6"
+tauri-plugin-store = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v1" }
 
 [features]
 # by default Tauri runs in production mode

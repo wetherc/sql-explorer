@@ -8,8 +8,11 @@ use crate::{
     },
     error::Error,
     state::AppState,
-    storage,
+    storage::{self, SavedConnection},
 };
+use tauri::{AppHandle, Manager, Wry};
+use tauri_plugin_store::{with_store, StoreCollection};
+use std::path::PathBuf;
 
 type CommandResult<T> = Result<T, Error>;
 
@@ -75,7 +78,7 @@ pub async fn list_tables(
 ) -> CommandResult<Vec<db::Table>> {
     let mut client_guard = state.db.lock().await;
     let client = client_guard.as_mut().ok_or(Error::NotConnected)?;
-    
+
     // For MySQL, the schema_name is not used, and the database is the primary parameter.
     // For other drivers like Postgres/MSSQL, schema_name is the key.
     // The driver implementation will handle the logic.
@@ -95,84 +98,45 @@ pub async fn list_columns(
 }
 
 #[tauri::command]
-pub fn list_connections() -> CommandResult<Vec<storage::SavedConnection>> {
-    storage::get_all_connections().map_err(Error::from)
+pub async fn get_connections(app: AppHandle) -> CommandResult<Vec<SavedConnection>> {
+    let stores = app.state::<StoreCollection<Wry>>();
+    let path = PathBuf::from(".settings.dat");
+
+    let connections = with_store(app.clone(), stores, path, |store| {
+        Ok(store
+            .values()
+            .map(|v| serde_json::from_value(v.clone()).unwrap())
+            .collect())
+    })?;
+    Ok(connections)
 }
 
 #[tauri::command]
-pub fn save_connection(
-    name: String,
-    db_type: storage::DbType,
-    server: String,
-    database: String,
-    auth_type: storage::AuthType,
-    user: Option<String>,
-    password: Option<String>,
+pub async fn save_connection(
+    app: AppHandle,
+    connection: SavedConnection,
 ) -> CommandResult<()> {
-    let connection = storage::SavedConnection {
-        name: name.clone(),
-        db_type,
-        server,
-        database,
-        auth_type,
-        user,
-    };
-    let result = storage::save_connection_details(&connection);
-    if let Err(e) = result {
-        log::error!("Failed to save connection details for '{}': {:?}", connection.name, e);
-        return Err(e.into());
-    }
-    log::info!("Connection details for '{}' saved successfully.", connection.name);
+    let stores = app.state::<StoreCollection<Wry>>();
+    let path = PathBuf::from(".settings.dat");
 
-    if let Some(password) = password {
-        let result = storage::save_password(&name, &password);
-        if let Err(e) = result {
-            log::error!("Failed to save password for connection '{}': {:?}", name, e);
-            return Err(e.into());
-        }
-        log::info!("Password for connection '{}' saved successfully (password not logged).", name);
-    } else {
-        if connection.auth_type == storage::AuthType::Sql {
-            let _ = storage::delete_password(&name);
-            log::info!("Existing password for SQL Auth connection '{}' deleted (no new password provided).", name);
-        }
-    }
+    with_store(app.clone(), stores, path, |store| {
+        store.insert(connection.id.clone(), serde_json::to_value(&connection)?)?;
+        Ok(())
+    })?;
     Ok(())
 }
 
 #[tauri::command]
-pub fn delete_connection(name: String) -> CommandResult<()> {
-    let result_details = storage::delete_connection_details(&name);
-    let result_password = storage::delete_password(&name);
+pub async fn delete_connection(app: AppHandle, id: String) -> CommandResult<()> {
+    let stores = app.state::<StoreCollection<Wry>>();
+    let path = PathBuf::from(".settings.dat");
 
-    if let Err(e) = result_details {
-        log::error!("Failed to delete connection details for '{}': {:?}", name, e);
-        return Err(e.into());
-    }
-    if let Err(e) = result_password {
-        log::error!("Failed to delete password for connection '{}': {:?}", name, e);
-        return Err(e.into());
-    }
-
-    log::info!("Connection '{}' and its associated password successfully deleted.", name);
+    with_store(app.clone(), stores, path, |store| {
+        let _ = store.delete(id);
+        Ok(())
+    })?;
     Ok(())
 }
-
-#[tauri::command]
-pub fn get_connection_password(name: String) -> CommandResult<String> {
-    let password_result = storage::get_password(&name);
-    match password_result {
-        Ok(password) => {
-            log::info!("Password successfully retrieved for connection '{}' (password not logged).", name);
-            Ok(password)
-        },
-        Err(e) => {
-            log::error!("Failed to retrieve password for connection '{}': {:?}", name, e);
-            Err(e.into())
-        }
-    }
-}
-
 
 #[cfg(test)]
 mod tests {
@@ -256,26 +220,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_save_connection_with_db_type() {
-        // cleanup before test
-        let _ = storage::delete_connection_details("test_mysql");
-        // This test mainly checks that the command can be called without panicking.
-        // A more thorough test would involve checking the filesystem, which is out of scope here.
-        let result = save_connection(
-            "test_mysql".to_string(),
-            storage::DbType::Mysql,
-            "localhost".to_string(),
-            "test_db".to_string(),
-            storage::AuthType::Sql,
-            Some("user".to_string()),
-            Some("password".to_string()),
-        );
-        assert!(result.is_ok());
-        // cleanup after test
-        let _ = storage::delete_connection_details("test_mysql");
-    }
-
     // --- M5.5 Connection Tests ---
 
     // Helper to get connection string from env
@@ -301,7 +245,7 @@ mod tests {
 
         let app = tauri::test::mock_app();
         app.manage(AppState { db: Mutex::new(None) });
-        
+
         let result = connect(
             connection_string,
             storage::DbType::Mssql,
@@ -322,7 +266,7 @@ mod tests {
 
         let app = tauri::test::mock_app();
         app.manage(AppState { db: Mutex::new(None) });
-        
+
         let result = connect(
             connection_string,
             storage::DbType::Mysql,
@@ -343,7 +287,7 @@ mod tests {
 
         let app = tauri::test::mock_app();
         app.manage(AppState { db: Mutex::new(None) });
-        
+
         let result = connect(
             connection_string,
             storage::DbType::Postgres,
@@ -355,3 +299,5 @@ mod tests {
         assert!(state_for_assertion.db.lock().await.is_some());
     }
 }
+
+

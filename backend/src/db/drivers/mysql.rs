@@ -212,7 +212,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_connect() {
-        let driver = match get_test_driver().await {
+        let _driver = match get_test_driver().await {
             Some(d) => d,
             None => return, // Skip test if env var not set
         };

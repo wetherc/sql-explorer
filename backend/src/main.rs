@@ -15,6 +15,7 @@ use tokio::sync::Mutex;
 fn main() {
     env_logger::init();
     tauri::Builder::default()
+        .plugin(storage::init())
         .manage(AppState {
             db: Mutex::new(None),
         })
@@ -25,10 +26,9 @@ fn main() {
             commands::list_schemas,
             commands::list_tables,
             commands::list_columns,
-            commands::list_connections,
+            commands::get_connections,
             commands::save_connection,
             commands::delete_connection,
-            commands::get_connection_password
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -3,8 +3,7 @@ use serde::Serialize;
 use tiberius;
 use mysql_async;
 use tokio_postgres;
-
-pub type Result<T> = std::result::Result<T, Error>;
+use tauri_plugin_store;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -31,6 +30,9 @@ pub enum Error {
 
     #[error(transparent)]
     Postgres(#[from] tokio_postgres::Error),
+
+    #[error(transparent)]
+    Store(#[from] tauri_plugin_store::Error),
 
     #[error("Database not connected")]
     NotConnected,
