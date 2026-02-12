@@ -30,6 +30,7 @@ export const useExplorerStore = defineStore('explorer', () => {
   function clearExplorer() {
     nodes.value = []
     error.value = null
+    loading.value = false
   }
 
   async function fetchDatabases() {

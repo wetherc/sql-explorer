@@ -1,8 +1,0 @@
-feat(frontend): Add unit tests for connection store
-
-Implemented unit tests for the `connection` Pinia store, ensuring its functionality for connecting, disconnecting, and handling errors is robust and reliable.
-
-This commit also includes:
-- **Test Setup**: Configured Vitest for unit testing in the frontend, including `vitest.config.ts` and `vitest.setup.ts`.
-- **CSS Mocking**: Resolved CSS import errors during testing by configuring Vitest to correctly mock CSS files.
-- **Dependency Inlining**: Added `test.server.deps.inline: true` to `vitest.config.ts` to address module resolution issues during testing, particularly with Vuetify components.

@@ -19,6 +19,7 @@
     "webfontloader": "^1.6.28"
   },
   "devDependencies": {
+    "@pinia/testing": "^1.0.3",
     "@types/node": "^24.10.1",
     "@types/webfontloader": "^1.6.38",
     "@vitejs/plugin-vue": "^6.0.2",
