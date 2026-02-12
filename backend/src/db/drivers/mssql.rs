@@ -210,7 +210,7 @@ impl DatabaseDriver for MssqlDriver {
         Ok(databases)
     }
 
-    async fn list_schemas(&mut self) -> Result<Vec<Schema>, Error> {
+    async fn list_schemas(&mut self, _database: &str) -> Result<Vec<Schema>, Error> {
         let query = "SELECT name FROM sys.schemas ORDER BY name";
         let mut stream = self.client.simple_query(query).await?;
         let mut schemas = Vec::new();
@@ -228,10 +228,14 @@ impl DatabaseDriver for MssqlDriver {
     async fn list_tables(&mut self, schema: &str) -> Result<Vec<Table>, Error> {
         let query = "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = @p1 ORDER BY TABLE_NAME";
         let mut stream = self.client.query(query, &[&schema]).await?;
-        let tables = Vec::new();
+        let mut tables = Vec::new();
 
-        while let Some(_item) = stream.try_next().await? {
-
+        while let Some(item) = stream.try_next().await? {
+            if let QueryItem::Row(row) = item {
+                if let Some(name) = row.get::<&str, _>(0) {
+                    tables.push(Table { name: name.to_string() });
+                }
+            }
         }
         Ok(tables)
     }
@@ -239,10 +243,14 @@ impl DatabaseDriver for MssqlDriver {
     async fn list_columns(&mut self, schema: &str, table: &str) -> Result<Vec<AppColumn>, Error> {
         let query = "SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = @p1 AND TABLE_NAME = @p2 ORDER BY ORDINAL_POSITION";
         let mut stream = self.client.query(query, &[&schema, &table]).await?;
-        let columns = Vec::new();
+        let mut columns = Vec::new();
 
-        while let Some(_item) = stream.try_next().await? {
-
+        while let Some(item) = stream.try_next().await? {
+            if let QueryItem::Row(row) = item {
+                let name = row.get::<&str, _>(0).unwrap_or_default().to_string();
+                let data_type = row.get::<&str, _>(1).unwrap_or_default().to_string();
+                columns.push(AppColumn { name, data_type });
+            }
         }
         Ok(columns)
     }

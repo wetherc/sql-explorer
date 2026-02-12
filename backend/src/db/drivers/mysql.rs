@@ -78,7 +78,7 @@ impl super::DatabaseDriver for MysqlDriver {
         }).await
     }
 
-    async fn list_schemas(&mut self) -> Result<Vec<Schema>, Error> {
+    async fn list_schemas(&mut self, _database: &str) -> Result<Vec<Schema>, Error> {
         info!("Listing MySQL schemas (returning empty as MySQL uses databases).");
         // MySQL doesn't have schemas in the same way as MS SQL or PostgreSQL.
         // It uses databases. So, we return an empty list or adapt this.

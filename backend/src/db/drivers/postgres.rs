@@ -113,7 +113,7 @@ impl DatabaseDriver for PostgresDriver {
         Ok(databases)
     }
 
-    async fn list_schemas(&mut self) -> Result<Vec<Schema>, Error> {
+    async fn list_schemas(&mut self, _database: &str) -> Result<Vec<Schema>, Error> {
         let rows = self
             .client
             .query(

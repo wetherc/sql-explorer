@@ -64,8 +64,7 @@ pub async fn list_databases(state: tauri::State<'_, AppState>) -> CommandResult<
 pub async fn list_schemas(database: String, state: tauri::State<'_, AppState>) -> CommandResult<Vec<db::Schema>> {
     let mut client_guard = state.db.lock().await;
     let client = client_guard.as_mut().ok_or(Error::NotConnected)?;
-    // The database parameter is not directly used for all drivers, but is kept for API consistency
-    client.list_schemas().await
+    client.list_schemas(&database).await
 }
 
 #[tauri::command]

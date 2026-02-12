@@ -1,14 +1,9 @@
-feat(frontend): Rebuild frontend with Vuetify and new architecture
+fix(backend): Align explorer commands with frontend parameters
 
-Rebuilt the entire frontend from scratch following the new architectural plan and the user's choice of Vuetify as the UI framework.
+Updated backend commands and driver implementations to correctly handle database and schema parameters for explorer functions, resolving inconsistencies with the frontend calls.
 
-Key changes include:
-- **UI Framework**: Migrated from PrimeVue (previous attempt) to Vuetify, adopting Material Design principles.
-- **Core Layout**: Implemented a new three-panel application layout with a rail-style mode switcher, a dynamic active panel (for explorer/connection management), and the main query workspace.
-- **State Management**: Installed and configured Pinia for global state management.
-- **Connection Management**: Implemented the basic  component and wired it to the  store for database connection functionality.
-- **Database Explorer**: Implemented a lazy-loading database explorer () using  (built with Vuetify  and ). The  store now handles dynamic fetching of database objects.
-- **Query Workspace**: Integrated  for the SQL editor and scaffolded the  and  components for a tabbed query interface with initial result display capabilities.
-- **Project Plan**: Updated  to reflect the new design philosophy, UI architecture, and technical task breakdown based on the chosen Vuetify framework and the wireframe.
-
-This commit represents a complete overhaul of the frontend, setting the foundation for future feature development on a solid and consistent UI platform.
+- Modified `DatabaseDriver` trait's `list_schemas` to accept a `database` parameter.
+- Updated `mssql.rs`, `mysql.rs`, and `postgres.rs` implementations to conform to the new trait signature for `list_schemas`. For drivers where a database-specific schema list isn't directly supported by the underlying client, the parameter is marked as unused to maintain API consistency.
+- Corrected `mssql.rs` `list_tables` and `list_columns` to properly stream and process results, fixing previous empty returns.
+- Updated `commands.rs` to pass the `database` parameter to the `client.list_schemas()` call.
+- Cleared `frontend/src/style.css` as it's redundant with Vuetify's styling.
