@@ -1,55 +1,42 @@
+// src/stores/tabs.ts
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
-import { v4 as uuidv4 } from 'uuid'
-import { type QueryResponse } from '@/types/query'
+import { ref } from 'vue'
 
 export interface QueryTab {
-  id: string;
-  title: string;
-  query: string;
-  response: QueryResponse | null;
-  isLoading: boolean;
-  errorMessage: string | null;
-  isSaved: boolean; // Future use for saving queries
+  id: string
+  title: string
+  query: string
 }
+
+let tabIdCounter = 0
 
 export const useTabsStore = defineStore('tabs', () => {
   const tabs = ref<QueryTab[]>([])
   const activeTabId = ref<string | null>(null)
 
-  const activeTab = computed(() => {
-    return tabs.value.find(tab => tab.id === activeTabId.value) || null
-  })
-
-  function addTab(queryContent: string = '') {
+  function addTab(query: string = '') {
+    const newId = `tab-${tabIdCounter++}`
     const newTab: QueryTab = {
-      id: uuidv4(),
-      title: `New Query ${tabs.value.length + 1}`,
-      query: queryContent,
-      response: null,
-      isLoading: false,
-      errorMessage: null,
-      isSaved: false,
+      id: newId,
+      title: `Query ${tabIdCounter}`,
+      query: query,
     }
     tabs.value.push(newTab)
-    activeTabId.value = newTab.id
+    activeTabId.value = newId
   }
 
   function closeTab(id: string) {
-    const index = tabs.value.findIndex(tab => tab.id === id)
-    if (index !== -1) {
-      tabs.value.splice(index, 1)
+    const index = tabs.value.findIndex(t => t.id === id)
+    if (index === -1) return
 
-      // If the closed tab was active, activate another tab
+    tabs.value.splice(index, 1)
+
+    // If the closed tab was the active one, set a new active tab
+    if (activeTabId.value === id) {
       if (tabs.value.length > 0) {
-        const newActiveTabIndex = Math.min(index, tabs.value.length - 1);
-        const newActiveTab = tabs.value[newActiveTabIndex];
-        if (newActiveTab) { // Explicit check
-          activeTabId.value = newActiveTab.id;
-        } else {
-          // This case theoretically shouldn't happen if tabs.value.length > 0
-          activeTabId.value = null;
-        }
+        // Activate the previous tab or the first one
+        const newActiveIndex = Math.max(0, index - 1)
+        activeTabId.value = tabs.value[newActiveIndex].id
       } else {
         activeTabId.value = null
       }
@@ -63,7 +50,6 @@ export const useTabsStore = defineStore('tabs', () => {
   return {
     tabs,
     activeTabId,
-    activeTab,
     addTab,
     closeTab,
     setActiveTab,

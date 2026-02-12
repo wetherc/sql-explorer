@@ -1,118 +1,118 @@
+// src/stores/explorer.ts
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref } from 'vue'
 import { invoke } from '@tauri-apps/api/tauri'
+import { useConnectionStore } from './connection'
+import { DbType } from '@/types/db'
 
-interface Database {
-  name: string;
+// A self-contained interface for our tree nodes.
+export interface ExplorerNode {
+  key: string
+  label: string
+  icon?: string
+  children?: ExplorerNode[]
+  // Contains metadata about the node
+  data: {
+    type: 'database' | 'schema' | 'table' | 'column'
+    [key: string]: any
+  }
 }
 
-interface Schema {
-  name: string;
-  database_name: string;
-}
-
-interface Table {
-  name: string;
-  database_name: string;
-  schema_name: string;
-}
-
-interface Column {
-  name: string;
-  data_type: string;
-}
+interface BackendDatabase { name: string }
+interface BackendSchema { name: string }
+interface BackendTable { name: string }
 
 export const useExplorerStore = defineStore('explorer', () => {
-  const databases = ref<Database[]>([])
-  const schemas = ref<Schema[]>([])
-  const tables = ref<Table[]>([])
-  const columns = ref<Column[]>([])
+  const nodes = ref<ExplorerNode[]>([])
   const loading = ref(false)
   const error = ref<string | null>(null)
 
-  const nodes = computed<TreeNode[]>(() => {
-    return databases.value.map(db => ({
-      key: db.name,
-      label: db.name,
-      icon: 'pi pi-fw pi-database',
-      data: { type: 'database', db: db.name },
-      children: schemas.value.filter(schema => schema.database_name === db.name).map(schema => ({
-        key: `${db.name}-${schema.name}`,
-        label: schema.name,
-        icon: 'pi pi-fw pi-folder',
-        data: { type: 'schema', db: db.name, schema: schema.name },
-        children: tables.value.filter(table => table.database_name === db.name && table.schema_name === schema.name).map(table => ({
-          key: `${db.name}-${schema.name}-${table.name}`,
-          label: table.name,
-          icon: 'pi pi-fw pi-table',
-          data: { type: 'table', db: db.name, schema: schema.name, table: table.name }
-        }))
-      }))
-    }))
-  })
+  function clearExplorer() {
+    nodes.value = []
+    error.value = null
+  }
 
   async function fetchDatabases() {
+    const connectionStore = useConnectionStore()
+    if (!connectionStore.isConnected) return
+
     loading.value = true
     error.value = null
     try {
-      const result = await invoke<Database[]>('list_databases')
-      databases.value = result
-    } catch (err) {
-      error.value = err as string
+      const result = await invoke<BackendDatabase[]>('list_databases')
+      nodes.value = result.map((db) => ({
+        key: db.name,
+        label: db.name,
+        icon: 'mdi-database',
+        children: [], // Start with no children, expand on click
+        data: { type: 'database', db: db.name },
+      }))
+    } catch (e: any) {
+      error.value = e.toString()
+      nodes.value = []
     } finally {
       loading.value = false
     }
   }
 
-  async function fetchSchemas() {
+  async function expandNode(node: ExplorerNode) {
+    const connectionStore = useConnectionStore()
+    if (!connectionStore.isConnected) return
+
+    // If children are already loaded, do nothing.
+    if (node.children && node.children.length > 0) {
+      return
+    }
+
     loading.value = true
     error.value = null
     try {
-      const result = await invoke<Schema[]>('list_schemas')
-      schemas.value = result
-    } catch (err) {
-      error.value = err as string
+      const { type, db, schema } = node.data
+
+      if (type === 'database') {
+        if (connectionStore.dbType === DbType.Mysql) {
+          const tables = await invoke<BackendTable[]>('list_tables', { database: db })
+          node.children = tables.map(t => ({
+            key: `${db}-${t.name}`,
+            label: t.name,
+            icon: 'mdi-table',
+            data: { type: 'table', db, schema: db, table: t.name },
+          }))
+        } else {
+          const schemas = await invoke<BackendSchema[]>('list_schemas', { database: db })
+          node.children = schemas.map(s => ({
+            key: `${db}-${s.name}`,
+            label: s.name,
+            icon: 'mdi-folder-outline',
+            children: [],
+            data: { type: 'schema', db, schema: s.name },
+          }))
+        }
+      } else if (type === 'schema') {
+        const tables = await invoke<BackendTable[]>('list_tables', { database: db, schemaName: schema })
+        node.children = tables.map(t => ({
+          key: `${db}-${schema}-${t.name}`,
+          label: t.name,
+          icon: 'mdi-table',
+          data: { type: 'table', db, schema, table: t.name },
+        }))
+      }
+    } catch (e: any) {
+      error.value = e.toString()
+      // Optionally add an error node to provide feedback in the UI
+      node.children = [{ key: `${node.key}-error`, label: 'Error', icon: 'mdi-alert-circle-outline', data: {type: 'column'} }]
     } finally {
       loading.value = false
     }
   }
 
-  async function fetchTables(schemaName: string) {
-    loading.value = true
-    error.value = null
-    try {
-      const result = await invoke<Table[]>('list_tables', { schemaName })
-      tables.value = result
-    } catch (err) {
-      error.value = err as string
-    } finally {
-      loading.value = false
-    }
-  }
-
-  async function fetchColumns(schemaName: string, tableName: string) {
-    loading.value = true
-    error.value = null
-    try {
-      const result = await invoke<Column[]>('list_columns', { schemaName, tableName })
-      columns.value = result
-    } catch (err) {
-      error.value = err as string
-    } finally {
-      loading.value = false
-    }
-  }
 
   return {
-    databases,
-    schemas,
-    tables,
-    columns,
+    nodes,
     loading,
     error,
+    clearExplorer,
     fetchDatabases,
-    fetchSchemas,
-    fetchTables,
-    fetchColumns,
+    expandNode,
   }
 })

@@ -61,20 +61,27 @@ pub async fn list_databases(state: tauri::State<'_, AppState>) -> CommandResult<
 }
 
 #[tauri::command]
-pub async fn list_schemas(state: tauri::State<'_, AppState>) -> CommandResult<Vec<db::Schema>> {
+pub async fn list_schemas(database: String, state: tauri::State<'_, AppState>) -> CommandResult<Vec<db::Schema>> {
     let mut client_guard = state.db.lock().await;
     let client = client_guard.as_mut().ok_or(Error::NotConnected)?;
+    // The database parameter is not directly used for all drivers, but is kept for API consistency
     client.list_schemas().await
 }
 
 #[tauri::command]
 pub async fn list_tables(
-    schema_name: String,
+    database: String,
+    schema_name: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> CommandResult<Vec<db::Table>> {
     let mut client_guard = state.db.lock().await;
     let client = client_guard.as_mut().ok_or(Error::NotConnected)?;
-    client.list_tables(&schema_name).await
+    
+    // For MySQL, the schema_name is not used, and the database is the primary parameter.
+    // For other drivers like Postgres/MSSQL, schema_name is the key.
+    // The driver implementation will handle the logic.
+    let schema_param = schema_name.as_deref().unwrap_or(&database);
+    client.list_tables(schema_param).await
 }
 
 #[tauri::command]
@@ -216,7 +223,7 @@ mod tests {
         let app = tauri::test::mock_app();
         app.manage(AppState { db: Mutex::new(None) });
         let state = app.state::<AppState>();
-        let result = list_schemas(state).await;
+        let result = list_schemas("test_db".to_string(), state).await;
         assert!(result.is_err());
         match result.unwrap_err() {
             Error::NotConnected => (),
@@ -229,7 +236,7 @@ mod tests {
         let app = tauri::test::mock_app();
         app.manage(AppState { db: Mutex::new(None) });
         let state = app.state::<AppState>();
-        let result = list_tables("dbo".to_string(), state).await;
+        let result = list_tables("test_db".to_string(), Some("dbo".to_string()), state).await;
         assert!(result.is_err());
         match result.unwrap_err() {
             Error::NotConnected => (),

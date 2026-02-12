@@ -1,72 +1,68 @@
-import { ref, computed } from 'vue'
+// src/stores/query.ts
 import { defineStore } from 'pinia'
+import { ref, reactive } from 'vue'
 import { invoke } from '@tauri-apps/api/tauri'
-import { type QueryResponse, type ResultSet } from '@/types/query'
 
+export interface QueryResult {
+  columns: { title: string, key: string }[]
+  rows: any[]
+}
+
+export interface QueryState {
+  loading: boolean
+  error: string | null
+  results: QueryResult[]
+  messages: string[]
+}
 
 export const useQueryStore = defineStore('query', () => {
-  const response = ref<QueryResponse | null>(null)
-  const isLoading = ref(false)
-  const errorMessage = ref('')
+  const queryStates = reactive<Map<string, QueryState>>(new Map())
 
-  const firstResultSet = computed<ResultSet | null | undefined>(() => {
-    return response.value && response.value.results.length > 0
-      ? response.value.results[0]
-      : null
-  })
+  function getStateForTab(tabId: string): QueryState {
+    if (!queryStates.has(tabId)) {
+      queryStates.set(tabId, {
+        loading: false,
+        error: null,
+        results: [],
+        messages: [],
+      })
+    }
+    return queryStates.get(tabId)!
+  }
 
-  const resultRows = computed(() => {
-    return firstResultSet.value ? firstResultSet.value.rows : []
-  })
-
-  const resultColumns = computed(() => {
-    return firstResultSet.value ? firstResultSet.value.columns : []
-  })
-
-  const messages = computed(() => {
-    return response.value ? response.value.messages : []
-  })
-
-  async function executeQuery(query: string): Promise<boolean> {
-    isLoading.value = true
-    errorMessage.value = ''
-    response.value = null
+  async function executeQuery(tabId: string, query: string) {
+    const state = getStateForTab(tabId)
+    state.loading = true
+    state.error = null
+    state.results = []
+    state.messages = []
 
     try {
-      const backendResponse = await invoke<QueryResponse>('execute_query', { query })
-      response.value = backendResponse
-      errorMessage.value = response.value.messages.join('\n')
-      // If there's an error message from the backend, consider it a failure.
-      // This is a simplified check; more robust error handling might be needed.
-      return response.value.messages.every(msg => !msg.toLowerCase().includes('error'))
-    } catch (error) {
-      errorMessage.value = error as string
-      return false
+      const response = await invoke<{ results: any[], messages: string[] }>('execute_query', { query })
+      
+      state.results = response.results.map(rs => ({
+        columns: rs.columns.map((col: string) => ({ title: col, key: col })),
+        rows: rs.rows,
+      }))
+      state.messages = response.messages
+
+    } catch (e: any) {
+      state.error = e.toString()
     } finally {
-      isLoading.value = false
+      state.loading = false
     }
   }
 
-  // This function is used by the tabs store to set the state of a specific tab.
-  function setQueryState(
-    newQuery: string, // Not directly used here, managed by tabs store
-    newResponse: QueryResponse | null,
-    newErrorMessage: string | null,
-    newIsLoading: boolean,
-  ) {
-    response.value = newResponse;
-    errorMessage.value = newErrorMessage || '';
-    isLoading.value = newIsLoading;
+  function clearStateForTab(tabId: string) {
+    if (queryStates.has(tabId)) {
+      queryStates.delete(tabId)
+    }
   }
 
   return {
-    response,
-    isLoading,
-    errorMessage,
-    resultRows,
-    resultColumns,
-    messages,
+    queryStates,
+    getStateForTab,
     executeQuery,
-    setQueryState,
+    clearStateForTab,
   }
 })
