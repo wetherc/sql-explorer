@@ -13,7 +13,7 @@
     </div>
     <div class="results-pane">
       <v-tabs v-model="activeResultsTab" bg-color="secondary">
-        <v-tab v-for="(result, index) in queryState.results" :key="index" :value="`result-${index}`">
+        <v-tab v-for="(_, index) in queryState.results" :key="index" :value="`result-${index}`">
           Result {{ index + 1 }}
         </v-tab>
         <v-tab value="messages">Messages</v-tab>
@@ -46,7 +46,7 @@
 import { ref, computed, onUnmounted } from 'vue'
 import MonacoEditor from 'monaco-editor-vue3'
 import { useQueryStore } from '@/stores/query'
-import { useTabsStore } from '@/stores/tabs'
+import { useTabsStore, type QueryTab } from '@/stores/tabs'
 
 const props = defineProps<{
   initialQuery: string
@@ -65,7 +65,7 @@ const queryState = computed(() => queryStore.getStateForTab(props.tabId))
 function handleExecute() {
   queryStore.executeQuery(props.tabId, query.value)
   // Also update the query in the tabs store so it's saved
-  const currentTab = tabsStore.tabs.find(t => t.id === props.tabId)
+  const currentTab = tabsStore.tabs.find((t: QueryTab) => t.id === props.tabId)
   if (currentTab) {
     currentTab.query = query.value
   }

@@ -36,7 +36,10 @@ export const useTabsStore = defineStore('tabs', () => {
       if (tabs.value.length > 0) {
         // Activate the previous tab or the first one
         const newActiveIndex = Math.max(0, index - 1)
-        activeTabId.value = tabs.value[newActiveIndex].id
+        const newActiveTab = tabs.value[newActiveIndex]
+        if (newActiveTab) {
+          activeTabId.value = newActiveTab.id
+        }
       } else {
         activeTabId.value = null
       }

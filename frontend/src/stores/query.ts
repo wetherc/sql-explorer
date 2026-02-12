@@ -1,6 +1,6 @@
 // src/stores/query.ts
 import { defineStore } from 'pinia'
-import { ref, reactive } from 'vue'
+import { reactive } from 'vue'
 import { invoke } from '@tauri-apps/api/tauri'
 
 export interface QueryResult {
@@ -40,7 +40,7 @@ export const useQueryStore = defineStore('query', () => {
     try {
       const response = await invoke<{ results: any[], messages: string[] }>('execute_query', { query })
       
-      state.results = response.results.map(rs => ({
+      state.results = response.results.map((rs: any) => ({
         columns: rs.columns.map((col: string) => ({ title: col, key: col })),
         rows: rs.rows,
       }))

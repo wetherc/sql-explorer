@@ -40,7 +40,7 @@ export const useExplorerStore = defineStore('explorer', () => {
     error.value = null
     try {
       const result = await invoke<BackendDatabase[]>('list_databases')
-      nodes.value = result.map((db) => ({
+      nodes.value = result.map((db: BackendDatabase) => ({
         key: db.name,
         label: db.name,
         icon: 'mdi-database',
@@ -72,7 +72,7 @@ export const useExplorerStore = defineStore('explorer', () => {
       if (type === 'database') {
         if (connectionStore.dbType === DbType.Mysql) {
           const tables = await invoke<BackendTable[]>('list_tables', { database: db })
-          node.children = tables.map(t => ({
+          node.children = tables.map((t: BackendTable) => ({
             key: `${db}-${t.name}`,
             label: t.name,
             icon: 'mdi-table',
@@ -80,7 +80,7 @@ export const useExplorerStore = defineStore('explorer', () => {
           }))
         } else {
           const schemas = await invoke<BackendSchema[]>('list_schemas', { database: db })
-          node.children = schemas.map(s => ({
+          node.children = schemas.map((s: BackendSchema) => ({
             key: `${db}-${s.name}`,
             label: s.name,
             icon: 'mdi-folder-outline',
@@ -90,7 +90,7 @@ export const useExplorerStore = defineStore('explorer', () => {
         }
       } else if (type === 'schema') {
         const tables = await invoke<BackendTable[]>('list_tables', { database: db, schemaName: schema })
-        node.children = tables.map(t => ({
+        node.children = tables.map((t: BackendTable) => ({
           key: `${db}-${schema}-${t.name}`,
           label: t.name,
           icon: 'mdi-table',

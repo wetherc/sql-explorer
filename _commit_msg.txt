@@ -1,9 +1,13 @@
-fix(backend): Align explorer commands with frontend parameters
+fix(frontend): Resolve build failures and align Tauri versions
 
-Updated backend commands and driver implementations to correctly handle database and schema parameters for explorer functions, resolving inconsistencies with the frontend calls.
+Fixed a series of critical build and configuration errors that prevented the frontend from compiling and running. The root cause was a version mismatch between the Tauri backend (v1.5) and the frontend's `@tauri-apps/api` dependency (v2).
 
-- Modified `DatabaseDriver` trait's `list_schemas` to accept a `database` parameter.
-- Updated `mssql.rs`, `mysql.rs`, and `postgres.rs` implementations to conform to the new trait signature for `list_schemas`. For drivers where a database-specific schema list isn't directly supported by the underlying client, the parameter is marked as unused to maintain API consistency.
-- Corrected `mssql.rs` `list_tables` and `list_columns` to properly stream and process results, fixing previous empty returns.
-- Updated `commands.rs` to pass the `database` parameter to the `client.list_schemas()` call.
-- Cleared `frontend/src/style.css` as it's redundant with Vuetify's styling.
+Key fixes include:
+- **Tauri API Version**: Replaced `@tauri-apps/api@^2.10.1` with the correct `^1.5.3` version to match the Tauri v1.5 backend.
+- **TypeScript Configuration**:
+  - Correctly configured `tsconfig.app.json` with path aliases and base URL.
+  - Created an `env.d.ts` file to manage triple-slash type references for Vite, Vuetify, and Tauri, which resolved module resolution errors for `vue-tsc`.
+  - Refactored the `DbType` enum to a `const` object to comply with modern TypeScript's `erasableSyntaxOnly` rule.
+- **Vite Configuration**: Updated `vite.config.ts` with the correct dev server port and Tauri-specific settings.
+- **Tauri Configuration**: Corrected the `beforeDevCommand` and `devPath` in `tauri.conf.json` to point to the correct frontend project and port.
+- **Code Fixes**: Addressed all resulting TypeScript errors, such as implicit `any` types and potential `undefined` objects, across various stores and components.

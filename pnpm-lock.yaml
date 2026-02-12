@@ -17,6 +17,9 @@ importers:
       '@mdi/font':
         specifier: ^7.4.47
         version: 7.4.47
+      '@tauri-apps/api':
+        specifier: ^1.6.0
+        version: 1.6.0
       monaco-editor-vue3:
         specifier: ^1.0.5
         version: 1.0.5(monaco-editor@0.55.1)(vue@3.5.27(typescript@5.9.3))
@@ -36,6 +39,9 @@ importers:
       '@types/node':
         specifier: ^24.10.1
         version: 24.10.11
+      '@types/webfontloader':
+        specifier: ^1.6.38
+        version: 1.6.38
       '@vitejs/plugin-vue':
         specifier: ^6.0.2
         version: 6.0.4(vite@7.3.1(@types/node@24.10.11)(jiti@2.6.1)(yaml@2.8.2))(vue@3.5.27(typescript@5.9.3))
@@ -377,6 +383,10 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  '@tauri-apps/api@1.6.0':
+    resolution: {integrity: sha512-rqI++FWClU5I2UBp4HXFvl+sBWkdigBkxnpJDQUWttNyG7IZP4FwQGhTNL5EOw0vI8i6eSAJ5frLqO7n7jbJdg==}
+    engines: {node: '>= 14.6.0', npm: '>= 6.6.0', yarn: '>= 1.19.1'}
+
   '@tauri-apps/cli-darwin-arm64@1.6.3':
     resolution: {integrity: sha512-fQN6IYSL8bG4NvkdKE4sAGF4dF/QqqQq4hOAU+t8ksOzHJr0hUlJYfncFeJYutr/MMkdF7hYKadSb0j5EE9r0A==}
     engines: {node: '>= 10'}
@@ -454,6 +464,9 @@ packages:
 
   '@types/trusted-types@2.0.7':
     resolution: {integrity: sha512-ScaPdn1dQczgbl0QFTeTOmVHFULt394XJgOQNoyVhZ6r2vLnMLJfBPd53SB52T/3G36VI1/g2MZaX0cwDuXsfw==}
+
+  '@types/webfontloader@1.6.38':
+    resolution: {integrity: sha512-kUaF72Fv202suFx6yBrwXqeVRMx7hGtJTesyESZgn9sEPCUeDXm2p0SiyS1MTqW74nQP4p7JyrOCwZ7pNFns4w==}
 
   '@vitejs/plugin-vue@6.0.4':
     resolution: {integrity: sha512-uM5iXipgYIn13UUQCZNdWkYk+sysBeA97d5mHsAoAt1u/wpN3+zxOmsVJWosuzX+IMGRzeYUNytztrYznboIkQ==}
@@ -951,6 +964,8 @@ snapshots:
   '@rollup/rollup-win32-x64-msvc@4.57.1':
     optional: true
 
+  '@tauri-apps/api@1.6.0': {}
+
   '@tauri-apps/cli-darwin-arm64@1.6.3':
     optional: true
 
@@ -1004,6 +1019,8 @@ snapshots:
 
   '@types/trusted-types@2.0.7':
     optional: true
+
+  '@types/webfontloader@1.6.38': {}
 
   '@vitejs/plugin-vue@6.0.4(vite@7.3.1(@types/node@24.10.11)(jiti@2.6.1)(yaml@2.8.2))(vue@3.5.27(typescript@5.9.3))':
     dependencies:

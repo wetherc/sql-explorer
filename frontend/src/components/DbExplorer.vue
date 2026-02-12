@@ -57,7 +57,7 @@ function onExpand(node: ExplorerNode) {
   explorerStore.expandNode(node)
 }
 
-function onNodeClick(node: ExplorerNode) {
+function onNodeClick(_node: ExplorerNode) {
   // Could be used to preview table data, etc. in the future
 }
 

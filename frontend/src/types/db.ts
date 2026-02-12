@@ -1,6 +1,8 @@
 // src/types/db.ts
-export enum DbType {
-  Mssql = 'Mssql',
-  Mysql = 'Mysql',
-  Postgres = 'Postgres',
-}
+export const DbType = {
+  Mssql: 'Mssql',
+  Mysql: 'Mysql',
+  Postgres: 'Postgres',
+} as const;
+
+export type DbType = typeof DbType[keyof typeof DbType];
