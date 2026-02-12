@@ -1,254 +1,95 @@
-# SQL Explorer - Development Plan
+# SQL Explorer Frontend - Design Philosophy & Technical Plan
 
-## 1. Project Overview
+## Part 1: Design and User Experience (UX) Philosophy
 
-This document outlines the plan for building **SQL Explorer**, a desktop application using Vue.js for the frontend. The goal is to create a lightweight, modern, and cross-platform alternative to SQL Server Management Studio (SSMS) for developers and database administrators who need to interact with Microsoft SQL Server instances.
+This document establishes a clear and unified vision for the SQL Explorer's frontend, centered on the **Vuetify** component framework and Material Design principles.
 
-The application will be built using a modern web stack and wrapped in a desktop shell (like Tauri or Electron) to provide the necessary system-level access for direct database connections.
+### Core Principles
 
-## 2. Core Technologies
+1.  **Clarity & Focus:** The user interface will be clean, uncluttered, and highly intuitive. The primary goal is to help users focus on their data and queries, not on navigating complex UI. We will achieve this through generous use of whitespace, clear typography, and a consistent, predictable layout. The Material Design system provides a robust foundation for this principle.
 
-- **Frontend:**
-  - **Framework:** Vue 3 (Composition API)
-  - **Build Tool:** Vite
-  - **State Management:** Pinia
-  - **Routing:** Vue Router
-  - **UI Components:** A component library like PrimeVue, Vuetify, or a custom-built set with TailwindCSS for styling.
-  - **SQL Editor:** Monaco Editor (the editor that powers VS Code) for a rich editing experience with syntax highlighting.
+2.  **Efficiency & Flow:** The application must feel fast and responsive. Common user workflows—connecting to a database, exploring objects, writing and executing queries, and viewing results—will be streamlined to require a minimum number of clicks and cognitive effort. Keyboard accessibility and shortcuts will be prioritized for power users, enabling them to perform actions without leaving the keyboard.
 
-- **Backend & Desktop:**
-  - **Application Shell:** **Tauri**. It's a more lightweight and secure alternative to Electron, using a Rust backend. This is critical as a browser cannot directly connect to a SQL database.
-  - **Database Driver:** `tiberius` (a Rust driver for TDS, the protocol for MS SQL Server).
-  - **API:** The Vue frontend will communicate with the Rust backend via Tauri's built-in IPC mechanism.
+3.  **Accessibility (A11y):** The application must be usable by the widest possible audience. We will adhere to WCAG 2.1 standards by:
+    *   Ensuring sufficient color contrast for all text and UI elements.
+    *   Guaranteeing full keyboard navigability for all interactive components.
+    *   Providing clear labels and ARIA attributes for screen reader support.
+    *   Vuetify's components are built with accessibility in mind, which provides a strong starting point for this commitment.
 
-## 3. UX/UI Design Philosophy
-
-- **Modern & Clean:** A minimalist interface that prioritizes content and reduces clutter.
-- **Responsive & Performant:** A fluid layout that works well on different screen sizes and feels fast.
-- **Component-Based:** A modular design with resizable panels for the database explorer, SQL editor, and results view.
-- **Tabbed Interface:** Allow users to work on multiple queries simultaneously in different tabs.
+4.  **Consistency & Predictability:** The UI will be consistent throughout the application. A button, icon, or menu will always look and behave in a predictable manner. This reduces cognitive load and makes the application easy to master. By strictly adhering to the Material Design component system provided by Vuetify, we ensure a cohesive and predictable user experience.
 
 ---
 
-## 4. Consolidated Project Roadmap
+## Part 2: UI Architecture and Interaction Patterns
 
-This section outlines the development plan in a milestone-based format.
+Based on the project wireframe, the application will be structured around a flexible three-panel layout, providing clear separation between application modes, contextual tools, and the main workspace.
 
-### **Milestone 1: Core Functionality (The "Spine")**
-*   **Goal:** Establish a working end-to-end connection between the Vue.js frontend and a SQL Server database, mediated by the Rust backend. This involves creating the most basic UI needed to input a query, execute it, and see the results.
-*   **Status:** ✅ **Completed**
+### Major UI Components
 
-#### **Completed Tasks:**
-*   **[x] M1.1 (Backend):** Add `tiberius` to `Cargo.toml`.
-*   **[x] M1.2 (Backend):** Create a `connect` Tauri Command.
-*   **[x] M1.3 (Backend):** Create an `execute_query` Tauri Command.
-*   **[x] M1.4 (Backend):** Register `connect` and `execute_query` commands in `main.rs`.
-*   **[x] M1.5 (Frontend):** Create a `ConnectionView.vue` component with a single input.
-*   **[x] M1.6 (Frontend):** Implement a Pinia store for connection state management.
-*   **[x] M1.7 (Frontend):** Create a `QueryView.vue` component with a `<textarea>` and `<table>`.
-*   **[x] M1.8 (Frontend):** Implement the logic to call the `execute_query` command and display results.
-*   **[x] M1.9 (Frontend):** Create the basic app layout to switch between `ConnectionView` and `QueryView`.
+1.  **Application Layout (`App.vue`)**
+    *   **Root:** The entire application will be wrapped in a `<v-app>` component.
+    *   **Application Switcher (Far Left):** A thin, rail-style navigation drawer (`<v-navigation-drawer :rail="true">`) will be permanently docked on the far left. It will contain a `<v-list>` of icons (e.g., `<v-icon>mdi-database</v-icon>`, `<v-icon>mdi-lan-connect</v-icon>`) that allows the user to switch between the primary application modes, such as "Database Explorer" and "Connection Manager".
+    *   **Active Panel (Middle Left):** A second, wider `<v-navigation-drawer>` will serve as the contextual panel. Its content will change dynamically based on the mode selected in the Application Switcher.
+    *   **Main Content:** The central `<v-main>` area remains the primary workspace, containing the tabbed query editor.
 
----
+2.  **Connection Management (`ConnectionManager.vue`)**
+    *   **Location:** This new component will be the primary view within the "Active Panel" when the user is in "Connection Manager" mode. It replaces the concept of a simple modal dialog.
+    *   **Functionality:** It will provide a rich interface for managing database connections. A `<v-list>` will display all saved connections. Selecting a connection will show its details in a form. Buttons will allow for creating, editing, and deleting connections. The form will use standard Vuetify components like `<v-text-field>` and `<v-select>`.
 
-### **Milestone 2: Advanced Connection & UI**
-*   **Goal:** Enhance the connection process with a more user-friendly UI and support for different authentication methods. Improve the core editor and results view.
-*   **Status:** ✅ **Completed**
+3.  **Database Explorer (`DbExplorer.vue`)**
+    *   **Location:** This component will be displayed in the "Active Panel" when the user is in "Database Explorer" mode.
+    *   **Component:** We will construct a tree using nested `<v-list>` and `<v-list-group>` components, as `v-treeview` is not yet available in Vuetify 3.
+    *   **Interaction:** The tree will support lazy-loading of nodes. Right-clicking a node will trigger a `<v-menu>` for context-sensitive actions.
 
-#### **Completed Tasks:**
-*   **[x] M2.1 (Frontend):** Refactor `ConnectionView.vue` to use separate input fields for Server, Database, Username, and Password.
-*   **[x] M2.2 (Frontend):** Add a dropdown/selector to `ConnectionView.vue` to switch between "SQL Server Authentication" and "Microsoft Entra / Integrated" authentication. The Username/Password fields should be disabled for Integrated auth.
-*   **[x] M2.3 (Frontend):** Create a `connectionStringBuilder.ts` utility to dynamically build the correct ADO.NET connection string from the form fields and selected auth type.
-*   **[x] M2.4 (Frontend):** Add the `monaco-editor-vue3` package (or a similar alternative) to the frontend dependencies.
-*   **[x] M2.5 (Frontend):** Replace the `<textarea>` in `QueryView.vue` with the Monaco Editor component.
-*   **[x] M2.6 (Frontend):** Configure the Monaco Editor for T-SQL language support (syntax highlighting).
-*   **[x] M2.7 (Frontend):** Research and select a virtualized data grid component for Vue (e.g., from PrimeVue, TanStack Table, etc.).
-*   **[x] M2.8 (Frontend):** Replace the simple `<table>` in `QueryView.vue` with the new virtualized grid component to improve performance with large datasets.
+4.  **Query Workspace (`QueryTabs.vue` & `QueryView.vue`)**
+    *   **This section remains unchanged from the previous plan.** It will consist of a `<v-tabs>` container managing multiple `QueryView` instances. Each `QueryView` will have a vertical split-pane layout for the Monaco editor and the `<v-data-table>` for results.
 
 ---
 
-### **Milestone 3: Database Explorer & Core Features**
-*   **Goal:** Implement the database object explorer and other core application features like saving connections and tabbed editing.
-*   **Status:** ✅ **Completed**
+## Part 3: Technical Task List - Reusable Design Components
 
-#### **Completed Tasks:**
+This phase focuses on creating a small library of generic, reusable components that form the building blocks of our application, ensuring consistency and accelerating development.
 
-*   **[x] M3.1 & M3.2 (Backend): Database Metadata Commands**
-    *   **Tauri Commands:** In `backend/src/main.rs`, create and export new `#[tauri::command]` functions: `list_databases`, `list_schemas`, `list_tables`, and `list_columns`. These will serve as the bridge to the frontend.
-    *   **Database Logic (`db.rs`):**
-        *   Implement the core logic for each command, which will execute SQL queries against system views.
-        *   `list_databases`: `SELECT name FROM sys.databases WHERE database_id > 4 ORDER BY name`.
-        *   `list_schemas`: `SELECT name FROM sys.schemas ORDER BY name`.
-        *   `list_tables`: `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = @P1 ORDER BY TABLE_NAME`.
-        *   `list_columns`: `SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = @P1 AND TABLE_NAME = @P2 ORDER BY ORDINAL_POSITION`.
-    *   **Connection Handling:** The backend state will hold the primary connection string. For exploring a specific database's objects, the commands will receive the target database name and establish a temporary connection to it to ensure metadata is fetched from the correct context.
-    *   **Data Structures:** Define simple, serializable Rust structs for each query's return type (e.g., `struct Table { table_name: String }`).
-
-*   **[x] M3.3, M3.4, & M3.5 (Frontend): Database Explorer UI**
-    *   **Multi-Pane Layout (`App.vue`):** Modify the main app layout to use a resizable split-pane view (e.g., using CSS Flexbox and a draggable divider). This will create a side panel for the database explorer and a main area for the query editor.
-    *   **Explorer Component (`DbExplorer.vue`):**
-        *   Create a new component to house the explorer.
-        *   Use a tree-view structure (e.g., using a component library or building a custom one with nested lists) to display the database hierarchy (Databases -> Schemas -> Tables -> Columns).
-    *   **State Management (`explorerStore.ts`):**
-        *   Create a new Pinia store to manage the explorer's state.
-        *   The state will hold the tree data structure.
-        *   Define actions (`fetchDatabases`, `fetchTables`, etc.) that call the corresponding Tauri commands using `invoke`.
-        *   The store will manage loading states for asynchronous operations, allowing the UI to display spinners while fetching data. When a user clicks to expand a tree node, the store will fetch its children on-demand.
-
-*   **[x] M3.6 & M3.7 (Frontend): Tabbed Query Editing**
-    *   **Tab Management (`tabsStore.ts`):**
-        *   Create a Pinia store to manage an array of open query tabs.
-        *   The state will include the `tabs` array (each object containing `id`, `title`, `query` text, `results`, etc.) and the `activeTabId`.
-        *   Implement actions like `addTab`, `closeTab`, and `setActiveTab`. The `addTab` action will support creating a new blank tab or a tab with a pre-filled query.
-    *   **Reusable Query View:**
-        *   Refactor the existing `QueryView.vue` into a generic, reusable component that represents the content of a single tab.
-        *   It will receive its state (query text, results) as props and emit events for user actions like executing a query or modifying the text.
-        *   A new parent component (`QueryTabs.vue`) will be responsible for rendering the tab headers and the currently active `QueryView` instance, sourcing all its data from the `tabsStore`.
-
-*   **[x] M3.8, M3.9, & M3.10 (Backend/Frontend): Saved Connections**
-    *   **Backend Commands:**
-        *   Create `save_connection` and `list_connections` Tauri commands.
-        *   Create a `get_connection_password` command to securely retrieve stored credentials when needed.
-    *   **Secure Storage (`keyring-node` crate):**
-        *   Add the `keyring-node` crate to the Rust backend.
-        *   When `save_connection` is called for a connection with a password, the password will be stored securely in the operating system's secret manager (e.g., macOS Keychain, Windows Credential Manager).
-        *   The rest of the connection details (server, user, database, etc.) will be stored in a simple JSON file in the app's local data directory.
-    *   **Frontend UI:**
-        *   Add a "Save" button to `ConnectionView.vue`.
-        *   Create a `SavedConnections.vue` component (e.g., a modal or separate view) that calls `list_connections` to display saved connection profiles.
-        *   When a user selects a saved connection, the form will be populated. If it uses a password, the password field will remain empty, and the `get_connection_password` command will be called transparently upon connecting.
+*   **Task 1: `AppLayout.vue`**
+    *   **Description:** Implement the main application shell, configuring the new three-panel layout: the rail drawer for mode switching, the main content panel drawer, and the `<v-main>` component.
+*   **Task 2: `AppTreeview.vue`**
+    *   **Description:** Create a reusable, generic treeview component using Vuetify's `<v-list>` and `<v-list-group>`.
+    *   **Props:** It will accept a `nodes` array as a prop and emit events for node expansion (`@expand`) and context-menu requests (`@contextmenu`).
+*   **Task 3: `AppDataTable.vue`**
+    *   **Description:** A standardized wrapper around `<v-data-table>`.
+    *   **Props:** It will accept `columns` and `items` as props and will internally manage loading and empty states.
+*   **Task 4: `AppSplitter.vue`**
+    *   **Description:** A simple, reusable vertical splitter component using CSS and JavaScript to allow resizing between two panes.
 
 ---
 
-### **Milestone 4: Advanced Features & Polish**
-*   **Goal:** Add "quality of life" features and polish the application for a better user experience.
-*   **Status:** ✅ **Completed**
+## Part 4: Technical Task List - Application Implementation
 
-#### **Technical Approach:**
+This phase focuses on assembling the reusable components and implementing the application's features and business logic.
 
-*   **[x] M4.1 & M4.2 (Frontend): Explorer Context Menu**
-    *   **UI:** In `DbExplorer.vue`, add a `@contextmenu.prevent` handler on tree nodes to display a custom context menu component at the cursor's position.
-    *   **Functionality:** The menu's options will depend on the node type (e.g., "New Query" for a database, "Select Top 1000 Rows" for a table).
-    *   **Actions:** Selecting an action will trigger the `tabsStore`. For example, "Select Top 1000 Rows" will generate the appropriate SQL statement and call `tabsStore.addTab(generatedSql)` to open it in a new, pre-filled query tab.
+*   **Task 1: Project Setup & Vuetify Integration**
+    *   `1.1:` Install `vuetify`, `@mdi/font`, and `vite-plugin-vuetify`.
+    *   `1.2:` Create `frontend/src/plugins/vuetify.ts`.
+    *   `1.3:` Update `frontend/main.ts` to use Vuetify and Pinia.
+    *   `1.4:` Update `frontend/vite.config.ts`.
 
-*   **[x] M4.3 & M4.5 (Backend): Enhanced Query Execution**
-    *   **Multiple Result Sets:**
-        *   Modify the `execute_query` logic in `db.rs`. The `tiberius` crate's `QueryStream` supports multiple result sets.
-        *   Iterate through the stream using `try_next()` to collect all distinct results from a single query execution.
-    *   **Informational Messages:** While iterating, inspect the stream for `tiberius::QueryItem::Message` items, which correspond to `PRINT` or `RAISERROR` outputs. Collect these messages.
-    *   **Updated Response Structure:** Change the command's return type from a simple array to a structured object, e.g., `{ results: [ResultSet1, ResultSet2, ...], messages: ["Msg1", "Msg2", ...] }`.
+*   **Task 2: Implement Core Layout and State**
+    *   `2.1:` Implement the new three-panel layout in `AppLayout.vue` (or directly in `App.vue`).
+    *   `2.2:` Create the initial Pinia stores: `connection.ts`, `explorer.ts`, `query.ts`, and `tabs.ts`. Also create a new `ui.ts` store to manage the active panel mode.
 
-*   **[x] M4.4 & M4.6 (Frontend): Advanced Results Display**
-    *   **Multi-Result UI:** In `QueryView.vue`, update the results panel to detect when the response contains multiple result sets. If so, it will render a set of tabs within the panel (e.g., "Result 1," "Result 2"). Each tab will contain a data grid for one result set.
-    *   **Messages Tab:** Add a dedicated "Messages" tab to the results panel. This tab will be populated with any informational messages returned from the backend, providing feedback from `PRINT` statements or warnings.
+*   **Task 3: Implement Connection Management**
+    *   `3.1:` Build the `ConnectionManager.vue` component with a list for saved connections and a form for editing/creating them.
+    *   `3.2:` Implement the logic in the `connection` store to save, delete, and retrieve connections from the backend.
+    *   `3.3:` Wire the component to the store to provide full connection management functionality.
 
-*   **[x] M4.7 & M4.8 (Frontend): CSV Export**
-    *   **UI:** Add an "Export to CSV" button within the results panel, likely one for each result grid.
-    *   **Client-Side Logic:**
-        *   Implement a utility function to convert the JSON data of a result set into a CSV string. This involves creating a header row from the column names and then iterating through the rows of data.
-        *   To ensure robust CSV generation (handling commas and quotes within data), consider adding a lightweight library like `papaparse`.
-        *   To trigger the download, the logic will create a `Blob` with the CSV content, generate a local object URL for it, and programmatically trigger a download via a temporary `<a>` element.
+*   **Task 4: Implement the Database Explorer**
+    *   `4.1:` Populate the `explorer` store with actions for lazy-loading tree data.
+    *   `4.2:` Build `DbExplorer.vue`, which will use the `AppTreeview.vue` component.
+    *   `4.3:` Place `DbExplorer.vue` inside the "Active Panel", to be shown when the UI is in "Database Explorer" mode.
+    *   `4.4:` Implement context menu actions.
 
----
-
-### **Milestone 5: Multi-Database Engine Support**
-*   **Goal:** Abstract the database connection and querying logic to support multiple database engines (MS SQL, MySQL/MariaDB, PostgreSQL).
-*   **Status:** ⏳ Not Started
-
-#### **Technical Approach:**
-
-*   **M5.1 (Backend): Introduce a Generic Database Trait.**
-    *   **Abstraction:** Create a new Rust module, e.g., `backend/src/db/drivers`.
-    *   **Trait Definition:** Define a `DatabaseDriver` trait with methods for common database operations:
-        *   `connect(connection_string: &str) -> Result<Box<dyn DatabaseDriver>, Error>`
-        *   `execute_query(query: &str) -> Result<QueryResponse, Error>`
-        *   `list_databases() -> Result<Vec<Database>, Error>`
-        *   `list_schemas() -> Result<Vec<Schema>, Error>`
-        *   `list_tables(schema: &str) -> Result<Vec<Table>, Error>`
-        *   `list_columns(schema: &str, table: &str) -> Result<Vec<Column>, Error>`
-        *   This trait will be `async` using `#[async_trait]` if needed, or methods will return `Future`s.
-    *   **State Management:** The `AppState` will hold `Option<Box<dyn DatabaseDriver>>` instead of `Option<DbClient>`.
-
-*   **M5.2 (Backend): Implement MS SQL Driver.**
-    *   **Refactor:** Create a `backend/src/db/drivers/mssql.rs`.
-    *   **Implementation:** Create a `MssqlDriver` struct that wraps the `tiberius` client.
-    *   **Trait Implementation:** Implement the `DatabaseDriver` trait for `MssqlDriver`. The existing logic from `db.rs` for connecting and querying MS SQL will be moved into this implementation. The metadata queries (`list_databases`, `list_schemas`, etc.) will remain specific to MS SQL (using `sys.databases`, `INFORMATION_SCHEMA`, etc.).
-
-*   **M5.3 (Backend): Add MySQL/MariaDB Support.**
-    *   **Crate:** Add the `mysql_async` crate to `backend/Cargo.toml`.
-    *   **Driver:** Create `backend/src/db/drivers/mysql.rs`.
-    *   **Implementation:** Create a `MysqlDriver` struct that wraps a `mysql_async::Conn` pool.
-    *   **Trait Implementation:** Implement the `DatabaseDriver` trait for `MysqlDriver`.
-        *   `connect`: Use `mysql_async::Conn::new()` to connect.
-        *   `execute_query`: Execute queries and transform the results into the common `QueryResponse` format.
-        *   `list_databases`: `SHOW DATABASES;`
-        *   `list_schemas`: MySQL doesn't have schemas in the same way as MS SQL or PostgreSQL. It uses databases. This method might return an empty list or be adapted.
-        *   `list_tables`: `SHOW TABLES FROM \`<database_name>\`;` (or query `INFORMATION_SCHEMA.TABLES`).
-        *   `list_columns`: `SHOW COLUMNS FROM \`<table_name>\` FROM \`<database_name>\`;` (or query `INFORMATION_SCHEMA.COLUMNS`).
-
-*   **M5.4 (Backend): Add PostgreSQL Support.**
-    *   **Crate:** Add the `tokio-postgres` crate to `backend/Cargo.toml`.
-    *   **Driver:** Create `backend/src/db/drivers/postgres.rs`.
-    *   **Implementation:** Create a `PostgresDriver` struct that wraps a `tokio_postgres::Client`.
-    *   **Trait Implementation:** Implement `DatabaseDriver` for `PostgresDriver`.
-        *   `connect`: Use `tokio_postgres::connect()` to connect.
-        *   `execute_query`: Execute queries and transform results.
-        *   `list_databases`: `SELECT datname FROM pg_database WHERE datistemplate = false;`
-        *   `list_schemas`: `SELECT nspname FROM pg_catalog.pg_namespace;`
-        *   `list_tables`: Query `pg_tables` or `information_schema.tables`.
-        *   `list_columns`: Query `information_schema.columns`.
-
-*   **M5.5 (Backend): Update Tauri Commands.**
-    *   **`connect` command:** Modify the `connect` command to accept a `db_engine` parameter (`"mssql"`, `"mysql"`, `"postgres"`).
-    *   **Factory:** Based on `db_engine`, the `connect` command will call the appropriate driver's `connect` method (`MssqlDriver::connect`, `MysqlDriver::connect`, etc.).
-    *   **State:** The `AppState` will now store the `Box<dyn DatabaseDriver>`.
-    *   **Other commands:** The other commands (`execute_query`, `list_databases`, etc.) will call the methods on the `Box<dyn DatabaseDriver>` trait object, dispatching to the correct implementation dynamically.
-
-*   **M5.6 (Frontend): Update Connection UI.**
-    *   **Engine Selector:** Add a dropdown to `ConnectionView.vue` to select the database engine (MS SQL, MySQL, PostgreSQL).
-    *   **Dynamic Form:** The connection form fields might need to change based on the selected engine (e.g., PostgreSQL uses "host", "port", "user", "password", "dbname"; MySQL is similar). The `connectionStringBuilder.ts` will need to be updated or replaced to handle different connection string formats for each engine.
-    *   **`connect` call:** The `connect` call from the frontend will now include the `dbEngine` parameter.
-
-*   **M5.7 (Frontend): Monaco Editor Language.**
-    *   **Dynamic Language:** Update the Monaco Editor in `QueryView.vue` to dynamically set the `language` option based on the connected database engine ('sql' for MS SQL, 'mysql' for MySQL, 'pgsql' for PostgreSQL). This provides correct syntax highlighting for each dialect.
----
-
-### **Milestone 6: UI/UX Polish**
-*   **Goal:** Elevate the application from a functional tool to a polished, professional-grade product by integrating a comprehensive UI framework, improving user feedback, and refining the overall aesthetic.
-*   **Status:** ⏳ Not Started
-
-#### **Phase 1: Foundation - PrimeVue Integration**
-*   **M6.1: Integrate PrimeVue Framework.**
-    *   **Action:** Add `primevue`, `primeflex`, and `primeicons` to `frontend/package.json` using `pnpm`.
-    *   **Configuration:** In `frontend/src/main.ts`, configure the PrimeVue plugin, register the `ToastService`, and import a modern theme like `aura-dark-green`.
-*   **M6.2: Refactor Core Layout (`App.vue`).**
-    *   **Action:** Replace the current `div`-based split-pane with PrimeVue's `<Splitter>` and `<SplitterPanel>` components.
-    *   **Context:** This provides robust, theme-consistent resizing and layout management.
-*   **M6.3: Refactor Connection View (`ConnectionView.vue`).**
-    *   **Action:** Replace all basic HTML form elements (`<input>`, `<select>`, `<button>`) with their PrimeVue counterparts (`<InputText>`, `<Dropdown>`, `<Checkbox>`, `<Button>`).
-    *   **Context:** Use `<FloatLabel>` to improve form aesthetics and user experience. Wrap the form in a `<Card>` component to visually group connection settings.
-*   **M6.4: Refactor Database Explorer (`DbExplorer.vue`).**
-    *   **Action:** Replace the custom `<ul>`-based tree with PrimeVue's `<Tree>` component.
-    *   **Context:** The `<Tree>` component offers a professional look, lazy-loading for performance, and better state management for node expansion. It will be configured to use `primeicons` for different node types (e.g., `pi-database`, `pi-folder`, `pi-table`).
-*   **M6.5: Refactor Query Tabs (`QueryTabs.vue`).**
-    *   **Action:** Replace the custom tab implementation with PrimeVue's `<TabView>` and `<TabPanel>`.
-    *   **Context:** This ensures theme consistency and provides built-in accessibility and state management for tabs.
-*   **M6.6: Refactor Results View (`QueryView.vue`).**
-    *   **Action:** Replace the `<table>` with PrimeVue's `<DataTable>`.
-    *   **Context:** This is a major UX upgrade, providing out-of-the-box features like virtual scrolling, column resizing, sorting, and pagination via the `<Paginator>` component.
-
-#### **Phase 2: Enhanced User Experience (UX)**
-*   **M6.7: Implement Advanced Loading States.**
-    *   **Action:** Use PrimeVue's `<ProgressBar>` (for global loading) and `<Skeleton>` (for placeholder content in the explorer and data table) components.
-    *   **Context:** Replace simple "Loading..." text with these components to provide better visual feedback and reduce perceived waiting time.
-*   **M6.8: Implement Toast Notifications.**
-    *   **Action:** Integrate `<Toast />` into the root `App.vue`. Refactor all `alert()` calls and error message blocks to use the `useToast()` service.
-    *   **Context:** This provides non-blocking, professional-looking notifications for success and error states.
-*   **M6.9: Refactor Modals and Menus.**
-    *   **Action:** Replace the custom context menu with `<ContextMenu>` and the save dialog with `<Dialog>`.
-    *   **Context:** Ensures all overlays and interactive menus are consistent with the PrimeVue theme.
-
-#### **Phase 3: Visual Polish**
-*   **M6.10: Final Theming and Layout Review.**
-    *   **Action:** Conduct a final review of the application to ensure consistent use of the chosen theme's color palette, typography, and spacing.
-    *   **Context:** Use `primeflex` utilities to fine-tune alignment and spacing for a pixel-perfect finish. Remove any remaining custom styles that conflict with the new design system.
+*   **Task 5: Implement the Query Workspace**
+    *   `5.1:` Build `QueryTabs.vue` using `<v-tabs>`.
+    *   `5.2:` Build `QueryView.vue` containing the Monaco editor and results area, separated by `AppSplitter.vue`.
+    *   `5.3:` Use `AppDataTable.vue` to display query results.
+    *   `5.4:` Implement the "Execute Query" logic in the `query` store.
