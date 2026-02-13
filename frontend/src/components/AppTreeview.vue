@@ -2,21 +2,24 @@
   <v-list dense density="compact">
     <template v-for="node in nodes" :key="node.key">
       <!-- Special rendering for Connection Root Node -->
-      <div v-if="node.data.type === 'connection'">
-        <v-list-item
-          :title="node.label"
-          :prepend-icon="node.icon"
-          class="connection-banner"
-        ></v-list-item>
+      <v-list-group v-if="node.data.type === 'connection'">
+        <template v-slot:activator="{ props }">
+          <v-list-item
+            v-bind="props"
+            :title="node.label"
+            :prepend-icon="node.icon"
+            class="connection-banner"
+          ></v-list-item>
+        </template>
         <v-divider></v-divider>
         <AppTreeview
           :nodes="node.children || []"
-          :indent-level="2"
+          :indent-level="1"
           @expand="(childNode) => $emit('expand', childNode)"
           @node-click="(childNode) => $emit('node-click', childNode)"
           @contextmenu="(data) => $emit('contextmenu', data)"
         />
-      </div>
+      </v-list-group>
 
       <!-- Standard rendering for expandable nodes -->
       <v-list-group v-else-if="node.children">
