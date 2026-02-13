@@ -6,6 +6,7 @@ export interface QueryTab {
   id: string
   title: string
   query: string
+  connectionId: string
 }
 
 let tabIdCounter = 0
@@ -14,12 +15,13 @@ export const useTabsStore = defineStore('tabs', () => {
   const tabs = ref<QueryTab[]>([])
   const activeTabId = ref<string | null>(null)
 
-  function addTab(query: string = '') {
+  function addTab(connectionId: string, query: string = '') {
     const newId = `tab-${tabIdCounter++}`
     const newTab: QueryTab = {
       id: newId,
       title: `Query ${tabIdCounter}`,
       query: query,
+      connectionId: connectionId,
     }
     tabs.value.push(newTab)
     activeTabId.value = newId

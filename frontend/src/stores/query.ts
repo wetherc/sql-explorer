@@ -30,7 +30,7 @@ export const useQueryStore = defineStore('query', () => {
     return queryStates.get(tabId)!
   }
 
-  async function executeQuery(tabId: string, query: string) {
+  async function executeQuery(tabId: string, connectionId: string, query: string) {
     const state = getStateForTab(tabId)
     state.loading = true
     state.error = null
@@ -38,7 +38,7 @@ export const useQueryStore = defineStore('query', () => {
     state.messages = []
 
     try {
-      const response = await invoke<{ results: any[], messages: string[] }>('execute_query', { query })
+      const response = await invoke<{ results: any[], messages: string[] }>('execute_query', { connectionId, query })
       
       state.results = response.results.map((rs: any) => ({
         columns: rs.columns.map((col: string) => ({ title: col, key: col })),

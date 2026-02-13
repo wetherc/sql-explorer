@@ -1,21 +1,19 @@
 // src/stores/connection.ts
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { invoke } from '@tauri-apps/api/tauri'
-import { DbType } from '@/types/db'
 import type { SavedConnection } from '@/stores/connectionManager'
 
 export const useConnectionStore = defineStore('connection', () => {
-  const isConnected = ref(false)
   const isConnecting = ref(false)
   const errorMessage = ref<string | null>(null)
-  const activeConnection = ref<SavedConnection | null>(null)
+  const activeConnections = ref<Record<string, SavedConnection>>({})
+
+  const isConnected = computed(() => Object.keys(activeConnections.value).length > 0)
 
   async function connect(savedConnection: SavedConnection) {
     isConnecting.value = true
     errorMessage.value = null
-    isConnected.value = false
-    activeConnection.value = null
 
     // Construct connection string based on dbType and fields
     let connectionString = ''
@@ -52,29 +50,36 @@ export const useConnectionStore = defineStore('connection', () => {
     }
 
     try {
-      await invoke('connect', { connectionString, dbType: savedConnection.dbType })
-      isConnected.value = true
-      activeConnection.value = savedConnection
+      await invoke('connect', {
+        connectionId: savedConnection.id,
+        connectionString,
+        dbType: savedConnection.dbType,
+      })
+      activeConnections.value[savedConnection.id] = savedConnection
     } catch (e: any) {
       errorMessage.value = e.toString()
-      isConnected.value = false
+      delete activeConnections.value[savedConnection.id]
     } finally {
       isConnecting.value = false
     }
   }
 
-  function disconnect() {
-    isConnected.value = false
-    activeConnection.value = null
-    // Future: Call backend to properly close connection
+  async function disconnect(connectionId: string) {
+    try {
+      await invoke('disconnect', { connectionId })
+      delete activeConnections.value[connectionId]
+    } catch (e: any) {
+      errorMessage.value = e.toString()
+    }
   }
 
   return {
-    isConnected,
     isConnecting,
     errorMessage,
-    activeConnection,
+    activeConnections,
+    isConnected,
     connect,
     disconnect,
   }
 })
+
