@@ -18,12 +18,11 @@ type CommandResult<T> = Result<T, Error>;
 
 #[tauri::command]
 pub async fn connect(
+    connection_id: String,
     connection_string: String,
     db_type: storage::DbType,
     state: tauri::State<'_, AppState>,
 ) -> CommandResult<()> {
-    // Only log the database type, not the full connection string or server
-    // to avoid logging sensitive information like credentials.
     let logged_db_type = format!("{:?}", db_type);
 
     let client_result = match db_type {
@@ -34,7 +33,7 @@ pub async fn connect(
 
     match client_result {
         Ok(client) => {
-            *state.db.lock().await = Some(client);
+            state.connections.lock().await.insert(connection_id, client);
             log::info!("Successfully connected to {} database.", logged_db_type);
             Ok(())
         },
@@ -46,54 +45,68 @@ pub async fn connect(
 }
 
 #[tauri::command]
+pub async fn disconnect(connection_id: String, state: tauri::State<'_, AppState>) -> CommandResult<()> {
+    let mut connections = state.connections.lock().await;
+    if connections.remove(&connection_id).is_some() {
+        log::info!("[CMD] disconnect: disconnected from {}", connection_id);
+    } else {
+        log::warn!("[CMD] disconnect: connection id {} not found", connection_id);
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn execute_query(
+    connection_id: String,
     query: String,
     query_params: Option<QueryParams>,
     state: tauri::State<'_, AppState>,
 ) -> CommandResult<db::QueryResponse> {
-    let mut client_guard = state.db.lock().await;
-    let client = client_guard.as_mut().ok_or(Error::NotConnected)?;
+    let mut connections = state.connections.lock().await;
+    let client = connections.get_mut(&connection_id).ok_or(Error::NotConnected)?;
     client.execute_query(&query, query_params.as_ref()).await
 }
 
 #[tauri::command]
-pub async fn list_databases(state: tauri::State<'_, AppState>) -> CommandResult<Vec<db::Database>> {
-    let mut client_guard = state.db.lock().await;
-    let client = client_guard.as_mut().ok_or(Error::NotConnected)?;
+pub async fn list_databases(connection_id: String, state: tauri::State<'_, AppState>) -> CommandResult<Vec<db::Database>> {
+    let mut connections = state.connections.lock().await;
+    let client = connections.get_mut(&connection_id).ok_or(Error::NotConnected)?;
     client.list_databases().await
 }
 
 #[tauri::command]
-pub async fn list_schemas(database: String, state: tauri::State<'_, AppState>) -> CommandResult<Vec<db::Schema>> {
-    let mut client_guard = state.db.lock().await;
-    let client = client_guard.as_mut().ok_or(Error::NotConnected)?;
+pub async fn list_schemas(
+    connection_id: String,
+    database: String,
+    state: tauri::State<'_, AppState>,
+) -> CommandResult<Vec<db::Schema>> {
+    let mut connections = state.connections.lock().await;
+    let client = connections.get_mut(&connection_id).ok_or(Error::NotConnected)?;
     client.list_schemas(&database).await
 }
 
 #[tauri::command]
 pub async fn list_tables(
+    connection_id: String,
     database: String,
     schema_name: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> CommandResult<Vec<db::Table>> {
-    let mut client_guard = state.db.lock().await;
-    let client = client_guard.as_mut().ok_or(Error::NotConnected)?;
-
-    // For MySQL, the schema_name is not used, and the database is the primary parameter.
-    // For other drivers like Postgres/MSSQL, schema_name is the key.
-    // The driver implementation will handle the logic.
+    let mut connections = state.connections.lock().await;
+    let client = connections.get_mut(&connection_id).ok_or(Error::NotConnected)?;
     let schema_param = schema_name.as_deref().unwrap_or(&database);
     client.list_tables(schema_param).await
 }
 
 #[tauri::command]
 pub async fn list_columns(
+    connection_id: String,
     schema_name: String,
     table_name: String,
     state: tauri::State<'_, AppState>,
 ) -> CommandResult<Vec<db::AppColumn>> {
-    let mut client_guard = state.db.lock().await;
-    let client = client_guard.as_mut().ok_or(Error::NotConnected)?;
+    let mut connections = state.connections.lock().await;
+    let client = connections.get_mut(&connection_id).ok_or(Error::NotConnected)?;
     client.list_columns(&schema_name, &table_name).await
 }
 
@@ -147,13 +160,14 @@ pub async fn delete_connection(app: AppHandle, id: String) -> CommandResult<()> 
 mod tests {
     use super::*;
     use crate::state::AppState;
+    use std::collections::HashMap;
     use tauri::Manager;
     use tokio::sync::Mutex;
 
     #[tokio::test]
     async fn test_connect_invalid_string() {
         let app = tauri::test::mock_app();
-        app.manage(AppState { db: Mutex::new(None) });
+        app.manage(AppState { connections: Mutex::new(HashMap::new()) });
         let connection_string = "server=localhost;user=sa;password=Password123;database=master;TrustServerCertificate=true".to_string();
         let result = MssqlDriver::connect(&connection_string).await;
         assert!(result.is_err(), "Connection should fail with an invalid connection string");
@@ -162,10 +176,10 @@ mod tests {
     #[tokio::test]
     async fn test_execute_query_without_connection() {
         let app = tauri::test::mock_app();
-        app.manage(AppState { db: Mutex::new(None) });
+        app.manage(AppState { connections: Mutex::new(HashMap::new()) });
         let state = app.state::<AppState>();
         let query = "SELECT 1".to_string();
-        let result = execute_query(query, None, state).await;
+        let result = execute_query("test_id".to_string(), query, None, state).await;
         assert!(result.is_err());
         match result.unwrap_err() {
             Error::NotConnected => (), // Correct error
@@ -176,9 +190,9 @@ mod tests {
     #[tokio::test]
     async fn test_list_databases_without_connection() {
         let app = tauri::test::mock_app();
-        app.manage(AppState { db: Mutex::new(None) });
+        app.manage(AppState { connections: Mutex::new(HashMap::new()) });
         let state = app.state::<AppState>();
-        let result = list_databases(state).await;
+        let result = list_databases("test_id".to_string(), state).await;
         assert!(result.is_err());
         match result.unwrap_err() {
             Error::NotConnected => (),
@@ -189,9 +203,9 @@ mod tests {
     #[tokio::test]
     async fn test_list_schemas_without_connection() {
         let app = tauri::test::mock_app();
-        app.manage(AppState { db: Mutex::new(None) });
+        app.manage(AppState { connections: Mutex::new(HashMap::new()) });
         let state = app.state::<AppState>();
-        let result = list_schemas("test_db".to_string(), state).await;
+        let result = list_schemas("test_id".to_string(), "test_db".to_string(), state).await;
         assert!(result.is_err());
         match result.unwrap_err() {
             Error::NotConnected => (),
@@ -202,9 +216,9 @@ mod tests {
     #[tokio::test]
     async fn test_list_tables_without_connection() {
         let app = tauri::test::mock_app();
-        app.manage(AppState { db: Mutex::new(None) });
+        app.manage(AppState { connections: Mutex::new(HashMap::new()) });
         let state = app.state::<AppState>();
-        let result = list_tables("test_db".to_string(), Some("dbo".to_string()), state).await;
+        let result = list_tables("test_id".to_string(), "test_db".to_string(), Some("dbo".to_string()), state).await;
         assert!(result.is_err());
         match result.unwrap_err() {
             Error::NotConnected => (),
@@ -215,9 +229,9 @@ mod tests {
     #[tokio::test]
     async fn test_list_columns_without_connection() {
         let app = tauri::test::mock_app();
-        app.manage(AppState { db: Mutex::new(None) });
+        app.manage(AppState { connections: Mutex::new(HashMap::new()) });
         let state = app.state::<AppState>();
-        let result = list_columns("dbo".to_string(), "mytable".to_string(), state).await;
+        let result = list_columns("test_id".to_string(), "dbo".to_string(), "mytable".to_string(), state).await;
         assert!(result.is_err());
         match result.unwrap_err() {
             Error::NotConnected => (),
@@ -249,17 +263,18 @@ mod tests {
         };
 
         let app = tauri::test::mock_app();
-        app.manage(AppState { db: Mutex::new(None) });
+        app.manage(AppState { connections: Mutex::new(HashMap::new()) });
 
         let result = connect(
+            "test_mssql".to_string(),
             connection_string,
             storage::DbType::Mssql,
-            app.state::<AppState>(), // Get a new state instance for the command
+            app.state::<AppState>(),
         ).await;
 
-        let state_for_assertion = app.state::<AppState>(); // Get a fresh state for assertion
+        let state_for_assertion = app.state::<AppState>();
         assert!(result.is_ok(), "Failed to connect to MS SQL: {:?}", result.unwrap_err());
-        assert!(state_for_assertion.db.lock().await.is_some());
+        assert!(state_for_assertion.connections.lock().await.contains_key("test_mssql"));
     }
 
     #[tokio::test]
@@ -270,17 +285,18 @@ mod tests {
         };
 
         let app = tauri::test::mock_app();
-        app.manage(AppState { db: Mutex::new(None) });
+        app.manage(AppState { connections: Mutex::new(HashMap::new()) });
 
         let result = connect(
+            "test_mysql".to_string(),
             connection_string,
             storage::DbType::Mysql,
-            app.state::<AppState>(), // Get a new state instance for the command
+            app.state::<AppState>(),
         ).await;
 
-        let state_for_assertion = app.state::<AppState>(); // Get a fresh state for assertion
+        let state_for_assertion = app.state::<AppState>();
         assert!(result.is_ok(), "Failed to connect to MySQL: {:?}", result.unwrap_err());
-        assert!(state_for_assertion.db.lock().await.is_some());
+        assert!(state_for_assertion.connections.lock().await.contains_key("test_mysql"));
     }
 
     #[tokio::test]
@@ -291,17 +307,18 @@ mod tests {
         };
 
         let app = tauri::test::mock_app();
-        app.manage(AppState { db: Mutex::new(None) });
+        app.manage(AppState { connections: Mutex::new(HashMap::new()) });
 
         let result = connect(
+            "test_postgres".to_string(),
             connection_string,
             storage::DbType::Postgres,
-            app.state::<AppState>(), // Get a new state instance for the command
+            app.state::<AppState>(),
         ).await;
 
-        let state_for_assertion = app.state::<AppState>(); // Get a fresh state for assertion
+        let state_for_assertion = app.state::<AppState>();
         assert!(result.is_ok(), "Failed to connect to PostgreSQL: {:?}", result.unwrap_err());
-        assert!(state_for_assertion.db.lock().await.is_some());
+        assert!(state_for_assertion.connections.lock().await.contains_key("test_postgres"));
     }
 }
 

@@ -1,7 +1,8 @@
 // backend/src/state.rs
 use crate::db::drivers::DatabaseDriver;
+use std::collections::HashMap;
 use tokio::sync::Mutex;
 
 pub struct AppState {
-    pub db: Mutex<Option<Box<dyn DatabaseDriver + Send + Sync>>>,
+    pub connections: Mutex<HashMap<String, Box<dyn DatabaseDriver + Send + Sync>>>,
 }
