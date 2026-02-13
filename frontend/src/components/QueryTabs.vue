@@ -4,7 +4,7 @@
       {{ tab.title }}
       <v-icon size="x-small" @click.stop="closeTab(tab.id)">mdi-close</v-icon>
     </v-tab>
-    <v-tab @click="addTab">
+    <v-tab @click="addTab" :disabled="!selectedExplorerConnectionId">
       <v-icon start>mdi-plus</v-icon>
       New Query
     </v-tab>
@@ -19,10 +19,15 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { storeToRefs } from 'pinia'
 import { useTabsStore } from '@/stores/tabs'
+import { useNavigationStore } from '@/stores/navigation'
 import QueryView from './QueryView.vue'
 
 const tabsStore = useTabsStore()
+const navigationStore = useNavigationStore()
+
+const { selectedExplorerConnectionId } = storeToRefs(navigationStore)
 
 const tabs = computed(() => tabsStore.tabs)
 const activeTabId = computed({
@@ -32,7 +37,11 @@ const activeTabId = computed({
   },
 })
 
-const addTab = () => tabsStore.addTab()
+const addTab = () => {
+  if (selectedExplorerConnectionId.value) {
+    tabsStore.addTab(selectedExplorerConnectionId.value)
+  }
+}
 const closeTab = (id: string) => tabsStore.closeTab(id)
 </script>
 

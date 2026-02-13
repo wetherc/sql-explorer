@@ -26,14 +26,19 @@
 
 <script setup lang="ts">
 import { computed, reactive, watch } from 'vue'
+import { storeToRefs } from 'pinia'
 import { useExplorerStore, type ExplorerNode } from '@/stores/explorer'
 import { useConnectionStore } from '@/stores/connection'
 import { useTabsStore } from '@/stores/tabs'
+import { useNavigationStore } from '@/stores/navigation'
 import AppTreeview from './AppTreeview.vue'
 
 const explorerStore = useExplorerStore()
 const connectionStore = useConnectionStore()
 const tabsStore = useTabsStore()
+const navigationStore = useNavigationStore()
+
+const { selectedExplorerConnectionId } = storeToRefs(navigationStore)
 
 const nodes = computed(() => explorerStore.nodes)
 
@@ -44,10 +49,10 @@ const contextMenu = reactive({
   node: null as ExplorerNode | null,
 })
 
-// Fetch databases when the connection is established
-watch(() => connectionStore.isConnected, (isConnected) => {
-  if (isConnected) {
-    explorerStore.fetchDatabases()
+// Fetch databases when the selected connection for the explorer changes
+watch(selectedExplorerConnectionId, (newId) => {
+  if (newId) {
+    explorerStore.fetchDatabases(newId)
   } else {
     explorerStore.clearExplorer()
   }
@@ -73,19 +78,23 @@ function handleContextMenuAction(action: 'new_query' | 'select_top_1000') {
   const node = contextMenu.node
   if (!node) return
 
+  const connectionId = node.data.connectionId
+  if (!connectionId) return
+  
   if (action === 'new_query') {
-    tabsStore.addTab()
+    tabsStore.addTab(connectionId)
   } else if (action === 'select_top_1000' && node.data.type === 'table') {
     const { db, schema, table } = node.data
     let query = ''
-    if (connectionStore.dbType === 'Mysql') {
+    const activeConnection = connectionStore.activeConnections[connectionId]
+    if (activeConnection?.dbType === 'mysql') {
       query = `SELECT * FROM \`${db}\`.\`${table}\` LIMIT 1000;`
-    } else if (connectionStore.dbType === 'Postgres') {
+    } else if (activeConnection?.dbType === 'postgres') {
       query = `SELECT * FROM "${schema}"."${table}" LIMIT 1000;`
     } else {
       query = `SELECT TOP (1000) * FROM [${schema}].[${table}];`
     }
-    tabsStore.addTab(query)
+    tabsStore.addTab(connectionId, query)
   }
 
   contextMenu.visible = false

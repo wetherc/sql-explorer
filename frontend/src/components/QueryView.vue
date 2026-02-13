@@ -69,10 +69,10 @@ const activeResultsTab = ref('result-0')
 const queryState = computed(() => queryStore.getStateForTab(props.tabId))
 
 function handleExecute() {
-  queryStore.executeQuery(props.tabId, query.value)
-  // Also update the query in the tabs store so it's saved
   const currentTab = tabsStore.tabs.find((t: QueryTab) => t.id === props.tabId)
   if (currentTab) {
+    queryStore.executeQuery(props.tabId, currentTab.connectionId, query.value)
+    // Also update the query in the tabs store so it's saved
     currentTab.query = query.value
   }
 }

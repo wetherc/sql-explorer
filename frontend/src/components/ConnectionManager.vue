@@ -14,6 +14,7 @@
             :title="conn.name"
             :subtitle="conn.host"
             :active="isActive(conn)"
+            @click="selectConnectionForExplorer(conn)"
           >
             <template v-slot:append>
               <v-tooltip location="top">
@@ -23,7 +24,7 @@
                     :icon="isActive(conn) ? 'mdi-lan-disconnect' : 'mdi-lan-connect'"
                     variant="text"
                     :color="isActive(conn) ? 'error' : 'success'"
-                    @click="handleConnectionToggle(conn)"
+                    @click.stop="handleConnectionToggle(conn)"
                   ></v-btn>
                 </template>
                 <span>{{ isActive(conn) ? 'Disconnect' : 'Connect' }}</span>
@@ -35,7 +36,7 @@
                     v-bind="props"
                     icon="mdi-pencil"
                     variant="text"
-                    @click="editConnection(conn)"
+                    @click.stop="editConnection(conn)"
                     color="info"
                   ></v-btn>
                 </template>
@@ -48,7 +49,7 @@
                     v-bind="props"
                     icon="mdi-delete"
                     variant="text"
-                    @click="deleteConnection(conn.id)"
+                    @click.stop="deleteConnection(conn.id)"
                     color="error"
                   ></v-btn>
                 </template>
@@ -95,14 +96,14 @@ const connectionStore = useConnectionStore()
 const navigationStore = useNavigationStore()
 
 const { connections, loading, error, showConnectionForm } = storeToRefs(connectionManagerStore)
-const { activeConnection } = storeToRefs(connectionStore)
+const { activeConnections } = storeToRefs(connectionStore)
 const { fetchConnections, newConnection, editConnection, deleteConnection } = connectionManagerStore
 
 const disconnectDialog = ref(false)
 const connectionToDisconnect = ref<SavedConnection | null>(null)
 
 const isActive = (conn: SavedConnection) => {
-  return activeConnection.value?.id === conn.id
+  return !!activeConnections.value[conn.id]
 }
 
 onMounted(() => {
@@ -117,13 +118,26 @@ function handleConnectionToggle(connection: SavedConnection) {
   }
 }
 
+function selectConnectionForExplorer(connection: SavedConnection) {
+  if (isActive(connection)) {
+    navigationStore.setSelectedExplorerConnectionId(connection.id)
+    navigationStore.setActiveView('explorer')
+  }
+}
+
 function promptToDisconnect(connection: SavedConnection) {
   connectionToDisconnect.value = connection
   disconnectDialog.value = true
 }
 
 function confirmDisconnect() {
-  connectionStore.disconnect()
+  if (connectionToDisconnect.value) {
+    connectionStore.disconnect(connectionToDisconnect.value.id)
+    // If the disconnected connection was the one being explored, unset it
+    if (navigationStore.selectedExplorerConnectionId === connectionToDisconnect.value.id) {
+      navigationStore.setSelectedExplorerConnectionId(null)
+    }
+  }
   disconnectDialog.value = false
   connectionToDisconnect.value = null
   navigationStore.setActiveView('connections')
@@ -132,6 +146,7 @@ function confirmDisconnect() {
 async function connectToDatabase(connection: SavedConnection) {
   try {
     await connectionStore.connect(connection)
+    navigationStore.setSelectedExplorerConnectionId(connection.id)
     navigationStore.setActiveView('explorer')
   } catch (e: any) {
     console.error('Failed to connect:', e)

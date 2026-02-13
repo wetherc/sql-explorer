@@ -35,19 +35,19 @@ export const useExplorerStore = defineStore('explorer', () => {
     loading.value = false
   }
 
-  async function fetchDatabases() {
-    if (!connectionStore.isConnected) return
+  async function fetchDatabases(connectionId: string) {
+    if (!connectionStore.activeConnections[connectionId]) return
 
     loading.value = true
     error.value = null
     try {
-      const result = await invoke<BackendDatabase[]>('list_databases')
+      const result = await invoke<BackendDatabase[]>('list_databases', { connectionId })
       nodes.value = result.map((db: BackendDatabase) => ({
         key: db.name,
         label: db.name,
         icon: 'mdi-database',
         children: [], // Start with no children, expand on click
-        data: { type: 'database', db: db.name },
+        data: { type: 'database', db: db.name, connectionId },
       }))
     } catch (e: any) {
       error.value = e.toString()
@@ -58,7 +58,8 @@ export const useExplorerStore = defineStore('explorer', () => {
   }
 
   async function expandNode(node: ExplorerNode) {
-    if (!connectionStore.isConnected) return
+    const connectionId = node.data.connectionId
+    if (!connectionId || !connectionStore.activeConnections[connectionId]) return
 
     // If children are already loaded, do nothing.
     if (node.children && node.children.length > 0) {
@@ -69,39 +70,40 @@ export const useExplorerStore = defineStore('explorer', () => {
     error.value = null
     try {
       const { type, db, schema } = node.data
+      const activeConnection = connectionStore.activeConnections[connectionId]
 
       if (type === 'database') {
-        if (connectionStore.activeConnection?.dbType === DbType.Mysql) {
-          const tables = await invoke<BackendTable[]>('list_tables', { database: db })
+        if (activeConnection?.dbType === DbType.Mysql) {
+          const tables = await invoke<BackendTable[]>('list_tables', { connectionId, database: db })
           node.children = tables.map((t: BackendTable) => ({
             key: `${db}-${t.name}`,
             label: t.name,
             icon: 'mdi-table',
-            data: { type: 'table', db, schema: db, table: t.name },
+            data: { type: 'table', db, schema: db, table: t.name, connectionId },
           }))
         } else {
-          const schemas = await invoke<BackendSchema[]>('list_schemas', { database: db })
+          const schemas = await invoke<BackendSchema[]>('list_schemas', { connectionId, database: db })
           node.children = schemas.map((s: BackendSchema) => ({
             key: `${db}-${s.name}`,
             label: s.name,
             icon: 'mdi-folder-outline',
             children: [],
-            data: { type: 'schema', db, schema: s.name },
+            data: { type: 'schema', db, schema: s.name, connectionId },
           }))
         }
       } else if (type === 'schema') {
-        const tables = await invoke<BackendTable[]>('list_tables', { database: db, schemaName: schema })
+        const tables = await invoke<BackendTable[]>('list_tables', { connectionId, database: db, schemaName: schema })
         node.children = tables.map((t: BackendTable) => ({
           key: `${db}-${schema}-${t.name}`,
           label: t.name,
           icon: 'mdi-table',
-          data: { type: 'table', db, schema, table: t.name },
+          data: { type: 'table', db, schema, table: t.name, connectionId },
         }))
       }
     } catch (e: any) {
       error.value = e.toString()
       // Optionally add an error node to provide feedback in the UI
-      node.children = [{ key: `${node.key}-error`, label: 'Error', icon: 'mdi-alert-circle-outline', data: {type: 'column'} }]
+      node.children = [{ key: `${node.key}-error`, label: 'Error', icon: 'mdi-alert-circle-outline', data: {type: 'column', connectionId} }]
     } finally {
       loading.value = false
     }
