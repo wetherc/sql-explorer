@@ -20,19 +20,12 @@
       permanent
       width="300"
     >
-      <div v-if="activeView === 'connections'">
-        <!-- ConnectionManager will go here -->
-        <p class="pa-4">Connection Manager</p>
-      </div>
-      <div v-if="activeView === 'explorer'">
-        <!-- DbExplorer will go here -->
-        <p class="pa-4">DB Explorer</p>
-      </div>
+      <ConnectionManager v-if="activeView === 'connections'" />
+      <DbExplorer v-if="activeView === 'explorer' && isConnected" />
     </v-navigation-drawer>
 
     <v-main>
-      <!-- QueryTabs will go here -->
-      <p class="pa-4">Main Content</p>
+      <QueryTabs />
     </v-main>
   </v-app>
 </template>
@@ -40,8 +33,15 @@
 <script setup lang="ts">
 import { storeToRefs } from 'pinia'
 import { useNavigationStore } from '@/stores/navigation'
+import { useConnectionStore } from '@/stores/connection'
+import ConnectionManager from '@/components/ConnectionManager.vue'
+import DbExplorer from '@/components/DbExplorer.vue'
+import QueryTabs from '@/components/QueryTabs.vue'
 
 const navigationStore = useNavigationStore()
 const { activeView } = storeToRefs(navigationStore)
 const { setActiveView } = navigationStore
+
+const connectionStore = useConnectionStore()
+const { isConnected } = storeToRefs(connectionStore)
 </script>

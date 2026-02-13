@@ -27,6 +27,8 @@ export const useExplorerStore = defineStore('explorer', () => {
   const loading = ref(false)
   const error = ref<string | null>(null)
 
+  const connectionStore = useConnectionStore()
+
   function clearExplorer() {
     nodes.value = []
     error.value = null
@@ -34,7 +36,6 @@ export const useExplorerStore = defineStore('explorer', () => {
   }
 
   async function fetchDatabases() {
-    const connectionStore = useConnectionStore()
     if (!connectionStore.isConnected) return
 
     loading.value = true
@@ -57,7 +58,6 @@ export const useExplorerStore = defineStore('explorer', () => {
   }
 
   async function expandNode(node: ExplorerNode) {
-    const connectionStore = useConnectionStore()
     if (!connectionStore.isConnected) return
 
     // If children are already loaded, do nothing.

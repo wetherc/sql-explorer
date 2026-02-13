@@ -51,10 +51,14 @@
 import { onMounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useConnectionManagerStore, type SavedConnection } from '@/stores/connectionManager'
+import { useConnectionStore } from '@/stores/connection'
+import { useNavigationStore } from '@/stores/navigation'
 import ConnectionForm from './ConnectionForm.vue'
-import { invoke } from '@tauri-apps/api/tauri'
 
 const connectionManagerStore = useConnectionManagerStore()
+const connectionStore = useConnectionStore()
+const navigationStore = useNavigationStore()
+
 const { connections, loading, error, showConnectionForm } = storeToRefs(connectionManagerStore)
 const { fetchConnections, newConnection, editConnection, deleteConnection } = connectionManagerStore
 
@@ -63,25 +67,10 @@ onMounted(() => {
 })
 
 async function connectToDatabase(connection: SavedConnection) {
-  // Construct connection string based on dbType and fields
-  let connectionString = ''
-  switch (connection.dbType) {
-    case 'Mssql':
-      connectionString = `server=${connection.host};port=${connection.port};user=${connection.user};database=${connection.database};TrustServerCertificate=true;`
-      break
-    case 'Mysql':
-      connectionString = `mysql://${connection.user}@${connection.host}:${connection.port}/${connection.database}`
-      break
-    case 'Postgres':
-      connectionString = `postgresql://${connection.user}@${connection.host}:${connection.port}/${connection.database}`
-      break
-  }
-
   try {
-    // Call the backend connect command
-    await invoke('connect', { connectionString, dbType: connection.dbType })
+    await connectionStore.connect(connection)
     console.log('Connected to database:', connection.name)
-    // TODO: Update main connection store, switch to explorer view
+    navigationStore.setActiveView('explorer')
   } catch (e: any) {
     console.error('Failed to connect:', e)
     // TODO: Show error to user
