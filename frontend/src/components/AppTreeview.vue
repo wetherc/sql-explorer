@@ -1,27 +1,50 @@
 <template>
-  <v-list dense>
+  <v-list dense density="compact">
     <template v-for="node in nodes" :key="node.key">
-      <v-list-group v-if="node.children">
+      <!-- Special rendering for Connection Root Node -->
+      <div v-if="node.data.type === 'connection'">
+        <v-list-item
+          :title="node.label"
+          :prepend-icon="node.icon"
+          class="connection-banner"
+        ></v-list-item>
+        <v-divider></v-divider>
+        <AppTreeview
+          :nodes="node.children || []"
+          :indent-level="2"
+          @expand="(childNode) => $emit('expand', childNode)"
+          @node-click="(childNode) => $emit('node-click', childNode)"
+          @contextmenu="(data) => $emit('contextmenu', data)"
+        />
+      </div>
+
+      <!-- Standard rendering for expandable nodes -->
+      <v-list-group v-else-if="node.children">
         <template v-slot:activator="{ props }">
           <v-list-item
             v-bind="props"
             :prepend-icon="node.icon || 'mdi-folder'"
             :title="node.label"
+            :style="{ paddingLeft: `${indentLevel * 16}px` }"
             @click.stop="$emit('expand', node)"
             @contextmenu.prevent="$emit('contextmenu', { event: $event, node })"
           ></v-list-item>
         </template>
-        <AppTreeview 
-          :nodes="node.children" 
-          @expand="(node) => $emit('expand', node)" 
-          @node-click="(node) => $emit('node-click', node)"
-          @contextmenu="(data) => $emit('contextmenu', data)" 
+        <AppTreeview
+          :nodes="node.children"
+          :indent-level="indentLevel + 1"
+          @expand="(childNode) => $emit('expand', childNode)"
+          @node-click="(childNode) => $emit('node-click', childNode)"
+          @contextmenu="(data) => $emit('contextmenu', data)"
         />
       </v-list-group>
+
+      <!-- Standard rendering for leaf nodes -->
       <v-list-item
         v-else
         :prepend-icon="node.icon || 'mdi-file-document-outline'"
         :title="node.label"
+        :style="{ paddingLeft: `${indentLevel * 16}px` }"
         @click="$emit('node-click', node)"
         @contextmenu.prevent="$emit('contextmenu', { event: $event, node })"
       ></v-list-item>
@@ -33,9 +56,12 @@
 import AppTreeview from './AppTreeview.vue'
 import type { ExplorerNode } from '@/stores/explorer'
 
-defineProps<{
-  nodes: ExplorerNode[]
-}>()
+withDefaults(defineProps<{
+  nodes: ExplorerNode[],
+  indentLevel?: number
+}>(), {
+  indentLevel: 0
+})
 
 defineEmits<{
   (e: 'node-click', node: ExplorerNode): void
@@ -45,5 +71,8 @@ defineEmits<{
 </script>
 
 <style scoped>
-/* Scoped styles for the treeview if needed */
+.connection-banner {
+  background-color: #383838;
+  font-weight: bold;
+}
 </style>

@@ -96,14 +96,13 @@ const connectionStore = useConnectionStore()
 const navigationStore = useNavigationStore()
 
 const { connections, loading, error, showConnectionForm } = storeToRefs(connectionManagerStore)
-const { activeConnections } = storeToRefs(connectionStore)
 const { fetchConnections, newConnection, editConnection, deleteConnection } = connectionManagerStore
 
 const disconnectDialog = ref(false)
 const connectionToDisconnect = ref<SavedConnection | null>(null)
 
 const isActive = (conn: SavedConnection) => {
-  return !!activeConnections.value[conn.id]
+  return !!connectionStore.activeConnections[conn.id]
 }
 
 onMounted(() => {

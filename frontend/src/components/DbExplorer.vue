@@ -1,7 +1,7 @@
 <template>
   <div>
     <v-progress-linear v-if="explorerStore.loading" indeterminate></v-progress-linear>
-    <AppTreeview :nodes="nodes" @expand="onExpand" @node-click="onNodeClick" @contextmenu="onContextMenu" />
+    <AppTreeview :nodes="treeviewNodes" @expand="onExpand" @node-click="onNodeClick" @contextmenu="onContextMenu" />
 
     <v-menu
       v-model="contextMenu.visible"
@@ -39,8 +39,25 @@ const tabsStore = useTabsStore()
 const navigationStore = useNavigationStore()
 
 const { selectedExplorerConnectionId } = storeToRefs(navigationStore)
+const { activeConnections } = storeToRefs(connectionStore)
 
-const nodes = computed(() => explorerStore.nodes)
+const treeviewNodes = computed<ExplorerNode[]>(() => {
+  const connectionId = selectedExplorerConnectionId.value
+  if (!connectionId) return []
+
+  const connection = activeConnections.value[connectionId]
+  if (!connection) return []
+
+  return [
+    {
+      key: `conn-${connection.id}`,
+      label: connection.name,
+      icon: 'mdi-server',
+      children: explorerStore.nodes,
+      data: { type: 'connection', connectionId: connection.id },
+    }
+  ]
+})
 
 const contextMenu = reactive({
   visible: false,
