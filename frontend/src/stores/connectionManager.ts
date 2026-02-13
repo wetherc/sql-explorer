@@ -7,11 +7,12 @@ import { v4 as uuidv4 } from 'uuid'
 export interface SavedConnection {
   id: string
   name: string
-  dbType: 'Mssql' | 'Mysql' | 'Postgres'
+  dbType: 'mssql' | 'mysql' | 'postgres'
   host?: string
   port?: number
   user?: string
   database?: string
+  password?: string
 }
 
 export const useConnectionManagerStore = defineStore('connectionManager', () => {

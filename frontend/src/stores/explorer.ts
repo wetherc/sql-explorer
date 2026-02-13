@@ -71,7 +71,7 @@ export const useExplorerStore = defineStore('explorer', () => {
       const { type, db, schema } = node.data
 
       if (type === 'database') {
-        if (connectionStore.dbType === DbType.Mysql) {
+        if (connectionStore.activeConnection?.dbType === DbType.Mysql) {
           const tables = await invoke<BackendTable[]>('list_tables', { database: db })
           node.children = tables.map((t: BackendTable) => ({
             key: `${db}-${t.name}`,

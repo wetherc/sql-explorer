@@ -3,48 +3,54 @@
     <div class="editor-toolbar">
       <v-btn @click="handleExecute" :loading="queryState.loading">Execute</v-btn>
     </div>
-    <div class="editor-pane">
-      <MonacoEditor
-        v-model="query"
-        language="sql"
-        theme="vs-dark"
-        style="height: 100%;"
-      />
-    </div>
-    <div class="results-pane">
-      <v-tabs v-model="activeResultsTab" bg-color="secondary">
-        <v-tab v-for="(_, index) in queryState.results" :key="index" :value="`result-${index}`">
-          Result {{ index + 1 }}
-        </v-tab>
-        <v-tab value="messages">Messages</v-tab>
-      </v-tabs>
+    <splitpanes horizontal class="default-theme" style="height: 100%">
+      <pane size="40">
+        <MonacoEditor
+          v-model="query"
+          language="sql"
+          theme="vs-dark"
+          style="height: 100%;"
+        />
+      </pane>
+      <pane size="60">
+        <div class="results-pane">
+          <v-tabs v-model="activeResultsTab" bg-color="secondary">
+            <v-tab v-for="(_, index) in queryState.results" :key="index" :value="`result-${index}`">
+              Result {{ index + 1 }}
+            </v-tab>
+            <v-tab value="messages">Messages</v-tab>
+          </v-tabs>
 
-      <v-window v-model="activeResultsTab">
-        <v-window-item v-for="(result, index) in queryState.results" :key="index" :value="`result-${index}`">
-          <v-data-table
-            :headers="result.columns"
-            :items="result.rows"
-            :loading="queryState.loading"
-            density="compact"
-            class="fill-height"
-          ></v-data-table>
-        </v-window-item>
-        <v-window-item value="messages">
-          <v-list density="compact">
-            <v-list-item v-for="(msg, i) in queryState.messages" :key="i" :title="msg"></v-list-item>
-          </v-list>
-          <div v-if="queryState.error" class="pa-4 text-error">
-            {{ queryState.error }}
-          </div>
-        </v-window-item>
-      </v-window>
-    </div>
+          <v-window v-model="activeResultsTab">
+            <v-window-item v-for="(result, index) in queryState.results" :key="index" :value="`result-${index}`">
+              <v-data-table
+                :headers="result.columns"
+                :items="result.rows"
+                :loading="queryState.loading"
+                density="compact"
+                class="fill-height"
+              ></v-data-table>
+            </v-window-item>
+            <v-window-item value="messages">
+              <v-list density="compact">
+                <v-list-item v-for="(msg, i) in queryState.messages" :key="i" :title="msg"></v-list-item>
+              </v-list>
+              <div v-if="queryState.error" class="pa-4 text-error">
+                {{ queryState.error }}
+              </div>
+            </v-window-item>
+          </v-window>
+        </div>
+      </pane>
+    </splitpanes>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onUnmounted } from 'vue'
 import MonacoEditor from 'monaco-editor-vue3'
+import { Splitpanes, Pane } from 'splitpanes'
+import 'splitpanes/dist/splitpanes.css'
 import { useQueryStore } from '@/stores/query'
 import { useTabsStore, type QueryTab } from '@/stores/tabs'
 
@@ -85,13 +91,8 @@ onUnmounted(() => {
   padding: 8px;
   border-bottom: 1px solid #444;
 }
-.editor-pane {
-  height: 40%;
-  min-height: 100px;
-}
 .results-pane {
-  height: 60%;
-  border-top: 1px solid #ccc;
+  height: 100%;
   display: flex;
   flex-direction: column;
 }

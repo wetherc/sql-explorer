@@ -1,8 +1,8 @@
 // src/types/db.ts
 export const DbType = {
-  Mssql: 'Mssql',
-  Mysql: 'Mysql',
-  Postgres: 'Postgres',
+  Mssql: 'mssql',
+  Mysql: 'mysql',
+  Postgres: 'postgres',
 } as const;
 
 export type DbType = typeof DbType[keyof typeof DbType];

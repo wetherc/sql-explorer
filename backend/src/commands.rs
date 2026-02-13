@@ -116,13 +116,18 @@ pub async fn save_connection(
     app: AppHandle,
     connection: SavedConnection,
 ) -> CommandResult<()> {
+    log::info!("[CMD] save_connection: received request");
     let stores = app.state::<StoreCollection<Wry>>();
     let path = PathBuf::from(".settings.dat");
 
+    log::info!("[CMD] save_connection: calling with_store");
     with_store(app.clone(), stores, path, |store| {
+        log::info!("[CMD] save_connection: inside with_store closure");
         store.insert(connection.id.clone(), serde_json::to_value(&connection)?)?;
+        log::info!("[CMD] save_connection: store.insert finished");
         Ok(())
     })?;
+    log::info!("[CMD] save_connection: finished");
     Ok(())
 }
 

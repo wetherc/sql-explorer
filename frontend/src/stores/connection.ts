@@ -20,14 +20,34 @@ export const useConnectionStore = defineStore('connection', () => {
     // Construct connection string based on dbType and fields
     let connectionString = ''
     switch (savedConnection.dbType) {
-      case 'Mssql':
-        connectionString = `server=${savedConnection.host};port=${savedConnection.port};user=${savedConnection.user};database=${savedConnection.database};TrustServerCertificate=true;`
+      case 'mssql':
+        connectionString = `server=${savedConnection.host};port=${savedConnection.port};user=${savedConnection.user};TrustServerCertificate=true;`
+        if (savedConnection.password) {
+          connectionString += `;password=${savedConnection.password}`
+        }
+        if (savedConnection.database) {
+          connectionString += `;database=${savedConnection.database}`
+        }
         break
-      case 'Mysql':
-        connectionString = `mysql://${savedConnection.user}@${savedConnection.host}:${savedConnection.port}/${savedConnection.database}`
+      case 'mysql':
+        connectionString = `mysql://${savedConnection.user}`
+        if (savedConnection.password) {
+          connectionString += `:${savedConnection.password}`
+        }
+        connectionString += `@${savedConnection.host}:${savedConnection.port}`
+        if (savedConnection.database) {
+          connectionString += `/${savedConnection.database}`
+        }
         break
-      case 'Postgres':
-        connectionString = `postgresql://${savedConnection.user}@${savedConnection.host}:${savedConnection.port}/${savedConnection.database}`
+      case 'postgres':
+        connectionString = `postgresql://${savedConnection.user}`
+        if (savedConnection.password) {
+          connectionString += `:${savedConnection.password}`
+        }
+        connectionString += `@${savedConnection.host}:${savedConnection.port}`
+        if (savedConnection.database) {
+          connectionString += `/${savedConnection.database}`
+        }
         break
     }
 

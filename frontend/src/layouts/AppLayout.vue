@@ -19,6 +19,7 @@
     <v-navigation-drawer
       permanent
       width="300"
+      resizable
     >
       <ConnectionManager v-if="activeView === 'connections'" />
       <DbExplorer v-if="activeView === 'explorer' && isConnected" />
