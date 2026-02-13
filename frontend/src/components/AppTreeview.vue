@@ -75,4 +75,9 @@ defineEmits<{
   background-color: #383838;
   font-weight: bold;
 }
+
+/* Reduce spacing for prepend-icon */
+:deep(.v-list-item__prepend) {
+  margin-inline-end: 8px !important; /* Adjust as needed */
+}
 </style>
