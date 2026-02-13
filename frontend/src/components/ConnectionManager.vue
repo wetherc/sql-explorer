@@ -13,26 +13,47 @@
             :key="conn.id"
             :title="conn.name"
             :subtitle="conn.host"
+            :active="isActive(conn)"
           >
             <template v-slot:append>
-              <v-btn
-                icon="mdi-connection"
-                variant="text"
-                @click="connectToDatabase(conn)"
-                color="success"
-              ></v-btn>
-              <v-btn
-                icon="mdi-pencil"
-                variant="text"
-                @click="editConnection(conn)"
-                color="info"
-              ></v-btn>
-              <v-btn
-                icon="mdi-delete"
-                variant="text"
-                @click="deleteConnection(conn.id)"
-                color="error"
-              ></v-btn>
+              <v-tooltip location="top">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    :icon="isActive(conn) ? 'mdi-lan-disconnect' : 'mdi-lan-connect'"
+                    variant="text"
+                    :color="isActive(conn) ? 'error' : 'success'"
+                    @click="handleConnectionToggle(conn)"
+                  ></v-btn>
+                </template>
+                <span>{{ isActive(conn) ? 'Disconnect' : 'Connect' }}</span>
+              </v-tooltip>
+
+              <v-tooltip location="top">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    icon="mdi-pencil"
+                    variant="text"
+                    @click="editConnection(conn)"
+                    color="info"
+                  ></v-btn>
+                </template>
+                <span>Edit Connection</span>
+              </v-tooltip>
+
+              <v-tooltip location="top">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    icon="mdi-delete"
+                    variant="text"
+                    @click="deleteConnection(conn.id)"
+                    color="error"
+                  ></v-btn>
+                </template>
+                <span>Delete Connection</span>
+              </v-tooltip>
             </template>
           </v-list-item>
         </v-list>
@@ -44,11 +65,25 @@
     <v-dialog v-model="showConnectionForm" persistent max-width="600px">
       <ConnectionForm />
     </v-dialog>
+
+    <v-dialog v-model="disconnectDialog" persistent max-width="400px">
+      <v-card>
+        <v-card-title>Confirm Disconnect</v-card-title>
+        <v-card-text>
+          Are you sure you want to disconnect from <strong>{{ connectionToDisconnect?.name }}</strong>?
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer></v-spacer>
+          <v-btn text @click="disconnectDialog = false">Cancel</v-btn>
+          <v-btn color="error" @click="confirmDisconnect">Disconnect</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
   </v-container>
 </template>
 
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { onMounted, computed, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useConnectionManagerStore, type SavedConnection } from '@/stores/connectionManager'
 import { useConnectionStore } from '@/stores/connection'
@@ -60,16 +95,43 @@ const connectionStore = useConnectionStore()
 const navigationStore = useNavigationStore()
 
 const { connections, loading, error, showConnectionForm } = storeToRefs(connectionManagerStore)
+const { activeConnection } = storeToRefs(connectionStore)
 const { fetchConnections, newConnection, editConnection, deleteConnection } = connectionManagerStore
+
+const disconnectDialog = ref(false)
+const connectionToDisconnect = ref<SavedConnection | null>(null)
+
+const isActive = (conn: SavedConnection) => {
+  return activeConnection.value?.id === conn.id
+}
 
 onMounted(() => {
   fetchConnections()
 })
 
+function handleConnectionToggle(connection: SavedConnection) {
+  if (isActive(connection)) {
+    promptToDisconnect(connection)
+  } else {
+    connectToDatabase(connection)
+  }
+}
+
+function promptToDisconnect(connection: SavedConnection) {
+  connectionToDisconnect.value = connection
+  disconnectDialog.value = true
+}
+
+function confirmDisconnect() {
+  connectionStore.disconnect()
+  disconnectDialog.value = false
+  connectionToDisconnect.value = null
+  navigationStore.setActiveView('connections')
+}
+
 async function connectToDatabase(connection: SavedConnection) {
   try {
     await connectionStore.connect(connection)
-    console.log('Connected to database:', connection.name)
     navigationStore.setActiveView('explorer')
   } catch (e: any) {
     console.error('Failed to connect:', e)

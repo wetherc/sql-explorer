@@ -5,15 +5,28 @@
       width="64"
       class="pa-2"
     >
-      <v-btn
-        icon="mdi-lan-connect"
-        class="mb-2"
-        @click="setActiveView('connections')"
-      ></v-btn>
-      <v-btn
-        icon="mdi-database-search"
-        @click="setActiveView('explorer')"
-      ></v-btn>
+      <v-tooltip location="right">
+        <template v-slot:activator="{ props }">
+          <v-btn
+            v-bind="props"
+            icon="mdi-lan-connect"
+            class="mb-2"
+            @click="setActiveView('connections')"
+          ></v-btn>
+        </template>
+        <span>Connections</span>
+      </v-tooltip>
+
+      <v-tooltip location="right">
+        <template v-slot:activator="{ props }">
+          <v-btn
+            v-bind="props"
+            icon="mdi-database-search"
+            @click="setActiveView('explorer')"
+          ></v-btn>
+        </template>
+        <span>Explorer</span>
+      </v-tooltip>
     </v-navigation-drawer>
 
     <v-navigation-drawer
