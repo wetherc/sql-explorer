@@ -1,6 +1,6 @@
 # SQL Explorer
 
-A lightweight, modern, and cross-platform desktop application for interacting with Microsoft SQL Server. Built with Vue.js and [Tauri](https://tauri.app/).
+A lightweight, modern, and cross-platform desktop application for exploring multiple databases. It currently supports MySQL, MariaDB, Postgres, and MS SQL Server, with planned support for Redshift, SQLite, DuckDB, and BigQuery. Built with Vue.js and [Tauri](https://tauri.app/).
 
 This is vibe coded slop. Because I want to be a better informed hater.
 

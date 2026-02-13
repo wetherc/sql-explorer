@@ -3,13 +3,14 @@
     <div class="editor-toolbar">
       <v-btn @click="handleExecute" :loading="queryState.loading">Execute</v-btn>
     </div>
-    <splitpanes horizontal class="default-theme" style="height: 100%">
+    <splitpanes horizontal style="height: 100%" @resize="handlePaneResize">
       <pane size="40">
         <MonacoEditor
           v-model="query"
           language="sql"
           theme="vs-dark"
           style="height: 100%;"
+          @mount="handleEditorMount"
         />
       </pane>
       <pane size="60">
@@ -47,7 +48,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onUnmounted } from 'vue'
+import { ref, computed, onUnmounted, watch } from 'vue'
 import MonacoEditor from 'monaco-editor-vue3'
 import { Splitpanes, Pane } from 'splitpanes'
 import 'splitpanes/dist/splitpanes.css'
@@ -64,6 +65,7 @@ const tabsStore = useTabsStore()
 
 const query = ref(props.initialQuery)
 const activeResultsTab = ref('result-0')
+const monacoInstance = ref(null) // Renamed from monacoEditorRef
 
 // Get a reactive reference to the state for this specific tab
 const queryState = computed(() => queryStore.getStateForTab(props.tabId))
@@ -74,6 +76,20 @@ function handleExecute() {
     queryStore.executeQuery(props.tabId, currentTab.connectionId, query.value)
     // Also update the query in the tabs store so it's saved
     currentTab.query = query.value
+  }
+}
+
+function handleEditorMount(editor: any) {
+  monacoInstance.value = editor
+  console.log('Monaco editor mounted and instance stored.')
+}
+
+function handlePaneResize() {
+  if (monacoInstance.value) {
+    monacoInstance.value.layout()
+    console.log('Monaco editor layout() called via instance.')
+  } else {
+    console.log('Monaco editor instance not yet available for layout.')
   }
 }
 
@@ -99,5 +115,10 @@ onUnmounted(() => {
 .v-window {
   flex-grow: 1;
   overflow-y: auto;
+}
+
+:deep(.splitpanes__splitter) {
+  background-color: #333;
+  border: 1px solid #444;
 }
 </style>
