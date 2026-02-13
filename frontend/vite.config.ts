@@ -1,18 +1,25 @@
-import { defineConfig } from 'vite'
+import { defineConfig, PluginOption } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import vuetify from 'vite-plugin-vuetify'
 import { fileURLToPath, URL } from 'node:url'
+import monacoEditorPlugin from 'vite-plugin-monaco-editor'
 
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [
     vue(),
     vuetify({ autoImport: true }),
+    monacoEditorPlugin.default({
+      output: {
+        publicPath: './',
+      },
+      languageWorkers: ['editorWorkerService', 'css', 'html', 'json', 'typescript'],
+    }) as PluginOption,
   ],
   resolve: {
     alias: {
-      '@': fileURLToPath(new URL('./src', import.meta.url))
-    }
+      '@': fileURLToPath(new URL('./src', import.meta.url)),
+    },
   },
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   // prevent vite from obscuring rust errors
@@ -36,7 +43,7 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     coverage: {
-      provider: 'istanbul'
-    }
-  }
+      provider: 'istanbul',
+    },
+  },
 })
