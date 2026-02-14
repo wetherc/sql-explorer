@@ -5,7 +5,7 @@ use crate::error::Error;
 use async_trait::async_trait;
 use futures_util::stream::TryStreamExt;
 use log::{debug, info};
-use mysql_async::{prelude::*, Conn, Opts, OptsBuilder, Row as MySqlRow, QueryResult, Value as MySqlValue, BinaryProtocol};
+use mysql_async::{prelude::*, Conn, Opts, OptsBuilder, Row as MySqlRow, Value as MySqlValue};
 use serde_json::Value as JsonValue;
 
 
@@ -60,7 +60,23 @@ impl MysqlDriver {
 impl super::DatabaseDriver for MysqlDriver {
     async fn execute_query(&mut self, query: &str, query_params: Option<&QueryParams>) -> Result<QueryResponse, Error> {
         info!("Executing MySQL query: {}", query);
-        self.with_conn(|conn| execute_internal(conn, query.to_string(), query_params)).await
+
+        if query_params.is_some() {
+            // If there are params, we can't split the query. Execute as a single statement.
+            return self.with_conn(|conn| execute_internal(conn, query.to_string(), query_params)).await;
+        }
+
+        let statements: Vec<&str> = query.split(';').filter(|s| !s.trim().is_empty()).collect();
+        let mut final_response = QueryResponse { results: Vec::new(), messages: Vec::new() };
+        
+        for statement in statements {
+            // Note: with_conn consumes and returns the connection. It's reassigned to self.conn inside the method.
+            let (_, mut response) = self.with_conn(|conn| execute_internal(conn, statement.to_string(), None)).await?;
+            final_response.results.append(&mut response.results);
+            final_response.messages.append(&mut response.messages);
+        }
+
+        Ok(final_response)
     }
 
     async fn list_databases(&mut self) -> Result<Vec<Database>, Error> {
@@ -153,19 +169,21 @@ pub(crate) async fn execute_internal(
 
     let mut result = conn.exec_iter(query, params).await?;
 
-    result.for_each_set(|mut result_set| async {
-        let columns: Vec<String> = result_set.columns().unwrap_or_default().iter().map(|c| c.name_str().to_string()).collect();
-        let rows_result: Result<Vec<JsonValue>, _> = result_set
-            .map_ok(|row| row_to_json(&row, &columns))
-            .try_collect()
-            .await;
+    let columns: Vec<String> = result.columns().map_or(Vec::new(), |cols| {
+        cols.iter().map(|c| c.name_str().to_string()).collect()
+    });
 
-        if let Ok(rows) = rows_result {
-            if !rows.is_empty() || !columns.is_empty() {
-                all_results.push(ResultSet { columns, rows });
-            }
-        }
-    }).await?;
+    let collected_rows_results: Vec<Result<MySqlRow, _>> = result.collect().await;
+    let mut collected_rows = Vec::new();
+    for row_result in collected_rows_results {
+        collected_rows.push(row_result?);
+    }
+    
+    let rows: Vec<JsonValue> = collected_rows.iter().map(|row| row_to_json(row, &columns)).collect();
+    
+    if !columns.is_empty() || !rows.is_empty() {
+        all_results.push(ResultSet { columns, rows });
+    }
 
     Ok((conn, QueryResponse { results: all_results, messages }))
 }
