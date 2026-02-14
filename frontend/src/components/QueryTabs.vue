@@ -21,11 +21,13 @@
 import { computed } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useTabsStore } from '@/stores/tabs'
+import { useConnectionManagerStore } from '@/stores/connectionManager'
 import { useNavigationStore } from '@/stores/navigation'
 import QueryView from './QueryView.vue'
 
 const tabsStore = useTabsStore()
 const navigationStore = useNavigationStore()
+const connectionManagerStore = useConnectionManagerStore()
 
 const { selectedExplorerConnectionId } = storeToRefs(navigationStore)
 
@@ -40,6 +42,9 @@ const activeTabId = computed({
 const addTab = () => {
   if (selectedExplorerConnectionId.value) {
     tabsStore.addTab(selectedExplorerConnectionId.value)
+  } else {
+    navigationStore.setActiveView('connections')
+    connectionManagerStore.newConnection()
   }
 }
 const closeTab = (id: string) => tabsStore.closeTab(id)
