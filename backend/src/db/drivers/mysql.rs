@@ -3,6 +3,7 @@
 use crate::db::{AppColumn, Database, QueryResponse, ResultSet, Schema, Table, QueryParams};
 use crate::error::Error;
 use async_trait::async_trait;
+use futures_util::stream::TryStreamExt;
 use log::{debug, info};
 use mysql_async::{prelude::*, Conn, Opts, OptsBuilder, Row as MySqlRow, QueryResult, Value as MySqlValue, BinaryProtocol};
 use serde_json::Value as JsonValue;
@@ -150,16 +151,21 @@ pub(crate) async fn execute_internal(
         mysql_async::Params::Empty
     };
 
-    let mut query_result: QueryResult<'_, '_, BinaryProtocol> = conn.exec_iter(&query, params).await?;
+    let mut result = conn.exec_iter(query, params).await?;
 
-    while !query_result.is_empty() {
-        let columns: Vec<String> = query_result.columns().unwrap_or_default().iter().map(|c: &mysql_async::Column| c.name_str().to_string()).collect();
-        let rows: Vec<JsonValue> = query_result
-            .map(|row| row_to_json(&row, &columns))
-            .await?;
+    result.for_each_set(|mut result_set| async {
+        let columns: Vec<String> = result_set.columns().unwrap_or_default().iter().map(|c| c.name_str().to_string()).collect();
+        let rows_result: Result<Vec<JsonValue>, _> = result_set
+            .map_ok(|row| row_to_json(&row, &columns))
+            .try_collect()
+            .await;
 
-        all_results.push(crate::db::ResultSet { columns, rows });
-    }
+        if let Ok(rows) = rows_result {
+            if !rows.is_empty() || !columns.is_empty() {
+                all_results.push(ResultSet { columns, rows });
+            }
+        }
+    }).await?;
 
     Ok((conn, QueryResponse { results: all_results, messages }))
 }
