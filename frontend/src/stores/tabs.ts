@@ -1,6 +1,7 @@
 // src/stores/tabs.ts
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
+import { useConnectionStore } from './connection'
 
 export interface QueryTab {
   id: string
@@ -16,10 +17,14 @@ export const useTabsStore = defineStore('tabs', () => {
   const activeTabId = ref<string | null>(null)
 
   function addTab(connectionId: string, query: string = '') {
+    const connectionStore = useConnectionStore()
+    const connection = connectionStore.activeConnections[connectionId]
+    const connectionName = connection ? connection.name : 'Unknown'
+
     const newId = `tab-${tabIdCounter++}`
     const newTab: QueryTab = {
       id: newId,
-      title: `Query ${tabIdCounter}`,
+      title: `[${connectionName}] - Query ${tabIdCounter}`,
       query: query,
       connectionId: connectionId,
     }
@@ -52,11 +57,28 @@ export const useTabsStore = defineStore('tabs', () => {
     activeTabId.value = id
   }
 
+  function updateTabConnection(tabId: string, newConnectionId: string) {
+    const tab = tabs.value.find(t => t.id === tabId)
+    if (tab) {
+      const connectionStore = useConnectionStore()
+      const connection = connectionStore.activeConnections[newConnectionId]
+      const connectionName = connection ? connection.name : 'Unknown'
+      
+      tab.connectionId = newConnectionId
+      // Keep the query number consistent
+      const oldTitle = tab.title
+      const queryNumberMatch = oldTitle.match(/Query (\d+)/)
+      const queryNumber = queryNumberMatch ? queryNumberMatch[1] : tabIdCounter
+      tab.title = `[${connectionName}] - Query ${queryNumber}`
+    }
+  }
+
   return {
     tabs,
     activeTabId,
     addTab,
     closeTab,
     setActiveTab,
+    updateTabConnection,
   }
 })

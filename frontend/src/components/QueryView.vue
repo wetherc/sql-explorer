@@ -1,7 +1,15 @@
 <template>
   <div class="query-view d-flex flex-column">
-    <div class="editor-toolbar">
-      <v-btn @click="handleExecute" :loading="queryState.loading">Execute</v-btn>
+    <div class="editor-toolbar d-flex align-center">
+      <v-btn @click="handleExecute" :loading="queryState.loading" class="mr-4">Execute</v-btn>
+      <v-select
+        v-model="currentConnectionId"
+        :items="activeConnectionItems"
+        label="Connection"
+        density="compact"
+        hide-details
+        style="max-width: 300px"
+      ></v-select>
     </div>
     <splitpanes horizontal style="height: 100%" @resize="handlePaneResize">
       <pane size="40">
@@ -54,6 +62,7 @@ import { Splitpanes, Pane } from 'splitpanes'
 import 'splitpanes/dist/splitpanes.css'
 import { useQueryStore } from '@/stores/query'
 import { useTabsStore, type QueryTab } from '@/stores/tabs'
+import { useConnectionStore } from '@/stores/connection'
 
 const props = defineProps<{
   initialQuery: string
@@ -62,20 +71,38 @@ const props = defineProps<{
 
 const queryStore = useQueryStore()
 const tabsStore = useTabsStore()
+const connectionStore = useConnectionStore()
 
 const query = ref(props.initialQuery)
 const activeResultsTab = ref('result-0')
 const monacoInstance = ref(null) // Renamed from monacoEditorRef
 
+const currentTab = computed(() => tabsStore.tabs.find((t: QueryTab) => t.id === props.tabId))
+
 // Get a reactive reference to the state for this specific tab
 const queryState = computed(() => queryStore.getStateForTab(props.tabId))
 
+const activeConnectionItems = computed(() =>
+  Object.values(connectionStore.activeConnections).map(conn => ({
+    title: conn.name,
+    value: conn.id,
+  }))
+)
+
+const currentConnectionId = computed({
+  get: () => currentTab.value?.connectionId ?? null,
+  set: (newConnectionId) => {
+    if (newConnectionId && currentTab.value) {
+      tabsStore.updateTabConnection(props.tabId, newConnectionId)
+    }
+  }
+})
+
 function handleExecute() {
-  const currentTab = tabsStore.tabs.find((t: QueryTab) => t.id === props.tabId)
-  if (currentTab) {
-    queryStore.executeQuery(props.tabId, currentTab.connectionId, query.value)
+  if (currentTab.value) {
+    queryStore.executeQuery(props.tabId, currentTab.value.connectionId, query.value)
     // Also update the query in the tabs store so it's saved
-    currentTab.query = query.value
+    currentTab.value.query = query.value
   }
 }
 
