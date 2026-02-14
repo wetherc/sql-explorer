@@ -5,6 +5,8 @@
       <v-select
         v-model="currentConnectionId"
         :items="activeConnectionItems"
+        item-title="title"
+        item-value="value"
         label="Connection"
         density="compact"
         hide-details
