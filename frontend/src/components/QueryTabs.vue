@@ -4,7 +4,7 @@
       {{ tab.title }}
       <v-icon size="x-small" @click.stop="closeTab(tab.id)">mdi-close</v-icon>
     </v-tab>
-    <v-tab @click="addTab" :disabled="!selectedExplorerConnectionId">
+    <v-tab @click="addTab">
       <v-icon start>mdi-plus</v-icon>
       New Query
     </v-tab>
