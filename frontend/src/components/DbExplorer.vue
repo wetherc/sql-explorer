@@ -109,7 +109,8 @@ function handleContextMenuAction(action: 'new_query' | 'select_top_1000') {
     } else if (activeConnection?.dbType === 'postgres') {
       query = `SELECT * FROM "${schema}"."${table}" LIMIT 1000;`
     } else {
-      query = `SELECT TOP (1000) * FROM [${schema}].[${table}];`
+      // Generic fallback for other SQL dialects
+      query = `SELECT * FROM ${table} LIMIT 1000;`
     }
     tabsStore.addTab(connectionId, query)
   }

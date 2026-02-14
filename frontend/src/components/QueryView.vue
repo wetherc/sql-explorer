@@ -101,24 +101,23 @@ const currentConnectionId = computed({
 })
 
 function handleExecute() {
-  if (currentTab.value) {
-    queryStore.executeQuery(props.tabId, currentTab.value.connectionId, query.value)
+  if (currentTab.value && monacoInstance.value) {
+    const currentQuery = (monacoInstance.value as any).getValue()
+    queryStore.executeQuery(props.tabId, currentTab.value.connectionId, currentQuery)
     // Also update the query in the tabs store so it's saved
-    currentTab.value.query = query.value
+    if (currentTab.value) {
+      currentTab.value.query = currentQuery
+    }
   }
 }
 
 function handleEditorMount(editor: any) {
   monacoInstance.value = editor
-  console.log('Monaco editor mounted and instance stored.')
 }
 
 function handlePaneResize() {
   if (monacoInstance.value) {
-    monacoInstance.value.layout()
-    console.log('Monaco editor layout() called via instance.')
-  } else {
-    console.log('Monaco editor instance not yet available for layout.')
+    (monacoInstance.value as any).layout()
   }
 }
 
