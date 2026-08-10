@@ -156,19 +156,10 @@ async fn azure_cli_token(configured_path: Option<&str>) -> Result<String> {
 /// `winauth` feature, which builds on Windows only.
 async fn auth_method(connection: &SavedConnection) -> Result<AuthMethod> {
     match connection.effective_auth() {
-        MssqlAuth::Integrated => {
-            #[cfg(windows)]
-            {
-                Ok(AuthMethod::Integrated)
-            }
-            #[cfg(not(windows))]
-            {
-                Err(Error::Unsupported(
-                    "Windows Integrated Security works on Windows only. Give a user name and a password."
-                        .to_string(),
-                ))
-            }
-        }
+        // Windows uses SSPI. Every other system uses Kerberos through
+        // GSSAPI, which reads the ticket of the user from the credential
+        // cache that `kinit` fills.
+        MssqlAuth::Integrated => Ok(AuthMethod::Integrated),
         MssqlAuth::EntraAzureCli => {
             let token = azure_cli_token(connection.options.azure_cli_path.as_deref()).await?;
             Ok(AuthMethod::aad_token(token))
@@ -229,9 +220,46 @@ impl MssqlDriver {
             log::warn!("Could not disable the Nagle algorithm: {error}");
         }
 
-        let client = with_timeout(limit, Client::connect(config, tcp.compat_write())).await??;
+        let client = with_timeout(limit, Client::connect(config, tcp.compat_write()))
+            .await?
+            .map_err(|error| describe_login(error, connection.effective_auth()))?;
         Ok(Box::new(MssqlDriver { client }))
     }
+}
+
+/// Names the reason a login failed. Kerberos reports a missing ticket in
+/// words that mean nothing to a user of a database, so the message says what
+/// to do instead.
+fn describe_login(error: tiberius::error::Error, auth: MssqlAuth) -> Error {
+    if auth != MssqlAuth::Integrated {
+        return Error::from(error);
+    }
+    let text = error.to_string();
+    if names_a_ticket_fault(&text) {
+        Error::Authentication(format!(
+            "The server refused the account of this user. On macOS and on Linux, run `kinit` to \
+             get a Kerberos ticket, and name the server by its full host name so that the ticket \
+             matches. {text}"
+        ))
+    } else {
+        Error::from(error)
+    }
+}
+
+/// True when the text of a failed login points at the ticket of the user.
+fn names_a_ticket_fault(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    [
+        "credential",
+        "gss",
+        "kerberos",
+        "ticket",
+        "kdc",
+        "sspi",
+        "principal",
+    ]
+    .iter()
+    .any(|mark| lower.contains(mark))
 }
 
 /// Runs a future and turns the expiry of the limit into a timeout error.
@@ -816,18 +844,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn integrated_security_is_refused_where_it_cannot_work() {
+    async fn integrated_security_works_on_every_system() {
         let mut input = connection();
         input.options.integrated_security = true;
-        let result = auth_method(&input).await;
-        if cfg!(windows) {
-            assert!(result.is_ok());
-        } else {
-            assert_eq!(
-                result.unwrap_err().kind(),
-                crate::error::ErrorKind::Unsupported
-            );
-        }
+        // Windows reaches SSPI and every other system reaches Kerberos, so
+        // the method is available everywhere.
+        assert!(auth_method(&input).await.is_ok());
     }
 
     #[tokio::test]
@@ -1092,5 +1114,44 @@ mod tests {
     #[test]
     fn the_resource_of_the_token_names_the_database_service() {
         assert_eq!(DATABASE_RESOURCE, "https://database.windows.net/");
+    }
+    #[test]
+    fn a_fault_of_the_ticket_is_named_as_one() {
+        assert!(names_a_ticket_fault(
+            "Login failed. No credentials were supplied for GSS"
+        ));
+        assert!(names_a_ticket_fault("Cannot reach the KDC"));
+        assert!(names_a_ticket_fault("SSPI handshake failed"));
+        assert!(!names_a_ticket_fault("Login failed for user 'sa'."));
+    }
+
+    #[test]
+    fn a_login_that_names_no_ticket_keeps_the_error_of_the_driver() {
+        use tiberius::error::Error as TiberiusError;
+
+        // The text of this error names no ticket, so it stays a database
+        // error even for the integrated method.
+        assert_eq!(
+            describe_login(TiberiusError::Utf8, MssqlAuth::Integrated).kind(),
+            crate::error::ErrorKind::Database
+        );
+
+        // A fault of the ticket becomes an error about the credentials.
+        let error = describe_login(
+            TiberiusError::Protocol("no credentials were supplied".into()),
+            MssqlAuth::Integrated,
+        );
+        assert_eq!(error.kind(), crate::error::ErrorKind::Authentication);
+        assert!(error.to_string().contains("kinit"));
+
+        // Another method keeps the error of the driver as it is.
+        assert_eq!(
+            describe_login(
+                TiberiusError::Protocol("no credentials were supplied".into()),
+                MssqlAuth::SqlLogin
+            )
+            .kind(),
+            crate::error::ErrorKind::Database
+        );
     }
 }

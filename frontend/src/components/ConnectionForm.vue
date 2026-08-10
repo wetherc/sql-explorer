@@ -354,7 +354,7 @@ const needsAccessToken = computed(
 const authHint = computed(() => {
   switch (draft.value.options.mssqlAuth) {
     case MssqlAuth.Integrated:
-      return 'The server takes the account of the user who runs the application. This works on Windows only.'
+      return 'The server takes the account of the user who runs the application. Windows uses its own credentials. macOS and Linux use the Kerberos ticket of the user, so run `kinit` first and give the full host name.'
     case MssqlAuth.EntraAzureCli:
       return 'The application asks the Azure CLI for a token. Run `az login` first.'
     case MssqlAuth.EntraAccessToken:

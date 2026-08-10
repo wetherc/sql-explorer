@@ -78,6 +78,14 @@ keyring = { version = "4", default-features = false, features = [
 # Windows Integrated Security needs `winauth`, which builds on Windows only.
 tiberius = { version = "0.12.3", default-features = false, features = ["winauth"] }
 
+[target.'cfg(unix)'.dependencies]
+# On a system that is not Windows, Integrated Security means Kerberos through
+# GSSAPI. macOS carries the GSS framework and Linux carries the MIT or the
+# Heimdal library, so the feature needs no extra package.
+tiberius = { version = "0.12.3", default-features = false, features = [
+    "integrated-auth-gssapi",
+] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "4", default-features = false, features = [
     "v1",

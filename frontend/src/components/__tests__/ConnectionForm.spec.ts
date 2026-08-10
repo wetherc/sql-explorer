@@ -480,7 +480,7 @@ describe('ConnectionForm with every field filled', () => {
 
     expect(wrapper.find('[data-test="user-field"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="password-field"]').exists()).toBe(false)
-    expect(wrapper.text()).toContain('This works on Windows only')
+    expect(wrapper.text()).toContain('Kerberos ticket')
 
     await wrapper.find('[data-test="save-button"]').trigger('click')
     await settle()
