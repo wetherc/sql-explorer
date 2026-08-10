@@ -65,11 +65,44 @@ fn create_query_text(database: Option<&str>, table: &str, kind: TableKind) -> Cr
     CreateQuery::new(format!("SHOW CREATE {word} {name}"), 0)
 }
 
-/// True when the service refused `SHOW PARTITIONS` because the relation
-/// holds no partition. Such an answer is not a fault of the connection.
+/// Builds the statement that lists the partitions of a relation.
+///
+/// Engine version 3 of Athena follows Trino, which holds no `SHOW
+/// PARTITIONS`. The partitions come from a metadata relation instead. Its
+/// name is the name of the table with `$partitions` at the end, and it holds
+/// one column for each partition key.
+fn partitions_statement(database: &str, table: &str) -> String {
+    let name = Dialect::Athena.qualified_name(Some(database), None, &format!("{table}$partitions"));
+    format!("SELECT * FROM {name}")
+}
+
+/// Turns one row of the partitions relation into the values of a partition.
+///
+/// The text holds each key with its value, in the form that `SHOW
+/// PARTITIONS` gave, so a reader of the tree sees the same thing as before.
+fn partition_of_row(columns: &[ColumnInfo], row: &[JsonValue]) -> Partition {
+    let values = columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            let value = cell_text(row, index).unwrap_or_default();
+            format!("{}={}", column.name, value)
+        })
+        .collect::<Vec<String>>()
+        .join("/");
+    Partition { values }
+}
+
+/// True when the service refused the statement because the relation holds no
+/// partition. Such an answer is not a fault of the connection.
+///
+/// A relation with no partition key, and a view, hold no partitions
+/// relation, so the service reports a relation that is absent.
 fn names_an_unpartitioned_table(error: &Error) -> bool {
     let text = error.to_string().to_lowercase();
-    text.contains("not partitioned") || text.contains("is not a partitioned table")
+    text.contains("not partitioned")
+        || text.contains("is not a partitioned table")
+        || text.contains("does not exist")
 }
 
 /// True when the answer of the service could not be read. A catalog of Glue
@@ -350,6 +383,16 @@ impl AthenaDriver {
 
     /// Runs a statement that reads the catalog and gives back its rows.
     async fn catalog_rows(&self, statement: &str) -> Result<Vec<Vec<JsonValue>>> {
+        Ok(self
+            .catalog_set(statement)
+            .await?
+            .map(|set| set.rows)
+            .unwrap_or_default())
+    }
+
+    /// Runs a statement of the catalog and keeps the columns of the answer,
+    /// which a caller needs when the names of the columns carry meaning.
+    async fn catalog_set(&self, statement: &str) -> Result<Option<ResultSet>> {
         // A statement against `information_schema` scans no data in storage,
         // so it costs nothing and needs no row limit of its own.
         let options = ExecOptions {
@@ -357,7 +400,7 @@ impl AthenaDriver {
             timeout_secs: 60,
         };
         let (set, _) = self.run_statement(statement, &options).await?;
-        Ok(set.map(|set| set.rows).unwrap_or_default())
+        Ok(set)
     }
 
     /// Records that the metadata API cannot answer for this catalog.
@@ -705,21 +748,25 @@ impl DatabaseDriver for AthenaDriver {
         Ok(snapshot)
     }
 
-    /// Reads the partitions with `SHOW PARTITIONS`. A relation that holds no
-    /// partition, and a view, make the service refuse the statement, and the
-    /// answer is then an empty list and not a fault of the connection.
+    /// Reads the partitions from the `$partitions` relation of the table. A
+    /// relation that holds no partition, and a view, hold no such relation,
+    /// and the answer is then an empty list and not a fault of the
+    /// connection.
     async fn list_partitions(
         &mut self,
         database: &str,
         _schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<Partition>> {
-        let name = Dialect::Athena.qualified_name(Some(database), None, table);
-        match self.catalog_rows(&format!("SHOW PARTITIONS {name}")).await {
-            Ok(rows) => Ok(rows
+        match self
+            .catalog_set(&partitions_statement(database, table))
+            .await
+        {
+            Ok(None) => Ok(Vec::new()),
+            Ok(Some(set)) => Ok(set
+                .rows
                 .iter()
-                .filter_map(|row| cell_text(row, 0))
-                .map(|values| Partition { values })
+                .map(|row| partition_of_row(&set.columns, row))
                 .collect()),
             Err(error) if names_an_unpartitioned_table(&error) => Ok(Vec::new()),
             Err(error) => Err(error),
@@ -859,9 +906,36 @@ mod tests {
         assert!(names_an_unpartitioned_table(&Error::Athena(
             "SYNTAX_ERROR: Table orders is not partitioned".to_string()
         )));
+        assert!(names_an_unpartitioned_table(&Error::Athena(
+            "line 1:15: Table 'awsdatacatalog.db.orders$partitions' does not exist".to_string()
+        )));
         assert!(!names_an_unpartitioned_table(&Error::Athena(
             "The workgroup was not found".to_string()
         )));
+    }
+
+    #[test]
+    fn the_partitions_come_from_the_metadata_relation() {
+        assert_eq!(
+            partitions_statement("db", "orders"),
+            "SELECT * FROM \"db\".\"orders$partitions\""
+        );
+    }
+
+    #[test]
+    fn a_partition_holds_each_key_with_its_value() {
+        let columns = vec![
+            ColumnInfo {
+                name: "year".to_string(),
+                type_name: "varchar".to_string(),
+            },
+            ColumnInfo {
+                name: "month".to_string(),
+                type_name: "varchar".to_string(),
+            },
+        ];
+        let row = vec![JsonValue::String("2026".to_string()), JsonValue::Null];
+        assert_eq!(partition_of_row(&columns, &row).values, "year=2026/month=");
     }
 
     #[test]

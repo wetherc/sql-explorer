@@ -94,13 +94,25 @@ database in the unit tests. For MS SQL Server, MySQL, PostgreSQL and Athena
 the tests check the text of the statement alone, so a statement that the
 engine refuses shows itself the first time a user opens the folder.
 
-## The partitions of Athena come from a statement
+## The partitions of Athena come from a metadata relation
 
-Athena keeps the partitions in the catalog of Glue, and the driver reads them
-with `SHOW PARTITIONS`. The service refuses that statement for a relation
-that holds no partition and for a view, and the driver answers with an empty
-list when the refusal names that cause. Another refusal reaches the user as
-an error.
+Athena keeps the partitions in the catalog of Glue. Engine version 2 gave them
+with `SHOW PARTITIONS`. Engine version 3 follows Trino, which holds no such
+statement and answers it with "mismatched input 'PARTITIONS'". The driver
+therefore reads the relation whose name is the name of the table with
+`$partitions` at the end. That relation holds one column for each partition
+key, and the driver joins the columns into the form that `SHOW PARTITIONS`
+gave, which is `key=value` with a slash between the keys.
+
+A relation with no partition key, and a view, hold no such relation, so the
+service reports a relation that is absent. The driver answers with an empty
+list when the refusal names that cause. Another refusal reaches the user as an
+error.
+
+A table of Iceberg holds a different set of columns there, which includes the
+counts of the records and of the files and a group of the values of the keys.
+The tree shows those columns as they come, so the text of a partition of an
+Iceberg table is longer than the text of a partition of a table of Hive.
 
 ## A plan covers one statement
 
