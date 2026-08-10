@@ -4,7 +4,8 @@
   "scripts": {
     "bootstrap": "pnpm install",
     "dev": "tauri dev",
-    "build": "tauri build",
+    "build": "tauri build && pnpm build:windows",
+    "build:windows": "PATH=\"$(brew --prefix llvm)/bin:$PATH\" tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis",
     "tauri": "tauri",
     "test": "pnpm --filter frontend test:unit && cd backend && cargo test",
     "test:unit": "pnpm --filter frontend test:unit",
