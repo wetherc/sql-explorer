@@ -299,6 +299,7 @@ mod tests {
     use super::*;
     use crate::db::QueryParam;
     use crate::storage::{ConnectionOptions, DbType};
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     fn connection_for(path: &str) -> SavedConnection {
         SavedConnection {
@@ -319,10 +320,18 @@ mod tests {
         }
     }
 
+    /// Each test needs its own database. A shared cache name lets two tests
+    /// that run at the same time lock each other out, so the counter below
+    /// gives every call a name of its own.
+    static MEMORY_DATABASE_COUNT: AtomicU32 = AtomicU32::new(0);
+
     async fn open_memory() -> Box<dyn DatabaseDriver> {
-        SqliteDriver::connect(&connection_for("file:sqlite_test?mode=memory&cache=shared"))
-            .await
-            .unwrap()
+        let number = MEMORY_DATABASE_COUNT.fetch_add(1, Ordering::Relaxed);
+        SqliteDriver::connect(&connection_for(&format!(
+            "file:sqlite_test_{number}?mode=memory&cache=shared"
+        )))
+        .await
+        .unwrap()
     }
 
     #[tokio::test]

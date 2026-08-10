@@ -61,7 +61,7 @@ pub fn read_connections<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<SavedConne
     let store = app.store(PathBuf::from(CONNECTIONS_FILE))?;
     let values: Vec<(String, JsonValue)> = store.entries();
     let mut connections: Vec<SavedConnection> = parse_values(values);
-    connections.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    connections.sort_by_key(|connection| connection.name.to_lowercase());
     Ok(connections)
 }
 
@@ -109,7 +109,7 @@ pub fn clear_history<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
 pub fn read_saved_queries<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<SavedQuery>> {
     let store = app.store(PathBuf::from(QUERIES_FILE))?;
     let mut queries: Vec<SavedQuery> = parse_list(store.get(SAVED_KEY));
-    queries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    queries.sort_by_key(|query| query.name.to_lowercase());
     Ok(queries)
 }
 

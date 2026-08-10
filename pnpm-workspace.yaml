@@ -1,2 +1,5 @@
 packages:
   - 'frontend'
+allowBuilds:
+  # `esbuild` fetches its native binary in a build script.
+  esbuild: true
