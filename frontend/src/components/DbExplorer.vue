@@ -31,6 +31,8 @@
         :open-keys="openKeys"
         :selected-key="selectedKey"
         @activate="onActivate"
+        @expand="onExpand"
+        @collapse="onCollapse"
         @context="onContext"
       />
 
@@ -174,21 +176,31 @@ async function onActivate(node: ExplorerNode): Promise<void> {
   if (!isExpandable(node)) {
     return
   }
-  const next = new Set(openKeys.value)
-  if (next.has(node.key)) {
-    next.delete(node.key)
-    openKeys.value = next
+  if (openKeys.value.has(node.key)) {
+    onCollapse(node)
     return
   }
+  await onExpand(node)
+}
+
+/** Opens one branch and reads it. The tree asks only for a branch that is shut. */
+async function onExpand(node: ExplorerNode): Promise<void> {
+  const next = new Set(openKeys.value)
   next.add(node.key)
   openKeys.value = next
   await explorer.expand(node)
 }
 
-function onContext({ event, node }: { event: MouseEvent; node: ExplorerNode }): void {
+function onCollapse(node: ExplorerNode): void {
+  const next = new Set(openKeys.value)
+  next.delete(node.key)
+  openKeys.value = next
+}
+
+function onContext({ x, y, node }: { x: number; y: number; node: ExplorerNode }): void {
   menu.open = false
-  menu.x = event.clientX
-  menu.y = event.clientY
+  menu.x = x
+  menu.y = y
   menu.node = node
   menu.open = true
 }
