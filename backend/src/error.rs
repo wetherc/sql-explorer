@@ -156,9 +156,51 @@ impl Error {
         ErrorPayload {
             kind: self.kind().as_str(),
             message: self.to_string(),
-            detail: source_chain(self),
+            detail: self.server_detail().or_else(|| source_chain(self)),
         }
     }
+
+    /// What the server said about an error of its own, beside the text.
+    ///
+    /// MS SQL Server carries the number, the severity, the state, the line and
+    /// the procedure of every error it reports. A reader needs the number to
+    /// look the error up and the line to find the place in a long script.
+    fn server_detail(&self) -> Option<String> {
+        let Error::Tiberius(tiberius::error::Error::Server(token)) = self else {
+            return None;
+        };
+        Some(server_error_detail(
+            token.code(),
+            token.class(),
+            token.state(),
+            token.line(),
+            token.procedure(),
+        ))
+    }
+}
+
+/// Writes the fields that MS SQL Server sends with an error of its own. A
+/// line of zero and a procedure with no name are left out, because a
+/// statement that the user sent carries neither.
+pub fn server_error_detail(
+    code: u32,
+    severity: u8,
+    state: u8,
+    line: u32,
+    procedure: &str,
+) -> String {
+    let mut parts = vec![
+        format!("Number {code}"),
+        format!("severity {severity}"),
+        format!("state {state}"),
+    ];
+    if line > 0 {
+        parts.push(format!("line {line}"));
+    }
+    if !procedure.is_empty() {
+        parts.push(format!("procedure {procedure}"));
+    }
+    parts.join(", ")
 }
 
 /// Joins every cause below the given error into one text block. Returns
@@ -193,6 +235,26 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_detail_of_a_server_error_names_the_number_and_the_place() {
+        assert_eq!(
+            server_error_detail(208, 16, 1, 3, "usp_load"),
+            "Number 208, severity 16, state 1, line 3, procedure usp_load"
+        );
+        // A statement of the user carries no procedure, and a line of zero
+        // means the server named none.
+        assert_eq!(
+            server_error_detail(4060, 11, 1, 0, ""),
+            "Number 4060, severity 11, state 1"
+        );
+    }
+
+    #[test]
+    fn an_error_that_is_not_of_the_server_keeps_the_chain_of_causes() {
+        let error: Error = tiberius::error::Error::Tls("handshake".into()).into();
+        assert_eq!(error.to_payload().detail, None);
+    }
 
     #[test]
     fn every_kind_has_an_identifier() {

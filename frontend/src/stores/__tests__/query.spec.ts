@@ -20,7 +20,7 @@ function response(rows = [[1]]) {
         truncated: false,
       },
     ],
-    messages: ['1 row returned.'],
+    messages: [{ level: 'info' as const, text: '1 row returned.', detail: null }],
     rowsAffected: null,
     elapsedMs: 12,
   }
@@ -117,7 +117,7 @@ describe('query store', () => {
     expect(state.panes).toHaveLength(1)
     expect(state.panes[0]?.number).toBe(1)
     expect(state.activePaneId).toBe(state.panes[0]?.id)
-    expect(state.messages).toEqual(['1 row returned.'])
+    expect(state.messages).toEqual([{ level: 'info', text: '1 row returned.', detail: null }])
     expect(state.elapsedMs).toBe(12)
     expect(state.running).toBe(false)
     expect(state.requestId).toBeNull()

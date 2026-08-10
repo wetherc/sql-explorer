@@ -131,9 +131,25 @@ export interface QueryStats {
   resultReused: boolean | null
 }
 
+/** How much weight one message of a run carries. */
+export const MessageLevel = {
+  Info: 'info',
+  Warning: 'warning',
+  Error: 'error',
+} as const
+export type MessageLevel = (typeof MessageLevel)[keyof typeof MessageLevel]
+
+/** One line of the Messages tab. */
+export interface Message {
+  level: MessageLevel
+  text: string
+  /** What the server said beside the text, such as a severity or a line. */
+  detail: string | null
+}
+
 export interface QueryResponse {
   results: ResultSet[]
-  messages: string[]
+  messages: Message[]
   rowsAffected: number | null
   elapsedMs: number
   /** What the execution cost, when the engine reports it. */

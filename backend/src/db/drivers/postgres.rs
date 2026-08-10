@@ -12,26 +12,30 @@ use crate::db::drivers::{
 };
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, QueryParams, QueryResponse, ResultSet, Routine, Schema, SchemaSnapshot,
-    SnapshotColumn, Table, TableKind,
+    IndexInfo, Message, MessageLevel, QueryParams, QueryResponse, ResultSet, Routine, Schema,
+    SchemaSnapshot, SnapshotColumn, Table, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::Dialect;
 use crate::storage::{SavedConnection, TlsMode};
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use futures_util::{stream, StreamExt};
 use postgres_types::Type;
 use rust_decimal::Decimal;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 use serde_json::Value as JsonValue;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio_postgres::{Client, Config as PgConfig, Row, SimpleQueryMessage};
+use tokio_postgres::error::DbError;
+use tokio_postgres::{AsyncMessage, Client, Config as PgConfig, Row, SimpleQueryMessage};
 
 pub struct PostgresDriver {
     client: Client,
+    /// The notices that the server sent since the last answer.
+    notices: NoticeBuffer,
 }
 
 /// Builds the connection configuration from a saved connection.
@@ -210,18 +214,89 @@ impl PostgresDriver {
         let limit = Duration::from_secs(connection.options.connect_timeout_secs.max(1));
 
         let tls = tokio_postgres_rustls::MakeRustlsConnect::new(build_tls_config(connection)?);
-        let (client, io) = tokio::time::timeout(limit, config.connect(tls))
+        let (client, mut io) = tokio::time::timeout(limit, config.connect(tls))
             .await
             .map_err(|_| Error::Timeout(limit.as_secs()))??;
 
+        // The notices of the server arrive on the connection object and not
+        // with the result of a statement, so the task that drives the socket
+        // is a stream of messages and not a future. Each notice goes into a
+        // buffer that the driver drains into the answer of the next run.
+        let notices: NoticeBuffer = Arc::new(Mutex::new(Vec::new()));
+        let held = notices.clone();
+        let mut stream = stream::poll_fn(move |context| io.poll_message(context));
         tokio::spawn(async move {
-            if let Err(error) = io.await {
-                log::warn!("The PostgreSQL connection closed: {error}");
+            while let Some(message) = stream.next().await {
+                match message {
+                    Ok(AsyncMessage::Notice(notice)) => {
+                        if let Ok(mut buffer) = held.lock() {
+                            buffer.push(notice_message(&notice));
+                        }
+                    }
+                    // A notification comes from LISTEN, which this
+                    // application does not use.
+                    Ok(_) => {}
+                    Err(error) => {
+                        log::warn!("The PostgreSQL connection closed: {error}");
+                        break;
+                    }
+                }
             }
         });
 
-        Ok(Box::new(PostgresDriver { client }))
+        Ok(Box::new(PostgresDriver { client, notices }))
     }
+
+    /// Takes the notices that arrived since the last run.
+    fn take_notices(&self) -> Vec<Message> {
+        match self.notices.lock() {
+            Ok(mut buffer) => std::mem::take(&mut *buffer),
+            // The lock breaks only when a holder panicked, and a lost notice
+            // must not stop the run itself.
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
+/// The notices that wait for the next answer.
+type NoticeBuffer = Arc<Mutex<Vec<Message>>>;
+
+/// Reads the fields of a notice of the server and builds one message. The
+/// severity decides the level, and the fields beside the text become the
+/// detail. The fields arrive as text, so a test needs no notice of its own.
+fn notice_message_from(
+    severity: &str,
+    code: &str,
+    text: &str,
+    detail: Option<&str>,
+    hint: Option<&str>,
+) -> Message {
+    let level = match severity.to_uppercase().as_str() {
+        "WARNING" | "EXCEPTION" => MessageLevel::Warning,
+        "ERROR" | "FATAL" | "PANIC" => MessageLevel::Error,
+        _ => MessageLevel::Info,
+    };
+    let parts: Vec<&str> = [Some(severity), Some(code), detail, hint]
+        .into_iter()
+        .flatten()
+        .filter(|part| !part.is_empty())
+        .collect();
+    Message {
+        level,
+        text: text.to_string(),
+        detail: Some(parts.join(" · ")),
+    }
+}
+
+/// Builds one message from a notice of the server.
+fn notice_message(notice: &DbError) -> Message {
+    notice_message_from(
+        notice.severity(),
+        notice.code().code(),
+        notice.message(),
+        notice.detail(),
+        notice.hint(),
+    )
 }
 
 #[async_trait]
@@ -267,10 +342,27 @@ impl DatabaseDriver for PostgresDriver {
         options: &ExecOptions,
     ) -> Result<QueryResponse> {
         let started = Instant::now();
-        let mut response = match params {
-            Some(params) => self.run_with_params(query, params, options).await?,
-            None => self.run_simple(query, options).await?,
+        // A notice that arrived before this run belongs to no answer, so the
+        // buffer starts empty.
+        let _ = self.take_notices();
+        let outcome = match params {
+            Some(params) => self.run_with_params(query, params, options).await,
+            None => self.run_simple(query, options).await,
         };
+
+        let notices = self.take_notices();
+        let mut response = match outcome {
+            Ok(response) => response,
+            Err(error) => {
+                // A run that failed carries the error and no answer, so the
+                // notices of that run reach the log alone.
+                for notice in &notices {
+                    log::info!("The PostgreSQL server said: {}", notice.text);
+                }
+                return Err(error);
+            }
+        };
+        response.messages.splice(0..0, notices);
         response.elapsed_ms = started.elapsed().as_millis() as u64;
         Ok(response)
     }
@@ -756,6 +848,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_severity_of_a_notice_decides_its_level() {
+        for (severity, level) in [
+            ("NOTICE", MessageLevel::Info),
+            ("INFO", MessageLevel::Info),
+            ("DEBUG", MessageLevel::Info),
+            ("WARNING", MessageLevel::Warning),
+            ("EXCEPTION", MessageLevel::Warning),
+            ("ERROR", MessageLevel::Error),
+            ("FATAL", MessageLevel::Error),
+            ("PANIC", MessageLevel::Error),
+        ] {
+            let message = notice_message_from(severity, "00000", "text", None, None);
+            assert_eq!(message.level, level, "{severity}");
+        }
+    }
+
+    #[test]
+    fn a_notice_carries_its_text_and_what_the_server_added() {
+        let message = notice_message_from(
+            "WARNING",
+            "22001",
+            "the value was cut",
+            Some("the column holds ten letters"),
+            Some("make the column wider"),
+        );
+        assert_eq!(message.text, "the value was cut");
+        let detail = message.detail.unwrap();
+        assert_eq!(
+            detail,
+            "WARNING \u{b7} 22001 \u{b7} the column holds ten letters \u{b7} make the column wider"
+        );
+
+        // A notice that carries neither a detail nor a hint keeps the two
+        // fields it always holds.
+        let short = notice_message_from("NOTICE", "00000", "done", None, Some(""));
+        assert_eq!(short.detail.as_deref(), Some("NOTICE \u{b7} 00000"));
+    }
+
+    #[test]
     fn the_create_statement_covers_a_view_alone() {
         let view = create_query_text(Some("public"), "v", TableKind::View).unwrap();
         assert_eq!(
@@ -954,6 +1085,6 @@ mod tests {
         set.rows.push(vec![JsonValue::Null]);
         push_set(&mut response, set);
         assert_eq!(response.results.len(), 1);
-        assert_eq!(response.messages, vec!["1 row returned."]);
+        assert_eq!(response.messages, vec![Message::info("1 row returned.")]);
     }
 }

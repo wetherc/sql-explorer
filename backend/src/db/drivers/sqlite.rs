@@ -424,6 +424,7 @@ pub fn value_to_json(value: ValueRef<'_>) -> JsonValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Message;
 
     #[test]
     fn the_create_statement_reads_the_master_table() {
@@ -547,7 +548,7 @@ mod tests {
                 JsonValue::Null
             ]
         );
-        assert_eq!(response.messages, vec!["1 row returned."]);
+        assert_eq!(response.messages, vec![Message::info("1 row returned.")]);
         assert!(!response.results[0].truncated);
     }
 
@@ -568,7 +569,10 @@ mod tests {
         assert_eq!(response.results.len(), 1);
         assert_eq!(response.results[0].rows.len(), 2);
         assert_eq!(response.rows_affected, Some(2));
-        assert!(response.messages.iter().any(|m| m == "2 rows affected."));
+        assert!(response
+            .messages
+            .iter()
+            .any(|message| message.text == "2 rows affected."));
     }
 
     #[tokio::test]
@@ -596,7 +600,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.results[0].rows.len(), 2);
         assert!(response.results[0].truncated);
-        assert!(response.messages[0].contains("row limit"));
+        assert!(response.messages[0].text.contains("row limit"));
     }
 
     #[tokio::test]

@@ -9,8 +9,8 @@ pub mod sqlite;
 
 use crate::db::{
     AppColumn, Constraint, ConstraintKind, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, Partition, QueryParams, QueryResponse, Routine, RoutineKind, Schema, SchemaSnapshot,
-    SnapshotColumn, SnapshotRelation, Table, TableKind,
+    IndexInfo, Message, Partition, QueryParams, QueryResponse, Routine, RoutineKind, Schema,
+    SchemaSnapshot, SnapshotColumn, SnapshotRelation, Table, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::Dialect;
@@ -367,27 +367,30 @@ pub fn routine_kind(word: &str) -> RoutineKind {
 }
 
 /// Adds a message that reports how many rows a statement changed.
-pub fn rows_affected_message(count: u64) -> String {
+pub fn rows_affected_message(count: u64) -> Message {
     if count == 1 {
-        "1 row affected.".to_string()
+        Message::info("1 row affected.")
     } else {
-        format!("{count} rows affected.")
+        Message::info(format!("{count} rows affected."))
     }
 }
 
 /// Adds a message that reports how many rows a statement returned.
-pub fn rows_returned_message(count: usize, truncated: bool) -> String {
+pub fn rows_returned_message(count: usize, truncated: bool) -> Message {
     let plural = if count == 1 { "row" } else { "rows" };
     if truncated {
-        format!("{count} {plural} returned. The row limit stopped the read.")
+        Message::warning(format!(
+            "{count} {plural} returned. The row limit stopped the read."
+        ))
     } else {
-        format!("{count} {plural} returned.")
+        Message::info(format!("{count} {plural} returned."))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::MessageLevel;
 
     #[test]
     fn the_rows_of_a_snapshot_fold_into_one_record_for_each_relation() {
@@ -595,15 +598,19 @@ mod tests {
 
     #[test]
     fn the_row_messages_use_the_correct_number() {
-        assert_eq!(rows_affected_message(1), "1 row affected.");
-        assert_eq!(rows_affected_message(0), "0 rows affected.");
-        assert_eq!(rows_affected_message(4), "4 rows affected.");
-        assert_eq!(rows_returned_message(1, false), "1 row returned.");
-        assert_eq!(rows_returned_message(3, false), "3 rows returned.");
+        assert_eq!(rows_affected_message(1).text, "1 row affected.");
+        assert_eq!(rows_affected_message(0).text, "0 rows affected.");
+        assert_eq!(rows_affected_message(4).text, "4 rows affected.");
+        assert_eq!(rows_returned_message(1, false).text, "1 row returned.");
+        assert_eq!(rows_returned_message(3, false).level, MessageLevel::Info);
+        let stopped = rows_returned_message(2, true);
         assert_eq!(
-            rows_returned_message(2, true),
+            stopped.text,
             "2 rows returned. The row limit stopped the read."
         );
+        // A read that the limit stopped is a warning, because the answer is
+        // not the whole result.
+        assert_eq!(stopped.level, MessageLevel::Warning);
     }
 
     struct BareDriver;

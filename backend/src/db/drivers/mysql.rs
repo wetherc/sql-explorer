@@ -8,7 +8,7 @@ use crate::db::drivers::{
 };
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, QueryParams, QueryResponse, ResultSet, Routine, Schema, SchemaSnapshot,
+    IndexInfo, Message, QueryParams, QueryResponse, ResultSet, Routine, Schema, SchemaSnapshot,
     SnapshotColumn, Table, TableKind,
 };
 use crate::error::{Error, Result};
@@ -170,7 +170,9 @@ async fn run_statement(
             response.rows_affected = Some(response.rows_affected.unwrap_or(0) + affected);
             response.messages.push(rows_affected_message(affected));
             if !info.is_empty() {
-                response.messages.push(info);
+                // The server sends the text of the statement, such as the
+                // rows it matched and the warnings it counted.
+                response.messages.push(Message::info(info));
             }
             if result.is_empty() {
                 break;

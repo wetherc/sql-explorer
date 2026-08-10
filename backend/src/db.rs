@@ -99,12 +99,54 @@ fn sum_option(left: Option<u64>, right: Option<u64>) -> Option<u64> {
     }
 }
 
+/// How much weight one message of a run carries.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum MessageLevel {
+    /// A count of rows, or text that the statement itself printed.
+    #[default]
+    Info,
+    /// Text that the server sent as a warning.
+    Warning,
+    /// Text that the server sent as an error but that let the run go on.
+    Error,
+}
+
+/// One line of the Messages tab.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Message {
+    pub level: MessageLevel,
+    pub text: String,
+    /// What the server said about the message, such as the severity, the line
+    /// or the procedure that sent it.
+    pub detail: Option<String>,
+}
+
+impl Message {
+    pub fn info(text: impl Into<String>) -> Self {
+        Self {
+            level: MessageLevel::Info,
+            text: text.into(),
+            detail: None,
+        }
+    }
+
+    pub fn warning(text: impl Into<String>) -> Self {
+        Self {
+            level: MessageLevel::Warning,
+            text: text.into(),
+            detail: None,
+        }
+    }
+}
+
 /// Everything one execution produced.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryResponse {
     pub results: Vec<ResultSet>,
-    pub messages: Vec<String>,
+    pub messages: Vec<Message>,
     pub rows_affected: Option<u64>,
     pub elapsed_ms: u64,
     /// What the execution cost, when the engine reports it.
@@ -433,6 +475,17 @@ pub fn supported_engines() -> Vec<EngineInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_message_carries_a_level_and_a_detail() {
+        assert_eq!(Message::info("ok").level, MessageLevel::Info);
+        assert_eq!(Message::info("ok").detail, None);
+        assert_eq!(Message::warning("careful").level, MessageLevel::Warning);
+        assert_eq!(MessageLevel::default(), MessageLevel::Info);
+
+        let text = serde_json::to_string(&MessageLevel::Warning).unwrap();
+        assert_eq!(text, "\"warning\"");
+    }
 
     #[test]
     fn every_engine_is_listed_with_the_fields_it_uses() {

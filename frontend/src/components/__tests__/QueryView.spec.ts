@@ -27,7 +27,7 @@ const response = {
       truncated: false,
     },
   ],
-  messages: ['1 row returned.'],
+  messages: [{ level: 'info' as const, text: '1 row returned.', detail: null }],
   rowsAffected: null,
   elapsedMs: 8,
 }
@@ -140,6 +140,29 @@ describe('QueryView', () => {
     const wrapper = await mountView()
     const select = wrapper.findComponent({ name: 'VSelect' })
     expect(select.props('items')).toEqual([{ title: 'Server (not open)', value: 'c1' }])
+  })
+
+  it('marks a message that carries a warning and shows what the server said', async () => {
+    apiStub.executeQuery.mockResolvedValue({
+      ...response,
+      messages: [
+        {
+          level: 'warning' as const,
+          text: 'value out of range',
+          detail: 'WARNING · 22003',
+        },
+      ],
+    })
+    const wrapper = await mountView()
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+    await wrapper.find('[data-test="messages-tab"]').trigger('click')
+    await wrapper.vm.$nextTick()
+
+    const line = wrapper.find('[data-test="query-message"]')
+    expect(line.classes()).toContain('message-warning')
+    expect(line.text()).toContain('value out of range')
+    expect(line.text()).toContain('WARNING · 22003')
   })
 
   it('sends the statement to the backend when Run is pressed', async () => {
@@ -590,7 +613,7 @@ describe('QueryView details', () => {
   it('stays on the messages when a statement gives no result set', async () => {
     apiStub.executeQuery.mockResolvedValue({
       results: [],
-      messages: ['3 rows affected.'],
+      messages: [{ level: 'info' as const, text: '3 rows affected.', detail: null }],
       rowsAffected: 3,
       elapsedMs: 4,
     })

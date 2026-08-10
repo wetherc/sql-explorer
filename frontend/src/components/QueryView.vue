@@ -167,9 +167,14 @@
                 v-for="(message, index) in state.messages"
                 :key="index"
                 class="message-line"
+                :class="`message-${message.level}`"
                 data-test="query-message"
               >
-                {{ message }}
+                <v-icon v-if="message.level !== 'info'" size="14" class="mr-1">
+                  {{ message.level === 'error' ? 'mdi-alert-circle' : 'mdi-alert' }}
+                </v-icon>
+                {{ message.text }}
+                <span v-if="message.detail" class="message-detail">{{ message.detail }}</span>
               </div>
 
               <div
@@ -553,6 +558,19 @@ defineExpose({ runStatement, runAll, formatStatement })
   overflow: hidden;
   display: flex;
   flex-direction: column;
+}
+
+.message-warning {
+  color: rgb(var(--v-theme-warning));
+}
+
+.message-error {
+  color: rgb(var(--v-theme-error));
+}
+
+.message-detail {
+  margin-left: 0.5rem;
+  opacity: 0.7;
 }
 
 .messages {

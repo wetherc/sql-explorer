@@ -46,8 +46,13 @@ the same change, so this part goes away with the next release.
 severity, and then drops them. The crate gives no public way to read them, so
 the Messages tab cannot show that text.
 
-The driver reports what it can reach: the severity, the line number, the
-procedure name and the number of every server error.
+The driver reports what it can reach. An error of the server carries its
+number, its severity, its state, its line and its procedure, and those reach
+the user beside the text of the error.
+
+PostgreSQL has no such limit: a `NOTICE`, a `WARNING` and an `INFO` arrive on
+the connection and reach the Messages tab with the severity, the code, the
+detail and the hint that the server sent.
 
 ## A server that offers only the older ciphers
 

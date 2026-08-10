@@ -8,7 +8,7 @@ import { useSettingsStore } from './settings'
 import { useUiStore } from './ui'
 import { toErrorPayload } from '@/lib/errors'
 import { scanCost } from '@/lib/format'
-import type { ErrorPayload, QueryStats, ResultSet } from '@/types/api'
+import type { ErrorPayload, Message, QueryStats, ResultSet } from '@/types/api'
 
 /** One gigabyte, as a storage unit counts it. */
 const BYTES_IN_GIGABYTE = 1024 ** 3
@@ -35,7 +35,7 @@ export interface QueryState {
   requestId: string | null
   error: ErrorPayload | null
   panes: ResultPane[]
-  messages: string[]
+  messages: Message[]
   rowsAffected: number | null
   elapsedMs: number
   /** The moment the statement started, so the elapsed time can be shown. */
