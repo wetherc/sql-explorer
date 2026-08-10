@@ -138,7 +138,7 @@
       <v-card>
         <v-card-title class="text-subtitle-1">{{ inspectTitle }}</v-card-title>
         <v-card-text>
-          <pre class="inspect-body">{{ inspectValue }}</pre>
+          <pre class="app-code-block">{{ inspectValue }}</pre>
         </v-card-text>
         <v-card-actions>
           <v-spacer />
@@ -484,7 +484,7 @@ watch(
   border-spacing: 0;
   width: max-content;
   min-width: 100%;
-  font-size: 0.8125rem;
+  font-size: var(--app-text-md);
 }
 
 .grid-table th {
@@ -496,7 +496,7 @@ watch(
   padding: 4px 10px;
   cursor: pointer;
   white-space: nowrap;
-  border-bottom: 1px solid rgb(var(--v-theme-surface-variant));
+  border-bottom: var(--app-divider);
   user-select: none;
 }
 
@@ -511,8 +511,8 @@ watch(
 .header-type {
   margin-left: 6px;
   font-weight: 400;
-  font-size: 0.6875rem;
-  opacity: 0.6;
+  font-size: var(--app-text-xs);
+  color: rgb(var(--v-theme-on-surface-variant));
 }
 
 .grid-table td {
@@ -522,7 +522,7 @@ watch(
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  border-bottom: 1px solid rgba(var(--v-theme-surface-variant), 0.4);
+  border-bottom: var(--app-divider-soft);
   cursor: default;
 }
 
@@ -531,7 +531,7 @@ watch(
 }
 
 .row-number {
-  color: rgb(var(--v-theme-null-value));
+  color: rgb(var(--v-theme-on-surface-variant));
   text-align: right;
   width: 1%;
   position: sticky;
@@ -542,14 +542,5 @@ watch(
 .null-cell {
   color: rgb(var(--v-theme-null-value));
   font-style: italic;
-}
-
-.inspect-body {
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 50vh;
-  overflow: auto;
-  font-family: ui-monospace, monospace;
-  font-size: 0.8125rem;
 }
 </style>

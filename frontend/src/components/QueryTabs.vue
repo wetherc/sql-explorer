@@ -128,7 +128,7 @@ function newTab(): void {
 .tab-strip {
   flex: 0 0 auto;
   background: rgb(var(--v-theme-surface-light));
-  border-bottom: 1px solid rgb(var(--v-theme-surface-variant));
+  border-bottom: var(--app-divider);
 }
 
 .query-tab {
@@ -145,7 +145,7 @@ function newTab(): void {
 
 .dirty-mark {
   margin-left: 6px;
-  font-size: 0.7rem;
+  font-size: var(--app-text-xs);
   color: rgb(var(--v-theme-warning));
 }
 

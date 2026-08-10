@@ -293,7 +293,7 @@ async function copyName(node: ExplorerNode): Promise<void> {
 
 .explorer-header {
   flex: 0 0 auto;
-  border-bottom: 1px solid rgb(var(--v-theme-surface-variant));
+  border-bottom: var(--app-divider);
 }
 
 .explorer-body {

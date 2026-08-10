@@ -143,9 +143,9 @@ const dialectLabel = computed(() => {
 .status-bar {
   height: 26px;
   flex: 0 0 auto;
-  font-size: 0.75rem;
+  font-size: var(--app-text-sm);
   background: rgb(var(--v-theme-surface-light));
-  border-top: 1px solid rgb(var(--v-theme-surface-variant));
+  border-top: var(--app-divider);
   color: rgb(var(--v-theme-on-surface-variant));
 }
 </style>

@@ -149,7 +149,7 @@ function openSaved(query: SavedQuery): void {
 }
 
 .query-line {
-  font-family: ui-monospace, monospace;
-  font-size: 0.75rem;
+  font-family: var(--app-font-mono);
+  font-size: var(--app-text-sm);
 }
 </style>

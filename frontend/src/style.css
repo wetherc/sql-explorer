@@ -6,6 +6,33 @@ body,
   overflow: hidden;
 }
 
+/* The design tokens of the application. Each component takes its text
+   sizes, its monospace font, and its dividers from this list. One change
+   here changes every place that uses the token. */
+:root {
+  --app-text-xs: 0.6875rem;
+  --app-text-sm: 0.75rem;
+  --app-text-md: 0.8125rem;
+  --app-text-lg: 0.9375rem;
+
+  --app-font-mono: ui-monospace, monospace;
+
+  --app-divider: 1px solid rgb(var(--v-theme-surface-variant));
+  --app-divider-soft: 1px solid rgba(var(--v-theme-surface-variant), 0.4);
+}
+
+/* A block that shows text the database sent, such as an error detail or the
+   value of one cell. The block keeps the line breaks of the source text. */
+.app-code-block {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 50vh;
+  overflow: auto;
+  font-family: var(--app-font-mono);
+  font-size: var(--app-text-md);
+}
+
 /* The scroll bars follow the theme, so they do not stand out on a dark
    surface. */
 * {

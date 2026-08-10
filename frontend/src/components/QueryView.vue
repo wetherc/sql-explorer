@@ -757,13 +757,13 @@ defineExpose({ runStatement, runAll, formatStatement, readPlan })
 
 .toolbar {
   flex: 0 0 auto;
-  border-bottom: 1px solid rgb(var(--v-theme-surface-variant));
+  border-bottom: var(--app-divider);
   background: rgb(var(--v-theme-surface));
 }
 
 .param-name {
   min-width: 90px;
-  font-family: ui-monospace, monospace;
+  font-family: var(--app-font-mono);
 }
 
 .param-kind {
@@ -789,7 +789,7 @@ defineExpose({ runStatement, runAll, formatStatement, readPlan })
 
 .results-tabs {
   flex: 0 0 auto;
-  border-bottom: 1px solid rgb(var(--v-theme-surface-variant));
+  border-bottom: var(--app-divider);
 }
 
 .results-body {
@@ -808,26 +808,27 @@ defineExpose({ runStatement, runAll, formatStatement, readPlan })
   color: rgb(var(--v-theme-error));
 }
 
+/* The detail of one message stays in the colour of its level, so a smaller
+   size is what separates it from the text of the message. */
 .message-detail {
   margin-left: 0.5rem;
-  opacity: 0.7;
+  font-size: var(--app-text-sm);
 }
 
 .messages {
   overflow: auto;
-  font-size: 0.8125rem;
+  font-size: var(--app-text-md);
 }
 
 .message-line {
   padding: 2px 0;
-  font-family: ui-monospace, monospace;
+  font-family: var(--app-font-mono);
 }
 
 .error-detail {
   margin-top: 6px;
   white-space: pre-wrap;
-  font-size: 0.75rem;
-  opacity: 0.85;
+  font-size: var(--app-text-sm);
 }
 
 :deep(.splitpanes__splitter) {

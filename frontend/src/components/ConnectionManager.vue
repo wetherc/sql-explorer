@@ -278,7 +278,7 @@ function onSaved(): void {
 
 .header {
   flex: 0 0 auto;
-  border-bottom: 1px solid rgb(var(--v-theme-surface-variant));
+  border-bottom: var(--app-divider);
 }
 
 .list-body {
@@ -288,10 +288,10 @@ function onSaved(): void {
 }
 
 .group-title {
-  font-size: 0.6875rem;
+  font-size: var(--app-text-xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: rgb(var(--v-theme-null-value));
+  color: rgb(var(--v-theme-on-surface-variant));
 }
 
 .connection-item {

@@ -110,8 +110,8 @@ watch(filter, () => {
 }
 
 .palette-key {
-  font-size: 0.75rem;
-  opacity: 0.7;
+  font-size: var(--app-text-sm);
+  color: rgb(var(--v-theme-on-surface-variant));
   white-space: nowrap;
 }
 </style>

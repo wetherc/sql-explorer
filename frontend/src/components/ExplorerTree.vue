@@ -102,7 +102,7 @@ function onActivate(node: ExplorerNode): void {
   padding-bottom: 3px;
   padding-right: 8px;
   cursor: pointer;
-  font-size: 0.8125rem;
+  font-size: var(--app-text-md);
   user-select: none;
 }
 
@@ -126,7 +126,7 @@ function onActivate(node: ExplorerNode): void {
 }
 
 .node-icon {
-  opacity: 0.8;
+  color: rgb(var(--v-theme-on-surface-variant));
 }
 
 .node-label {
@@ -137,15 +137,15 @@ function onActivate(node: ExplorerNode): void {
 
 .node-hint {
   margin-left: 8px;
-  font-size: 0.6875rem;
-  color: rgb(var(--v-theme-null-value));
+  font-size: var(--app-text-xs);
+  color: rgb(var(--v-theme-on-surface-variant));
   white-space: nowrap;
 }
 
 .empty-branch {
-  font-size: 0.75rem;
+  font-size: var(--app-text-sm);
   font-style: italic;
-  color: rgb(var(--v-theme-null-value));
+  color: rgb(var(--v-theme-on-surface-variant));
   padding-top: 2px;
   padding-bottom: 2px;
 }

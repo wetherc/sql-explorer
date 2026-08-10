@@ -475,7 +475,7 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .app-title {
-  font-size: 0.9375rem;
+  font-size: var(--app-text-lg);
   font-weight: 600;
 }
 

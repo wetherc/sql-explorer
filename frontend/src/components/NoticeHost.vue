@@ -46,7 +46,9 @@
           {{ ui.openedNotice.message }}
         </v-card-title>
         <v-card-text>
-          <pre class="detail-body" data-test="notice-detail-body">{{ ui.openedNotice.detail }}</pre>
+          <pre class="app-code-block" data-test="notice-detail-body">{{
+            ui.openedNotice.detail
+          }}</pre>
         </v-card-text>
         <v-card-actions>
           <v-spacer />
@@ -68,14 +70,5 @@ const ui = useUiStore()
   max-width: 460px;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.detail-body {
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 50vh;
-  overflow: auto;
-  font-family: ui-monospace, monospace;
-  font-size: 0.8125rem;
 }
 </style>
