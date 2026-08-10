@@ -20,6 +20,7 @@
     "@mdi/font": "^7.4.47",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-dialog": "^2.7.2",
+    "fflate": "^0.8.3",
     "monaco-editor": "^0.55.1",
     "pinia": "^3.0.4",
     "splitpanes": "^4.0.4",

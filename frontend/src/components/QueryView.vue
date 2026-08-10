@@ -144,7 +144,7 @@
               <ResultsGrid
                 v-if="state.activePaneId === pane.id"
                 :result="pane.result"
-                @export="(format) => exportResult(pane.result, format)"
+                @export="onExport"
                 @copied="onCopied"
               />
             </template>
@@ -184,6 +184,32 @@
       </pane>
     </splitpanes>
 
+    <v-dialog v-model="askingTable" max-width="420">
+      <v-card>
+        <v-card-title class="text-subtitle-1">Name the table</v-card-title>
+        <v-card-text>
+          <v-text-field
+            v-model="insertTable"
+            label="Table"
+            hint="The name the INSERT statements write to."
+            persistent-hint
+            autofocus
+            data-test="insert-table-name"
+          />
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn text="Cancel" @click="askingTable = false" />
+          <v-btn
+            color="primary"
+            text="Export"
+            data-test="insert-table-confirm"
+            @click="confirmInsertExport"
+          />
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
     <v-dialog v-model="savingQuery" max-width="480">
       <v-card>
         <v-card-title class="text-subtitle-1">Save this statement</v-card-title>
@@ -210,7 +236,8 @@ import SqlEditor from './SqlEditor.vue'
 import ResultsGrid from './ResultsGrid.vue'
 import { api } from '@/lib/api'
 import { forgetTabActions, registerTabActions } from '@/lib/commands'
-import { exportFileName, toCsv, toJson } from '@/lib/export'
+import { exportFileName, toCsv, toInsertStatements, toJson, toMarkdown } from '@/lib/export'
+import { bytesToBase64, toXlsx } from '@/lib/xlsx'
 import { formatClockTime, formatRowCount } from '@/lib/format'
 import { useConnectionsStore } from '@/stores/connections'
 import { useExplorerStore } from '@/stores/explorer'
@@ -220,6 +247,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { useTabsStore } from '@/stores/tabs'
 import { useUiStore } from '@/stores/ui'
 import { Dialect, type ResultSet } from '@/types/api'
+import type { ExportFormat } from './ResultsGrid.vue'
 import type { ResultPane } from '@/stores/query'
 import type { QueryTab } from '@/stores/tabs'
 
@@ -241,6 +269,10 @@ const editorSize = ref(45)
 const savingQuery = ref(false)
 const saveName = ref('')
 const saveFolder = ref('')
+const askingTable = ref(false)
+const insertTable = ref('')
+/** The rows that wait while the user names the table for the INSERT form. */
+let pendingInsert: ResultSet | null = null
 
 const state = computed(() => queries.stateFor(props.tab.id))
 
@@ -326,22 +358,67 @@ function cancel(): void {
   }
 }
 
-async function exportResult(result: ResultSet, format: 'csv' | 'json'): Promise<void> {
-  const suggested = exportFileName(props.tab.title, format)
+/** The name and the extension of the file each form of export writes. */
+const EXPORT_FILES: Record<ExportFormat, { label: string; extension: string }> = {
+  csv: { label: 'CSV', extension: 'csv' },
+  json: { label: 'JSON', extension: 'json' },
+  markdown: { label: 'Markdown', extension: 'md' },
+  insert: { label: 'SQL', extension: 'sql' },
+  xlsx: { label: 'Excel', extension: 'xlsx' },
+}
+
+function onExport(format: ExportFormat, rows: ResultSet): void {
+  if (format === 'insert') {
+    pendingInsert = rows
+    insertTable.value = props.tab.title
+    askingTable.value = true
+    return
+  }
+  void exportResult(rows, format)
+}
+
+function confirmInsertExport(): void {
+  const rows = pendingInsert
+  askingTable.value = false
+  pendingInsert = null
+  if (rows) {
+    void exportResult(rows, 'insert')
+  }
+}
+
+async function exportResult(result: ResultSet, format: ExportFormat): Promise<void> {
+  const file = EXPORT_FILES[format]
   try {
     const path = await saveFileDialog({
-      defaultPath: suggested,
-      filters: [{ name: format.toUpperCase(), extensions: [format] }],
+      defaultPath: exportFileName(props.tab.title, file.extension),
+      filters: [{ name: file.label, extensions: [file.extension] }],
     })
     if (!path) {
       return
     }
-    const contents = format === 'csv' ? toCsv(result) : toJson(result)
-    await api.writeTextFile(path, contents)
+    if (format === 'xlsx') {
+      await api.writeBinaryFile(path, bytesToBase64(toXlsx(result, props.tab.title)))
+    } else {
+      await api.writeTextFile(path, textFor(result, format))
+    }
     ui.success(`The result is written to ${path}.`)
   } catch (error) {
     ui.reportError(error)
   }
+}
+
+/** Writes the result in the text form the user asked for. */
+function textFor(result: ResultSet, format: ExportFormat): string {
+  if (format === 'json') {
+    return toJson(result)
+  }
+  if (format === 'markdown') {
+    return toMarkdown(result)
+  }
+  if (format === 'insert') {
+    return toInsertStatements(result, insertTable.value.trim() || 'the_table', dialect.value)
+  }
+  return toCsv(result)
 }
 
 async function confirmSave(): Promise<void> {

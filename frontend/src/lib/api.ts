@@ -151,6 +151,10 @@ export const api = {
     return invoke('write_text_file', { path, contents })
   },
 
+  writeBinaryFile(path: string, contentsBase64: string): Promise<void> {
+    return invoke('write_binary_file', { path, contentsBase64 })
+  },
+
   readTextFile(path: string): Promise<string> {
     return invoke('read_text_file', { path })
   },

@@ -1,5 +1,6 @@
-import type { CellValue, ResultSet } from '@/types/api'
+import type { CellValue, Dialect, ResultSet } from '@/types/api'
 import { formatCell, isNullCell } from './format'
+import { quoteIdentifier } from './sql'
 
 /**
  * Writes one field of a comma separated file. A field that holds a comma,
@@ -41,6 +42,61 @@ export function toJson(result: ResultSet, indent = 2): string {
     return object
   })
   return JSON.stringify(objects, null, indent)
+}
+
+/**
+ * Writes a result set as a table of Markdown. A vertical bar inside a value
+ * is escaped, and a line break becomes a space, because a cell of Markdown
+ * holds one line.
+ */
+export function toMarkdown(result: ResultSet): string {
+  const cell = (value: CellValue): string =>
+    (isNullCell(value) ? '' : formatCell(value)).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ')
+  const lines = [
+    `| ${result.columns.map((column) => cell(column.name)).join(' | ')} |`,
+    `| ${result.columns.map(() => '---').join(' | ')} |`,
+  ]
+  for (const row of result.rows) {
+    lines.push(`| ${row.map(cell).join(' | ')} |`)
+  }
+  return lines.join('\n')
+}
+
+/**
+ * Writes a value as a literal of SQL. A number and a boolean go in as they
+ * are, and everything else becomes a text with its quotes doubled. A value
+ * that holds no data becomes NULL.
+ */
+export function toSqlLiteral(value: CellValue): string {
+  if (isNullCell(value)) {
+    return 'NULL'
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? String(value) : 'NULL'
+  }
+  if (typeof value === 'boolean') {
+    return value ? '1' : '0'
+  }
+  return `'${formatCell(value).replace(/'/g, "''")}'`
+}
+
+/**
+ * Writes a result set as one INSERT statement for each row. Every name
+ * carries the quotes of the dialect, because a column of a result can hold a
+ * word that the engine reserves.
+ */
+export function toInsertStatements(result: ResultSet, table: string, dialect: Dialect): string {
+  const columns = result.columns.map((column) => quoteIdentifier(column.name, dialect)).join(', ')
+  const target = table
+    .split('.')
+    .map((part) => quoteIdentifier(part, dialect))
+    .join('.')
+  return result.rows
+    .map((row) => {
+      const values = result.columns.map((_, index) => toSqlLiteral(row[index] ?? null)).join(', ')
+      return `INSERT INTO ${target} (${columns}) VALUES (${values});`
+    })
+    .join('\n')
 }
 
 /** Writes the selected cells as text that a spreadsheet accepts. */

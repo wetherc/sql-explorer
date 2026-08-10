@@ -94,7 +94,7 @@ describe('ResultsGrid', () => {
 
   it('opens the whole value of a cell', async () => {
     const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
-    await wrapper.findAll('[data-test="grid-cell"]')[1]!.trigger('click')
+    await wrapper.findAll('[data-test="grid-cell"]')[1]!.trigger('dblclick')
     expect(document.body.textContent).toContain('Grace')
   })
 
@@ -153,23 +153,99 @@ describe('ResultsGrid', () => {
     expect(wrapper.findAll('[data-test="grid-row"]')).toHaveLength(1)
   })
 
-  it('asks for an export in each form', async () => {
+  it('asks for an export in each form and gives the rows of the view', async () => {
     const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
     await wrapper.find('[data-test="grid-export"]').trigger('click')
     await new Promise((resolve) => setTimeout(resolve, 0))
-    const items = [...document.querySelectorAll('.v-list-item')]
-    const csv = items.find((item) => item.textContent?.includes('CSV'))
-    const json = items.find((item) => item.textContent?.includes('JSON'))
-    csv?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    json?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    expect(wrapper.emitted('export')).toEqual([['csv'], ['json']])
+
+    const items = [...document.querySelectorAll('[data-test="grid-export-item"]')]
+    expect(items).toHaveLength(5)
+    for (const item of items) {
+      item.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    }
+
+    const asked = wrapper.emitted('export') as Array<[string, ResultSet]>
+    expect(asked.map((call) => call[0])).toEqual(['csv', 'json', 'markdown', 'insert', 'xlsx'])
+    expect(asked[0]![1].rows).toHaveLength(3)
+  })
+
+  it('names the export after the selection once rows are selected', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    await wrapper.findAll('[data-test="grid-row"]')[0]!.trigger('click')
+    await wrapper.find('[data-test="grid-export"]').trigger('click')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    const items = [...document.querySelectorAll('[data-test="grid-export-item"]')]
+    expect(items[0]?.textContent).toContain('the selected rows')
+    items[0]?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    const asked = wrapper.emitted('export') as Array<[string, ResultSet]>
+    expect(asked[0]![1].rows).toEqual([[2, 'Grace']])
+  })
+
+  it('selects one row, adds a row, and reaches a run of rows', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    const rows = () => wrapper.findAll('[data-test="grid-row"]')
+
+    await rows()[0]!.trigger('click')
+    expect(rows()[0]!.classes()).toContain('selected')
+    expect(wrapper.find('[data-test="grid-count"]').text()).toContain('1 selected')
+
+    // Control adds a row and takes it away again.
+    await rows()[2]!.trigger('click', { ctrlKey: true })
+    expect(rows()[2]!.classes()).toContain('selected')
+    await rows()[2]!.trigger('click', { ctrlKey: true })
+    expect(rows()[2]!.classes()).not.toContain('selected')
+
+    // Shift reaches from the row of the last click that set the anchor.
+    await rows()[0]!.trigger('click', { shiftKey: true })
+    expect(rows().every((row) => row.classes().includes('selected'))).toBe(true)
+  })
+
+  it('holds the selection through a sort', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    await wrapper.findAll('[data-test="grid-row"]')[0]!.trigger('click')
+    await wrapper.findAll('[data-test="grid-header"]')[0]!.trigger('click')
+
+    // The row of Grace moves to the end of the sort and keeps its mark.
+    const rows = wrapper.findAll('[data-test="grid-row"]')
+    expect(rows[1]!.classes()).toContain('selected')
+    expect(rows[0]!.classes()).not.toContain('selected')
+  })
+
+  it('clears the selection from the menu and when a new result arrives', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    await wrapper.findAll('[data-test="grid-row"]')[0]!.trigger('click')
+    await wrapper.find('[data-test="grid-export"]').trigger('click')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    document
+      .querySelector('[data-test="grid-clear-selection"]')
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-test="grid-count"]').text()).not.toContain('selected')
+
+    await wrapper.findAll('[data-test="grid-row"]')[0]!.trigger('click')
+    await wrapper.setProps({ result: result({ rows: [[9, 'Nine']] }) })
+    expect(wrapper.find('[data-test="grid-count"]').text()).not.toContain('selected')
+  })
+
+  it('copies the rows of the selection alone', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(globalThis.navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    await wrapper.findAll('[data-test="grid-row"]')[1]!.trigger('click')
+    await wrapper.find('[data-test="grid-copy"]').trigger('click')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(writeText).toHaveBeenCalledWith('id\tname\n1\tAda')
   })
 
   it('names a cell of a column it cannot find', async () => {
     const wrapper = mountWithPlugins(ResultsGrid, {
       props: { result: { columns: [], rows: [[1]], truncated: false } },
     })
-    await wrapper.findAll('[data-test="grid-cell"]')[0]!.trigger('click')
+    await wrapper.findAll('[data-test="grid-cell"]')[0]!.trigger('dblclick')
     expect(document.body.textContent).toContain('1')
   })
 })
@@ -183,7 +259,7 @@ describe('ResultsGrid inspection dialog', () => {
     })
 
     const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
-    await wrapper.findAll('[data-test="grid-cell"]')[1]!.trigger('click')
+    await wrapper.findAll('[data-test="grid-cell"]')[1]!.trigger('dblclick')
     await new Promise((resolve) => setTimeout(resolve, 0))
 
     const buttons = [...document.querySelectorAll('.v-card-actions .v-btn')]
@@ -218,7 +294,7 @@ describe('ResultsGrid inspection dialog', () => {
 describe('ResultsGrid dialog state', () => {
   it('closes the inspection when the overlay reports it', async () => {
     const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
-    await wrapper.findAll('[data-test="grid-cell"]')[1]!.trigger('click')
+    await wrapper.findAll('[data-test="grid-cell"]')[1]!.trigger('dblclick')
     await new Promise((resolve) => setTimeout(resolve, 0))
 
     const dialog = wrapper.findComponent({ name: 'VDialog' })

@@ -38,8 +38,20 @@
           />
         </template>
         <v-list density="compact">
-          <v-list-item title="Export as CSV" @click="emit('export', 'csv')" />
-          <v-list-item title="Export as JSON" @click="emit('export', 'json')" />
+          <v-list-item
+            v-for="entry in exportItems"
+            :key="entry.format"
+            :title="entry.title"
+            data-test="grid-export-item"
+            @click="askExport(entry.format)"
+          />
+          <v-divider v-if="hasSelection" />
+          <v-list-item
+            v-if="hasSelection"
+            title="Clear the selection"
+            data-test="grid-clear-selection"
+            @click="clearSelection()"
+          />
         </v-list>
       </v-menu>
     </div>
@@ -75,15 +87,22 @@
           <tr v-if="topPad > 0" :style="{ height: `${topPad}px` }">
             <td :colspan="result.columns.length + 1"></td>
           </tr>
-          <tr v-for="entry in windowRows" :key="entry.index" data-test="grid-row">
-            <td class="row-number">{{ entry.index + 1 }}</td>
+          <tr
+            v-for="entry in windowRows"
+            :key="entry.sourceIndex"
+            :class="{ selected: selected.has(entry.sourceIndex) }"
+            :aria-selected="selected.has(entry.sourceIndex)"
+            data-test="grid-row"
+            @click="onRowClick(entry.position, entry.sourceIndex, $event)"
+          >
+            <td class="row-number">{{ entry.position + 1 }}</td>
             <td
               v-for="(cell, cellIndex) in entry.row"
               :key="cellIndex"
               :class="{ 'null-cell': isNullCell(cell) }"
               :title="formatCell(cell)"
               data-test="grid-cell"
-              @click="inspect(cell, columnName(cellIndex))"
+              @dblclick="inspect(cell, columnName(cellIndex))"
             >
               {{ truncate(formatCell(cell), 160) }}
             </td>
@@ -122,9 +141,12 @@ import { compareCells, formatCell, isNullCell, truncate } from '@/lib/format'
 import { toTabSeparated } from '@/lib/export'
 import type { CellValue, ResultSet } from '@/types/api'
 
+/** The forms an export can take. */
+export type ExportFormat = 'csv' | 'json' | 'markdown' | 'insert' | 'xlsx'
+
 const props = defineProps<{ result: ResultSet }>()
 const emit = defineEmits<{
-  (event: 'export', format: 'csv' | 'json'): void
+  (event: 'export', format: ExportFormat, rows: ResultSet): void
   (event: 'copied', text: string): void
 }>()
 
@@ -145,13 +167,27 @@ const inspecting = ref(false)
 const inspectValue = ref('')
 const inspectTitle = ref('')
 
+/**
+ * The rows the user selected, held by their place in the result and not by
+ * their place in the view. A sort or a filter moves a row in the view, and
+ * the selection must follow the row and not the position.
+ */
+const selected = ref(new Set<number>())
+/** The row of the last plain click, from which a click with Shift reaches. */
+const anchor = ref<number | null>(null)
+
+/** Every row of the result with the place it holds in the result. */
+const sourceRows = computed(() =>
+  props.result.rows.map((row, sourceIndex) => ({ row, sourceIndex })),
+)
+
 const filteredRows = computed(() => {
   const needle = search.value.trim().toLowerCase()
   if (needle === '') {
-    return props.result.rows
+    return sourceRows.value
   }
-  return props.result.rows.filter((row) =>
-    row.some((cell) => formatCell(cell).toLowerCase().includes(needle)),
+  return sourceRows.value.filter((entry) =>
+    entry.row.some((cell) => formatCell(cell).toLowerCase().includes(needle)),
   )
 })
 
@@ -162,8 +198,21 @@ const sortedRows = computed(() => {
   }
   const direction = sortDescending.value ? -1 : 1
   return [...filteredRows.value].sort(
-    (left, right) => compareCells(left[index] ?? null, right[index] ?? null) * direction,
+    (left, right) => compareCells(left.row[index] ?? null, right.row[index] ?? null) * direction,
   )
+})
+
+const hasSelection = computed(() => selected.value.size > 0)
+
+const exportItems = computed<Array<{ format: ExportFormat; title: string }>>(() => {
+  const scope = hasSelection.value ? 'the selected rows' : 'the rows'
+  return [
+    { format: 'csv', title: `Export ${scope} as CSV` },
+    { format: 'json', title: `Export ${scope} as JSON` },
+    { format: 'markdown', title: `Export ${scope} as Markdown` },
+    { format: 'insert', title: `Export ${scope} as INSERT statements` },
+    { format: 'xlsx', title: `Export ${scope} as Excel` },
+  ]
 })
 
 const firstVisible = computed(() =>
@@ -177,7 +226,7 @@ const lastVisible = computed(() =>
 const windowRows = computed(() =>
   sortedRows.value
     .slice(firstVisible.value, lastVisible.value)
-    .map((row, offset) => ({ index: firstVisible.value + offset, row })),
+    .map((entry, offset) => ({ ...entry, position: firstVisible.value + offset })),
 )
 
 const topPad = computed(() => firstVisible.value * ROW_HEIGHT)
@@ -188,9 +237,11 @@ const bottomPad = computed(() =>
 const countLabel = computed(() => {
   const shown = sortedRows.value.length
   const total = props.result.rows.length
-  return shown === total
-    ? `${total.toLocaleString()} rows`
-    : `${shown.toLocaleString()} of ${total.toLocaleString()} rows`
+  const head =
+    shown === total
+      ? `${total.toLocaleString()} rows`
+      : `${shown.toLocaleString()} of ${total.toLocaleString()} rows`
+  return hasSelection.value ? `${head}, ${selected.value.size.toLocaleString()} selected` : head
 })
 
 function onScroll(event: Event): void {
@@ -224,6 +275,60 @@ function columnName(index: number): string {
   return props.result.columns[index]?.name ?? ''
 }
 
+/**
+ * Answers a click on a row. A plain click takes the row alone. A click with
+ * Control or Command adds the row or takes it away. A click with Shift takes
+ * every row between the last plain click and this one.
+ */
+function onRowClick(position: number, sourceIndex: number, event: MouseEvent): void {
+  if (event.shiftKey && anchor.value !== null) {
+    const from = Math.min(anchor.value, position)
+    const to = Math.max(anchor.value, position)
+    const next = new Set(selected.value)
+    for (const entry of sortedRows.value.slice(from, to + 1)) {
+      next.add(entry.sourceIndex)
+    }
+    selected.value = next
+    return
+  }
+  if (event.ctrlKey || event.metaKey) {
+    const next = new Set(selected.value)
+    if (next.has(sourceIndex)) {
+      next.delete(sourceIndex)
+    } else {
+      next.add(sourceIndex)
+    }
+    selected.value = next
+    anchor.value = position
+    return
+  }
+  selected.value = new Set([sourceIndex])
+  anchor.value = position
+}
+function clearSelection(): void {
+  selected.value = new Set()
+  anchor.value = null
+}
+
+/**
+ * Builds the result an export writes. The rows follow the sort and the
+ * filter of the view, and they hold the selection alone when there is one.
+ */
+function rowsToExport(): ResultSet {
+  const entries = hasSelection.value
+    ? sortedRows.value.filter((entry) => selected.value.has(entry.sourceIndex))
+    : sortedRows.value
+  return {
+    columns: props.result.columns,
+    rows: entries.map((entry) => entry.row),
+    truncated: props.result.truncated,
+  }
+}
+
+function askExport(format: ExportFormat): void {
+  emit('export', format, rowsToExport())
+}
+
 function inspect(cell: CellValue, name: string): void {
   inspectTitle.value = name
   inspectValue.value = formatCell(cell)
@@ -240,7 +345,7 @@ async function copyText(text: string): Promise<void> {
 
 function copyAll(): void {
   const header = props.result.columns.map((column) => column.name)
-  void copyText(toTabSeparated([header, ...sortedRows.value]))
+  void copyText(toTabSeparated([header, ...rowsToExport().rows]))
 }
 
 // A new result starts at the top with no sort and no filter.
@@ -252,11 +357,16 @@ watch(
     sortDescending.value = false
     scrollTop.value = 0
     resultGeneration.value += 1
+    clearSelection()
   },
 )
 </script>
 
 <style scoped>
+.grid-table tbody tr.selected td {
+  background: rgba(var(--v-theme-primary), 0.16);
+}
+
 .results-grid {
   display: flex;
   flex-direction: column;

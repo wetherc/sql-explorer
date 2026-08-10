@@ -92,6 +92,12 @@ describe('api', () => {
       contents: 'a,b',
     })
 
+    await api.writeBinaryFile('/tmp/a.xlsx', 'UEs=')
+    expect(invoke).toHaveBeenCalledWith('write_binary_file', {
+      path: '/tmp/a.xlsx',
+      contentsBase64: 'UEs=',
+    })
+
     await api.readTextFile('/tmp/a.csv')
     expect(invoke).toHaveBeenCalledWith('read_text_file', { path: '/tmp/a.csv' })
 

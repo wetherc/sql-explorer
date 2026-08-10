@@ -32,6 +32,15 @@ const response = {
   elapsedMs: 8,
 }
 
+/** The result that the grid hands over when it asks for an export. */
+function exported() {
+  return {
+    columns: [{ name: 'n', typeName: 'int' }],
+    rows: [[1]],
+    truncated: false,
+  }
+}
+
 /**
  * Puts an editor with a model in place of the stub, so that the format
  * action has a text to work on. Returns the spy that records the writes.
@@ -58,6 +67,16 @@ function editorWithText(text: string) {
     dispose: vi.fn(),
   } as unknown as ReturnType<typeof monaco.editor.create>)
   return executeEdits
+}
+
+/** Mounts the view and runs one statement, so a grid is on show. */
+async function mountedWithResult() {
+  apiStub.executeQuery.mockResolvedValue(response)
+  const wrapper = await mountView()
+  await wrapper.find('[data-test="run-button"]').trigger('click')
+  await settle()
+  await wrapper.vm.$nextTick()
+  return wrapper
 }
 
 async function mountView(query = 'SELECT 1') {
@@ -228,7 +247,7 @@ describe('QueryView', () => {
     await settle()
     await wrapper.vm.$nextTick()
 
-    await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export', 'csv')
+    await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export', 'csv', exported())
     await settle()
 
     expect(apiStub.writeTextFile).toHaveBeenCalledWith('/tmp/out.csv', 'n\n1')
@@ -245,7 +264,7 @@ describe('QueryView', () => {
     await settle()
     await wrapper.vm.$nextTick()
 
-    await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export', 'json')
+    await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export', 'json', exported())
     await settle()
     expect(apiStub.writeTextFile).toHaveBeenCalledWith(
       '/tmp/out.json',
@@ -262,7 +281,7 @@ describe('QueryView', () => {
     await settle()
     await wrapper.vm.$nextTick()
 
-    await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export', 'csv')
+    await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export', 'csv', exported())
     await settle()
     expect(apiStub.writeTextFile).not.toHaveBeenCalled()
   })
@@ -276,7 +295,7 @@ describe('QueryView', () => {
     await settle()
     await wrapper.vm.$nextTick()
 
-    await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export', 'csv')
+    await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export', 'csv', exported())
     await settle()
     expect(useUiStore().notices.some((notice) => notice.level === 'error')).toBe(true)
   })
@@ -695,12 +714,95 @@ describe('QueryView edge paths', () => {
     expect(wrapper.findComponent({ name: 'ResultsGrid' }).exists()).toBe(true)
   })
 
+  it('writes a result as a table of Markdown', async () => {
+    apiStub.writeTextFile.mockResolvedValue(undefined)
+    saveDialog.mockResolvedValue('/tmp/out.md')
+    const wrapper = await mountedWithResult()
+
+    await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export', 'markdown', exported())
+    await settle()
+    expect(apiStub.writeTextFile).toHaveBeenCalledWith('/tmp/out.md', '| n |\n| --- |\n| 1 |')
+  })
+
+  it('asks for the table before it writes INSERT statements', async () => {
+    apiStub.writeTextFile.mockResolvedValue(undefined)
+    saveDialog.mockResolvedValue('/tmp/out.sql')
+    const wrapper = await mountedWithResult()
+
+    await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export', 'insert', exported())
+    await settle()
+    expect(apiStub.writeTextFile).not.toHaveBeenCalled()
+
+    const field = document.querySelector(
+      '[data-test="insert-table-name"] input',
+    ) as HTMLInputElement
+    field.value = 'dbo.orders'
+    field.dispatchEvent(new Event('input'))
+    await settle()
+    ;(document.querySelector('[data-test="insert-table-confirm"]') as HTMLElement).click()
+    await settle()
+
+    expect(apiStub.writeTextFile).toHaveBeenCalledWith(
+      '/tmp/out.sql',
+      'INSERT INTO [dbo].[orders] ([n]) VALUES (1);',
+    )
+  })
+
+  it('closes the table dialog when the overlay reports it', async () => {
+    const wrapper = await mountedWithResult()
+    await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export', 'insert', exported())
+    await settle()
+
+    const dialog = wrapper
+      .findAllComponents({ name: 'VDialog' })
+      .find((item) => item.props('modelValue'))
+    await dialog!.vm.$emit('update:modelValue', false)
+    await settle()
+    expect(dialog!.props('modelValue')).toBe(false)
+  })
+
+  it('writes no INSERT statements when the user closes the dialog', async () => {
+    const wrapper = await mountedWithResult()
+    await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export', 'insert', exported())
+    await settle()
+    ;(
+      [...document.querySelectorAll('button')].find(
+        (button) => button.textContent?.trim() === 'Cancel',
+      ) as HTMLElement
+    ).click()
+    await settle()
+    expect(saveDialog).not.toHaveBeenCalled()
+  })
+
+  it('writes a result as an Excel file', async () => {
+    apiStub.writeBinaryFile.mockResolvedValue(undefined)
+    saveDialog.mockResolvedValue('/tmp/out.xlsx')
+    const wrapper = await mountedWithResult()
+
+    await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export', 'xlsx', exported())
+    await settle()
+    const [path, base64] = apiStub.writeBinaryFile.mock.calls[0] as [string, string]
+    expect(path).toBe('/tmp/out.xlsx')
+    // A ZIP container starts with the two letters PK.
+    expect(atob(base64).startsWith('PK')).toBe(true)
+  })
+
+  it('writes nothing when the user closes the save dialog', async () => {
+    saveDialog.mockResolvedValue(null)
+    const wrapper = await mountedWithResult()
+    await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export', 'csv', exported())
+    await settle()
+    expect(apiStub.writeTextFile).not.toHaveBeenCalled()
+  })
+
   it('closes the save dialog when the overlay reports it', async () => {
     const wrapper = await mountView()
     await wrapper.find('[data-test="save-query-button"]').trigger('click')
     await settle()
 
-    const dialog = wrapper.findComponent({ name: 'VDialog' })
+    const dialog = wrapper
+      .findAllComponents({ name: 'VDialog' })
+      .find((item) => item.props('modelValue'))!
     await dialog.vm.$emit('update:modelValue', false)
     await settle()
     expect(dialog.props('modelValue')).toBe(false)

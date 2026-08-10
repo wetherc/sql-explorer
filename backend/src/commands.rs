@@ -437,6 +437,20 @@ pub async fn write_text_file(path: String, contents: String) -> Result<()> {
     Ok(())
 }
 
+/// Writes bytes to a file the user chose. The bytes arrive as base64 text,
+/// because the raw form of the bridge carries one body and cannot carry the
+/// path beside it.
+#[tauri::command]
+pub async fn write_binary_file(path: String, contents_base64: String) -> Result<()> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(contents_base64.as_bytes())
+        .map_err(|error| Error::Configuration(format!("The file content is damaged: {error}")))?;
+    std::fs::write(&path, bytes)?;
+    log::info!("Wrote the file '{path}'.");
+    Ok(())
+}
+
 /// Reads a text file the user chose.
 #[tauri::command]
 pub async fn read_text_file(path: String) -> Result<String> {
@@ -516,5 +530,23 @@ mod tests {
         let state = state();
         let filled = with_password(&state, sqlite_connection("/tmp/a.db")).unwrap();
         assert_eq!(filled.password, None);
+    }
+    #[tokio::test]
+    async fn bytes_reach_a_file_and_damaged_content_is_refused() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("book.xlsx");
+        let target = path.to_string_lossy().to_string();
+
+        // "PK" is the mark that a ZIP container starts with.
+        write_binary_file(target.clone(), "UEs=".to_string())
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"PK");
+
+        let error = write_binary_file(target, "not base64!".to_string())
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), crate::error::ErrorKind::Configuration);
     }
 }

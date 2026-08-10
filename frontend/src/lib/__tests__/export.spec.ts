@@ -3,12 +3,15 @@ import {
   exportFileName,
   toCsv,
   toCsvField,
+  toInsertStatements,
   toJson,
+  toMarkdown,
   toScript,
+  toSqlLiteral,
   toTabSeparated,
   uniqueColumnNames,
 } from '@/lib/export'
-import type { ResultSet } from '@/types/api'
+import { Dialect, type ResultSet } from '@/types/api'
 
 const result: ResultSet = {
   columns: [
@@ -127,5 +130,59 @@ describe('exportFileName', () => {
 
   it('uses the present moment when none is given', () => {
     expect(exportFileName('a', 'csv')).toMatch(/^a-\d{8}-\d{6}\.csv$/)
+  })
+})
+
+describe('toMarkdown', () => {
+  it('writes a table with a header and a rule', () => {
+    expect(toMarkdown(result)).toBe('| id | name |\n| --- | --- |\n| 1 | Ada |\n| 2 |  |')
+  })
+
+  it('escapes a bar and folds a line break', () => {
+    const result = {
+      columns: [{ name: 'text', typeName: 'text' }],
+      rows: [['a|b'], ['one\ntwo']],
+      truncated: false,
+    }
+    expect(toMarkdown(result)).toContain('| a\\|b |')
+    expect(toMarkdown(result)).toContain('| one two |')
+  })
+})
+
+describe('toSqlLiteral', () => {
+  it('writes each kind of value', () => {
+    expect(toSqlLiteral(null)).toBe('NULL')
+    expect(toSqlLiteral(7)).toBe('7')
+    expect(toSqlLiteral(Number.POSITIVE_INFINITY)).toBe('NULL')
+    expect(toSqlLiteral(true)).toBe('1')
+    expect(toSqlLiteral(false)).toBe('0')
+    expect(toSqlLiteral("it's")).toBe("'it''s'")
+  })
+})
+
+describe('toInsertStatements', () => {
+  it('writes one statement for each row with the quotes of the dialect', () => {
+    expect(toInsertStatements(result, 'dbo.people', Dialect.MsSql)).toBe(
+      "INSERT INTO [dbo].[people] ([id], [name]) VALUES (1, 'Ada');\n" +
+        'INSERT INTO [dbo].[people] ([id], [name]) VALUES (2, NULL);',
+    )
+  })
+
+  it('quotes the name for the engine that uses back quotes', () => {
+    expect(toInsertStatements(result, 'people', Dialect.MySql)).toContain(
+      'INSERT INTO `people` (`id`, `name`)',
+    )
+  })
+
+  it('fills a missing cell with NULL', () => {
+    const result = {
+      columns: [
+        { name: 'a', typeName: 'int' },
+        { name: 'b', typeName: 'int' },
+      ],
+      rows: [[1]],
+      truncated: false,
+    }
+    expect(toInsertStatements(result, 't', Dialect.Sqlite)).toContain('VALUES (1, NULL)')
   })
 })

@@ -29,6 +29,7 @@ export function makeApiStub() {
     getWorkspace: vi.fn(),
     saveWorkspace: vi.fn(),
     writeTextFile: vi.fn(),
+    writeBinaryFile: vi.fn(),
     readTextFile: vi.fn(),
     supportedEngines: vi.fn(),
     onConnectionStatus: vi.fn(),
