@@ -348,7 +348,7 @@ import { formatClockTime, formatRowCount } from '@/lib/format'
 import { useConnectionsStore } from '@/stores/connections'
 import { useExplorerStore } from '@/stores/explorer'
 import { useHistoryStore } from '@/stores/history'
-import { useQueryStore } from '@/stores/query'
+import { newQueryState, useQueryStore } from '@/stores/query'
 import { useSettingsStore } from '@/stores/settings'
 import { useTabsStore } from '@/stores/tabs'
 import { useUiStore } from '@/stores/ui'
@@ -387,7 +387,16 @@ const insertTable = ref('')
 /** The rows that wait while the user names the table for the INSERT form. */
 let pendingInsert: ResultSet | null = null
 
-const state = computed(() => queries.stateFor(props.tab.id))
+// The state record is made here, outside the computed below, because a
+// computed must read alone and this call writes a record for a new tab.
+watch(
+  () => props.tab.id,
+  (id) => {
+    queries.stateFor(id)
+  },
+  { immediate: true },
+)
+const state = computed(() => queries.states[props.tab.id] ?? newQueryState())
 
 /**
  * The connections the tab can run on, and the one it names when that one is
@@ -578,10 +587,7 @@ function onFormatFailed(message: string): void {
 }
 
 function cancel(): void {
-  const connectionId = props.tab.connectionId
-  if (connectionId) {
-    void queries.cancel(props.tab.id, connectionId)
-  }
+  void queries.cancel(props.tab.id)
 }
 
 /** The name and the extension of the file each form of export writes. */
@@ -622,15 +628,22 @@ async function onExportAll(format: 'csv' | 'json'): Promise<void> {
   if (!connectionId) {
     return
   }
+  // The export runs the statement of the last run, and not the text of the
+  // editor, which the user may have changed since that run.
+  const lastRun = state.value.lastRun
+  if (!lastRun) {
+    ui.warn('Run the statement first. The export writes the rows of a run.')
+    return
+  }
   try {
     const summary = await api.exportQuery({
       connectionId,
       requestId: `export-${props.tab.id}-${Date.now()}`,
-      query: props.tab.query.trim(),
+      query: lastRun.query,
       defaultName: exportFileName(props.tab.title, format),
       format,
       maxRows: settings.settings.exportRowLimit,
-      queryParams: paramsForRun(props.tab.params),
+      queryParams: lastRun.params,
     })
     if (!summary) {
       return

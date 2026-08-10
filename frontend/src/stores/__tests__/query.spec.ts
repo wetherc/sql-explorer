@@ -42,6 +42,8 @@ describe('newQueryState', () => {
     expect(newQueryState()).toEqual({
       running: false,
       requestId: null,
+      requestConnectionId: null,
+      lastRun: null,
       error: null,
       panes: [],
       messages: [],
@@ -254,15 +256,55 @@ describe('query store', () => {
     const running = queries.execute('t1', 'c1', 'SELECT 1')
     const requestId = queries.stateFor('t1').requestId
 
-    await queries.cancel('t1', 'c1')
+    await queries.cancel('t1')
     expect(apiStub.cancelQuery).toHaveBeenCalledWith('c1', requestId)
     release(response())
     await running
   })
 
+  it('remembers the statement and the values of the last run', async () => {
+    apiStub.executeQuery.mockResolvedValue(response())
+    apiStub.explainQuery.mockResolvedValue(response())
+    const queries = useQueryStore()
+
+    await queries.execute('t1', 'c1', ' SELECT :id ', { id: 7 })
+    expect(queries.stateFor('t1').lastRun).toEqual({ query: 'SELECT :id', params: { id: 7 } })
+
+    // A plan is not a run, so it does not replace the last run.
+    await queries.explain('t1', 'c1', 'SELECT 2', 'estimated')
+    expect(queries.stateFor('t1').lastRun?.query).toBe('SELECT :id')
+
+    // A run that failed leaves the last good run in place.
+    apiStub.executeQuery.mockRejectedValue({ kind: 'database', message: 'no', detail: null })
+    await queries.execute('t1', 'c1', 'SELECT bad')
+    expect(queries.stateFor('t1').lastRun?.query).toBe('SELECT :id')
+  })
+
+  it('sends the stop to the connection of the run', async () => {
+    let release: (value: unknown) => void = () => {}
+    apiStub.executeQuery.mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve
+      }),
+    )
+    apiStub.cancelQuery.mockResolvedValue(undefined)
+    const queries = useQueryStore()
+    const running = queries.execute('t1', 'old-connection', 'SELECT 1')
+    expect(queries.stateFor('t1').requestConnectionId).toBe('old-connection')
+
+    await queries.cancel('t1')
+    expect(apiStub.cancelQuery).toHaveBeenCalledWith(
+      'old-connection',
+      queries.stateFor('t1').requestId,
+    )
+    release(response())
+    await running
+    expect(queries.stateFor('t1').requestConnectionId).toBeNull()
+  })
+
   it('does nothing when there is no statement to stop', async () => {
     const queries = useQueryStore()
-    await queries.cancel('t1', 'c1')
+    await queries.cancel('t1')
     expect(apiStub.cancelQuery).not.toHaveBeenCalled()
   })
 
@@ -276,7 +318,7 @@ describe('query store', () => {
     apiStub.cancelQuery.mockRejectedValue(new Error('the server refused'))
     const queries = useQueryStore()
     const running = queries.execute('t1', 'c1', 'SELECT 1')
-    await queries.cancel('t1', 'c1')
+    await queries.cancel('t1')
     expect(useUiStore().notices.some((notice) => notice.level === 'warning')).toBe(true)
     release(response())
     await running

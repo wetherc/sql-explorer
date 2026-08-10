@@ -43,6 +43,13 @@ export interface QueryState {
   running: boolean
   /** The identifier the backend uses to stop this statement. */
   requestId: string | null
+  /** The connection the running statement was sent to. A stop must reach
+   *  that connection, whatever the tab names at the moment of the stop. */
+  requestConnectionId: string | null
+  /** The statement and the values of the last run that gave a result. The
+   *  export of every row runs this again, and not the text of the editor,
+   *  which the user may have changed since the run. */
+  lastRun: { query: string; params?: Record<string, unknown> } | null
   error: ErrorPayload | null
   panes: ResultPane[]
   messages: Message[]
@@ -61,6 +68,8 @@ export function newQueryState(): QueryState {
   return {
     running: false,
     requestId: null,
+    requestConnectionId: null,
+    lastRun: null,
     error: null,
     panes: [],
     messages: [],
@@ -125,6 +134,7 @@ export const useQueryStore = defineStore('query', () => {
     query: string,
     call: (requestId: string, options: ExecOptions) => Promise<QueryResponse>,
     label?: string,
+    queryParams?: Record<string, unknown>,
   ): Promise<boolean> {
     const trimmed = query.trim()
     if (trimmed === '') {
@@ -141,6 +151,7 @@ export const useQueryStore = defineStore('query', () => {
     const requestId = createId()
     state.running = true
     state.requestId = requestId
+    state.requestConnectionId = connectionId
     state.error = null
     // A result the user kept stays. Every other result goes.
     state.panes = state.panes.filter((pane) => pane.pinned)
@@ -186,6 +197,9 @@ export const useQueryStore = defineStore('query', () => {
       state.stats = response.stats ?? null
       recordScan(state.stats)
       succeeded = true
+      if (label === undefined) {
+        state.lastRun = { query: trimmed, params: queryParams }
+      }
       if (response.results.some((result) => result.truncated)) {
         ui.warn('The row limit stopped the read. Raise it in the settings to see more rows.')
       }
@@ -196,6 +210,7 @@ export const useQueryStore = defineStore('query', () => {
     } finally {
       state.running = false
       state.requestId = null
+      state.requestConnectionId = null
       state.startedAt = null
     }
 
@@ -223,8 +238,14 @@ export const useQueryStore = defineStore('query', () => {
     query: string,
     queryParams?: Record<string, unknown>,
   ): Promise<boolean> {
-    return runRequest(tabId, connectionId, query, (requestId, options) =>
-      api.executeQuery({ connectionId, requestId, query: query.trim(), queryParams, options }),
+    return runRequest(
+      tabId,
+      connectionId,
+      query,
+      (requestId, options) =>
+        api.executeQuery({ connectionId, requestId, query: query.trim(), queryParams, options }),
+      undefined,
+      queryParams,
     )
   }
 
@@ -276,14 +297,18 @@ export const useQueryStore = defineStore('query', () => {
     }
   }
 
-  /** Asks the backend to stop the statement of one tab. */
-  async function cancel(tabId: string, connectionId: string): Promise<void> {
+  /**
+   * Asks the backend to stop the statement of one tab. The stop goes to the
+   * connection that the statement was sent to, because the user can change
+   * the connection of the tab while the statement runs.
+   */
+  async function cancel(tabId: string): Promise<void> {
     const state = stateFor(tabId)
-    if (!state.running || !state.requestId) {
+    if (!state.running || !state.requestId || !state.requestConnectionId) {
       return
     }
     try {
-      await api.cancelQuery(connectionId, state.requestId)
+      await api.cancelQuery(state.requestConnectionId, state.requestId)
     } catch (error) {
       const payload = toErrorPayload(error)
       ui.warn(payload.message)
