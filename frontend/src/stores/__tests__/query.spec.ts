@@ -198,13 +198,15 @@ describe('query store', () => {
     })
   })
 
-  it('names the connection by its identifier when the record is gone', async () => {
+  it('reports that the record of a connection is gone in the history', async () => {
     apiStub.executeQuery.mockResolvedValue(response())
     const history = useHistoryStore()
     const record = vi.spyOn(history, 'record')
     const queries = useQueryStore()
     await queries.execute('t1', 'lost', 'SELECT 1')
-    expect(record).toHaveBeenCalledWith(expect.objectContaining({ connectionName: 'lost' }))
+    expect(record).toHaveBeenCalledWith(
+      expect.objectContaining({ connectionName: 'Connection that is gone' }),
+    )
   })
 
   it('asks the backend to stop a statement that runs', async () => {

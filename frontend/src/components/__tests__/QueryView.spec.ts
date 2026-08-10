@@ -111,6 +111,37 @@ describe('QueryView', () => {
     apiStub.getSavedQueries.mockResolvedValue([])
   })
 
+  it('names a connection that is not open in place of its identifier', async () => {
+    apiStub.listActiveConnections.mockResolvedValue([])
+    const wrapper = mountWithPlugins(QueryView, {
+      props: {
+        tab: {
+          id: 't1',
+          title: 'Query 1',
+          query: 'SELECT 1',
+          connectionId: 'gone',
+          dirty: false,
+          savedQueryId: null,
+        },
+      },
+    })
+    const connections = useConnectionsStore()
+    await connections.load()
+    await wrapper.vm.$nextTick()
+
+    const select = wrapper.findComponent({ name: 'VSelect' })
+    expect(select.props('items')).toEqual([
+      { title: 'Connection that is gone (not open)', value: 'gone' },
+    ])
+  })
+
+  it('names a saved connection that is closed as one that is not open', async () => {
+    apiStub.listActiveConnections.mockResolvedValue([])
+    const wrapper = await mountView()
+    const select = wrapper.findComponent({ name: 'VSelect' })
+    expect(select.props('items')).toEqual([{ title: 'Server (not open)', value: 'c1' }])
+  })
+
   it('sends the statement to the backend when Run is pressed', async () => {
     apiStub.executeQuery.mockResolvedValue(response)
     const wrapper = await mountView()

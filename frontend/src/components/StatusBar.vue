@@ -84,7 +84,7 @@ const connectionLabel = computed(() => {
   if (!id) {
     return 'No connection'
   }
-  return connections.byId(id)?.name ?? id
+  return connections.nameFor(id)
 })
 
 const stateLabel = computed(() => {

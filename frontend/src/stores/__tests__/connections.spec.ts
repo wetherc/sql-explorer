@@ -147,6 +147,14 @@ describe('connections store', () => {
     apiStub.supportedEngines.mockResolvedValue([])
   })
 
+  it('names a connection, and reports a record that is gone', async () => {
+    apiStub.getConnections.mockResolvedValue([{ ...connectionFixture(), name: 'Server' }])
+    const connections = useConnectionsStore()
+    await connections.load()
+    expect(connections.nameFor('c1')).toBe('Server')
+    expect(connections.nameFor('gone')).toBe('Connection that is gone')
+  })
+
   it('reads the engines the build supports', async () => {
     apiStub.supportedEngines.mockResolvedValue([{ dbType: DbType.Mssql, label: 'MS SQL Server' }])
     const connections = useConnectionsStore()

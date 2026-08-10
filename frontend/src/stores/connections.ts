@@ -149,6 +149,15 @@ export const useConnectionsStore = defineStore('connections', () => {
     return Boolean(active.value[id])
   }
 
+  /**
+   * The name to show for one identifier. A tab that the workspace holds can
+   * name a connection that the user has since deleted, and an identifier
+   * means nothing to a reader, so such a tab reports that the record is gone.
+   */
+  function nameFor(id: string): string {
+    return byId(id)?.name ?? 'Connection that is gone'
+  }
+
   async function loadEngines(): Promise<void> {
     try {
       engines.value = await api.supportedEngines()
@@ -313,6 +322,7 @@ export const useConnectionsStore = defineStore('connections', () => {
     groups,
     byId,
     isActive,
+    nameFor,
     loadEngines,
     load,
     save,

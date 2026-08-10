@@ -277,12 +277,23 @@ let pendingInsert: ResultSet | null = null
 
 const state = computed(() => queries.stateFor(props.tab.id))
 
-const connectionItems = computed(() =>
-  connections.activeList.map((connection) => ({
+/**
+ * The connections the tab can run on, and the one it names when that one is
+ * not open. A tab that the workspace held can name a connection that is
+ * closed, or one that the user has deleted, and the select would then show
+ * the identifier of that connection to the reader.
+ */
+const connectionItems = computed(() => {
+  const items = connections.activeList.map((connection) => ({
     title: connection.name,
     value: connection.id,
-  })),
-)
+  }))
+  const id = props.tab.connectionId
+  if (id && !items.some((item) => item.value === id)) {
+    items.unshift({ title: `${connections.nameFor(id)} (not open)`, value: id })
+  }
+  return items
+})
 
 const dialect = computed<Dialect>(() => {
   const id = props.tab.connectionId

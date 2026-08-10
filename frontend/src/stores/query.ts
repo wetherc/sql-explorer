@@ -132,7 +132,9 @@ export const useQueryStore = defineStore('query', () => {
     state.activePaneId = null
     state.stats = null
 
-    const connectionName = connections.byId(connectionId)?.name ?? connectionId
+    // The history holds the name and not the identifier, so an entry stays
+    // readable after the record of the connection is gone.
+    const connectionName = connections.nameFor(connectionId)
     let succeeded = false
     let failure: ErrorPayload | null = null
     let fresh: ResultSet[] = []

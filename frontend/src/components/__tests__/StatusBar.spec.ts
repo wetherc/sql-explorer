@@ -37,11 +37,11 @@ describe('StatusBar', () => {
     expect(wrapper.find('[data-test="status-dialect"]').text()).toBe('T-SQL')
   })
 
-  it('names a connection the store does not know by its identifier', async () => {
+  it('reports that the record of a connection is gone', async () => {
     const wrapper = mountWithPlugins(StatusBar)
     useTabsStore().add({ connectionId: 'ghost' })
     await wrapper.vm.$nextTick()
-    expect(wrapper.find('[data-test="status-connection"]').text()).toBe('ghost')
+    expect(wrapper.find('[data-test="status-connection"]').text()).toBe('Connection that is gone')
     expect(wrapper.find('[data-test="status-dialect"]').text()).toBe('SQL')
   })
 
