@@ -81,6 +81,14 @@ function clamp(value: unknown, fallback: number, low: number, high: number): num
  */
 export const useLayoutStore = defineStore('layout', () => {
   const layout = ref<Layout>(defaultLayout())
+  /**
+   * True while a drag moves the edge of the side panel. A drag gives a new
+   * width for every step of the pointer, and a write to the browser store for
+   * each step would hold up the frame, so the write waits for the end of the
+   * drag. The shell also reads this state, to stop the panel from easing
+   * towards each new width while the pointer sets it.
+   */
+  const resizingPanel = ref(false)
 
   function load(storage: Pick<Storage, 'getItem'> | null = safeStorage()): void {
     layout.value = parseLayout(storage ? storage.getItem(LAYOUT_KEY) : null)
@@ -92,7 +100,9 @@ export const useLayoutStore = defineStore('layout', () => {
 
   function update(patch: Partial<Layout>): void {
     layout.value = { ...layout.value, ...patch }
-    persist()
+    if (!resizingPanel.value) {
+      persist()
+    }
   }
 
   /** Opens one panel, whichever panel stood open before. */
@@ -132,12 +142,26 @@ export const useLayoutStore = defineStore('layout', () => {
     setPanelWidth(layout.value.panelWidth + step)
   }
 
+  function beginPanelResize(): void {
+    resizingPanel.value = true
+  }
+
+  /** Ends a drag of the panel edge and writes the width the drag left. */
+  function endPanelResize(): void {
+    if (!resizingPanel.value) {
+      return
+    }
+    resizingPanel.value = false
+    persist()
+  }
+
   function setEditorSize(size: number): void {
     update({ editorSize: sizeOr(size, layout.value.editorSize) })
   }
 
   return {
     layout,
+    resizingPanel,
     load,
     persist,
     update,
@@ -147,6 +171,8 @@ export const useLayoutStore = defineStore('layout', () => {
     togglePanel,
     setPanelWidth,
     nudgePanelWidth,
+    beginPanelResize,
+    endPanelResize,
     setEditorSize,
   }
 })

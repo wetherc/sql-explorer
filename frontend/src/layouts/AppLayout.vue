@@ -312,28 +312,69 @@ function onConnected(): void {
   layout.showPanel('explorer')
 }
 
+/** The class that stops the drag from marking text under the pointer. */
+const RESIZING_CLASS = 'app-resizing'
+
+/** The place the pointer last reported, which the next frame reads. */
+let pendingPanelWidth: number | null = null
+let panelFrame: number | null = null
+
 /**
  * Follows the pointer while it drags the edge of the side panel. The width is
  * the distance from the left of the window less the width of the rail, so the
  * edge stays under the pointer.
+ *
+ * A pointer reports its place more often than the screen draws, so each report
+ * only holds the figure and the width changes once for each frame. The drag
+ * also takes the pointer for itself, which keeps the events coming while the
+ * pointer stands over the editor or the tree.
  */
 function startPanelDrag(event: PointerEvent): void {
+  // Without this the press starts a selection, and the text of the tree or the
+  // editor then marks itself as the pointer crosses it.
+  event.preventDefault()
   const target = event.currentTarget as HTMLElement
-  target.setPointerCapture(event.pointerId)
+  target.setPointerCapture?.(event.pointerId)
+  document.body.classList.add(RESIZING_CLASS)
+  layout.beginPanelResize()
 
-  function onMove(move: PointerEvent): void {
-    layout.setPanelWidth(move.clientX - RAIL_WIDTH)
+  window.addEventListener('pointermove', onPanelDragMove)
+  window.addEventListener('pointerup', endPanelDrag)
+  window.addEventListener('pointercancel', endPanelDrag)
+}
+
+function onPanelDragMove(move: PointerEvent): void {
+  pendingPanelWidth = move.clientX - RAIL_WIDTH
+  if (panelFrame !== null) {
+    return
   }
+  panelFrame = requestAnimationFrame(() => {
+    panelFrame = null
+    if (pendingPanelWidth !== null) {
+      layout.setPanelWidth(pendingPanelWidth)
+      pendingPanelWidth = null
+    }
+  })
+}
 
-  function onUp(): void {
-    target.removeEventListener('pointermove', onMove)
-    target.removeEventListener('pointerup', onUp)
-    target.removeEventListener('pointercancel', onUp)
+function endPanelDrag(): void {
+  window.removeEventListener('pointermove', onPanelDragMove)
+  window.removeEventListener('pointerup', endPanelDrag)
+  window.removeEventListener('pointercancel', endPanelDrag)
+  if (panelFrame !== null) {
+    cancelAnimationFrame(panelFrame)
+    panelFrame = null
   }
-
-  target.addEventListener('pointermove', onMove)
-  target.addEventListener('pointerup', onUp)
-  target.addEventListener('pointercancel', onUp)
+  // The last report of the pointer may still wait for its frame, so it is
+  // taken here and the panel ends the drag where the pointer left it.
+  if (pendingPanelWidth !== null) {
+    layout.setPanelWidth(pendingPanelWidth)
+    pendingPanelWidth = null
+  }
+  document.body.classList.remove(RESIZING_CLASS)
+  // A stray mark can survive the drag, so it goes here.
+  window.getSelection()?.removeAllRanges()
+  layout.endPanelResize()
 }
 
 /** The actions of the tab that is open, when a tab is open. */
@@ -500,6 +541,9 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeyDown)
+  // A drag that is still under way would otherwise leave its listeners and the
+  // class it put on the body behind.
+  endPanelDrag()
   unlisten?.()
   unlisten = null
 })

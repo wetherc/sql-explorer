@@ -33,6 +33,26 @@ body,
   font-size: var(--app-text-md);
 }
 
+/* While a drag moves the edge of a panel, no text under the pointer may mark
+   itself, and the pointer keeps the shape of the drag wherever it goes. The
+   editor and the tree set `user-select` on their own elements, so the rule
+   needs `!important` to reach them. */
+body.app-resizing,
+body.app-resizing * {
+  user-select: none !important;
+  cursor: col-resize !important;
+}
+
+/* The panel and the work area beside it both ease from one width to the next,
+   which is right for the button that opens and closes the panel. A drag sets a
+   new width for every frame, and the easing would then hold both of them
+   behind the pointer. The rules of the library carry the same weight, so these
+   need `!important` to win. */
+body.app-resizing .v-navigation-drawer,
+body.app-resizing .v-main {
+  transition: none !important;
+}
+
 /* Text that a screen reader speaks and the eye does not see. It gives a
    state, such as a change that is not saved, to a reader that cannot see the
    mark which shows that state. */

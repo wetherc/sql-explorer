@@ -123,26 +123,104 @@ describe('AppLayout', () => {
     wrapper.unmount()
   })
 
+  /** Starts a drag of the panel edge and gives back the strip it began on. */
+  async function beginDrag(wrapper: ReturnType<typeof mountWithPlugins>) {
+    const resizer = wrapper.find('[data-test="panel-resizer"]')
+    ;(resizer.element as HTMLElement).setPointerCapture = vi.fn()
+    await resizer.trigger('pointerdown', { pointerId: 1 })
+    return resizer
+  }
+
+  /** The width of the side panel that the browser store holds. */
+  function storedWidth(): number | undefined {
+    const raw = localStorage.getItem(LAYOUT_KEY)
+    return raw ? (JSON.parse(raw) as { panelWidth: number }).panelWidth : undefined
+  }
+
+  /** Moves the pointer and waits for the frame that reads its place. */
+  async function movePointer(clientX: number) {
+    window.dispatchEvent(new MouseEvent('pointermove', { clientX }))
+    await new Promise((resolve) => requestAnimationFrame(() => resolve(null)))
+    await new Promise((resolve) => requestAnimationFrame(() => resolve(null)))
+  }
+
   it('follows the pointer that drags the edge of the panel', async () => {
     const wrapper = mountWithPlugins(AppLayout)
     await settle()
     const layout = useLayoutStore()
-    const resizer = wrapper.find('[data-test="panel-resizer"]')
-    const element = resizer.element as HTMLElement
-    element.setPointerCapture = vi.fn()
-    element.releasePointerCapture = vi.fn()
+    await beginDrag(wrapper)
 
-    await resizer.trigger('pointerdown', { pointerId: 1 })
-    element.dispatchEvent(new MouseEvent('pointermove', { clientX: 456 }))
-    await wrapper.vm.$nextTick()
+    await movePointer(456)
     // The width leaves out the rail, which stands to the left of the panel.
     expect(layout.layout.panelWidth).toBe(400)
 
     // The drag ends, so a later move of the pointer changes nothing.
-    element.dispatchEvent(new MouseEvent('pointerup'))
-    element.dispatchEvent(new MouseEvent('pointermove', { clientX: 300 }))
-    await wrapper.vm.$nextTick()
+    window.dispatchEvent(new MouseEvent('pointerup'))
+    await movePointer(300)
     expect(layout.layout.panelWidth).toBe(400)
+    wrapper.unmount()
+  })
+
+  it('changes the width once for each frame, however often the pointer reports', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const layout = useLayoutStore()
+    await beginDrag(wrapper)
+
+    // Three reports arrive before the frame, and the last one is the one that
+    // reaches the panel.
+    window.dispatchEvent(new MouseEvent('pointermove', { clientX: 300 }))
+    window.dispatchEvent(new MouseEvent('pointermove', { clientX: 350 }))
+    await movePointer(456)
+
+    expect(layout.layout.panelWidth).toBe(400)
+    wrapper.unmount()
+  })
+
+  it('writes the width once the drag ends and not for every step of it', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const layout = useLayoutStore()
+    // The panel writes its state when it opens, which gives a record to read.
+    layout.persist()
+    await beginDrag(wrapper)
+
+    await movePointer(456)
+    await movePointer(500)
+    expect(layout.layout.panelWidth).toBe(444)
+    // The steps of the drag leave the record alone, so no write holds a frame.
+    expect(storedWidth()).toBe(defaultLayout().panelWidth)
+
+    window.dispatchEvent(new MouseEvent('pointerup'))
+    expect(storedWidth()).toBe(444)
+    wrapper.unmount()
+  })
+
+  it('takes the last place of the pointer when the drag ends before the frame', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const layout = useLayoutStore()
+    await beginDrag(wrapper)
+
+    window.dispatchEvent(new MouseEvent('pointermove', { clientX: 456 }))
+    window.dispatchEvent(new MouseEvent('pointerup'))
+
+    expect(layout.layout.panelWidth).toBe(400)
+    wrapper.unmount()
+  })
+
+  it('stops the text under the pointer from marking itself during a drag', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const layout = useLayoutStore()
+    await beginDrag(wrapper)
+
+    expect(document.body.classList.contains('app-resizing')).toBe(true)
+    expect(layout.resizingPanel).toBe(true)
+
+    window.dispatchEvent(new MouseEvent('pointerup'))
+    expect(document.body.classList.contains('app-resizing')).toBe(false)
+    expect(layout.resizingPanel).toBe(false)
     wrapper.unmount()
   })
 
@@ -150,17 +228,26 @@ describe('AppLayout', () => {
     const wrapper = mountWithPlugins(AppLayout)
     await settle()
     const layout = useLayoutStore()
-    const resizer = wrapper.find('[data-test="panel-resizer"]')
-    const element = resizer.element as HTMLElement
-    element.setPointerCapture = vi.fn()
+    await beginDrag(wrapper)
 
-    await resizer.trigger('pointerdown', { pointerId: 1 })
-    element.dispatchEvent(new MouseEvent('pointercancel'))
-    element.dispatchEvent(new MouseEvent('pointermove', { clientX: 500 }))
-    await wrapper.vm.$nextTick()
+    window.dispatchEvent(new MouseEvent('pointercancel'))
+    await movePointer(500)
 
     expect(layout.layout.panelWidth).toBe(defaultLayout().panelWidth)
     wrapper.unmount()
+  })
+
+  it('lets go of a drag that is still under way when the shell goes away', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const layout = useLayoutStore()
+    await beginDrag(wrapper)
+    window.dispatchEvent(new MouseEvent('pointermove', { clientX: 456 }))
+
+    wrapper.unmount()
+
+    expect(document.body.classList.contains('app-resizing')).toBe(false)
+    expect(layout.resizingPanel).toBe(false)
   })
 
   it('opens the panel that stood open before the restart', async () => {
