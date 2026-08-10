@@ -176,9 +176,12 @@
           </v-tabs>
 
           <div class="results-body">
+            <!-- The grids stay mounted behind v-show, so the filter, the
+                 sort and the scroll place of a result survive a switch to
+                 another result and back. -->
             <template v-for="pane in state.panes" :key="pane.id">
               <ResultsGrid
-                v-if="state.activePaneId === pane.id"
+                v-show="state.activePaneId === pane.id"
                 :result="pane.result"
                 @export="onExport"
                 @export-all="onExportAll"

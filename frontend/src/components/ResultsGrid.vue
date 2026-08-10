@@ -77,7 +77,7 @@
       </v-alert>
     </div>
 
-    <div :key="resultGeneration" class="grid-scroll" @scroll="onScroll">
+    <div ref="scrollArea" :key="resultGeneration" class="grid-scroll" @scroll="onScroll">
       <table class="grid-table">
         <thead>
           <tr>
@@ -115,11 +115,11 @@
               v-for="(cell, cellIndex) in entry.row"
               :key="cellIndex"
               :class="{ 'null-cell': isNullCell(cell) }"
-              :title="formatCell(cell)"
+              :title="entry.texts[cellIndex]"
               data-test="grid-cell"
               @dblclick="inspect(cell, columnName(cellIndex))"
             >
-              {{ truncate(formatCell(cell), 160) }}
+              {{ truncate(entry.texts[cellIndex] ?? '', 160) }}
             </td>
           </tr>
           <tr v-if="bottomPad > 0" :style="{ height: `${bottomPad}px` }">
@@ -151,7 +151,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { compareCells, formatCell, isNullCell, truncate } from '@/lib/format'
 import { toTabSeparated } from '@/lib/export'
 import type { CellValue, ResultSet } from '@/types/api'
@@ -172,12 +172,64 @@ const ROW_HEIGHT = 30
 const OVERSCAN = 12
 
 const search = ref('')
+/**
+ * The filter text the rows are matched against. It follows the field after
+ * a short pause, so that a keystroke does not scan every row at once.
+ */
+const appliedSearch = ref('')
+const FILTER_DELAY_MS = 200
+let filterTimer: ReturnType<typeof setTimeout> | null = null
+watch(search, (value) => {
+  if (filterTimer !== null) {
+    clearTimeout(filterTimer)
+  }
+  filterTimer = setTimeout(() => {
+    filterTimer = null
+    appliedSearch.value = (value ?? '').trim().toLowerCase()
+  }, FILTER_DELAY_MS)
+})
+
 const sortIndex = ref<number | null>(null)
 const sortDescending = ref(false)
 /** Rises with each new result, which draws a fresh scroll area. */
 const resultGeneration = ref(0)
 const scrollTop = ref(0)
 const viewportHeight = ref(600)
+/** The element the rows scroll in, which gives the height of the window. */
+const scrollArea = ref<HTMLElement | null>(null)
+let sizeObserver: ResizeObserver | null = null
+
+onMounted(() => {
+  if (typeof ResizeObserver === 'undefined') {
+    return
+  }
+  sizeObserver = new ResizeObserver(() => {
+    const element = scrollArea.value
+    if (element && element.clientHeight > 0) {
+      viewportHeight.value = element.clientHeight
+    }
+  })
+  if (scrollArea.value) {
+    sizeObserver.observe(scrollArea.value)
+  }
+})
+
+// A new result draws a fresh scroll area, so the observer moves with it.
+watch(scrollArea, (element, previous) => {
+  if (previous) {
+    sizeObserver?.unobserve(previous)
+  }
+  if (element) {
+    sizeObserver?.observe(element)
+  }
+})
+
+onBeforeUnmount(() => {
+  sizeObserver?.disconnect()
+  if (filterTimer !== null) {
+    clearTimeout(filterTimer)
+  }
+})
 
 const inspecting = ref(false)
 const inspectValue = ref('')
@@ -197,14 +249,26 @@ const sourceRows = computed(() =>
   props.result.rows.map((row, sourceIndex) => ({ row, sourceIndex })),
 )
 
+/**
+ * The text of every row in small letters, which the filter matches against.
+ * A computed property runs only when it is read, so this text is built the
+ * first time a filter is active and once for each result after that.
+ */
+const rowTexts = computed(() =>
+  props.result.rows.map((row) =>
+    row
+      .map((cell) => formatCell(cell))
+      .join(' ')
+      .toLowerCase(),
+  ),
+)
+
 const filteredRows = computed(() => {
-  const needle = search.value.trim().toLowerCase()
+  const needle = appliedSearch.value
   if (needle === '') {
     return sourceRows.value
   }
-  return sourceRows.value.filter((entry) =>
-    entry.row.some((cell) => formatCell(cell).toLowerCase().includes(needle)),
-  )
+  return sourceRows.value.filter((entry) => rowTexts.value[entry.sourceIndex]?.includes(needle))
 })
 
 const sortedRows = computed(() => {
@@ -240,9 +304,13 @@ const lastVisible = computed(() =>
 )
 
 const windowRows = computed(() =>
-  sortedRows.value
-    .slice(firstVisible.value, lastVisible.value)
-    .map((entry, offset) => ({ ...entry, position: firstVisible.value + offset })),
+  sortedRows.value.slice(firstVisible.value, lastVisible.value).map((entry, offset) => ({
+    ...entry,
+    position: firstVisible.value + offset,
+    // The text of each cell is built once here, so the view does not build
+    // it again for the tooltip and for the body of the cell.
+    texts: entry.row.map((cell) => formatCell(cell)),
+  })),
 )
 
 const topPad = computed(() => firstVisible.value * ROW_HEIGHT)
@@ -364,11 +432,22 @@ function copyAll(): void {
   void copyText(toTabSeparated([header, ...rowsToExport().rows]))
 }
 
+// A sort or a filter moves the rows in the view, so the anchor of a click
+// with Shift no longer points at the row the user last clicked.
+watch([sortIndex, sortDescending, appliedSearch], () => {
+  anchor.value = null
+})
+
 // A new result starts at the top with no sort and no filter.
 watch(
   () => props.result,
   () => {
+    if (filterTimer !== null) {
+      clearTimeout(filterTimer)
+      filterTimer = null
+    }
     search.value = ''
+    appliedSearch.value = ''
     sortIndex.value = null
     sortDescending.value = false
     scrollTop.value = 0

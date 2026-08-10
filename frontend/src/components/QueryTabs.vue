@@ -43,8 +43,15 @@
     </div>
 
     <div class="tab-body">
+      <!-- A tab mounts its view, with its editor, the first time the user
+           opens it. A workspace with many tabs then starts with one editor
+           and not one for each tab. -->
       <template v-for="tab in tabs.tabs" :key="tab.id">
-        <QueryView v-show="tab.id === tabs.activeTabId" :tab="tab" />
+        <QueryView
+          v-if="visitedTabIds.has(tab.id)"
+          v-show="tab.id === tabs.activeTabId"
+          :tab="tab"
+        />
       </template>
 
       <div v-if="!tabs.hasTabs" class="empty-state">
@@ -77,13 +84,25 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import QueryView from './QueryView.vue'
 import { useConnectionsStore } from '@/stores/connections'
 import { useTabsStore } from '@/stores/tabs'
 
 const tabs = useTabsStore()
 const connections = useConnectionsStore()
+
+/** The tabs the user has opened at least once in this session. */
+const visitedTabIds = ref(new Set<string>())
+watch(
+  () => tabs.activeTabId,
+  (id) => {
+    if (id !== null && !visitedTabIds.value.has(id)) {
+      visitedTabIds.value = new Set(visitedTabIds.value).add(id)
+    }
+  },
+  { immediate: true },
+)
 
 const emit = defineEmits<{ (event: 'open-connections'): void }>()
 

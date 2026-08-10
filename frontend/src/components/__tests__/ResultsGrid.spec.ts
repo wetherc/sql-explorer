@@ -85,9 +85,13 @@ describe('ResultsGrid', () => {
     expect(headers[1]?.attributes('aria-sort')).toBe('ascending')
   })
 
-  it('keeps only the rows that match the filter', async () => {
+  it('keeps only the rows that match the filter after a short pause', async () => {
     const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
     await wrapper.find('[data-test="grid-filter"] input').setValue('ada')
+    // The filter waits for a pause, so every row still shows.
+    expect(wrapper.findAll('[data-test="grid-row"]')).toHaveLength(3)
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    await wrapper.vm.$nextTick()
     expect(wrapper.findAll('[data-test="grid-row"]')).toHaveLength(1)
     expect(wrapper.find('[data-test="grid-count"]').text()).toBe('1 of 3 rows')
   })
