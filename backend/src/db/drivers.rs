@@ -8,7 +8,8 @@ pub mod postgres;
 pub mod sqlite;
 
 use crate::db::{
-    AppColumn, Database, DriverCapabilities, ExecOptions, QueryParams, QueryResponse, Schema, Table,
+    AppColumn, CreateQuery, Database, DriverCapabilities, ExecOptions, QueryParams, QueryResponse,
+    Schema, Table, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::Dialect;
@@ -50,6 +51,22 @@ pub trait DatabaseDriver: Send + Sync {
         schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<AppColumn>>;
+
+    /// Returns the statement that reads the CREATE text of one object from
+    /// the engine. An engine that gives no such text returns `None`, and the
+    /// command layer builds a draft from the column list instead.
+    ///
+    /// The method builds text alone and reaches no server, so a test can
+    /// check the statement of every engine.
+    fn create_query(
+        &self,
+        _database: Option<&str>,
+        _schema: Option<&str>,
+        _table: &str,
+        _kind: TableKind,
+    ) -> Option<CreateQuery> {
+        None
+    }
 
     /// Returns a handle that can ask the server to stop a statement while
     /// the driver itself is busy with that statement. A driver that cannot
@@ -265,5 +282,12 @@ mod tests {
         assert_eq!(driver.dialect(), Dialect::Sqlite);
         assert!(!driver.capabilities().supports_cancel);
         assert!(!driver.capabilities().supports_transactions);
+    }
+
+    #[test]
+    fn a_driver_that_keeps_no_create_text_gives_no_statement() {
+        assert!(BareDriver
+            .create_query(None, None, "t", TableKind::Table)
+            .is_none());
     }
 }

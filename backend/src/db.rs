@@ -203,6 +203,23 @@ pub struct AppColumn {
     pub is_primary_key: bool,
 }
 
+/// The statement that reads the CREATE text of one object from the engine,
+/// and the column of the answer that carries that text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateQuery {
+    pub sql: String,
+    pub column: usize,
+}
+
+impl CreateQuery {
+    pub fn new(sql: impl Into<String>, column: usize) -> Self {
+        Self {
+            sql: sql.into(),
+            column,
+        }
+    }
+}
+
 /// What one driver can do. The user interface hides the actions that the
 /// active engine does not support.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

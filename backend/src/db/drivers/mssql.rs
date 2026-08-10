@@ -10,8 +10,8 @@ use crate::db::drivers::{
     rows_affected_message, rows_returned_message, DatabaseDriver, NumberValue,
 };
 use crate::db::{
-    AppColumn, ColumnInfo, Database, DriverCapabilities, ExecOptions, QueryParams, QueryResponse,
-    ResultSet, Schema, Table,
+    AppColumn, ColumnInfo, CreateQuery, Database, DriverCapabilities, ExecOptions, QueryParams,
+    QueryResponse, ResultSet, Schema, Table, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
@@ -277,6 +277,28 @@ async fn while_connecting<F: std::future::Future>(limit: Duration, future: F) ->
 /// True when the first keyword of the statement introduces a statement that
 /// gives rows back. A statement that does not is sent through `execute`, so
 /// that the number of changed rows reaches the user.
+/// Builds the statement that reads the CREATE text of one view. MS SQL
+/// Server keeps no text for a table, so a table gives no statement and the
+/// command layer builds a draft instead.
+fn create_query_text(
+    database: Option<&str>,
+    schema: Option<&str>,
+    table: &str,
+    kind: TableKind,
+) -> Option<CreateQuery> {
+    if kind != TableKind::View {
+        return None;
+    }
+    let name = Dialect::MsSql.qualified_name(database, schema, table);
+    Some(CreateQuery::new(
+        format!(
+            "SELECT OBJECT_DEFINITION(OBJECT_ID({}));",
+            Dialect::MsSql.quote_literal(&name)
+        ),
+        0,
+    ))
+}
+
 pub fn returns_rows(statement: &str) -> bool {
     let keyword = first_keyword(statement);
     !matches!(
@@ -368,6 +390,16 @@ impl DatabaseDriver for MssqlDriver {
 
     fn dialect(&self) -> Dialect {
         Dialect::MsSql
+    }
+
+    fn create_query(
+        &self,
+        database: Option<&str>,
+        schema: Option<&str>,
+        table: &str,
+        kind: TableKind,
+    ) -> Option<CreateQuery> {
+        create_query_text(database, schema, table, kind)
     }
 
     async fn ping(&mut self) -> Result<()> {
@@ -756,6 +788,17 @@ fn read<T>(result: tiberius::Result<Option<T>>) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_create_statement_covers_a_view_alone() {
+        let view = create_query_text(Some("db"), Some("dbo"), "v", TableKind::View).unwrap();
+        assert_eq!(
+            view.sql,
+            "SELECT OBJECT_DEFINITION(OBJECT_ID('[db].[dbo].[v]'));"
+        );
+        assert_eq!(view.column, 0);
+        assert!(create_query_text(Some("db"), Some("dbo"), "t", TableKind::Table).is_none());
+    }
     use crate::storage::{ConnectionOptions, DbType};
 
     fn connection() -> SavedConnection {

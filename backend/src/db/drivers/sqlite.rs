@@ -9,8 +9,8 @@ use crate::db::drivers::{
     rows_returned_message, DatabaseDriver, NumberValue,
 };
 use crate::db::{
-    AppColumn, ColumnInfo, Database, DriverCapabilities, ExecOptions, QueryParams, QueryResponse,
-    ResultSet, Schema, Table,
+    AppColumn, ColumnInfo, CreateQuery, Database, DriverCapabilities, ExecOptions, QueryParams,
+    QueryResponse, ResultSet, Schema, Table, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
@@ -91,6 +91,16 @@ impl DatabaseDriver for SqliteDriver {
 
     fn dialect(&self) -> Dialect {
         Dialect::Sqlite
+    }
+
+    fn create_query(
+        &self,
+        _database: Option<&str>,
+        _schema: Option<&str>,
+        table: &str,
+        _kind: TableKind,
+    ) -> Option<CreateQuery> {
+        Some(create_query_text(table))
     }
 
     async fn ping(&mut self) -> Result<()> {
@@ -205,6 +215,19 @@ impl DatabaseDriver for SqliteDriver {
     }
 }
 
+/// Builds the statement that reads the CREATE text of one object. SQLite
+/// keeps the text of every object in `sqlite_master`, so a table and a view
+/// come from the same place.
+fn create_query_text(table: &str) -> CreateQuery {
+    CreateQuery::new(
+        format!(
+            "SELECT sql FROM sqlite_master WHERE name = {} AND sql IS NOT NULL;",
+            Dialect::Sqlite.quote_literal(table)
+        ),
+        0,
+    )
+}
+
 /// Runs one statement and adds what it produced to the response.
 fn run_statement(
     connection: &Connection,
@@ -297,6 +320,16 @@ pub fn value_to_json(value: ValueRef<'_>) -> JsonValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_create_statement_reads_the_master_table() {
+        let query = create_query_text("it's");
+        assert_eq!(
+            query.sql,
+            "SELECT sql FROM sqlite_master WHERE name = 'it''s' AND sql IS NOT NULL;"
+        );
+        assert_eq!(query.column, 0);
+    }
     use crate::db::QueryParam;
     use crate::storage::{ConnectionOptions, DbType};
     use std::sync::atomic::{AtomicU32, Ordering};

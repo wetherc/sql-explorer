@@ -6,10 +6,11 @@ use crate::db::drivers::{
 };
 use crate::db::{
     self, drivers::DatabaseDriver, AppColumn, Database, ExecOptions, QueryParams, QueryResponse,
-    Schema, Table,
+    Schema, Table, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::history::{HistoryEntry, SavedQuery};
+use crate::script::{self, ScriptKind};
 use crate::state::{
     AppState, ConnectionHealth, ConnectionInfo, ConnectionStatusEvent, OpenConnection,
     CONNECTION_STATUS_EVENT,
@@ -305,6 +306,130 @@ pub async fn list_columns<R: Runtime>(
         open.mark_ok().await;
     }
     result
+}
+
+/// Builds one statement for an object of the tree: the CREATE text, or a
+/// SELECT, an INSERT or an UPDATE built from the column list.
+///
+/// The CREATE text comes from the engine when the engine keeps it. An engine
+/// that keeps no text, and an answer that holds nothing, give a draft built
+/// from the columns.
+#[tauri::command]
+pub async fn script_object<R: Runtime>(
+    app: AppHandle<R>,
+    request: ScriptRequest,
+    state: tauri::State<'_, AppState>,
+) -> Result<String> {
+    let ScriptRequest {
+        connection_id,
+        database,
+        schema_name,
+        table_name,
+        kind,
+        script_kind,
+    } = request;
+
+    let open = ensure_healthy(&app, &state, &connection_id).await?;
+    let dialect = open.dialect;
+    let name = dialect.qualified_name(database.as_deref(), schema_name.as_deref(), &table_name);
+
+    let mut guard = open.driver.lock().await;
+    let columns = guard
+        .list_columns(
+            database.as_deref().unwrap_or_default(),
+            schema_name.as_deref(),
+            &table_name,
+        )
+        .await?;
+
+    let from_engine = match script_kind {
+        ScriptKind::Create => match guard.create_query(
+            database.as_deref(),
+            schema_name.as_deref(),
+            &table_name,
+            kind,
+        ) {
+            Some(query) => {
+                let response = guard
+                    .execute_query(&query.sql, None, &ExecOptions::default())
+                    .await?;
+                text_of_column(&response, query.column)
+            }
+            None => None,
+        },
+        _ => None,
+    };
+
+    drop(guard);
+    let text = script_text(dialect, &name, script_kind, &columns, from_engine)?;
+    open.mark_ok().await;
+    Ok(text)
+}
+
+/// What the user interface asks for when it wants the text of one object.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScriptRequest {
+    pub connection_id: String,
+    pub database: Option<String>,
+    pub schema_name: Option<String>,
+    pub table_name: String,
+    /// The kind of the object, which decides where the CREATE text lives.
+    pub kind: TableKind,
+    /// The statement the user asked for.
+    pub script_kind: ScriptKind,
+}
+
+/// Selects the statement for the kind that the user asked for. The text of
+/// the engine wins for the CREATE form, and a draft serves when there is no
+/// such text.
+fn script_text(
+    dialect: crate::sql::Dialect,
+    name: &str,
+    kind: ScriptKind,
+    columns: &[AppColumn],
+    from_engine: Option<String>,
+) -> Result<String> {
+    if kind == ScriptKind::Select {
+        return Ok(script::select_statement(dialect, name, columns));
+    }
+    if let (ScriptKind::Create, Some(text)) = (kind, from_engine) {
+        return Ok(text);
+    }
+    if columns.is_empty() {
+        // The other forms are built from the columns, and a relation that
+        // reports none gives no statement at all.
+        return Err(Error::Configuration(
+            "The object reports no column, so the statement cannot be built.".to_string(),
+        ));
+    }
+    Ok(match kind {
+        ScriptKind::Insert => script::insert_statement(dialect, name, columns),
+        ScriptKind::Update => script::update_statement(dialect, name, columns),
+        // The select form left this function above.
+        ScriptKind::Create | ScriptKind::Select => script::create_draft(dialect, name, columns),
+    })
+}
+
+/// Reads one column of every row as text and joins the lines. Athena gives
+/// the CREATE text one line for each row, and the other engines give it in
+/// one row. An answer that holds no text gives `None`.
+fn text_of_column(response: &QueryResponse, column: usize) -> Option<String> {
+    let lines: Vec<String> = response
+        .results
+        .iter()
+        .flat_map(|set| set.rows.iter())
+        .filter_map(|row| match row.get(column) {
+            Some(serde_json::Value::String(text)) => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    let text = lines.join("\n");
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 /// Builds the statement that reads the first rows of one relation. The
@@ -620,8 +745,103 @@ pub fn supported_engines() -> Vec<db::EngineInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{ColumnInfo, ResultSet};
     use crate::secrets::MemoryStore;
+    use crate::sql::Dialect;
     use crate::storage::ConnectionOptions;
+
+    fn response_with(rows: Vec<Vec<serde_json::Value>>) -> QueryResponse {
+        let mut set = ResultSet::new(vec![ColumnInfo::new("text", "text")]);
+        set.rows = rows;
+        QueryResponse {
+            results: vec![set],
+            ..QueryResponse::default()
+        }
+    }
+
+    fn columns() -> Vec<AppColumn> {
+        vec![AppColumn {
+            name: "id".into(),
+            data_type: "int".into(),
+            nullable: false,
+            is_primary_key: true,
+        }]
+    }
+
+    #[test]
+    fn the_text_of_a_column_joins_every_row() {
+        let response = response_with(vec![
+            vec![serde_json::json!("CREATE TABLE t (")],
+            vec![serde_json::json!(")")],
+        ]);
+        assert_eq!(text_of_column(&response, 0).unwrap(), "CREATE TABLE t (\n)");
+    }
+
+    #[test]
+    fn an_answer_without_text_gives_nothing() {
+        assert_eq!(text_of_column(&response_with(Vec::new()), 0), None);
+        let blank = response_with(vec![vec![serde_json::json!("  ")]]);
+        assert_eq!(text_of_column(&blank, 0), None);
+        let other_type = response_with(vec![vec![serde_json::json!(7)]]);
+        assert_eq!(text_of_column(&other_type, 0), None);
+    }
+
+    #[test]
+    fn the_text_of_the_engine_wins_for_the_create_form() {
+        let text = script_text(
+            Dialect::Sqlite,
+            "\"t\"",
+            ScriptKind::Create,
+            &columns(),
+            Some("CREATE TABLE t (id integer)".to_string()),
+        )
+        .unwrap();
+        assert_eq!(text, "CREATE TABLE t (id integer)");
+    }
+
+    #[test]
+    fn an_engine_without_text_gives_a_draft() {
+        let text = script_text(
+            Dialect::Sqlite,
+            "\"t\"",
+            ScriptKind::Create,
+            &columns(),
+            None,
+        )
+        .unwrap();
+        assert!(text.contains("CREATE TABLE \"t\" ("));
+    }
+
+    #[test]
+    fn each_kind_builds_its_own_statement() {
+        let select = script_text(Dialect::Sqlite, "\"t\"", ScriptKind::Select, &[], None).unwrap();
+        assert_eq!(select, "SELECT *\nFROM \"t\";");
+        let insert = script_text(
+            Dialect::Sqlite,
+            "\"t\"",
+            ScriptKind::Insert,
+            &columns(),
+            None,
+        )
+        .unwrap();
+        assert!(insert.starts_with("INSERT INTO \"t\" ("));
+        let update = script_text(
+            Dialect::Sqlite,
+            "\"t\"",
+            ScriptKind::Update,
+            &columns(),
+            None,
+        )
+        .unwrap();
+        assert!(update.starts_with("UPDATE \"t\""));
+    }
+
+    #[test]
+    fn an_object_without_columns_gives_no_statement() {
+        let error = script_text(Dialect::Sqlite, "\"t\"", ScriptKind::Insert, &[], None)
+            .expect_err("a statement cannot be built");
+        assert!(error.to_string().contains("reports no column"));
+    }
 
     fn state() -> AppState {
         AppState::new(Box::new(MemoryStore::default()))

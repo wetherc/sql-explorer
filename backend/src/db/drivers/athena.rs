@@ -6,8 +6,8 @@
 
 use crate::db::drivers::{f64_to_json, rows_returned_message, CancelHandle, DatabaseDriver};
 use crate::db::{
-    AppColumn, ColumnInfo, Database, DriverCapabilities, ExecOptions, QueryParams, QueryResponse,
-    QueryStats, ResultSet, Schema, Table,
+    AppColumn, ColumnInfo, CreateQuery, Database, DriverCapabilities, ExecOptions, QueryParams,
+    QueryResponse, QueryStats, ResultSet, Schema, Table, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
@@ -46,7 +46,19 @@ pub struct AthenaDriver {
 
 /// Writes a value as a literal of SQL, for a name that reaches a statement.
 fn quote_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
+    Dialect::Athena.quote_literal(value)
+}
+
+/// Builds the statement that reads the CREATE text of one object. Athena
+/// answers `SHOW CREATE` with one line of the text in each row of the first
+/// column.
+fn create_query_text(database: Option<&str>, table: &str, kind: TableKind) -> CreateQuery {
+    let name = Dialect::Athena.qualified_name(database, None, table);
+    let word = match kind {
+        TableKind::Table => "TABLE",
+        TableKind::View => "VIEW",
+    };
+    CreateQuery::new(format!("SHOW CREATE {word} {name}"), 0)
 }
 
 /// True when the answer of the service could not be read. A catalog of Glue
@@ -469,6 +481,16 @@ impl DatabaseDriver for AthenaDriver {
         Dialect::Athena
     }
 
+    fn create_query(
+        &self,
+        database: Option<&str>,
+        _schema: Option<&str>,
+        table: &str,
+        kind: TableKind,
+    ) -> Option<CreateQuery> {
+        Some(create_query_text(database, table, kind))
+    }
+
     async fn ping(&mut self) -> Result<()> {
         self.list_databases_inner().await.map(|_| ())
     }
@@ -723,6 +745,16 @@ pub fn typed_value(text: &str, type_name: &str) -> JsonValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_create_statement_names_the_kind_of_the_object() {
+        let table = create_query_text(Some("db"), "t", TableKind::Table);
+        assert_eq!(table.sql, "SHOW CREATE TABLE \"db\".\"t\"");
+        assert_eq!(table.column, 0);
+
+        let view = create_query_text(None, "v", TableKind::View);
+        assert_eq!(view.sql, "SHOW CREATE VIEW \"v\"");
+    }
     use aws_sdk_athena::types::Datum;
 
     #[test]

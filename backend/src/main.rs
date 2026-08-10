@@ -7,6 +7,7 @@ mod commands;
 mod db;
 mod error;
 mod history;
+mod script;
 mod secrets;
 mod sql;
 mod state;
@@ -44,6 +45,7 @@ fn main() {
             commands::list_tables,
             commands::list_columns,
             commands::preview_query,
+            commands::script_object,
             commands::quote_identifier,
             commands::get_connections,
             commands::save_connection,

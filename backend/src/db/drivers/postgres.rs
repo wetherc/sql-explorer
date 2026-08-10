@@ -10,8 +10,8 @@ use crate::db::drivers::{
     rows_returned_message, CancelHandle, DatabaseDriver, NumberValue,
 };
 use crate::db::{
-    AppColumn, ColumnInfo, Database, DriverCapabilities, ExecOptions, QueryParams, QueryResponse,
-    ResultSet, Schema, Table,
+    AppColumn, ColumnInfo, CreateQuery, Database, DriverCapabilities, ExecOptions, QueryParams,
+    QueryResponse, ResultSet, Schema, Table, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::Dialect;
@@ -237,6 +237,16 @@ impl DatabaseDriver for PostgresDriver {
 
     fn dialect(&self) -> Dialect {
         Dialect::Postgres
+    }
+
+    fn create_query(
+        &self,
+        _database: Option<&str>,
+        schema: Option<&str>,
+        table: &str,
+        kind: TableKind,
+    ) -> Option<CreateQuery> {
+        create_query_text(schema, table, kind)
     }
 
     async fn ping(&mut self) -> Result<()> {
@@ -469,6 +479,27 @@ impl PostgresDriver {
 }
 
 /// Adds a result set and the message that belongs to it.
+/// Builds the statement that reads the CREATE text of one view. PostgreSQL
+/// keeps no text for a table, so a table gives no statement and the command
+/// layer builds a draft instead.
+///
+/// The name goes into the statement as a literal that `regclass` reads. A
+/// name of another database cannot be read this way, so the name holds the
+/// schema and the table alone.
+fn create_query_text(schema: Option<&str>, table: &str, kind: TableKind) -> Option<CreateQuery> {
+    if kind != TableKind::View {
+        return None;
+    }
+    let name = Dialect::Postgres.qualified_name(None, schema, table);
+    Some(CreateQuery::new(
+        format!(
+            "SELECT pg_get_viewdef({}::regclass, true);",
+            Dialect::Postgres.quote_literal(&name)
+        ),
+        0,
+    ))
+}
+
 fn push_set(response: &mut QueryResponse, set: ResultSet) {
     response
         .messages
@@ -580,6 +611,17 @@ fn get<'a, T: tokio_postgres::types::FromSql<'a>>(row: &'a Row, index: usize) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_create_statement_covers_a_view_alone() {
+        let view = create_query_text(Some("public"), "v", TableKind::View).unwrap();
+        assert_eq!(
+            view.sql,
+            "SELECT pg_get_viewdef('\"public\".\"v\"'::regclass, true);"
+        );
+        assert_eq!(view.column, 0);
+        assert!(create_query_text(Some("public"), "t", TableKind::Table).is_none());
+    }
     use crate::storage::{ConnectionOptions, DbType};
 
     fn connection() -> SavedConnection {

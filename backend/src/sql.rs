@@ -39,14 +39,19 @@ impl Dialect {
             .join(".")
     }
 
-    /// Builds the statement that reads the first rows of one relation.
-    /// MS SQL Server has no `LIMIT`, so it gets a `TOP` clause.
-    pub fn preview_query(
+    /// Wraps one value in single quotes and doubles a quote inside it, so
+    /// that a name with a quote cannot break out of the literal.
+    pub fn quote_literal(&self, value: &str) -> String {
+        format!("'{}'", value.replace('\'', "''"))
+    }
+
+    /// Builds the quoted name of one relation. The levels that the engine
+    /// holds decide which parts the name carries.
+    pub fn qualified_name(
         &self,
         database: Option<&str>,
         schema: Option<&str>,
         table: &str,
-        limit: usize,
     ) -> String {
         let mut parts: Vec<&str> = Vec::new();
         match self {
@@ -69,7 +74,19 @@ impl Dialect {
             }
         }
         parts.push(table);
-        let name = self.quote_qualified(&parts);
+        self.quote_qualified(&parts)
+    }
+
+    /// Builds the statement that reads the first rows of one relation.
+    /// MS SQL Server has no `LIMIT`, so it gets a `TOP` clause.
+    pub fn preview_query(
+        &self,
+        database: Option<&str>,
+        schema: Option<&str>,
+        table: &str,
+        limit: usize,
+    ) -> String {
+        let name = self.qualified_name(database, schema, table);
 
         match self {
             Dialect::MsSql => format!("SELECT TOP {limit} * FROM {name};"),
@@ -476,6 +493,28 @@ mod tests {
             "[dbo].[t]"
         );
         assert_eq!(Dialect::Postgres.quote_qualified(&[]), "");
+    }
+
+    #[test]
+    fn a_literal_doubles_a_quote() {
+        assert_eq!(Dialect::MsSql.quote_literal("plain"), "'plain'");
+        assert_eq!(Dialect::Postgres.quote_literal("it's"), "'it''s'");
+    }
+
+    #[test]
+    fn a_qualified_name_holds_the_levels_of_the_engine() {
+        assert_eq!(
+            Dialect::MsSql.qualified_name(Some("Sales"), Some("dbo"), "Orders"),
+            "[Sales].[dbo].[Orders]"
+        );
+        assert_eq!(
+            Dialect::MySql.qualified_name(Some("shop"), Some("shop"), "orders"),
+            "`shop`.`orders`"
+        );
+        assert_eq!(
+            Dialect::Sqlite.qualified_name(Some("main"), None, "events"),
+            "\"events\""
+        );
     }
 
     #[test]

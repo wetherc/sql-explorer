@@ -5,8 +5,8 @@ use crate::db::drivers::{
     rows_affected_message, rows_returned_message, CancelHandle, DatabaseDriver, NumberValue,
 };
 use crate::db::{
-    AppColumn, ColumnInfo, Database, DriverCapabilities, ExecOptions, QueryParams, QueryResponse,
-    ResultSet, Schema, Table,
+    AppColumn, ColumnInfo, CreateQuery, Database, DriverCapabilities, ExecOptions, QueryParams,
+    QueryResponse, ResultSet, Schema, Table, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
@@ -213,6 +213,16 @@ impl DatabaseDriver for MysqlDriver {
         Dialect::MySql
     }
 
+    fn create_query(
+        &self,
+        database: Option<&str>,
+        _schema: Option<&str>,
+        table: &str,
+        kind: TableKind,
+    ) -> Option<CreateQuery> {
+        Some(create_query_text(database, table, kind))
+    }
+
     async fn ping(&mut self) -> Result<()> {
         self.conn()?.ping().await?;
         Ok(())
@@ -338,6 +348,18 @@ impl CancelHandle for MysqlCancel {
 }
 
 /// Converts one row into an array of JSON values.
+/// Builds the statement that reads the CREATE text of one object. MySQL and
+/// MariaDB answer `SHOW CREATE` with the name in the first column and the
+/// text in the second one.
+fn create_query_text(database: Option<&str>, table: &str, kind: TableKind) -> CreateQuery {
+    let name = Dialect::MySql.qualified_name(database, None, table);
+    let word = match kind {
+        TableKind::Table => "TABLE",
+        TableKind::View => "VIEW",
+    };
+    CreateQuery::new(format!("SHOW CREATE {word} {name};"), 1)
+}
+
 pub fn row_to_json(row: &MysqlRow, column_count: usize) -> Vec<JsonValue> {
     let values: Vec<MysqlValue> = (0..column_count)
         .map(|index| row.as_ref(index).cloned().unwrap_or(MysqlValue::NULL))
@@ -425,6 +447,16 @@ pub fn format_time(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_create_statement_names_the_kind_of_the_object() {
+        let table = create_query_text(Some("db"), "t", TableKind::Table);
+        assert_eq!(table.sql, "SHOW CREATE TABLE `db`.`t`;");
+        assert_eq!(table.column, 1);
+
+        let view = create_query_text(None, "v", TableKind::View);
+        assert_eq!(view.sql, "SHOW CREATE VIEW `v`;");
+    }
     use crate::storage::{ConnectionOptions, DbType, TlsMode};
 
     fn connection() -> SavedConnection {
