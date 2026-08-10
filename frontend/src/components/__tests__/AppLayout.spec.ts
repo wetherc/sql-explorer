@@ -9,7 +9,14 @@ const AppLayout = (await import('@/layouts/AppLayout.vue')).default
 const App = (await import('@/App.vue')).default
 const { mountWithPlugins, settle } = await import('./mount')
 const { useConnectionsStore } = await import('@/stores/connections')
-const { LAYOUT_KEY } = await import('@/stores/layout')
+const {
+  LAYOUT_KEY,
+  MAX_PANEL_WIDTH,
+  MIN_PANEL_WIDTH,
+  PANEL_WIDTH_STEP,
+  defaultLayout,
+  useLayoutStore,
+} = await import('@/stores/layout')
 const { useExplorerStore } = await import('@/stores/explorer')
 const { useSettingsStore } = await import('@/stores/settings')
 const { useTabsStore } = await import('@/stores/tabs')
@@ -20,6 +27,9 @@ const { ConnectionHealth } = await import('@/types/api')
 describe('AppLayout', () => {
   beforeEach(() => {
     document.body.innerHTML = ''
+    // The shell writes the shape of the work area to the browser store, so a
+    // test would otherwise open with the shape the test before it left.
+    localStorage.clear()
     Object.values(apiStub).forEach((fn) => fn.mockReset())
     apiStub.supportedEngines.mockResolvedValue([])
     apiStub.getConnections.mockResolvedValue([connectionFixture()])
@@ -76,6 +86,80 @@ describe('AppLayout', () => {
     await wrapper.find('[data-test="rail-connections"]').trigger('click')
     await wrapper.vm.$nextTick()
     expect(wrapper.findComponent({ name: 'ConnectionManager' }).isVisible()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('closes the panel when the rail names the one that stands open', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const layout = useLayoutStore()
+
+    await wrapper.find('[data-test="rail-connections"]').trigger('click')
+    expect(layout.layout.panelOpen).toBe(false)
+
+    await wrapper.find('[data-test="rail-connections"]').trigger('click')
+    expect(layout.layout.panelOpen).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('moves the edge of the panel with the arrow keys', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const layout = useLayoutStore()
+    const start = layout.layout.panelWidth
+    const resizer = wrapper.find('[data-test="panel-resizer"]')
+
+    await resizer.trigger('keydown', { key: 'ArrowRight' })
+    expect(layout.layout.panelWidth).toBe(start + PANEL_WIDTH_STEP)
+
+    await resizer.trigger('keydown', { key: 'ArrowLeft' })
+    expect(layout.layout.panelWidth).toBe(start)
+
+    await resizer.trigger('keydown', { key: 'Home' })
+    expect(layout.layout.panelWidth).toBe(MIN_PANEL_WIDTH)
+
+    await resizer.trigger('keydown', { key: 'End' })
+    expect(layout.layout.panelWidth).toBe(MAX_PANEL_WIDTH)
+    wrapper.unmount()
+  })
+
+  it('follows the pointer that drags the edge of the panel', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const layout = useLayoutStore()
+    const resizer = wrapper.find('[data-test="panel-resizer"]')
+    const element = resizer.element as HTMLElement
+    element.setPointerCapture = vi.fn()
+    element.releasePointerCapture = vi.fn()
+
+    await resizer.trigger('pointerdown', { pointerId: 1 })
+    element.dispatchEvent(new MouseEvent('pointermove', { clientX: 456 }))
+    await wrapper.vm.$nextTick()
+    // The width leaves out the rail, which stands to the left of the panel.
+    expect(layout.layout.panelWidth).toBe(400)
+
+    // The drag ends, so a later move of the pointer changes nothing.
+    element.dispatchEvent(new MouseEvent('pointerup'))
+    element.dispatchEvent(new MouseEvent('pointermove', { clientX: 300 }))
+    await wrapper.vm.$nextTick()
+    expect(layout.layout.panelWidth).toBe(400)
+    wrapper.unmount()
+  })
+
+  it('lets go of the drag when the pointer is taken away', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const layout = useLayoutStore()
+    const resizer = wrapper.find('[data-test="panel-resizer"]')
+    const element = resizer.element as HTMLElement
+    element.setPointerCapture = vi.fn()
+
+    await resizer.trigger('pointerdown', { pointerId: 1 })
+    element.dispatchEvent(new MouseEvent('pointercancel'))
+    element.dispatchEvent(new MouseEvent('pointermove', { clientX: 500 }))
+    await wrapper.vm.$nextTick()
+
+    expect(layout.layout.panelWidth).toBe(defaultLayout().panelWidth)
     wrapper.unmount()
   })
 
@@ -307,6 +391,9 @@ describe('AppLayout dialog state', () => {
 describe('AppLayout keys', () => {
   beforeEach(() => {
     document.body.innerHTML = ''
+    // The shell writes the shape of the work area to the browser store, so a
+    // test would otherwise open with the shape the test before it left.
+    localStorage.clear()
     Object.values(apiStub).forEach((fn) => fn.mockReset())
     apiStub.supportedEngines.mockResolvedValue([])
     apiStub.getConnections.mockResolvedValue([connectionFixture()])
@@ -362,6 +449,21 @@ describe('AppLayout keys', () => {
     expect(wrapper.find('[data-test="rail-connections"]').classes()).toContain(
       'v-list-item--active',
     )
+    wrapper.unmount()
+  })
+
+  it('shows and hides the side panel', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const layout = useLayoutStore()
+
+    press('KeyB')
+    await settle()
+    expect(layout.layout.panelOpen).toBe(false)
+
+    press('KeyB')
+    await settle()
+    expect(layout.layout.panelOpen).toBe(true)
     wrapper.unmount()
   })
 

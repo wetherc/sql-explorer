@@ -3,7 +3,10 @@ import { createPinia, setActivePinia } from 'pinia'
 import {
   LAYOUT_KEY,
   MAX_EDITOR_SIZE,
+  MAX_PANEL_WIDTH,
   MIN_EDITOR_SIZE,
+  MIN_PANEL_WIDTH,
+  PANEL_WIDTH_STEP,
   defaultLayout,
   parseLayout,
   useLayoutStore,
@@ -19,10 +22,25 @@ describe('parseLayout', () => {
   })
 
   it('keeps the values a record holds', () => {
-    expect(parseLayout(JSON.stringify({ panel: 'history', editorSize: 60 }))).toEqual({
-      panel: 'history',
-      editorSize: 60,
-    })
+    const stored = { panel: 'history', panelOpen: false, panelWidth: 420, editorSize: 60 }
+    expect(parseLayout(JSON.stringify(stored))).toEqual(stored)
+  })
+
+  it('holds the width of the side panel inside its limits', () => {
+    expect(parseLayout(JSON.stringify({ panelWidth: 40 })).panelWidth).toBe(MIN_PANEL_WIDTH)
+    expect(parseLayout(JSON.stringify({ panelWidth: 4000 })).panelWidth).toBe(MAX_PANEL_WIDTH)
+  })
+
+  it('falls back when the width is not a number', () => {
+    expect(parseLayout(JSON.stringify({ panelWidth: 'wide' })).panelWidth).toBe(
+      defaultLayout().panelWidth,
+    )
+  })
+
+  it('falls back when the open state is not a true or false value', () => {
+    expect(parseLayout(JSON.stringify({ panelOpen: 'yes' })).panelOpen).toBe(
+      defaultLayout().panelOpen,
+    )
   })
 
   it('refuses a panel it does not know', () => {
@@ -115,6 +133,98 @@ describe('useLayoutStore', () => {
 
     layout.update({ editorSize: 55 })
 
-    expect(layout.layout).toEqual({ panel: defaultLayout().panel, editorSize: 55 })
+    expect(layout.layout).toEqual({ ...defaultLayout(), editorSize: 55 })
+  })
+
+  it('opens the panel it is asked to show, whatever stood open', () => {
+    const layout = useLayoutStore()
+    layout.setPanelOpen(false)
+
+    layout.showPanel('explorer')
+
+    expect(layout.layout).toMatchObject({ panel: 'explorer', panelOpen: true })
+  })
+
+  it('closes the panel when the rail names the one that already stands open', () => {
+    const layout = useLayoutStore()
+    layout.showPanel('history')
+
+    layout.selectPanel('history')
+
+    expect(layout.layout.panelOpen).toBe(false)
+    expect(layout.layout.panel).toBe('history')
+  })
+
+  it('opens the panel again when the rail names it a second time', () => {
+    const layout = useLayoutStore()
+    layout.showPanel('history')
+    layout.selectPanel('history')
+
+    layout.selectPanel('history')
+
+    expect(layout.layout).toMatchObject({ panel: 'history', panelOpen: true })
+  })
+
+  it('moves to another panel when the rail names one that is not open', () => {
+    const layout = useLayoutStore()
+    layout.showPanel('history')
+
+    layout.selectPanel('explorer')
+
+    expect(layout.layout).toMatchObject({ panel: 'explorer', panelOpen: true })
+  })
+
+  it('opens a closed panel when the rail names the panel it holds', () => {
+    const layout = useLayoutStore()
+    layout.showPanel('history')
+    layout.setPanelOpen(false)
+
+    layout.selectPanel('history')
+
+    expect(layout.layout).toMatchObject({ panel: 'history', panelOpen: true })
+  })
+
+  it('moves between the two states of the panel', () => {
+    const layout = useLayoutStore()
+    expect(layout.layout.panelOpen).toBe(true)
+
+    layout.togglePanel()
+    expect(layout.layout.panelOpen).toBe(false)
+
+    layout.togglePanel()
+    expect(layout.layout.panelOpen).toBe(true)
+  })
+
+  it('holds a new width of the side panel inside its limits', () => {
+    const layout = useLayoutStore()
+
+    layout.setPanelWidth(400)
+    expect(layout.layout.panelWidth).toBe(400)
+
+    layout.setPanelWidth(10)
+    expect(layout.layout.panelWidth).toBe(MIN_PANEL_WIDTH)
+
+    layout.setPanelWidth(5000)
+    expect(layout.layout.panelWidth).toBe(MAX_PANEL_WIDTH)
+  })
+
+  it('keeps the width it has when the new one is not a number', () => {
+    const layout = useLayoutStore()
+    layout.setPanelWidth(400)
+
+    layout.setPanelWidth(Number.NaN)
+
+    expect(layout.layout.panelWidth).toBe(400)
+  })
+
+  it('moves the edge of the panel by one step in each direction', () => {
+    const layout = useLayoutStore()
+    layout.setPanelWidth(400)
+
+    layout.nudgePanelWidth(PANEL_WIDTH_STEP)
+    expect(layout.layout.panelWidth).toBe(400 + PANEL_WIDTH_STEP)
+
+    layout.nudgePanelWidth(-PANEL_WIDTH_STEP)
+    expect(layout.layout.panelWidth).toBe(400)
   })
 })

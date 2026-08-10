@@ -44,7 +44,7 @@
       </v-tooltip>
     </v-app-bar>
 
-    <v-navigation-drawer permanent rail :width="56" class="rail">
+    <v-navigation-drawer permanent rail :width="RAIL_WIDTH" class="rail">
       <v-list density="compact" nav>
         <v-tooltip v-for="item in railItems" :key="item.value" location="right" :text="item.label">
           <template #activator="{ props: tip }">
@@ -53,21 +53,47 @@
               :active="layout.layout.panel === item.value"
               :prepend-icon="item.icon"
               :aria-label="item.label"
+              :aria-expanded="layout.layout.panel === item.value && layout.layout.panelOpen"
               :data-test="`rail-${item.value}`"
-              @click="layout.showPanel(item.value)"
+              @click="layout.selectPanel(item.value)"
             />
           </template>
         </v-tooltip>
       </v-list>
     </v-navigation-drawer>
 
-    <v-navigation-drawer permanent :width="320" class="side-panel">
+    <v-navigation-drawer
+      :model-value="layout.layout.panelOpen"
+      permanent
+      :width="layout.layout.panelWidth"
+      class="side-panel"
+    >
       <ConnectionManager v-show="layout.layout.panel === 'connections'" @connected="onConnected" />
       <DbExplorer
         v-show="layout.layout.panel === 'explorer'"
         @open-connections="layout.showPanel('connections')"
       />
       <HistoryPanel v-show="layout.layout.panel === 'history'" />
+
+      <!-- The edge of the panel answers a drag and an arrow key. The ARIA
+           role of a separator with a value is what a screen reader reads as
+           a window splitter it can move. -->
+      <div
+        class="panel-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Width of the side panel"
+        :aria-valuenow="layout.layout.panelWidth"
+        :aria-valuemin="MIN_PANEL_WIDTH"
+        :aria-valuemax="MAX_PANEL_WIDTH"
+        tabindex="0"
+        data-test="panel-resizer"
+        @pointerdown="startPanelDrag"
+        @keydown.left.prevent="layout.nudgePanelWidth(-PANEL_WIDTH_STEP)"
+        @keydown.right.prevent="layout.nudgePanelWidth(PANEL_WIDTH_STEP)"
+        @keydown.home.prevent="layout.setPanelWidth(MIN_PANEL_WIDTH)"
+        @keydown.end.prevent="layout.setPanelWidth(MAX_PANEL_WIDTH)"
+      ></div>
     </v-navigation-drawer>
 
     <v-main class="main-area">
@@ -246,7 +272,13 @@ import {
 import { useConnectionsStore } from '@/stores/connections'
 import { useExplorerStore } from '@/stores/explorer'
 import { useHistoryStore } from '@/stores/history'
-import { useLayoutStore, type Panel } from '@/stores/layout'
+import {
+  MAX_PANEL_WIDTH,
+  MIN_PANEL_WIDTH,
+  PANEL_WIDTH_STEP,
+  useLayoutStore,
+  type Panel,
+} from '@/stores/layout'
 import { useSettingsStore } from '@/stores/settings'
 import { useTabsStore } from '@/stores/tabs'
 import { useUiStore } from '@/stores/ui'
@@ -260,6 +292,9 @@ const settings = useSettingsStore()
 const tabs = useTabsStore()
 const ui = useUiStore()
 const theme = useTheme()
+
+/** The width of the rail of icons, which a drag of the panel edge allows for. */
+const RAIL_WIDTH = 56
 
 /** True on macOS, where the key list names Cmd in place of Ctrl. */
 const apple = /mac|iphone|ipad/i.test(navigator.userAgent)
@@ -275,6 +310,30 @@ const railItems: Array<{ value: Panel; icon: string; label: string }> = [
 
 function onConnected(): void {
   layout.showPanel('explorer')
+}
+
+/**
+ * Follows the pointer while it drags the edge of the side panel. The width is
+ * the distance from the left of the window less the width of the rail, so the
+ * edge stays under the pointer.
+ */
+function startPanelDrag(event: PointerEvent): void {
+  const target = event.currentTarget as HTMLElement
+  target.setPointerCapture(event.pointerId)
+
+  function onMove(move: PointerEvent): void {
+    layout.setPanelWidth(move.clientX - RAIL_WIDTH)
+  }
+
+  function onUp(): void {
+    target.removeEventListener('pointermove', onMove)
+    target.removeEventListener('pointerup', onUp)
+    target.removeEventListener('pointercancel', onUp)
+  }
+
+  target.addEventListener('pointermove', onMove)
+  target.addEventListener('pointerup', onUp)
+  target.addEventListener('pointercancel', onUp)
 }
 
 /** The actions of the tab that is open, when a tab is open. */
@@ -364,6 +423,13 @@ const commands: Command[] = [
     group: 'View',
     key: 'mod+3',
     run: () => layout.showPanel('history'),
+  },
+  {
+    id: 'view.togglePanel',
+    title: 'Show or hide the side panel',
+    group: 'View',
+    key: 'mod+b',
+    run: () => layout.togglePanel(),
   },
   {
     id: 'app.settings',
@@ -478,6 +544,25 @@ onBeforeUnmount(() => {
 
 .rail :deep(.v-list-item) {
   justify-content: center;
+}
+
+/* The strip sits over the right edge of the panel. It reaches past the edge on
+   both sides, so the pointer finds it without a careful aim. */
+.panel-resizer {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 7px;
+  height: 100%;
+  z-index: 1;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.panel-resizer:hover,
+.panel-resizer:focus-visible {
+  background: rgb(var(--v-theme-primary));
+  outline: none;
 }
 
 .main-area {

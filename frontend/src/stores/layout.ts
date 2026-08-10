@@ -9,6 +9,10 @@ export type Panel = 'connections' | 'explorer' | 'history'
 export interface Layout {
   /** The side panel that stands open. */
   panel: Panel
+  /** True while the side panel takes room beside the work area. */
+  panelOpen: boolean
+  /** The width of the side panel, in pixels. */
+  panelWidth: number
   /** The share of the query view the editor takes, as a percentage. */
   editorSize: number
 }
@@ -17,9 +21,19 @@ export interface Layout {
 export const MIN_EDITOR_SIZE = 15
 export const MAX_EDITOR_SIZE = 85
 
+/**
+ * The smallest and the largest width of the side panel. The lower figure
+ * keeps the filter field and the buttons of a panel header on one row.
+ */
+export const MIN_PANEL_WIDTH = 220
+export const MAX_PANEL_WIDTH = 640
+
+/** The step one arrow key moves the edge of the side panel. */
+export const PANEL_WIDTH_STEP = 16
+
 /** The shape a new installation starts with. */
 export function defaultLayout(): Layout {
-  return { panel: 'connections', editorSize: 45 }
+  return { panel: 'connections', panelOpen: true, panelWidth: 320, editorSize: 45 }
 }
 
 /** The key under which the shape of the work area lives in the browser store. */
@@ -37,6 +51,8 @@ export function parseLayout(raw: string | null): Layout {
     const parsed = JSON.parse(raw) as Partial<Layout>
     return {
       panel: PANELS.includes(parsed.panel as Panel) ? (parsed.panel as Panel) : defaults.panel,
+      panelOpen: typeof parsed.panelOpen === 'boolean' ? parsed.panelOpen : defaults.panelOpen,
+      panelWidth: clamp(parsed.panelWidth, defaults.panelWidth, MIN_PANEL_WIDTH, MAX_PANEL_WIDTH),
       editorSize: sizeOr(parsed.editorSize, defaults.editorSize),
     }
   } catch {
@@ -46,10 +62,15 @@ export function parseLayout(raw: string | null): Layout {
 
 /** Keeps a share inside the limits of the split, and falls back for a fault. */
 function sizeOr(value: unknown, fallback: number): number {
+  return clamp(value, fallback, MIN_EDITOR_SIZE, MAX_EDITOR_SIZE)
+}
+
+/** Keeps a figure inside its limits, and falls back when it is not a number. */
+function clamp(value: unknown, fallback: number, low: number, high: number): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return fallback
   }
-  return Math.min(MAX_EDITOR_SIZE, Math.max(MIN_EDITOR_SIZE, Math.round(value)))
+  return Math.min(high, Math.max(low, Math.round(value)))
 }
 
 /**
@@ -74,13 +95,58 @@ export const useLayoutStore = defineStore('layout', () => {
     persist()
   }
 
+  /** Opens one panel, whichever panel stood open before. */
   function showPanel(panel: Panel): void {
-    update({ panel })
+    update({ panel, panelOpen: true })
+  }
+
+  /**
+   * Answers a click on the rail. A click on the panel that already stands
+   * open closes it, which gives the work area the whole window. A click on
+   * any other panel opens that one.
+   */
+  function selectPanel(panel: Panel): void {
+    if (layout.value.panel === panel && layout.value.panelOpen) {
+      update({ panelOpen: false })
+      return
+    }
+    showPanel(panel)
+  }
+
+  function setPanelOpen(open: boolean): void {
+    update({ panelOpen: open })
+  }
+
+  function togglePanel(): void {
+    setPanelOpen(!layout.value.panelOpen)
+  }
+
+  function setPanelWidth(width: number): void {
+    update({
+      panelWidth: clamp(width, layout.value.panelWidth, MIN_PANEL_WIDTH, MAX_PANEL_WIDTH),
+    })
+  }
+
+  /** Moves the edge of the side panel by one step, which an arrow key does. */
+  function nudgePanelWidth(step: number): void {
+    setPanelWidth(layout.value.panelWidth + step)
   }
 
   function setEditorSize(size: number): void {
     update({ editorSize: sizeOr(size, layout.value.editorSize) })
   }
 
-  return { layout, load, persist, update, showPanel, setEditorSize }
+  return {
+    layout,
+    load,
+    persist,
+    update,
+    showPanel,
+    selectPanel,
+    setPanelOpen,
+    togglePanel,
+    setPanelWidth,
+    nudgePanelWidth,
+    setEditorSize,
+  }
 })
