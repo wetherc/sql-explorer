@@ -115,6 +115,9 @@ pub struct AppState {
     /// One token for each statement that runs, keyed by the identifier the
     /// user interface gave it.
     pub running: Mutex<HashMap<String, CancellationToken>>,
+    /// One lock for each connection, so that two commands that find the
+    /// same idle connection do not both check it and open it again.
+    pub health_checks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub secrets: Box<dyn SecretStore>,
 }
 
@@ -124,8 +127,25 @@ impl AppState {
             connections: Mutex::new(HashMap::new()),
             background: Mutex::new(HashMap::new()),
             running: Mutex::new(HashMap::new()),
+            health_checks: Mutex::new(HashMap::new()),
             secrets,
         }
+    }
+
+    /// Returns the lock that serialises the health checks of one connection.
+    pub async fn health_check_lock(&self, connection_id: &str) -> Arc<Mutex<()>> {
+        self.health_checks
+            .lock()
+            .await
+            .entry(connection_id.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// Drops the background driver of a connection, so that the next
+    /// metadata read opens a fresh one.
+    pub async fn clear_background(&self, connection_id: &str) {
+        self.background.lock().await.remove(connection_id);
     }
 
     /// Returns the background driver of a connection, when one is open.
@@ -171,10 +191,11 @@ impl AppState {
         info
     }
 
-    /// Removes an open connection, together with its background driver.
-    /// Returns true when one was present.
+    /// Removes an open connection, together with its background driver and
+    /// its health check lock. Returns true when one was present.
     pub async fn remove(&self, connection_id: &str) -> bool {
         self.background.lock().await.remove(connection_id);
+        self.health_checks.lock().await.remove(connection_id);
         self.connections
             .lock()
             .await

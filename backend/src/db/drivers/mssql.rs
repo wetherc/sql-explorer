@@ -390,7 +390,7 @@ pub fn select_plan_sets(sets: Vec<ResultSet>) -> (Vec<ResultSet>, bool) {
 /// gives rows back. A statement that does not is sent through `execute`, so
 /// that the number of changed rows reaches the user.
 pub fn returns_rows(statement: &str) -> bool {
-    let keyword = first_keyword(statement);
+    let keyword = crate::sql::leading_keyword(statement);
     !matches!(
         keyword.as_str(),
         "insert"
@@ -412,37 +412,6 @@ pub fn returns_rows(statement: &str) -> bool {
             | "backup"
             | "restore"
     )
-}
-
-/// Reads the first word of a statement, and steps over the comments and the
-/// opening brackets that stand before it.
-fn first_keyword(statement: &str) -> String {
-    let mut rest = statement.trim_start();
-    loop {
-        if let Some(tail) = rest.strip_prefix("--") {
-            rest = tail
-                .find('\n')
-                .map_or("", |index| &tail[index + 1..])
-                .trim_start();
-            continue;
-        }
-        if let Some(tail) = rest.strip_prefix("/*") {
-            rest = tail
-                .find("*/")
-                .map_or("", |index| &tail[index + 2..])
-                .trim_start();
-            continue;
-        }
-        if let Some(tail) = rest.strip_prefix('(') {
-            rest = tail.trim_start();
-            continue;
-        }
-        break;
-    }
-    rest.split(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .next()
-        .unwrap_or("")
-        .to_lowercase()
 }
 
 /// Turns the JSON parameters into values that `tiberius` can bind.
@@ -1341,9 +1310,10 @@ mod tests {
 
     #[test]
     fn the_first_keyword_steps_over_comments_that_never_close() {
-        assert_eq!(first_keyword("-- only a comment"), "");
-        assert_eq!(first_keyword("/* never closed"), "");
-        assert_eq!(first_keyword("/* a */ /* b */ select"), "select");
+        use crate::sql::leading_keyword;
+        assert_eq!(leading_keyword("-- only a comment"), "");
+        assert_eq!(leading_keyword("/* never closed"), "");
+        assert_eq!(leading_keyword("/* a */ /* b */ select"), "select");
     }
 
     #[test]

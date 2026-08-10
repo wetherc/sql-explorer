@@ -141,6 +141,16 @@ async fn ensure_healthy<R: Runtime>(
         return Ok(open);
     }
 
+    // One check at a time for each connection. A command that waited here
+    // takes the connection that the first check left behind, so two
+    // commands never open the same connection twice.
+    let lock = state.health_check_lock(connection_id).await;
+    let _guard = lock.lock().await;
+    let open = state.connection(connection_id).await?;
+    if !open.needs_check().await {
+        return Ok(open);
+    }
+
     let healthy = {
         let mut driver = open.driver.lock().await;
         driver.ping().await.is_ok()
@@ -158,6 +168,9 @@ async fn ensure_healthy<R: Runtime>(
         Ok(driver) => {
             let replacement = OpenConnection::new(full, driver);
             state.insert(connection_id, replacement.clone()).await;
+            // The background driver shares the fate of the session that
+            // stopped answering, so the next metadata read opens a new one.
+            state.clear_background(connection_id).await;
             announce(app, connection_id, ConnectionHealth::Connected, None);
             Ok(replacement)
         }
@@ -172,6 +185,18 @@ async fn ensure_healthy<R: Runtime>(
             Err(error)
         }
     }
+}
+
+/// Returns the driver that a metadata read runs on. The read goes to a
+/// second connection when one can open, so that the tree of the explorer
+/// does not wait behind a statement of the user.
+async fn metadata_driver<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    connection_id: &str,
+) -> Result<crate::state::BackgroundDriver> {
+    let open = ensure_healthy(app, state, connection_id).await?;
+    Ok(background_driver(state, connection_id, &open).await)
 }
 
 /// Waits for the number of seconds, or forever when the number is zero.
@@ -419,12 +444,9 @@ pub async fn list_databases<R: Runtime>(
     connection_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<Database>> {
-    let open = ensure_healthy(&app, &state, &connection_id).await?;
-    let result = open.driver.lock().await.list_databases().await;
-    if result.is_ok() {
-        open.mark_ok().await;
-    }
-    result
+    let driver = metadata_driver(&app, &state, &connection_id).await?;
+    let mut guard = driver.lock().await;
+    guard.list_databases().await
 }
 
 #[tauri::command]
@@ -434,12 +456,9 @@ pub async fn list_schemas<R: Runtime>(
     database: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<Schema>> {
-    let open = ensure_healthy(&app, &state, &connection_id).await?;
-    let result = open.driver.lock().await.list_schemas(&database).await;
-    if result.is_ok() {
-        open.mark_ok().await;
-    }
-    result
+    let driver = metadata_driver(&app, &state, &connection_id).await?;
+    let mut guard = driver.lock().await;
+    guard.list_schemas(&database).await
 }
 
 #[tauri::command]
@@ -450,17 +469,9 @@ pub async fn list_tables<R: Runtime>(
     schema_name: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<Table>> {
-    let open = ensure_healthy(&app, &state, &connection_id).await?;
-    let result = open
-        .driver
-        .lock()
-        .await
-        .list_tables(&database, schema_name.as_deref())
-        .await;
-    if result.is_ok() {
-        open.mark_ok().await;
-    }
-    result
+    let driver = metadata_driver(&app, &state, &connection_id).await?;
+    let mut guard = driver.lock().await;
+    guard.list_tables(&database, schema_name.as_deref()).await
 }
 
 #[tauri::command]
@@ -472,17 +483,11 @@ pub async fn list_columns<R: Runtime>(
     table_name: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<AppColumn>> {
-    let open = ensure_healthy(&app, &state, &connection_id).await?;
-    let result = open
-        .driver
-        .lock()
-        .await
+    let driver = metadata_driver(&app, &state, &connection_id).await?;
+    let mut guard = driver.lock().await;
+    guard
         .list_columns(&database, schema_name.as_deref(), &table_name)
-        .await;
-    if result.is_ok() {
-        open.mark_ok().await;
-    }
-    result
+        .await
 }
 
 #[tauri::command]
@@ -493,17 +498,9 @@ pub async fn list_routines<R: Runtime>(
     schema_name: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<Routine>> {
-    let open = ensure_healthy(&app, &state, &connection_id).await?;
-    let result = open
-        .driver
-        .lock()
-        .await
-        .list_routines(&database, schema_name.as_deref())
-        .await;
-    if result.is_ok() {
-        open.mark_ok().await;
-    }
-    result
+    let driver = metadata_driver(&app, &state, &connection_id).await?;
+    let mut guard = driver.lock().await;
+    guard.list_routines(&database, schema_name.as_deref()).await
 }
 
 #[tauri::command]
@@ -515,17 +512,11 @@ pub async fn list_indexes<R: Runtime>(
     table_name: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<IndexInfo>> {
-    let open = ensure_healthy(&app, &state, &connection_id).await?;
-    let result = open
-        .driver
-        .lock()
-        .await
+    let driver = metadata_driver(&app, &state, &connection_id).await?;
+    let mut guard = driver.lock().await;
+    guard
         .list_indexes(&database, schema_name.as_deref(), &table_name)
-        .await;
-    if result.is_ok() {
-        open.mark_ok().await;
-    }
-    result
+        .await
 }
 
 #[tauri::command]
@@ -537,17 +528,11 @@ pub async fn list_constraints<R: Runtime>(
     table_name: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<Constraint>> {
-    let open = ensure_healthy(&app, &state, &connection_id).await?;
-    let result = open
-        .driver
-        .lock()
-        .await
+    let driver = metadata_driver(&app, &state, &connection_id).await?;
+    let mut guard = driver.lock().await;
+    guard
         .list_constraints(&database, schema_name.as_deref(), &table_name)
-        .await;
-    if result.is_ok() {
-        open.mark_ok().await;
-    }
-    result
+        .await
 }
 
 #[tauri::command]
@@ -559,17 +544,11 @@ pub async fn list_partitions<R: Runtime>(
     table_name: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<Partition>> {
-    let open = ensure_healthy(&app, &state, &connection_id).await?;
-    let result = open
-        .driver
-        .lock()
-        .await
+    let driver = metadata_driver(&app, &state, &connection_id).await?;
+    let mut guard = driver.lock().await;
+    guard
         .list_partitions(&database, schema_name.as_deref(), &table_name)
-        .await;
-    if result.is_ok() {
-        open.mark_ok().await;
-    }
-    result
+        .await
 }
 
 /// Collects everything the properties dialog shows about one relation: the
@@ -586,9 +565,9 @@ pub async fn table_details<R: Runtime>(
     table_name: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<TableDetails> {
-    let open = ensure_healthy(&app, &state, &connection_id).await?;
+    let driver = metadata_driver(&app, &state, &connection_id).await?;
     let schema = schema_name.as_deref();
-    let mut guard = open.driver.lock().await;
+    let mut guard = driver.lock().await;
 
     let details = TableDetails {
         facts: guard.table_facts(&database, schema, &table_name).await?,
@@ -599,8 +578,6 @@ pub async fn table_details<R: Runtime>(
             .await?,
     };
 
-    drop(guard);
-    open.mark_ok().await;
     Ok(details)
 }
 
@@ -631,11 +608,8 @@ pub async fn schema_snapshot<R: Runtime>(
         false => open.driver.clone(),
     };
 
-    let result = driver.lock().await.schema_snapshot(&database, limit).await;
-    if result.is_ok() {
-        open.mark_ok().await;
-    }
-    result
+    let mut guard = driver.lock().await;
+    guard.schema_snapshot(&database, limit).await
 }
 
 /// Returns the background driver of a connection, and opens one when the

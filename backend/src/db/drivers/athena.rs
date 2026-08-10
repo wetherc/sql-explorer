@@ -242,7 +242,9 @@ impl AthenaDriver {
         self.set_running(None);
         let stats = outcome?;
 
-        let set = self.read_results(&execution_id, options).await?;
+        let set = self
+            .read_results(&execution_id, options, statement_repeats_names(statement))
+            .await?;
         Ok((set, stats))
     }
 
@@ -294,11 +296,13 @@ impl AthenaDriver {
         }
     }
 
-    /// Reads the pages of the result, up to the row limit.
+    /// Reads the pages of the result, up to the row limit. The first row is
+    /// dropped when the statement repeats the column names there.
     async fn read_results(
         &self,
         execution_id: &str,
         options: &ExecOptions,
+        expect_header: bool,
     ) -> Result<Option<ResultSet>> {
         let mut token: Option<String> = None;
         let mut set: Option<ResultSet> = None;
@@ -338,8 +342,14 @@ impl AthenaDriver {
 
             let current = set.as_mut().expect("the result set exists");
             let rows = result_set.rows();
-            // The first page repeats the column names in its first row.
-            let rows = if first_page && !rows.is_empty() && is_header(&rows[0], &current.columns) {
+            // A statement that reads rows repeats the column names in the
+            // first row of the first page. A row of another statement that
+            // happens to spell the column names is data and stays.
+            let rows = if expect_header
+                && first_page
+                && !rows.is_empty()
+                && is_header(&rows[0], &current.columns)
+            {
                 &rows[1..]
             } else {
                 rows
@@ -854,6 +864,16 @@ pub fn next_wait(current: Duration) -> Duration {
     std::cmp::min(current * 2, Duration::from_secs(2))
 }
 
+/// True when the statement puts the column names into the first row of its
+/// result. Athena does this for the statements that read rows, and not for
+/// a utility statement such as `SHOW CREATE TABLE`.
+pub fn statement_repeats_names(statement: &str) -> bool {
+    matches!(
+        crate::sql::leading_keyword(statement).as_str(),
+        "select" | "with" | "explain"
+    )
+}
+
 /// True when the row repeats the column names. Athena puts such a row at
 /// the top of the first page of a `SELECT` result.
 pub fn is_header(row: &AthenaRow, columns: &[ColumnInfo]) -> bool {
@@ -1005,6 +1025,15 @@ mod tests {
             builder = builder.data(datum.build());
         }
         builder.build()
+    }
+
+    #[test]
+    fn only_a_statement_that_reads_rows_repeats_the_names() {
+        assert!(statement_repeats_names("SELECT 1"));
+        assert!(statement_repeats_names("  with x as (select 1) select 1"));
+        assert!(statement_repeats_names("EXPLAIN SELECT 1"));
+        assert!(!statement_repeats_names("SHOW CREATE TABLE t"));
+        assert!(!statement_repeats_names("DESCRIBE t"));
     }
 
     #[test]
