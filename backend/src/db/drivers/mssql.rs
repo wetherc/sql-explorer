@@ -60,10 +60,7 @@ pub async fn build_config(connection: &SavedConnection) -> Result<Config> {
             config.application_name(name);
         }
         config.authentication(auth_method(connection).await?);
-        config.encryption(level_for(
-            connection.options.tls_mode,
-            connection.effective_auth(),
-        ));
+        config.encryption(encryption_level(connection.options.tls_mode));
         if !connection.options.tls_mode.verifies_certificate() {
             config.trust_cert();
         }
@@ -195,26 +192,6 @@ pub fn encryption_level(mode: TlsMode) -> EncryptionLevel {
         TlsMode::Prefer => EncryptionLevel::Off,
         TlsMode::Require | TlsMode::VerifyFull => EncryptionLevel::Required,
     }
-}
-
-/// Gives the encryption level for one connection.
-///
-/// `Off` means that TLS covers the login packet and nothing after it. The
-/// driver drops the TLS layer as soon as it has sent the login, and Kerberos
-/// needs one more exchange after that point. The server keeps that exchange
-/// inside TLS, the client reads it as plain bytes, and the connection waits
-/// until the time limit runs out. Kerberos therefore keeps the encryption for
-/// the whole session.
-pub fn level_for(mode: TlsMode, auth: MssqlAuth) -> EncryptionLevel {
-    let level = encryption_level(mode);
-    if auth == MssqlAuth::Integrated && level == EncryptionLevel::Off {
-        log::info!(
-            "Windows Authentication keeps the encryption on for the whole session, because the \
-             exchange of the credentials continues after the login packet."
-        );
-        return EncryptionLevel::Required;
-    }
-    level
 }
 
 impl MssqlDriver {
@@ -1180,27 +1157,6 @@ mod tests {
             )
             .kind(),
             crate::error::ErrorKind::Database
-        );
-    }
-    #[test]
-    fn kerberos_keeps_the_encryption_for_the_whole_session() {
-        // The login-only level cannot work with Kerberos, so it rises.
-        assert_eq!(
-            level_for(TlsMode::Prefer, MssqlAuth::Integrated),
-            EncryptionLevel::Required
-        );
-        // Every other level and every other method stay as they are.
-        assert_eq!(
-            level_for(TlsMode::Prefer, MssqlAuth::SqlLogin),
-            EncryptionLevel::Off
-        );
-        assert_eq!(
-            level_for(TlsMode::Disable, MssqlAuth::Integrated),
-            EncryptionLevel::NotSupported
-        );
-        assert_eq!(
-            level_for(TlsMode::VerifyFull, MssqlAuth::Integrated),
-            EncryptionLevel::Required
         );
     }
 }

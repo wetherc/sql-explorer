@@ -109,6 +109,10 @@ custom-protocol = ["tauri/custom-protocol"]
 
 [dev-dependencies]
 tempfile = "3"
+# The probe under `examples/` prints the trace of `tiberius`, which uses
+# `tracing` and not the `log` crate that the application itself uses.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [profile.release]
 codegen-units = 1
@@ -123,3 +127,10 @@ strip = true
 # copy of the crate under `vendor/`.
 [patch.crates-io]
 libgssapi = { path = "vendor/libgssapi" }
+
+# `tiberius` 0.12.3 holds each write of the TLS handshake in a buffer and sends
+# it only when the caller flushes. A TLS library that the crate drives itself
+# flushes, and the library of the operating system does not, so the first
+# handshake message never left the machine and the connection waited until its
+# time limit ran out. The copy under `vendor/` sends each write at once.
+tiberius = { path = "vendor/tiberius" }
