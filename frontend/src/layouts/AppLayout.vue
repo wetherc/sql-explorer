@@ -595,7 +595,14 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 
+/* A row of the rail holds an icon and no text. The library keeps a gap of 32
+   pixels after the icon for the text that would follow it, and the icon with
+   that gap is wider than the row. Centring the two together pushed the icon
+   out of the highlight behind it and against the edge of the window. The gap
+   goes, and the icon sits in the middle of its row. */
 .rail :deep(.v-list-item) {
+  --v-list-prepend-gap: 0px;
+
   justify-content: center;
 }
 
