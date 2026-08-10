@@ -466,10 +466,6 @@ watch(
 </script>
 
 <style scoped>
-.grid-table tbody tr.selected td {
-  background: rgba(var(--v-theme-primary), 0.16);
-}
-
 .results-grid {
   display: flex;
   flex-direction: column;
@@ -551,8 +547,23 @@ watch(
   cursor: default;
 }
 
+/* The three rules below give a cell its background, and they carry the same
+   weight as each other. The order is therefore what decides: a stripe covers
+   the plain cell, the gutter of row numbers covers the stripe, and the mark of
+   a chosen row covers both. */
 .grid-table tbody tr:nth-child(even) td {
   background: rgb(var(--v-theme-grid-stripe));
+}
+
+/* The column of row numbers holds still while the rows scroll sideways, so it
+   needs a background of its own for the cells to pass behind. It takes the
+   colour of the column headers, because it names a row as they name a column. */
+.grid-table tbody tr td.row-number {
+  background: rgb(var(--v-theme-grid-header));
+}
+
+.grid-table tbody tr.selected td {
+  background: rgba(var(--v-theme-primary), 0.16);
 }
 
 .row-number {
@@ -561,7 +572,12 @@ watch(
   width: 1%;
   position: sticky;
   left: 0;
-  background: rgb(var(--v-theme-surface));
+}
+
+/* The corner cell holds still in both directions, so it stands above the
+   other header cells, which pass behind it as the rows scroll sideways. */
+.grid-table th.row-number {
+  z-index: 2;
 }
 
 .null-cell {
