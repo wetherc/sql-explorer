@@ -507,9 +507,16 @@ describe('ConnectionForm with every field filled', () => {
     const reveal = wrapper
       .findAllComponents({ name: 'VTextField' })
       .find((item) => item.attributes('data-test') === 'access-token-field')
-    await reveal!.vm.$emit('click:append-inner')
+    const toggle = wrapper.find('[data-test="toggle-token"]')
+    expect(toggle.attributes('aria-label')).toBe('Show the token')
+    expect(toggle.attributes('aria-pressed')).toBe('false')
+
+    await toggle.trigger('click')
     await wrapper.vm.$nextTick()
     expect(reveal!.props('type')).toBe('text')
+    expect(wrapper.find('[data-test="toggle-token"]').attributes('aria-label')).toBe(
+      'Hide the token',
+    )
 
     await select!.vm.$emit('update:modelValue', MssqlAuth.EntraAzureCli)
     await wrapper.vm.$nextTick()

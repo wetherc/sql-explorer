@@ -162,3 +162,13 @@ describe('StatusBar without a tab', () => {
     expect(wrapper.find('[data-test="status-affected"]').exists()).toBe(false)
   })
 })
+
+describe('StatusBar as a part a reader can follow', () => {
+  it('tells a reader of each change of the state of a run', () => {
+    const wrapper = mountWithPlugins(StatusBar)
+    const state = wrapper.find('[data-test="status-state"]')
+
+    expect(state.attributes('role')).toBe('status')
+    expect(state.attributes('aria-live')).toBe('polite')
+  })
+})

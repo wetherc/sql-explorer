@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import type { ErrorPayload } from '@/types/api'
 import { errorAdvice, errorIcon, fullErrorText, isCancellation, toErrorPayload } from '@/lib/errors'
 
@@ -29,6 +29,13 @@ export const useUiStore = defineStore('ui', () => {
   const paletteOpen = ref(false)
   /** True while the list of the keys stands open. */
   const keyboardHelpOpen = ref(false)
+  /**
+   * The number of dialogs that stand open. Each dialog of the application
+   * counts itself here as it opens and takes itself away as it closes, so the
+   * key handler of the shell knows without asking the document.
+   */
+  const openDialogs = ref(0)
+  const dialogOpen = computed(() => openDialogs.value > 0)
 
   function push(notice: Omit<Notice, 'id'>): Notice {
     const created: Notice = { ...notice, id: (nextNoticeId += 1) }
@@ -120,11 +127,23 @@ export const useUiStore = defineStore('ui', () => {
     keyboardHelpOpen.value = open
   }
 
+  function addDialog(): void {
+    openDialogs.value += 1
+  }
+
+  function removeDialog(): void {
+    openDialogs.value = Math.max(0, openDialogs.value - 1)
+  }
+
   return {
     notices,
     openedNotice,
     paletteOpen,
     keyboardHelpOpen,
+    openDialogs,
+    dialogOpen,
+    addDialog,
+    removeDialog,
     setPaletteOpen,
     setKeyboardHelpOpen,
     push,

@@ -129,16 +129,16 @@
       </EmptyState>
     </div>
 
-    <v-dialog v-if="draft" v-model="editing" max-width="620" persistent scrollable>
+    <AppDialog v-if="draft" v-model="editing" max-width="620" persistent scrollable>
       <ConnectionForm
         :connection="draft"
         :is-new="isNew"
         @close="editing = false"
         @saved="onSaved"
       />
-    </v-dialog>
+    </AppDialog>
 
-    <v-dialog v-if="pendingDelete" v-model="deleting" max-width="420">
+    <AppDialog v-if="pendingDelete" v-model="deleting" max-width="420">
       <v-card>
         <v-card-title class="text-subtitle-1">Delete this connection?</v-card-title>
         <v-card-text>
@@ -155,11 +155,12 @@
           />
         </v-card-actions>
       </v-card>
-    </v-dialog>
+    </AppDialog>
   </div>
 </template>
 
 <script setup lang="ts">
+import AppDialog from './AppDialog.vue'
 import { ref } from 'vue'
 import ConnectionForm from './ConnectionForm.vue'
 import EmptyState from './EmptyState.vue'

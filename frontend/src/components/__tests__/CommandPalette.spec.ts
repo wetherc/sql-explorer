@@ -118,3 +118,79 @@ describe('CommandPalette', () => {
     expect(wrapper.emitted('update:open')?.[0]).toEqual([false])
   })
 })
+
+describe('CommandPalette as a list a reader can follow', () => {
+  /** The field of the palette, which the dialog draws away from the wrapper. */
+  function field(): HTMLElement {
+    return document.querySelector('[data-test="palette-filter"] input') as HTMLElement
+  }
+
+  function items(): HTMLElement[] {
+    return [...document.querySelectorAll('[data-test="palette-item"]')] as HTMLElement[]
+  }
+
+  async function press(key: string): Promise<void> {
+    field().dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
+    await settle()
+  }
+
+  it('names the field and the list, and points the field at the chosen row', async () => {
+    await mountPalette()
+
+    expect(field().getAttribute('role')).toBe('combobox')
+    expect(field().getAttribute('aria-controls')).toBe('palette-listbox')
+    expect(document.querySelector('#palette-listbox')?.getAttribute('role')).toBe('listbox')
+    expect(items()[0]?.getAttribute('role')).toBe('option')
+    expect(items()[0]?.getAttribute('aria-selected')).toBe('true')
+    expect(field().getAttribute('aria-activedescendant')).toBe(items()[0]?.id)
+
+    await press('ArrowDown')
+
+    expect(field().getAttribute('aria-activedescendant')).toBe(items()[1]?.id)
+    expect(items()[1]?.getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('points at no row while no command matches', async () => {
+    const wrapper = await mountPalette()
+
+    await wrapper.findComponent({ name: 'VTextField' }).vm.$emit('update:modelValue', 'nothing')
+    await settle()
+
+    expect(field().getAttribute('aria-activedescendant')).toBeNull()
+    expect(document.querySelector('[data-test="palette-empty"]')?.getAttribute('role')).toBe(
+      'presentation',
+    )
+  })
+
+  it('reaches the first row and the last row', async () => {
+    await mountPalette()
+
+    await press('End')
+    const rows = items()
+    expect(rows[rows.length - 1]?.getAttribute('aria-selected')).toBe('true')
+
+    await press('Home')
+    expect(items()[0]?.getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('leaves the choice alone at the ends of the list', async () => {
+    await mountPalette()
+
+    await press('Home')
+    await press('Home')
+
+    expect(items()[0]?.getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('brings the chosen row into the part of the list that shows', async () => {
+    await mountPalette()
+    const scrollIntoView = vi.fn()
+    for (const item of items()) {
+      item.scrollIntoView = scrollIntoView
+    }
+
+    await press('ArrowDown')
+
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
+  })
+})

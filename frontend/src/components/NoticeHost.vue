@@ -13,8 +13,16 @@
       data-test="notice"
       @update:model-value="ui.dismiss(notice.id)"
     >
-      <div class="d-flex align-center ga-2">
-        <v-icon size="small">{{ notice.icon }}</v-icon>
+      <!-- A notice arrives on its own, so a reader is told of it as it comes.
+           An error breaks in, because it stops the work of the user. The
+           snackbar is drawn away from this element, so the part that a reader
+           follows is the text of the notice itself. -->
+      <div
+        class="d-flex align-center ga-2"
+        :role="notice.level === 'error' ? 'alert' : 'status'"
+        :aria-live="notice.level === 'error' ? 'assertive' : 'polite'"
+      >
+        <v-icon size="small" aria-hidden="true">{{ notice.icon }}</v-icon>
         <span class="notice-text">{{ notice.message }}</span>
       </div>
       <template #actions>
@@ -35,7 +43,7 @@
       </template>
     </v-snackbar>
 
-    <v-dialog
+    <AppDialog
       :model-value="ui.openedNotice !== null"
       max-width="720"
       @update:model-value="ui.closeNotice()"
@@ -55,11 +63,12 @@
           <v-btn text="Close" @click="ui.closeNotice()" />
         </v-card-actions>
       </v-card>
-    </v-dialog>
+    </AppDialog>
   </div>
 </template>
 
 <script setup lang="ts">
+import AppDialog from './AppDialog.vue'
 import { useUiStore } from '@/stores/ui'
 
 const ui = useUiStore()

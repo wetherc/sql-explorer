@@ -181,7 +181,7 @@
       </div>
     </div>
 
-    <v-dialog v-model="inspecting" max-width="720">
+    <AppDialog v-model="inspecting" max-width="720">
       <v-card>
         <v-card-title class="text-subtitle-1">{{ inspectTitle }}</v-card-title>
         <v-card-text>
@@ -193,11 +193,12 @@
           <v-btn text="Close" @click="inspecting = false" />
         </v-card-actions>
       </v-card>
-    </v-dialog>
+    </AppDialog>
   </div>
 </template>
 
 <script setup lang="ts">
+import AppDialog from './AppDialog.vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { ComponentPublicInstance } from 'vue'
 import PanelHeader from './PanelHeader.vue'

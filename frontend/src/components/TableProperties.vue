@@ -1,5 +1,5 @@
 <template>
-  <v-dialog :model-value="open" max-width="820" @update:model-value="emit('close')">
+  <AppDialog :model-value="open" max-width="820" @update:model-value="emit('close')">
     <v-card data-test="properties-dialog">
       <v-card-title class="text-subtitle-1">{{ title }}</v-card-title>
 
@@ -84,10 +84,11 @@
         <v-btn text="Close" data-test="properties-close" @click="emit('close')" />
       </v-card-actions>
     </v-card>
-  </v-dialog>
+  </AppDialog>
 </template>
 
 <script setup lang="ts">
+import AppDialog from './AppDialog.vue'
 import { computed, ref, watch } from 'vue'
 import { api } from '@/lib/api'
 import { constraintHint, type ExplorerNode } from '@/stores/explorer'

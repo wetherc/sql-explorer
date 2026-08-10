@@ -70,12 +70,24 @@
           v-model="password"
           label="Password"
           :type="showPassword ? 'text' : 'password'"
-          :append-inner-icon="showPassword ? 'mdi-eye-off' : 'mdi-eye'"
           :hint="passwordHint"
           persistent-hint
           data-test="password-field"
-          @click:append-inner="showPassword = !showPassword"
-        />
+        >
+          <!-- The icon that shows the password is a button of its own, so a
+               reader can name it and a key can reach it. -->
+          <template #append-inner>
+            <v-btn
+              :icon="showPassword ? 'mdi-eye-off' : 'mdi-eye'"
+              :aria-label="showPassword ? 'Hide the password' : 'Show the password'"
+              :aria-pressed="showPassword"
+              size="x-small"
+              variant="text"
+              data-test="toggle-password"
+              @click="showPassword = !showPassword"
+            />
+          </template>
+        </v-text-field>
       </template>
 
       <v-text-field
@@ -83,12 +95,22 @@
         v-model="password"
         label="Access token"
         :type="showPassword ? 'text' : 'password'"
-        :append-inner-icon="showPassword ? 'mdi-eye-off' : 'mdi-eye'"
         hint="The token is a credential. It goes to the keychain, never to a settings file."
         persistent-hint
         data-test="access-token-field"
-        @click:append-inner="showPassword = !showPassword"
-      />
+      >
+        <template #append-inner>
+          <v-btn
+            :icon="showPassword ? 'mdi-eye-off' : 'mdi-eye'"
+            :aria-label="showPassword ? 'Hide the token' : 'Show the token'"
+            :aria-pressed="showPassword"
+            size="x-small"
+            variant="text"
+            data-test="toggle-token"
+            @click="showPassword = !showPassword"
+          />
+        </template>
+      </v-text-field>
 
       <v-text-field
         v-if="draft.options.mssqlAuth === MssqlAuth.EntraAzureCli"

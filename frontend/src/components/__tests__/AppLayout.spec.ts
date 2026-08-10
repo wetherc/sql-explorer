@@ -697,6 +697,25 @@ describe('AppLayout keys', () => {
     wrapper.unmount()
   })
 
+  it('takes the keys again once the dialog closes', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    await wrapper.find('[data-test="open-settings"]').trigger('click')
+    await settle()
+
+    const close = [...document.querySelectorAll('.v-card-actions .v-btn')].find((button) =>
+      button.textContent?.includes('Close'),
+    )
+    close?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+    expect(useUiStore().dialogOpen).toBe(false)
+
+    const tabs = useTabsStore()
+    press('KeyT')
+    expect(tabs.tabs).toHaveLength(1)
+    wrapper.unmount()
+  })
+
   it('stops listening once it is gone', async () => {
     const wrapper = mountWithPlugins(AppLayout)
     await settle()

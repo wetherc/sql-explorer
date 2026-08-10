@@ -252,7 +252,7 @@
       </pane>
     </splitpanes>
 
-    <v-dialog v-model="askingTable" max-width="420">
+    <AppDialog v-model="askingTable" max-width="420">
       <v-card>
         <v-card-title class="text-subtitle-1">Name the table</v-card-title>
         <v-card-text>
@@ -276,9 +276,9 @@
           />
         </v-card-actions>
       </v-card>
-    </v-dialog>
+    </AppDialog>
 
-    <v-dialog v-model="askingParams" max-width="520">
+    <AppDialog v-model="askingParams" max-width="520">
       <v-card>
         <v-card-title class="text-subtitle-1">Give the values of the parameters</v-card-title>
         <v-card-text class="d-flex flex-column ga-3">
@@ -321,9 +321,9 @@
           />
         </v-card-actions>
       </v-card>
-    </v-dialog>
+    </AppDialog>
 
-    <v-dialog v-model="askingPlan" max-width="460">
+    <AppDialog v-model="askingPlan" max-width="460">
       <v-card>
         <v-card-title class="text-subtitle-1">Run the statement for its plan</v-card-title>
         <v-card-text>
@@ -341,9 +341,9 @@
           />
         </v-card-actions>
       </v-card>
-    </v-dialog>
+    </AppDialog>
 
-    <v-dialog v-model="savingQuery" max-width="480">
+    <AppDialog v-model="savingQuery" max-width="480">
       <v-card>
         <v-card-title class="text-subtitle-1">Save this statement</v-card-title>
         <v-card-text class="d-flex flex-column ga-3">
@@ -356,11 +356,12 @@
           <v-btn color="primary" text="Save" data-test="save-query-confirm" @click="confirmSave" />
         </v-card-actions>
       </v-card>
-    </v-dialog>
+    </AppDialog>
   </div>
 </template>
 
 <script setup lang="ts">
+import AppDialog from './AppDialog.vue'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Splitpanes, Pane } from 'splitpanes'
 import 'splitpanes/dist/splitpanes.css'

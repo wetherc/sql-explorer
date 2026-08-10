@@ -103,3 +103,22 @@ describe('NoticeHost dialog', () => {
     wrapper.unmount()
   })
 })
+
+describe('NoticeHost as a part a reader can follow', () => {
+  it('breaks in for an error and waits its turn for anything else', async () => {
+    const wrapper = mountWithPlugins(NoticeHost)
+    const ui = useUiStore()
+
+    ui.success('Saved')
+    ui.reportError(new Error('It failed'))
+    await settle()
+
+    const parts = [...document.querySelectorAll('[role="status"], [role="alert"]')]
+    const roles = parts.map((part) => part.getAttribute('role'))
+    expect(roles).toContain('status')
+    expect(roles).toContain('alert')
+    const alert = parts.find((part) => part.getAttribute('role') === 'alert')
+    expect(alert?.getAttribute('aria-live')).toBe('assertive')
+    wrapper.unmount()
+  })
+})

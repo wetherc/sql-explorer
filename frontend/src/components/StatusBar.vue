@@ -7,7 +7,9 @@
 
     <v-divider vertical />
 
-    <div data-test="status-state">{{ stateLabel }}</div>
+    <!-- The state of a run changes with no other sign, so a reader is told of
+         each change as it comes. -->
+    <div role="status" aria-live="polite" data-test="status-state">{{ stateLabel }}</div>
 
     <template v-if="state && !state.running && state.panes.length > 0">
       <v-divider vertical />

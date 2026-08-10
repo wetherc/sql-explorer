@@ -108,3 +108,37 @@ describe('ui store', () => {
     expect(ui.fullErrorText({ kind: ErrorKind.Database, message: 'a', detail: 'b' })).toBe('a\nb')
   })
 })
+
+describe('ui store dialog count', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  it('starts with no dialog open', () => {
+    const ui = useUiStore()
+    expect(ui.openDialogs).toBe(0)
+    expect(ui.dialogOpen).toBe(false)
+  })
+
+  it('counts each dialog that opens and each that closes', () => {
+    const ui = useUiStore()
+
+    ui.addDialog()
+    ui.addDialog()
+    expect(ui.dialogOpen).toBe(true)
+
+    ui.removeDialog()
+    expect(ui.dialogOpen).toBe(true)
+
+    ui.removeDialog()
+    expect(ui.dialogOpen).toBe(false)
+  })
+
+  it('never counts below none', () => {
+    const ui = useUiStore()
+
+    ui.removeDialog()
+
+    expect(ui.openDialogs).toBe(0)
+  })
+})

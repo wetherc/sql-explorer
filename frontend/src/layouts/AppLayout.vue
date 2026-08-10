@@ -112,7 +112,7 @@
       @update:open="ui.setPaletteOpen"
     />
 
-    <v-dialog
+    <AppDialog
       :model-value="ui.keyboardHelpOpen"
       max-width="520"
       @update:model-value="ui.setKeyboardHelpOpen"
@@ -135,9 +135,9 @@
           <v-btn text="Close" @click="ui.setKeyboardHelpOpen(false)" />
         </v-card-actions>
       </v-card>
-    </v-dialog>
+    </AppDialog>
 
-    <v-dialog v-model="settingsOpen" max-width="520">
+    <AppDialog v-model="settingsOpen" max-width="520">
       <v-card>
         <v-card-title class="text-subtitle-1">Settings</v-card-title>
         <v-card-text class="d-flex flex-column ga-4">
@@ -254,11 +254,12 @@
           <v-btn text="Close" @click="settingsOpen = false" />
         </v-card-actions>
       </v-card>
-    </v-dialog>
+    </AppDialog>
   </v-app>
 </template>
 
 <script setup lang="ts">
+import AppDialog from '@/components/AppDialog.vue'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useTheme } from 'vuetify'
 import CommandPalette from '@/components/CommandPalette.vue'
@@ -506,19 +507,11 @@ const commands: Command[] = [
 
 const commandsWithKeys = computed(() => commands.filter((command) => command.key !== null))
 
-/**
- * True while a dialog stands open. A key of the application must not reach
- * through a dialog, because the dialog holds the attention of the user.
- */
-function dialogIsOpen(): boolean {
-  // The ARIA role marks a dialog whatever the component library names its
-  // classes, and the class covers a Vuetify dialog that has not set the
-  // role yet.
-  return document.querySelector('[role="dialog"], .v-dialog.v-overlay--active') !== null
-}
-
 function onKeyDown(event: KeyboardEvent): void {
-  if (dialogIsOpen()) {
+  // A key of the application must not reach through a dialog, because the
+  // dialog holds the attention of the user. Each dialog counts itself in the
+  // store as it opens, so the shell asks the store and not the document.
+  if (ui.dialogOpen) {
     return
   }
   const command = commandForEvent(commands, event)
