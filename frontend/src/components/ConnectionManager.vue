@@ -138,24 +138,17 @@
       />
     </AppDialog>
 
-    <AppDialog v-if="pendingDelete" v-model="deleting" max-width="420">
-      <v-card>
-        <v-card-title class="text-subtitle-1">Delete this connection?</v-card-title>
-        <v-card-text>
-          The record for <strong>{{ pendingDelete.name }}</strong> and its password are removed.
-        </v-card-text>
-        <v-card-actions>
-          <v-spacer />
-          <v-btn text="Cancel" @click="deleting = false" />
-          <v-btn
-            color="error"
-            text="Delete"
-            data-test="confirm-delete"
-            @click="confirmDelete(pendingDelete)"
-          />
-        </v-card-actions>
-      </v-card>
-    </AppDialog>
+    <ConfirmDialog
+      v-if="pendingDelete"
+      :open="deleting"
+      title="Delete this connection?"
+      confirm-text="Delete"
+      danger
+      @confirm="confirmDelete(pendingDelete)"
+      @cancel="deleting = false"
+    >
+      The record for <strong>{{ pendingDelete.name }}</strong> and its password are removed.
+    </ConfirmDialog>
   </div>
 </template>
 
@@ -163,6 +156,7 @@
 import AppDialog from './AppDialog.vue'
 import { ref } from 'vue'
 import ConnectionForm from './ConnectionForm.vue'
+import ConfirmDialog from './ConfirmDialog.vue'
 import EmptyState from './EmptyState.vue'
 import PanelHeader from './PanelHeader.vue'
 import { connectionSubtitle, newConnection, useConnectionsStore } from '@/stores/connections'

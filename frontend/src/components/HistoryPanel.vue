@@ -20,7 +20,7 @@
               size="small"
               aria-label="Empty the history"
               data-test="clear-history"
-              @click="history.clear()"
+              @click="clearing = true"
             />
           </template>
         </v-tooltip>
@@ -84,7 +84,7 @@
                 color="error"
                 aria-label="Delete the saved statement"
                 data-test="delete-saved"
-                @click.stop="history.remove(query.id)"
+                @click.stop="pendingDelete = query"
               />
             </template>
           </v-list-item>
@@ -97,11 +97,32 @@
         />
       </template>
     </div>
+
+    <ConfirmDialog
+      :open="clearing"
+      title="Empty the history?"
+      message="Every statement that has run is taken away. Saved statements stay."
+      confirm-text="Empty it"
+      danger
+      @confirm="confirmClear"
+      @cancel="clearing = false"
+    />
+
+    <ConfirmDialog
+      :open="pendingDelete !== null"
+      title="Delete this saved statement?"
+      :message="`The statement named ${pendingDelete?.name ?? ''} is taken away.`"
+      confirm-text="Delete"
+      danger
+      @confirm="confirmDelete"
+      @cancel="pendingDelete = null"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref } from 'vue'
+import ConfirmDialog from './ConfirmDialog.vue'
 import EmptyState from './EmptyState.vue'
 import PanelHeader from './PanelHeader.vue'
 import { formatDuration, formatRowCount, formatTimestamp, summariseQuery } from '@/lib/format'
@@ -115,6 +136,24 @@ const tabs = useTabsStore()
 const connections = useConnectionsStore()
 
 const mode = ref<'history' | 'saved'>('history')
+
+/** True while the question about emptying the history stands open. */
+const clearing = ref(false)
+/** The saved statement that waits on an answer about its deletion. */
+const pendingDelete = ref<SavedQuery | null>(null)
+
+function confirmClear(): void {
+  clearing.value = false
+  history.clear()
+}
+
+function confirmDelete(): void {
+  const query = pendingDelete.value
+  pendingDelete.value = null
+  if (query) {
+    history.remove(query.id)
+  }
+}
 
 /** Opens a past statement in a new tab, on the connection it ran against. */
 function openEntry(entry: HistoryEntry): void {

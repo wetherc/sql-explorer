@@ -323,25 +323,15 @@
       </v-card>
     </AppDialog>
 
-    <AppDialog v-model="askingPlan" max-width="460">
-      <v-card>
-        <v-card-title class="text-subtitle-1">Run the statement for its plan</v-card-title>
-        <v-card-text>
-          The actual plan comes from a real run. The statement runs on the server, so a statement
-          that writes rows writes them, and a statement on Athena scans data.
-        </v-card-text>
-        <v-card-actions>
-          <v-spacer />
-          <v-btn text="Cancel" @click="askingPlan = false" />
-          <v-btn
-            color="primary"
-            text="Run it"
-            data-test="plan-actual-confirm"
-            @click="confirmActualPlan"
-          />
-        </v-card-actions>
-      </v-card>
-    </AppDialog>
+    <ConfirmDialog
+      :open="askingPlan"
+      title="Run the statement for its plan"
+      message="The actual plan comes from a real run. The statement runs on the server, so a
+               statement that writes rows writes them, and a statement on Athena scans data."
+      confirm-text="Run it"
+      @confirm="confirmActualPlan"
+      @cancel="askingPlan = false"
+    />
 
     <AppDialog v-model="savingQuery" max-width="480">
       <v-card>
@@ -367,6 +357,7 @@ import { Splitpanes, Pane } from 'splitpanes'
 import 'splitpanes/dist/splitpanes.css'
 import SqlEditor from './SqlEditor.vue'
 import ResultsGrid from './ResultsGrid.vue'
+import ConfirmDialog from './ConfirmDialog.vue'
 import { api } from '@/lib/api'
 import { forgetTabActions, registerTabActions } from '@/lib/commands'
 import { exportFileName, toCsv, toInsertStatements, toJson, toMarkdown } from '@/lib/export'

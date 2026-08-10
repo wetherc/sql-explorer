@@ -184,7 +184,7 @@ describe('ConnectionManager', () => {
     await settle()
 
     expect(document.body.textContent).toContain('Delete this connection?')
-    const confirm = document.querySelector('[data-test="confirm-delete"]') as HTMLElement
+    const confirm = document.querySelector('[data-test="confirm-accept"]') as HTMLElement
     confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     await settle()
 
@@ -284,11 +284,11 @@ describe('ConnectionManager delete dialog', () => {
     remove.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     await settle()
 
-    const dialogs = wrapper.findAllComponents({ name: 'VDialog' })
-    const dialog = dialogs[dialogs.length - 1]!
-    expect(dialog.props('modelValue')).toBe(true)
-    await dialog.vm.$emit('update:modelValue', false)
+    const confirm = wrapper.findComponent({ name: 'ConfirmDialog' })
+    expect(confirm.props('open')).toBe(true)
+    await confirm.findComponent({ name: 'AppDialog' }).vm.$emit('update:modelValue', false)
     await settle()
+    expect(confirm.props('open')).toBe(false)
     expect(apiStub.deleteConnection).not.toHaveBeenCalled()
   })
 })

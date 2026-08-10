@@ -101,3 +101,65 @@ describe('QueryTabs', () => {
     expect(tabs.activeTabId).toBe(first.id)
   })
 })
+
+describe('QueryTabs asking before it loses work', () => {
+  it('closes a tab that holds no change without a question', async () => {
+    const wrapper = mountWithPlugins(QueryTabs)
+    const tabs = useTabsStore()
+    tabs.add()
+    await settle()
+
+    await wrapper.find('[data-test="close-tab"]').trigger('click')
+
+    expect(tabs.tabs).toHaveLength(0)
+    expect(document.body.textContent).not.toContain('Close this tab?')
+  })
+
+  it('asks before it closes a tab whose changes are not saved', async () => {
+    const wrapper = mountWithPlugins(QueryTabs)
+    const tabs = useTabsStore()
+    const tab = tabs.add({ query: 'SELECT 1' })
+    tabs.setQuery(tab.id, 'SELECT 2')
+    await settle()
+
+    await wrapper.find('[data-test="close-tab"]').trigger('click')
+    await settle()
+    expect(tabs.tabs).toHaveLength(1)
+    expect(document.body.textContent).toContain('Close this tab?')
+
+    const confirm = document.querySelector('[data-test="confirm-accept"]') as HTMLElement
+    confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+    expect(tabs.tabs).toHaveLength(0)
+  })
+
+  it('keeps the tab when the question is refused', async () => {
+    const wrapper = mountWithPlugins(QueryTabs)
+    const tabs = useTabsStore()
+    const tab = tabs.add({ query: 'SELECT 1' })
+    tabs.setQuery(tab.id, 'SELECT 2')
+    await settle()
+
+    await wrapper.find('[data-test="close-tab"]').trigger('click')
+    await settle()
+    const cancel = document.querySelector('[data-test="confirm-cancel"]') as HTMLElement
+    cancel.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+
+    expect(tabs.tabs).toHaveLength(1)
+  })
+
+  it('asks the same question when the Delete key closes a changed tab', async () => {
+    const wrapper = mountWithPlugins(QueryTabs)
+    const tabs = useTabsStore()
+    const tab = tabs.add({ query: 'SELECT 1' })
+    tabs.setQuery(tab.id, 'SELECT 2')
+    await settle()
+
+    await wrapper.find('[data-test="query-tab"]').trigger('keydown', { key: 'Delete' })
+    await settle()
+
+    expect(tabs.tabs).toHaveLength(1)
+    expect(document.body.textContent).toContain('Close this tab?')
+  })
+})

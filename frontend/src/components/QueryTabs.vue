@@ -17,7 +17,7 @@
           :value="tab.id"
           class="query-tab"
           data-test="query-tab"
-          @keydown.delete.prevent="tabs.close(tab.id)"
+          @keydown.delete.prevent="askClose(tab)"
         >
           <span class="tab-title">{{ tab.title }}</span>
           <span v-if="tab.dirty" class="dirty-mark" aria-hidden="true">●</span>
@@ -27,7 +27,7 @@
             class="ml-2 close-mark"
             aria-hidden="true"
             data-test="close-tab"
-            @click.stop="tabs.close(tab.id)"
+            @click.stop="askClose(tab)"
           >
             mdi-close
           </v-icon>
@@ -86,15 +86,26 @@
         />
       </EmptyState>
     </div>
+
+    <ConfirmDialog
+      :open="pendingClose !== null"
+      title="Close this tab?"
+      :message="`The changes to ${pendingClose?.title ?? ''} are not saved, and closing the tab loses them.`"
+      confirm-text="Close the tab"
+      danger
+      @confirm="confirmClose"
+      @cancel="pendingClose = null"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import ConfirmDialog from './ConfirmDialog.vue'
 import EmptyState from './EmptyState.vue'
 import QueryView from './QueryView.vue'
 import { useConnectionsStore } from '@/stores/connections'
-import { useTabsStore } from '@/stores/tabs'
+import { useTabsStore, type QueryTab } from '@/stores/tabs'
 
 const tabs = useTabsStore()
 const connections = useConnectionsStore()
@@ -121,6 +132,29 @@ const emptyHint = computed(() =>
 
 function newTab(): void {
   tabs.add()
+}
+
+/** The tab that waits on an answer, while its changes are not saved. */
+const pendingClose = ref<QueryTab | null>(null)
+
+/**
+ * Closes one tab. A tab whose changes are not saved asks first, because the
+ * text of the statement is lost with it.
+ */
+function askClose(tab: QueryTab): void {
+  if (tab.dirty) {
+    pendingClose.value = tab
+    return
+  }
+  tabs.close(tab.id)
+}
+
+function confirmClose(): void {
+  const tab = pendingClose.value
+  pendingClose.value = null
+  if (tab) {
+    tabs.close(tab.id)
+  }
 }
 </script>
 

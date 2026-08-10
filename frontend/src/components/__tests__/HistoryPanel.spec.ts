@@ -104,6 +104,12 @@ describe('HistoryPanel', () => {
 
     await wrapper.find('[data-test="clear-history"]').trigger('click')
     await settle()
+    // The history is emptied only once the user answers the question.
+    expect(apiStub.clearHistory).not.toHaveBeenCalled()
+
+    const confirm = document.querySelector('[data-test="confirm-accept"]') as HTMLElement
+    confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
     expect(apiStub.clearHistory).toHaveBeenCalled()
   })
 
@@ -145,6 +151,11 @@ describe('HistoryPanel', () => {
 
     await wrapper.find('[data-test="delete-saved"]').trigger('click')
     await settle()
+    expect(apiStub.deleteSavedQuery).not.toHaveBeenCalled()
+
+    const confirm = document.querySelector('[data-test="confirm-accept"]') as HTMLElement
+    confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
     expect(apiStub.deleteSavedQuery).toHaveBeenCalledWith('q1')
   })
 
@@ -157,5 +168,41 @@ describe('HistoryPanel', () => {
     await wrapper.find('[data-test="history-filter"] input').setValue('SELECT 2')
     await wrapper.vm.$nextTick()
     expect(wrapper.findAll('[data-test="history-entry"]')).toHaveLength(1)
+  })
+})
+
+describe('HistoryPanel asking before it takes something away', () => {
+  it('keeps the history when the question is refused', async () => {
+    apiStub.getHistory.mockResolvedValue([entry])
+    const wrapper = mountWithPlugins(HistoryPanel)
+    await useHistoryStore().load()
+    await wrapper.vm.$nextTick()
+
+    await wrapper.find('[data-test="clear-history"]').trigger('click')
+    await settle()
+    const cancel = document.querySelector('[data-test="confirm-cancel"]') as HTMLElement
+    cancel.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+
+    expect(apiStub.clearHistory).not.toHaveBeenCalled()
+    const questions = wrapper.findAllComponents({ name: 'ConfirmDialog' })
+    expect(questions.every((question) => question.props('open') === false)).toBe(true)
+  })
+
+  it('keeps a saved statement when the question is refused', async () => {
+    apiStub.getSavedQueries.mockResolvedValue([savedQuery])
+    const wrapper = mountWithPlugins(HistoryPanel)
+    await useHistoryStore().load()
+    await wrapper.find('[data-test="mode-saved"]').trigger('click')
+    await wrapper.vm.$nextTick()
+
+    await wrapper.find('[data-test="delete-saved"]').trigger('click')
+    await settle()
+    expect(document.body.textContent).toContain('Daily count')
+    const cancel = document.querySelector('[data-test="confirm-cancel"]') as HTMLElement
+    cancel.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+
+    expect(apiStub.deleteSavedQuery).not.toHaveBeenCalled()
   })
 })

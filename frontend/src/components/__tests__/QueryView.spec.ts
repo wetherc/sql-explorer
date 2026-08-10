@@ -364,7 +364,7 @@ describe('QueryView', () => {
     await wrapper.vm.$nextTick()
     expect(apiStub.explainQuery).not.toHaveBeenCalled()
 
-    const confirm = document.querySelector('[data-test="plan-actual-confirm"]') as HTMLElement
+    const confirm = document.querySelector('[data-test="confirm-accept"]') as HTMLElement
     confirm.click()
     await settle()
     expect(apiStub.explainQuery).toHaveBeenCalledWith(expect.objectContaining({ kind: 'actual' }))
@@ -377,20 +377,14 @@ describe('QueryView', () => {
     ;(document.querySelector('[data-test="plan-actual"]') as HTMLElement).click()
     await settle()
 
-    const dialog = wrapper
-      .findAllComponents({ name: 'VDialog' })
-      .find((item) => item.props('modelValue'))!
-    const cancel = [...document.querySelectorAll('.v-btn')].find(
-      (button) => button.textContent?.trim() === 'Cancel',
-    ) as HTMLElement
-    cancel.click()
+    const confirm = wrapper
+      .findAllComponents({ name: 'ConfirmDialog' })
+      .find((item) => item.props('open'))!
+    const cancel = document.querySelector('[data-test="confirm-cancel"]') as HTMLElement
+    cancel.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     await settle()
     expect(apiStub.explainQuery).not.toHaveBeenCalled()
-
-    // The overlay reports the same close, and the dialog follows it.
-    await dialog.vm.$emit('update:modelValue', false)
-    await settle()
-    expect(dialog.props('modelValue')).toBe(false)
+    expect(confirm.props('open')).toBe(false)
   })
 
   it('holds no plan button for an engine that reads no plan', async () => {
