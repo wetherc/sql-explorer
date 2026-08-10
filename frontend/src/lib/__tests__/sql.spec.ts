@@ -7,9 +7,11 @@ import {
   formatterDialect,
   isPlainIdentifier,
   quoteIdentifier,
+  qualifierBefore,
   quoteIfNeeded,
   statementAt,
   statementBounds,
+  tableAliases,
   wordBefore,
   type SchemaIndex,
 } from '@/lib/sql'
@@ -205,5 +207,133 @@ describe('completionsFor with a dialect that quotes differently', () => {
     expect(completionsFor('my c', index, Dialect.MySql)[0]?.insertText).toBe('`my column`')
     expect(completionsFor('my s', index, Dialect.Postgres)[0]?.insertText).toBe('"my schema"')
     expect(completionsFor('my d', index, Dialect.Sqlite)[0]?.insertText).toBe('"my db"')
+  })
+})
+
+describe('qualifierBefore', () => {
+  it('reads the name in front of the full stop at the cursor', () => {
+    expect(qualifierBefore('SELECT o.', 9)).toBe('o')
+    expect(qualifierBefore('SELECT o.tot', 12)).toBe('o')
+    expect(qualifierBefore('SELECT [Sales].[dbo].', 21)).toBe('dbo')
+    expect(qualifierBefore('SELECT "public".', 16)).toBe('public')
+    expect(qualifierBefore('SELECT `shop`.', 14)).toBe('shop')
+  })
+
+  it('gives nothing when no full stop stands before the cursor', () => {
+    expect(qualifierBefore('SELECT tot', 10)).toBe('')
+    expect(qualifierBefore('', 0)).toBe('')
+    expect(qualifierBefore('SELECT o.tot', 99)).toBe('o')
+  })
+
+  it('gives nothing when the quoted name never opened', () => {
+    expect(qualifierBefore('SELECT dbo].', 12)).toBe('')
+  })
+})
+
+describe('tableAliases', () => {
+  it('reads the alias of a relation, with and without the word AS', () => {
+    const aliases = tableAliases(
+      'SELECT * FROM Sales.dbo.Orders AS o JOIN Customers c ON c.id = o.customer',
+      Dialect.MsSql,
+    )
+    expect(aliases.get('o')).toBe('Orders')
+    expect(aliases.get('c')).toBe('Customers')
+    // The name of a relation answers for itself as well.
+    expect(aliases.get('orders')).toBe('Orders')
+    expect(aliases.get('customers')).toBe('Customers')
+  })
+
+  it('reads a quoted name and the brackets of MS SQL Server', () => {
+    const aliases = tableAliases('SELECT * FROM [Sales].[dbo].[Order Lines] AS l', Dialect.MsSql)
+    expect(aliases.get('l')).toBe('Order Lines')
+    expect(tableAliases('SELECT * FROM "public"."orders" o', Dialect.Postgres).get('o')).toBe(
+      'orders',
+    )
+  })
+
+  it('steps over the comments and the literals', () => {
+    const aliases = tableAliases(
+      "-- FROM nothing\n/* FROM nothing */ SELECT 'FROM x' FROM orders o",
+      Dialect.Postgres,
+    )
+    expect([...aliases.keys()]).toEqual(['orders', 'o'])
+  })
+
+  it('leaves out a clause that names no relation', () => {
+    expect(tableAliases('SELECT * FROM', Dialect.Postgres).size).toBe(0)
+    expect(tableAliases('SELECT * FROM (SELECT 1) AS x', Dialect.Postgres).size).toBe(0)
+  })
+
+  it('stops the name of a relation at the next word of the clause', () => {
+    const aliases = tableAliases('SELECT * FROM orders WHERE id = 1', Dialect.Postgres)
+    expect([...aliases.keys()]).toEqual(['orders'])
+    const joined = tableAliases('SELECT * FROM a JOIN b ON a.id = b.id', Dialect.Postgres)
+    expect([...joined.keys()]).toEqual(['a', 'b'])
+  })
+
+  it('reads a relation that stands at the end of the statement', () => {
+    const aliases = tableAliases('SELECT * FROM orders', Dialect.Postgres)
+    expect(aliases.get('orders')).toBe('orders')
+  })
+
+  it('steps over a quoted name that stands outside a clause', () => {
+    const aliases = tableAliases('SELECT "id" FROM orders o', Dialect.Postgres)
+    expect(aliases.get('o')).toBe('orders')
+  })
+
+  it('reads a name of two parts as the last part', () => {
+    const aliases = tableAliases('SELECT * FROM shop.orders', Dialect.MySql)
+    expect(aliases.get('orders')).toBe('orders')
+  })
+})
+
+describe('completionsFor with a qualifier', () => {
+  const index = {
+    databases: ['Sales'],
+    schemas: ['dbo', 'staging'],
+    tables: [
+      { name: 'Orders', qualifier: 'Sales.dbo' },
+      { name: 'Orders', qualifier: 'Sales.staging' },
+    ],
+    columns: [
+      { name: 'total', table: 'Orders', qualifier: 'Sales.dbo', dataType: 'money' },
+      { name: 'raw', table: 'Orders', qualifier: 'Sales.staging', dataType: 'text' },
+      { name: 'note', table: 'Customers', qualifier: 'Sales.dbo', dataType: 'text' },
+    ],
+  }
+
+  it('gives the columns of the relation an alias stands for', () => {
+    const aliases = new Map([['o', 'Orders']])
+    const items = completionsFor('', index, Dialect.MsSql, { qualifier: 'o', aliases })
+    expect(items.map((item) => item.label)).toEqual(['total', 'raw'])
+  })
+
+  it('gives the columns of a relation the qualifier names itself', () => {
+    const items = completionsFor('', index, Dialect.MsSql, { qualifier: 'Customers' })
+    expect(items.map((item) => item.label)).toEqual(['note'])
+  })
+
+  it('keeps the prefix while a qualifier stands', () => {
+    const items = completionsFor('no', index, Dialect.MsSql, { qualifier: 'Customers' })
+    expect(items.map((item) => item.label)).toEqual(['note'])
+    expect(completionsFor('zz', index, Dialect.MsSql, { qualifier: 'Customers' })).toEqual([])
+  })
+
+  it('gives the relations of a schema when the qualifier names one', () => {
+    const items = completionsFor('', { ...index, columns: [] }, Dialect.MsSql, {
+      qualifier: 'staging',
+    })
+    expect(items.map((item) => item.detail)).toEqual(['Sales.staging'])
+  })
+
+  it('puts the columns of the relations of the statement in front', () => {
+    const aliases = new Map([['customers', 'Customers']])
+    const items = completionsFor('', index, Dialect.MsSql, { aliases })
+    expect(items[0]?.label).toBe('note')
+  })
+
+  it('offers every name when the statement holds no relation', () => {
+    const items = completionsFor('', index, Dialect.MsSql, { qualifier: '  ' })
+    expect(items.map((item) => item.label).slice(0, 3)).toEqual(['total', 'raw', 'note'])
   })
 })

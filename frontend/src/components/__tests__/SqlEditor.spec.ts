@@ -3,6 +3,7 @@ import { mount } from '@vue/test-utils'
 import SqlEditor from '@/components/SqlEditor.vue'
 import { monaco } from '@/plugins/monaco'
 import type { editor as MonacoEditor, languages } from 'monaco-editor'
+import { disposeSqlCompletions } from '@/lib/completion'
 import { emptySchemaIndex } from '@/lib/sql'
 import { Dialect } from '@/types/api'
 
@@ -45,6 +46,7 @@ function stubEditor(value = 'SELECT 1;\nSELECT 2') {
       contentHandler()
     }),
     getModel: vi.fn(() => ({
+      uri: { toString: () => 'model:test' },
       getValue: () => value,
       // The whole range gives the whole text; any other range stands for
       // the selection of the user.
@@ -88,6 +90,9 @@ describe('SqlEditor', () => {
     vi.mocked(monaco.languages.registerCompletionItemProvider).mockReturnValue({
       dispose: vi.fn(),
     })
+    // The provider belongs to the language and not to one editor, so each
+    // test starts without one.
+    disposeSqlCompletions()
   })
 
   it('builds the editor with the settings it was given', () => {
@@ -198,7 +203,7 @@ describe('SqlEditor', () => {
     )
   })
 
-  it('gives the completions the index holds', () => {
+  it('tells the provider of the application which names it offers', () => {
     const stub = stubEditor('sel')
     vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
     mount(SqlEditor, {
@@ -227,29 +232,25 @@ describe('SqlEditor', () => {
     expect(suggestions[0]?.kind).toBe(monaco.languages.CompletionItemKind.Keyword)
   })
 
-  it('marks each kind of name with its own icon', () => {
-    const stub = stubEditor('a')
+  it('registers the provider once, however many editors open', () => {
+    const first = stubEditor('a')
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(first.editor))
+    mount(SqlEditor, { props: { modelValue: 'a' } })
+    mount(SqlEditor, { props: { modelValue: 'a' } })
+    expect(vi.mocked(monaco.languages.registerCompletionItemProvider)).toHaveBeenCalledTimes(1)
+  })
+
+  it('offers nothing of its own once the editor is gone', () => {
+    const stub = stubEditor('sel')
     vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
-    mount(SqlEditor, {
+    const wrapper = mount(SqlEditor, {
       props: {
-        modelValue: 'a',
-        schemaIndex: {
-          databases: ['adb'],
-          schemas: ['aschema'],
-          tables: [{ name: 'atable', qualifier: 'q' }],
-          columns: [{ name: 'acolumn', table: 'atable', qualifier: '', dataType: 'int' }],
-        },
+        modelValue: 'sel',
+        schemaIndex: { ...emptySchemaIndex(), tables: [{ name: 'sales', qualifier: 'public' }] },
       },
     })
-    const kinds = suggestionsOf(stub, 2)
-      .slice(0, 4)
-      .map((item) => item.kind)
-    expect(kinds).toEqual([
-      monaco.languages.CompletionItemKind.Field,
-      monaco.languages.CompletionItemKind.Struct,
-      monaco.languages.CompletionItemKind.Folder,
-      monaco.languages.CompletionItemKind.Module,
-    ])
+    wrapper.unmount()
+    expect(suggestionsOf(stub, 4).map((item) => item.label)).not.toContain('sales')
   })
 
   it('offers the actions a parent can call', () => {
@@ -348,14 +349,10 @@ describe('SqlEditor', () => {
 
   it('closes the editor when the view goes away', () => {
     const stub = stubEditor()
-    const dispose = vi.fn()
     vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
-    vi.mocked(monaco.languages.registerCompletionItemProvider).mockReturnValue({ dispose })
-    void dispose
     const wrapper = mount(SqlEditor, { props: { modelValue: '' } })
     wrapper.unmount()
     expect(stub.editor.dispose).toHaveBeenCalled()
-    expect(dispose).toHaveBeenCalled()
   })
 
   it('gives the text it was given when no editor was built', () => {
@@ -376,6 +373,9 @@ describe('SqlEditor settings', () => {
     vi.mocked(monaco.languages.registerCompletionItemProvider).mockReturnValue({
       dispose: vi.fn(),
     })
+    // The provider belongs to the language and not to one editor, so each
+    // test starts without one.
+    disposeSqlCompletions()
   })
 
   it('passes every setting on to the editor when one changes', async () => {

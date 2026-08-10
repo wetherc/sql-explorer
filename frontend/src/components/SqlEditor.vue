@@ -5,7 +5,8 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { monaco, registerMonacoThemes } from '@/plugins/monaco'
-import { completionsFor, formatSql, statementAt, wordBefore, type SchemaIndex } from '@/lib/sql'
+import { clearCompletionSource, installSqlCompletions, setCompletionSource } from '@/lib/completion'
+import { emptySchemaIndex, formatSql, statementAt, type SchemaIndex } from '@/lib/sql'
 import { Dialect } from '@/types/api'
 
 const props = withDefaults(
@@ -38,7 +39,8 @@ const emit = defineEmits<{
 
 const host = ref<HTMLElement | null>(null)
 let editor: monaco.editor.IStandaloneCodeEditor | null = null
-let completionProvider: monaco.IDisposable | null = null
+/** The address of the model of this editor, which keys its own names. */
+let modelUri: string | null = null
 /** True while the editor writes into the model itself. */
 let applyingExternalValue = false
 
@@ -91,51 +93,22 @@ function formatText(): void {
   }
 }
 
-function registerCompletions() {
-  completionProvider?.dispose()
-  completionProvider = monaco.languages.registerCompletionItemProvider('sql', {
-    provideCompletionItems: (model: monaco.editor.ITextModel, position: monaco.Position) => {
-      const offset = model.getOffsetAt(position)
-      const prefix = wordBefore(model.getValue(), offset)
-      const word = model.getWordUntilPosition(position)
-      const range = {
-        startLineNumber: position.lineNumber,
-        endLineNumber: position.lineNumber,
-        startColumn: word.startColumn,
-        endColumn: word.endColumn,
-      }
-      const index: SchemaIndex = props.schemaIndex ?? {
-        databases: [],
-        schemas: [],
-        tables: [],
-        columns: [],
-      }
-      const kinds = monaco.languages.CompletionItemKind
-      const kindFor = (kind: string): monaco.languages.CompletionItemKind => {
-        switch (kind) {
-          case 'database':
-            return kinds.Module
-          case 'schema':
-            return kinds.Folder
-          case 'table':
-            return kinds.Struct
-          case 'column':
-            return kinds.Field
-          default:
-            return kinds.Keyword
-        }
-      }
-      return {
-        suggestions: completionsFor(prefix, index, props.dialect).map((item) => ({
-          label: item.label,
-          detail: item.detail,
-          insertText: item.insertText,
-          kind: kindFor(item.kind),
-          range,
-        })),
-      }
-    },
-  })
+/**
+ * Tells the provider of the application which names this editor offers. The
+ * provider itself is registered once for the SQL language, so five open tabs
+ * still give one list of each name.
+ */
+function registerCompletions(): void {
+  const uri = editor?.getModel()?.uri?.toString()
+  if (!uri) {
+    return
+  }
+  modelUri = uri
+  setCompletionSource(modelUri, () => ({
+    index: props.schemaIndex ?? emptySchemaIndex(),
+    dialect: props.dialect,
+  }))
+  installSqlCompletions()
 }
 
 onMounted(() => {
@@ -157,6 +130,9 @@ onMounted(() => {
     renderLineHighlight: 'all',
     tabSize: 2,
     padding: { top: 8, bottom: 8 },
+    // The names of the schema and the keywords are the whole list, so the
+    // words of the document add nothing but noise.
+    wordBasedSuggestions: 'off',
   })
   editor = instance
 
@@ -219,8 +195,10 @@ watch(
 )
 
 onBeforeUnmount(() => {
-  completionProvider?.dispose()
-  completionProvider = null
+  if (modelUri) {
+    clearCompletionSource(modelUri)
+    modelUri = null
+  }
   editor?.dispose()
   editor = null
 })

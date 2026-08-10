@@ -219,22 +219,284 @@ export function emptySchemaIndex(): SchemaIndex {
   return { databases: [], schemas: [], tables: [], columns: [] }
 }
 
+/** The words that end the name of a relation in a FROM or a JOIN clause. */
+const CLAUSE_WORDS = new Set([
+  'AND',
+  'CROSS',
+  'EXCEPT',
+  'FETCH',
+  'FOR',
+  'FULL',
+  'GROUP',
+  'HAVING',
+  'INNER',
+  'INTERSECT',
+  'JOIN',
+  'LATERAL',
+  'LEFT',
+  'LIMIT',
+  'OFFSET',
+  'ON',
+  'OR',
+  'ORDER',
+  'OUTER',
+  'RIGHT',
+  'SELECT',
+  'SET',
+  'UNION',
+  'USING',
+  'WHERE',
+  'WINDOW',
+])
+
+/** One word of a statement, with the quotes of the dialect removed. */
+interface Token {
+  /** The text of the word, without the quotes it carried. */
+  text: string
+  /** True when the word carried quotes, so it is a name and not a keyword. */
+  quoted: boolean
+}
+
+/**
+ * Splits a statement into words, names and single characters. The reader
+ * steps over the comments and over the string literals, and it removes the
+ * quotes of a name, so the caller reads a name as the user wrote it.
+ */
+function tokenize(statement: string, dialect: Dialect): Token[] {
+  const tokens: Token[] = []
+  const chars = [...statement]
+  let index = 0
+
+  const closingFor = (open: string): string => (open === '[' ? ']' : open)
+
+  while (index < chars.length) {
+    const character = chars[index] as string
+    const next = chars[index + 1]
+
+    if (character === '-' && next === '-') {
+      while (index < chars.length && chars[index] !== '\n') {
+        index += 1
+      }
+      continue
+    }
+    if (character === '/' && next === '*') {
+      index += 2
+      while (index < chars.length && !(chars[index] === '*' && chars[index + 1] === '/')) {
+        index += 1
+      }
+      index += 2
+      continue
+    }
+    if (character === "'") {
+      index += 1
+      while (index < chars.length && chars[index] !== "'") {
+        index += 1
+      }
+      index += 1
+      continue
+    }
+    if (
+      character === '"' ||
+      character === '`' ||
+      (character === '[' && dialect === Dialect.MsSql)
+    ) {
+      const closing = closingFor(character)
+      index += 1
+      let name = ''
+      while (index < chars.length && chars[index] !== closing) {
+        name += chars[index]
+        index += 1
+      }
+      index += 1
+      tokens.push({ text: name, quoted: true })
+      continue
+    }
+    if (/[A-Za-z0-9_$#@]/.test(character)) {
+      let word = ''
+      while (index < chars.length && /[A-Za-z0-9_$#@]/.test(chars[index] as string)) {
+        word += chars[index]
+        index += 1
+      }
+      tokens.push({ text: word, quoted: false })
+      continue
+    }
+    if (!/\s/.test(character)) {
+      tokens.push({ text: character, quoted: false })
+    }
+    index += 1
+  }
+  return tokens
+}
+
+/** True when a token ends the name of a relation. */
+function endsTheName(token: Token): boolean {
+  if (token.quoted) {
+    return false
+  }
+  return CLAUSE_WORDS.has(token.text.toUpperCase()) || /^[(),;]$/.test(token.text)
+}
+
+/**
+ * Reads the name that stands in front of the full stop at the cursor.
+ *
+ * `SELECT o.` gives `o`, and `SELECT [Sales].[dbo].` gives `dbo`, because the
+ * name closest to the cursor is the one that decides the list. A cursor that
+ * does not follow a full stop gives an empty text.
+ */
+export function qualifierBefore(text: string, offset: number): string {
+  const position = Math.max(0, Math.min(offset, text.length))
+  let head = text.slice(0, position)
+  // The word the user is typing stands after the full stop, so it goes first.
+  head = head.slice(0, head.length - wordBefore(head, head.length).length)
+  if (!head.endsWith('.')) {
+    return ''
+  }
+  head = head.slice(0, -1)
+
+  const closing = head.endsWith(']')
+    ? '['
+    : head.endsWith('"')
+      ? '"'
+      : head.endsWith('`')
+        ? '`'
+        : ''
+  if (closing !== '') {
+    const start = head.lastIndexOf(closing, head.length - 2)
+    return start < 0 ? '' : head.slice(start + 1, head.length - 1)
+  }
+  return wordBefore(head, head.length)
+}
+
+/**
+ * Reads the FROM clause and the JOIN clauses of a statement and returns the
+ * relation that each alias stands for. The name of a relation without an
+ * alias is a key of its own, so `FROM Sales.dbo.Orders` answers for `Orders`
+ * as well.
+ */
+export function tableAliases(statement: string, dialect: Dialect): Map<string, string> {
+  const aliases = new Map<string, string>()
+  const tokens = tokenize(statement, dialect)
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const word = tokens[index] as Token
+    if (word.quoted) {
+      continue
+    }
+    const upper = word.text.toUpperCase()
+    if (upper !== 'FROM' && upper !== 'JOIN') {
+      continue
+    }
+
+    // The name of the relation, which can carry a database and a schema.
+    const parts: string[] = []
+    let cursor = index + 1
+    while (cursor < tokens.length && !endsTheName(tokens[cursor] as Token)) {
+      const part = tokens[cursor] as Token
+      if (part.text === '.') {
+        cursor += 1
+        continue
+      }
+      if (parts.length > 0 && (tokens[cursor - 1] as Token).text !== '.') {
+        break
+      }
+      parts.push(part.text)
+      cursor += 1
+    }
+    if (parts.length === 0) {
+      continue
+    }
+    const relation = parts[parts.length - 1] as string
+    aliases.set(relation.toLowerCase(), relation)
+
+    // The alias, with or without the word AS in front of it.
+    let alias = tokens[cursor] as Token | undefined
+    if (alias && !alias.quoted && alias.text.toUpperCase() === 'AS') {
+      cursor += 1
+      alias = tokens[cursor] as Token | undefined
+    }
+    if (alias && !endsTheName(alias)) {
+      aliases.set(alias.text.toLowerCase(), relation)
+    }
+    // The loop steps forward by one, and the word at the cursor may itself
+    // start the next clause, so the cursor goes back by one here.
+    index = Math.max(index, cursor - 1)
+  }
+  return aliases
+}
+
+/** What the statement around the cursor tells the completion list. */
+export interface CompletionContext {
+  /** The name in front of the full stop at the cursor, when there is one. */
+  qualifier?: string
+  /** The relation each alias of the statement stands for. */
+  aliases?: Map<string, string>
+}
+
 /**
  * Builds the list of completions for a prefix. The names of the objects
  * come first, because a name is what the user usually wants; keywords
  * follow.
+ *
+ * A qualifier gives the columns of the relation it names and nothing else. A
+ * statement without a qualifier puts the columns of its own relations in
+ * front of the other names.
  */
 export function completionsFor(
   prefix: string,
   index: SchemaIndex,
   dialect: Dialect,
+  context: CompletionContext = {},
 ): CompletionItem[] {
   const lower = prefix.toLowerCase()
   const matches = (name: string) => lower === '' || name.toLowerCase().startsWith(lower)
+  const aliases = context.aliases ?? new Map<string, string>()
 
   const items: CompletionItem[] = []
 
-  for (const column of index.columns) {
+  const qualifier = (context.qualifier ?? '').trim()
+  if (qualifier !== '') {
+    // The qualifier names an alias, a relation, a schema or a database.
+    const relation = aliases.get(qualifier.toLowerCase()) ?? qualifier
+    const wanted = relation.toLowerCase()
+    for (const column of index.columns) {
+      const place = column.qualifier.toLowerCase().split('.')
+      if (
+        matches(column.name) &&
+        (column.table.toLowerCase() === wanted || place.includes(wanted))
+      ) {
+        items.push({
+          label: column.name,
+          detail: `${column.dataType} in ${column.table}`,
+          insertText: quoteIfNeeded(column.name, dialect),
+          kind: 'column',
+        })
+      }
+    }
+    if (items.length > 0) {
+      return items
+    }
+    // The qualifier names a database or a schema whose columns are not held,
+    // so the relations of that place are offered instead.
+    for (const table of index.tables) {
+      if (matches(table.name) && table.qualifier.toLowerCase().split('.').includes(wanted)) {
+        items.push({
+          label: table.name,
+          detail: table.qualifier,
+          insertText: quoteIfNeeded(table.name, dialect),
+          kind: 'table',
+        })
+      }
+    }
+    return items
+  }
+
+  // The columns of the relations of the statement come first.
+  const inStatement = (column: IndexedColumn) => aliases.has(column.table.toLowerCase())
+  const columns = [
+    ...index.columns.filter(inStatement),
+    ...index.columns.filter((column) => !inStatement(column)),
+  ]
+  for (const column of columns) {
     if (matches(column.name)) {
       items.push({
         label: column.name,
