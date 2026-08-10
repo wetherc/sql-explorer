@@ -182,6 +182,116 @@ describe('DbExplorer', () => {
     expect(apiStub.executeQuery).not.toHaveBeenCalled()
   })
 
+  it('puts the statement of an object in a new tab without running it', async () => {
+    apiStub.scriptObject.mockResolvedValue('SELECT\n    [id]\nFROM [dbo].[orders];')
+    const wrapper = await mountExplorer()
+    const explorer = useExplorerStore()
+    explorer.addRoot('c1')
+    await wrapper.vm.$nextTick()
+
+    await wrapper.findComponent({ name: 'ExplorerTree' }).vm.$emit('context', {
+      event: new MouseEvent('contextmenu'),
+      node: {
+        key: 'v',
+        label: 'orders',
+        kind: 'view',
+        icon: 'mdi-table-eye',
+        loading: false,
+        loaded: false,
+        connectionId: 'c1',
+        database: 'Sales',
+        schema: 'dbo',
+        table: 'orders',
+      },
+    })
+    await settle()
+
+    menuItem('menu-script-select')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+
+    expect(apiStub.scriptObject).toHaveBeenCalledWith({
+      connectionId: 'c1',
+      database: 'Sales',
+      schemaName: 'dbo',
+      tableName: 'orders',
+      kind: 'view',
+      scriptKind: 'select',
+    })
+    expect(useTabsStore().tabs[0]?.query).toBe('SELECT\n    [id]\nFROM [dbo].[orders];')
+    expect(useTabsStore().tabs[0]?.title).toBe('orders (select)')
+    expect(apiStub.executeQuery).not.toHaveBeenCalled()
+  })
+
+  it('offers the four forms and names a table as a table', async () => {
+    apiStub.scriptObject.mockResolvedValue('CREATE TABLE t ();')
+    const wrapper = await mountExplorer()
+    const explorer = useExplorerStore()
+    explorer.addRoot('c1')
+    await wrapper.vm.$nextTick()
+
+    await wrapper.findComponent({ name: 'ExplorerTree' }).vm.$emit('context', {
+      event: new MouseEvent('contextmenu'),
+      node: {
+        key: 't',
+        label: 'orders',
+        kind: 'table',
+        icon: 'mdi-table',
+        loading: false,
+        loaded: false,
+        connectionId: 'c1',
+        table: 'orders',
+      },
+    })
+    await settle()
+
+    for (const form of ['create', 'select', 'insert', 'update']) {
+      expect(menuItem(`menu-script-${form}`)).toBeTruthy()
+    }
+
+    menuItem('menu-script-create')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+
+    expect(apiStub.scriptObject).toHaveBeenCalledWith({
+      connectionId: 'c1',
+      database: null,
+      schemaName: null,
+      tableName: 'orders',
+      kind: 'table',
+      scriptKind: 'create',
+    })
+  })
+
+  it('reports a failure to build the statement of an object', async () => {
+    apiStub.scriptObject.mockRejectedValue({
+      kind: 'configuration',
+      message: 'no column',
+      detail: null,
+    })
+    const wrapper = await mountExplorer()
+    const explorer = useExplorerStore()
+    explorer.addRoot('c1')
+    await wrapper.vm.$nextTick()
+
+    await wrapper.findComponent({ name: 'ExplorerTree' }).vm.$emit('context', {
+      event: new MouseEvent('contextmenu'),
+      node: {
+        key: 't',
+        label: 'orders',
+        kind: 'table',
+        icon: 'mdi-table',
+        loading: false,
+        loaded: false,
+        connectionId: 'c1',
+      },
+    })
+    await settle()
+
+    menuItem('menu-script-insert')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+
+    expect(useUiStore().notices.some((notice) => notice.message.includes('no column'))).toBe(true)
+  })
+
   it('reports a failure to build the preview statement', async () => {
     apiStub.previewQuery.mockRejectedValue({ kind: 'notConnected', message: 'gone', detail: null })
     const wrapper = await mountExplorer()

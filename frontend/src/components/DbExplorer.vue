@@ -62,6 +62,16 @@
           data-test="menu-preview"
           @click="previewRows(menuNode)"
         />
+        <template v-if="isRelation(menuNode)">
+          <v-list-item
+            v-for="form of scriptForms"
+            :key="form.kind"
+            prepend-icon="mdi-script-text-outline"
+            :title="form.title"
+            :data-test="`menu-script-${form.kind}`"
+            @click="scriptHere(menuNode, form.kind)"
+          />
+        </template>
         <v-list-item
           v-if="isRelation(menuNode)"
           prepend-icon="mdi-format-list-bulleted"
@@ -100,6 +110,7 @@ import { computed, reactive, ref } from 'vue'
 import ExplorerTree from './ExplorerTree.vue'
 import { api } from '@/lib/api'
 import { isExpandable, type ExplorerNode } from '@/stores/explorer'
+import type { ScriptKind } from '@/types/api'
 import { useConnectionsStore } from '@/stores/connections'
 import { useExplorerStore } from '@/stores/explorer'
 import { useQueryStore } from '@/stores/query'
@@ -195,6 +206,42 @@ async function previewRows(node: ExplorerNode): Promise<void> {
     if (settings.settings.autoRunPreview) {
       await queries.execute(tab.id, node.connectionId, statement)
     }
+  } catch (error) {
+    ui.reportError(error)
+  }
+}
+
+/**
+ * The four statements the menu offers for a table or a view. The CREATE form
+ * says "draft" for an engine that keeps no text of its own, and the backend
+ * decides which of the two the user gets.
+ */
+const scriptForms: { kind: ScriptKind; title: string }[] = [
+  { kind: 'create', title: 'Script as CREATE' },
+  { kind: 'select', title: 'Script as SELECT' },
+  { kind: 'insert', title: 'Script as INSERT' },
+  { kind: 'update', title: 'Script as UPDATE' },
+]
+
+/**
+ * Puts the statement of one object in a new tab. The tab is never run,
+ * because an INSERT or an UPDATE would change data.
+ */
+async function scriptHere(node: ExplorerNode, scriptKind: ScriptKind): Promise<void> {
+  try {
+    const statement = await api.scriptObject({
+      connectionId: node.connectionId,
+      database: node.database ?? null,
+      schemaName: node.schema ?? null,
+      tableName: node.table ?? node.label,
+      kind: node.kind === 'view' ? 'view' : 'table',
+      scriptKind,
+    })
+    tabs.add({
+      connectionId: node.connectionId,
+      query: statement,
+      title: `${node.label} (${scriptKind})`,
+    })
   } catch (error) {
     ui.reportError(error)
   }

@@ -180,6 +180,19 @@ describe('api', () => {
     expect(invoke).toHaveBeenCalledWith('preview_query', expect.objectContaining({ limit: null }))
   })
 
+  it('sends the request of a statement as one record', async () => {
+    const request = {
+      connectionId: 'c1',
+      database: 'db',
+      schemaName: 'dbo',
+      tableName: 't',
+      kind: 'table' as const,
+      scriptKind: 'insert' as const,
+    }
+    await api.scriptObject(request)
+    expect(invoke).toHaveBeenCalledWith('script_object', { request })
+  })
+
   it('passes the payload of a state event to the handler', async () => {
     const handler = vi.fn()
     await api.onConnectionStatus(handler)

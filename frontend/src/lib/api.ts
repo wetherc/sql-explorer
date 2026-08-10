@@ -14,6 +14,7 @@ import type {
   SavedConnection,
   SavedQuery,
   SchemaRef,
+  ScriptKind,
   TableRef,
 } from '@/types/api'
 
@@ -83,6 +84,21 @@ export const api = {
     tableName: string,
   ): Promise<ColumnRef[]> {
     return invoke('list_columns', { connectionId, database, schemaName, tableName })
+  },
+
+  /**
+   * Asks the backend for one statement of an object of the tree. The kinds
+   * are `create`, `select`, `insert` and `update`.
+   */
+  scriptObject(request: {
+    connectionId: string
+    database: string | null
+    schemaName: string | null
+    tableName: string
+    kind: 'table' | 'view'
+    scriptKind: ScriptKind
+  }): Promise<string> {
+    return invoke('script_object', { request })
   },
 
   previewQuery(request: {

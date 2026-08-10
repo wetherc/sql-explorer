@@ -16,6 +16,7 @@ export function makeApiStub() {
     listTables: vi.fn(),
     listColumns: vi.fn(),
     previewQuery: vi.fn(),
+    scriptObject: vi.fn(),
     quoteIdentifier: vi.fn(),
     getConnections: vi.fn(),
     saveConnection: vi.fn(),

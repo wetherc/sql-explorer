@@ -178,6 +178,15 @@ export interface TableRef {
   kind: TableKind
 }
 
+/** The statement that the explorer builds for one object. */
+export const ScriptKind = {
+  Create: 'create',
+  Select: 'select',
+  Insert: 'insert',
+  Update: 'update',
+} as const
+export type ScriptKind = (typeof ScriptKind)[keyof typeof ScriptKind]
+
 export interface ColumnRef {
   name: string
   dataType: string
