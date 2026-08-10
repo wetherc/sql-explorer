@@ -11,7 +11,7 @@
 
     <template v-if="state && !state.running && state.results.length > 0">
       <v-divider vertical />
-      <div data-test="status-rows">{{ rowsLabel }}</div>
+      <div data-test="status-rows">{{ formatRowCount(totalRows(state.results)) }}</div>
       <v-divider vertical />
       <div data-test="status-elapsed">{{ formatDuration(state.elapsedMs) }}</div>
     </template>
@@ -84,10 +84,6 @@ const stateLabel = computed(() => {
   }
   return 'Ready'
 })
-
-const rowsLabel = computed(() =>
-  state.value ? formatRowCount(totalRows(state.value.results)) : '',
-)
 
 const dialectLabel = computed(() => {
   const id = connectionId.value

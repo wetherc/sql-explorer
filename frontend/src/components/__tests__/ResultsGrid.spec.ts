@@ -173,3 +173,57 @@ describe('ResultsGrid', () => {
     expect(document.body.textContent).toContain('1')
   })
 })
+
+describe('ResultsGrid inspection dialog', () => {
+  it('copies the value it shows and then closes', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(globalThis.navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    await wrapper.findAll('[data-test="grid-cell"]')[1]!.trigger('click')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    const buttons = [...document.querySelectorAll('.v-card-actions .v-btn')]
+    buttons
+      .find((button) => button.textContent?.includes('Copy'))
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await Promise.resolve()
+    expect(writeText).toHaveBeenCalledWith('Grace')
+
+    buttons
+      .find((button) => button.textContent?.includes('Close'))
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    wrapper.unmount()
+  })
+
+  it('sorts a row that is shorter than the header', async () => {
+    const ragged = {
+      columns: [
+        { name: 'a', typeName: 'int' },
+        { name: 'b', typeName: 'int' },
+      ],
+      rows: [[2], [1, 5]],
+      truncated: false,
+    }
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: ragged } })
+    await wrapper.findAll('[data-test="grid-header"]')[1]!.trigger('click')
+    expect(wrapper.findAll('[data-test="grid-row"]')).toHaveLength(2)
+  })
+})
+
+describe('ResultsGrid dialog state', () => {
+  it('closes the inspection when the overlay reports it', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    await wrapper.findAll('[data-test="grid-cell"]')[1]!.trigger('click')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    const dialog = wrapper.findComponent({ name: 'VDialog' })
+    await dialog.vm.$emit('update:modelValue', false)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(dialog.props('modelValue')).toBe(false)
+  })
+})

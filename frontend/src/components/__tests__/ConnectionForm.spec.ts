@@ -258,3 +258,290 @@ describe('ConnectionForm', () => {
     expect(blank.text()).toContain('Edit connection')
   })
 })
+
+describe('ConnectionForm advanced options', () => {
+  beforeEach(() => {
+    Object.values(apiStub).forEach((fn) => fn.mockReset())
+    apiStub.getConnections.mockResolvedValue([])
+    apiStub.listActiveConnections.mockResolvedValue([])
+  })
+
+  /** Opens the panel that holds the options a user rarely changes. */
+  async function openAdvanced(wrapper: Awaited<ReturnType<typeof mountForm>>) {
+    await wrapper.find('[data-test="advanced-panel"] .v-expansion-panel-title').trigger('click')
+    await settle()
+    return wrapper
+  }
+
+  it('shows the transport and instance options of MS SQL Server', async () => {
+    const wrapper = await openAdvanced(await mountForm())
+    expect(wrapper.find('[data-test="tls-select"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="instance-field"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="integrated-switch"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="connection-url-field"]').exists()).toBe(true)
+  })
+
+  it('offers a certificate authority file only when the certificate is checked', async () => {
+    const wrapper = await openAdvanced(await mountForm())
+    expect(wrapper.text()).toContain('Certificate authority file')
+
+    const tlsSelect = wrapper
+      .findAllComponents({ name: 'VSelect' })
+      .find((item) => item.attributes('data-test') === 'tls-select')
+    await tlsSelect?.vm.$emit('update:modelValue', TlsMode.Disable)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.text()).not.toContain('Certificate authority file')
+  })
+
+  it('hides the transport options for an engine that has none', async () => {
+    const wrapper = await openAdvanced(
+      await mountForm(connectionFixture({ dbType: DbType.Sqlite })),
+    )
+    expect(wrapper.find('[data-test="tls-select"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="instance-field"]').exists()).toBe(false)
+  })
+
+  it('keeps the timeouts, the row limit and the folder', async () => {
+    apiStub.saveConnection.mockResolvedValue(undefined)
+    const wrapper = await openAdvanced(await mountForm())
+
+    const numbers = wrapper.findAll('input[type="number"]')
+    await numbers[numbers.length - 3]!.setValue('30')
+    await numbers[numbers.length - 2]!.setValue('60')
+    await numbers[numbers.length - 1]!.setValue('500')
+
+    await wrapper.find('[data-test="save-button"]').trigger('click')
+    await settle()
+
+    expect(apiStub.saveConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        options: expect.objectContaining({
+          connectTimeoutSecs: 30,
+          queryTimeoutSecs: 60,
+          maxRows: 500,
+        }),
+      }),
+    )
+  })
+
+  it('keeps a read-only session and a colour', async () => {
+    apiStub.saveConnection.mockResolvedValue(undefined)
+    const wrapper = await openAdvanced(await mountForm())
+
+    const switches = wrapper.findAllComponents({ name: 'VSwitch' })
+    await switches[switches.length - 1]!.vm.$emit('update:modelValue', true)
+
+    const selects = wrapper.findAllComponents({ name: 'VSelect' })
+    await selects[selects.length - 1]!.vm.$emit('update:modelValue', 'error')
+
+    await wrapper.find('[data-test="save-button"]').trigger('click')
+    await settle()
+
+    expect(apiStub.saveConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        color: 'error',
+        options: expect.objectContaining({ readOnly: true }),
+      }),
+    )
+  })
+
+  it('sends a connection string in place of the fields', async () => {
+    apiStub.saveConnection.mockResolvedValue(undefined)
+    const wrapper = await openAdvanced(await mountForm())
+    await wrapper.find('[data-test="connection-url-field"] textarea').setValue('server=tcp:a,1')
+    await wrapper.find('[data-test="save-button"]').trigger('click')
+    await settle()
+    expect(apiStub.saveConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        options: expect.objectContaining({ connectionUrl: 'server=tcp:a,1' }),
+      }),
+    )
+  })
+
+  it('keeps the AWS fields of an Athena record', async () => {
+    apiStub.saveConnection.mockResolvedValue(undefined)
+    const athena = connectionFixture({ dbType: DbType.Athena, host: null, port: null })
+    athena.options.awsRegion = 'us-east-1'
+    athena.options.athenaWorkgroup = 'primary'
+    const wrapper = await mountForm(athena)
+
+    await wrapper.find('[data-test="aws-profile-field"] input').setValue('reporting')
+    await wrapper.find('[data-test="athena-output-field"] input').setValue('s3://bucket/out/')
+    await wrapper.find('[data-test="save-button"]').trigger('click')
+    await settle()
+
+    expect(apiStub.saveConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        options: expect.objectContaining({
+          awsProfile: 'reporting',
+          athenaOutputLocation: 's3://bucket/out/',
+        }),
+      }),
+    )
+  })
+})
+
+describe('ConnectionForm with every field filled', () => {
+  beforeEach(() => {
+    Object.values(apiStub).forEach((fn) => fn.mockReset())
+    apiStub.getConnections.mockResolvedValue([])
+    apiStub.listActiveConnections.mockResolvedValue([])
+    apiStub.saveConnection.mockResolvedValue(undefined)
+  })
+
+  it('keeps every value the user typed', async () => {
+    const wrapper = await mountForm()
+    await wrapper.find('[data-test="advanced-panel"] .v-expansion-panel-title').trigger('click')
+    await settle()
+
+    await wrapper.find('[data-test="name-field"] input').setValue('Reporting')
+    await wrapper.find('[data-test="host-field"] input').setValue('sql.example.com')
+    await wrapper.find('[data-test="port-field"] input').setValue('14330')
+    await wrapper.find('[data-test="user-field"] input').setValue('reader')
+    await wrapper.find('[data-test="password-field"] input').setValue('secret')
+    await wrapper.find('[data-test="database-field"] input').setValue('Warehouse')
+    await wrapper.find('[data-test="instance-field"] input').setValue('SQLEXPRESS')
+
+    const caField = wrapper
+      .findAll('input')
+      .find((input) => input.attributes('id') && input.element.value === '')
+    void caField
+
+    await wrapper.findAllComponents({ name: 'VSwitch' })[0]!.vm.$emit('update:modelValue', true)
+    await wrapper.find('[data-test="save-button"]').trigger('click')
+    await settle()
+
+    expect(apiStub.saveConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'Reporting',
+        host: 'sql.example.com',
+        port: 14330,
+        user: 'reader',
+        password: 'secret',
+        database: 'Warehouse',
+        options: expect.objectContaining({
+          instanceName: 'SQLEXPRESS',
+          integratedSecurity: true,
+        }),
+      }),
+    )
+  })
+
+  it('keeps the certificate authority file and the application name', async () => {
+    const wrapper = await mountForm()
+    await wrapper.find('[data-test="advanced-panel"] .v-expansion-panel-title').trigger('click')
+    await settle()
+
+    const labelled = (label: string) =>
+      wrapper
+        .findAllComponents({ name: 'VTextField' })
+        .find((item) => item.props('label') === label)
+
+    await labelled('Certificate authority file')?.vm.$emit('update:modelValue', '/etc/ca.pem')
+    await labelled('Application name')?.vm.$emit('update:modelValue', 'Reporting client')
+    await labelled('Folder')?.vm.$emit('update:modelValue', 'Production')
+
+    await wrapper.find('[data-test="save-button"]').trigger('click')
+    await settle()
+
+    expect(apiStub.saveConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        group: 'Production',
+        options: expect.objectContaining({
+          caCertPath: '/etc/ca.pem',
+          applicationName: 'Reporting client',
+        }),
+      }),
+    )
+  })
+
+  it('keeps every AWS field', async () => {
+    const athena = connectionFixture({ dbType: DbType.Athena, host: null, port: null })
+    athena.options.awsRegion = 'us-east-1'
+    athena.options.athenaWorkgroup = 'primary'
+    const wrapper = await mountForm(athena)
+
+    await wrapper.find('[data-test="aws-region-field"] input').setValue('eu-west-1')
+    await wrapper.find('[data-test="athena-workgroup-field"] input').setValue('reporting')
+    await wrapper.find('[data-test="database-field"] input').setValue('logs')
+    const catalog = wrapper
+      .findAllComponents({ name: 'VTextField' })
+      .find((item) => item.props('label') === 'Data catalog')
+    await catalog?.vm.$emit('update:modelValue', 'MyCatalog')
+
+    await wrapper.find('[data-test="save-button"]').trigger('click')
+    await settle()
+
+    expect(apiStub.saveConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        database: 'logs',
+        options: expect.objectContaining({
+          awsRegion: 'eu-west-1',
+          athenaWorkgroup: 'reporting',
+          athenaCatalog: 'MyCatalog',
+        }),
+      }),
+    )
+  })
+
+  it('keeps the path of a SQLite file the user typed', async () => {
+    const wrapper = await mountForm(connectionFixture({ dbType: DbType.Sqlite }))
+    await wrapper.find('[data-test="file-field"] input').setValue('/data/local.db')
+    await wrapper.find('[data-test="save-button"]').trigger('click')
+    await settle()
+    expect(apiStub.saveConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        options: expect.objectContaining({ filePath: '/data/local.db' }),
+      }),
+    )
+  })
+
+  it('shows no field for an engine the build does not describe', async () => {
+    const wrapper = mountWithPlugins(ConnectionForm, {
+      props: { connection: connectionFixture(), isNew: false },
+    })
+    useConnectionsStore().engines = []
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-test="host-field"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="user-field"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="database-field"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="file-field"]').exists()).toBe(false)
+  })
+})
+
+describe('ConnectionForm without a stored password', () => {
+  beforeEach(() => {
+    Object.values(apiStub).forEach((fn) => fn.mockReset())
+    apiStub.getConnections.mockResolvedValue([])
+    apiStub.listActiveConnections.mockResolvedValue([])
+    apiStub.saveConnection.mockResolvedValue(undefined)
+  })
+
+  it('starts with an empty box for a record that carries no password', async () => {
+    const wrapper = await mountForm(connectionFixture({ password: null }))
+    const field = wrapper.find('[data-test="password-field"] input').element as HTMLInputElement
+    expect(field.value).toBe('')
+  })
+
+  it('empties the box when the parent gives a record without a password', async () => {
+    const wrapper = await mountForm()
+    await wrapper.setProps({ connection: connectionFixture({ id: 'c2', password: null }) })
+    await wrapper.vm.$nextTick()
+    const field = wrapper.find('[data-test="password-field"] input').element as HTMLInputElement
+    expect(field.value).toBe('')
+  })
+
+  it('keeps a password the user typed into the box', async () => {
+    const wrapper = await mountForm(connectionFixture({ password: null }))
+    const field = wrapper
+      .findAllComponents({ name: 'VTextField' })
+      .find((item) => item.props('label') === 'Password')
+    await field?.vm.$emit('update:modelValue', 'typed-in')
+
+    await wrapper.find('[data-test="save-button"]').trigger('click')
+    await settle()
+    expect(apiStub.saveConnection).toHaveBeenCalledWith(
+      expect.objectContaining({ password: 'typed-in' }),
+    )
+  })
+})

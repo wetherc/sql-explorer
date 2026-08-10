@@ -233,3 +233,62 @@ describe('ConnectionManager', () => {
     expect(wrapper.findAllComponents({ name: 'VDialog' })[0]?.props('modelValue')).toBe(false)
   })
 })
+
+describe('ConnectionManager dialog state', () => {
+  beforeEach(() => {
+    Object.values(apiStub).forEach((fn) => fn.mockReset())
+    apiStub.getConnections.mockResolvedValue([connectionFixture()])
+    apiStub.listActiveConnections.mockResolvedValue([])
+    apiStub.supportedEngines.mockResolvedValue([])
+  })
+
+  it('closes the form when it asks to close', async () => {
+    const wrapper = await mountManager()
+    await wrapper.find('[data-test="new-connection"]').trigger('click')
+    await settle()
+
+    const open = () =>
+      wrapper.findAllComponents({ name: 'VDialog' }).filter((item) => item.props('modelValue'))
+    expect(open()).toHaveLength(1)
+
+    await wrapper.findComponent({ name: 'ConnectionForm' }).vm.$emit('close')
+    await wrapper.vm.$nextTick()
+    expect(open()).toHaveLength(0)
+  })
+
+  it('closes the form when the overlay reports it', async () => {
+    const wrapper = await mountManager()
+    await wrapper.find('[data-test="new-connection"]').trigger('click')
+    await settle()
+
+    const dialogs = wrapper.findAllComponents({ name: 'VDialog' })
+    await dialogs[0]!.vm.$emit('update:modelValue', false)
+    await settle()
+    expect(dialogs[0]!.props('modelValue')).toBe(false)
+  })
+})
+
+describe('ConnectionManager delete dialog', () => {
+  beforeEach(() => {
+    Object.values(apiStub).forEach((fn) => fn.mockReset())
+    apiStub.getConnections.mockResolvedValue([connectionFixture()])
+    apiStub.listActiveConnections.mockResolvedValue([])
+    apiStub.supportedEngines.mockResolvedValue([])
+  })
+
+  it('closes the confirmation when the overlay reports it', async () => {
+    const wrapper = await mountManager()
+    await wrapper.find('[data-test="connection-menu"]').trigger('click')
+    await settle()
+    const remove = document.querySelector('[data-test="delete-connection"]') as HTMLElement
+    remove.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+
+    const dialogs = wrapper.findAllComponents({ name: 'VDialog' })
+    const dialog = dialogs[dialogs.length - 1]!
+    expect(dialog.props('modelValue')).toBe(true)
+    await dialog.vm.$emit('update:modelValue', false)
+    await settle()
+    expect(apiStub.deleteConnection).not.toHaveBeenCalled()
+  })
+})

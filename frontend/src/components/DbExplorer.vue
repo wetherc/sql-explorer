@@ -54,40 +54,41 @@
     </div>
 
     <v-menu v-model="menu.open" :target="[menu.x, menu.y]" data-test="explorer-menu">
-      <v-list density="compact" min-width="220">
+      <v-list v-if="menuNode" density="compact" min-width="220">
         <v-list-item
-          v-if="menu.node && isRelation(menu.node)"
+          v-if="isRelation(menuNode)"
           prepend-icon="mdi-table-eye"
           title="Select the first 1000 rows"
           data-test="menu-preview"
-          @click="previewRows"
+          @click="previewRows(menuNode)"
         />
         <v-list-item
-          v-if="menu.node && isRelation(menu.node)"
+          v-if="isRelation(menuNode)"
           prepend-icon="mdi-format-list-bulleted"
           title="Copy the name"
-          @click="copyName"
+          data-test="menu-copy-name"
+          @click="copyName(menuNode)"
         />
         <v-list-item
           prepend-icon="mdi-file-document-outline"
           title="New query on this connection"
           data-test="menu-new-query"
-          @click="newQueryHere"
+          @click="tabs.add({ connectionId: menuNode.connectionId })"
         />
         <v-divider />
         <v-list-item
-          v-if="menu.node && canExpandNode(menu.node)"
+          v-if="isExpandable(menuNode)"
           prepend-icon="mdi-refresh"
           title="Read this branch again"
           data-test="menu-refresh"
-          @click="refreshNode"
+          @click="explorer.refresh(menuNode)"
         />
         <v-list-item
-          v-if="menu.node && menu.node.kind === 'connection'"
+          v-if="menuNode.kind === 'connection'"
           prepend-icon="mdi-lan-disconnect"
           title="Close this connection"
           data-test="menu-disconnect"
-          @click="disconnectHere"
+          @click="disconnectHere(menuNode)"
         />
       </v-list>
     </v-menu>
@@ -119,6 +120,12 @@ const openKeys = ref(new Set<string>())
 const selectedKey = ref<string | null>(null)
 const menu = reactive({ open: false, x: 0, y: 0, node: null as ExplorerNode | null })
 
+/**
+ * The node the menu belongs to. The menu draws nothing without one, so
+ * every action below receives a node and needs no guard of its own.
+ */
+const menuNode = computed(() => menu.node)
+
 const emptyTitle = computed(() =>
   connections.hasActive ? 'Nothing matches the filter' : 'No open connection',
 )
@@ -130,10 +137,6 @@ const emptyHint = computed(() =>
 
 function isRelation(node: ExplorerNode): boolean {
   return node.kind === 'table' || node.kind === 'view'
-}
-
-function canExpandNode(node: ExplorerNode): boolean {
-  return isExpandable(node)
 }
 
 async function onActivate(node: ExplorerNode): Promise<void> {
@@ -166,36 +169,16 @@ async function refreshRoots(): Promise<void> {
   }
 }
 
-async function refreshNode(): Promise<void> {
-  if (menu.node) {
-    await explorer.refresh(menu.node)
-  }
-}
-
-function newQueryHere(): void {
-  const node = menu.node
-  if (node) {
-    tabs.add({ connectionId: node.connectionId })
-  }
-}
-
-async function disconnectHere(): Promise<void> {
-  const node = menu.node
-  if (node) {
-    await connections.disconnect(node.connectionId)
-    explorer.removeRoot(node.connectionId)
-  }
+async function disconnectHere(node: ExplorerNode): Promise<void> {
+  await connections.disconnect(node.connectionId)
+  explorer.removeRoot(node.connectionId)
 }
 
 /**
  * Asks the backend to build the statement, so that every name is quoted
  * for the engine and no dialect rule lives in the interface.
  */
-async function previewRows(): Promise<void> {
-  const node = menu.node
-  if (!node || !isRelation(node)) {
-    return
-  }
+async function previewRows(node: ExplorerNode): Promise<void> {
   try {
     const statement = await api.previewQuery({
       connectionId: node.connectionId,
@@ -217,11 +200,7 @@ async function previewRows(): Promise<void> {
   }
 }
 
-async function copyName(): Promise<void> {
-  const node = menu.node
-  if (!node) {
-    return
-  }
+async function copyName(node: ExplorerNode): Promise<void> {
   try {
     const quoted = await api.quoteIdentifier(node.connectionId, node.table ?? node.label)
     const clipboard = globalThis.navigator?.clipboard

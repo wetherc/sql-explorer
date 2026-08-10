@@ -125,9 +125,8 @@
       </div>
     </div>
 
-    <v-dialog v-model="editing" max-width="620" persistent scrollable>
+    <v-dialog v-if="draft" v-model="editing" max-width="620" persistent scrollable>
       <ConnectionForm
-        v-if="draft"
         :connection="draft"
         :is-new="isNew"
         @close="editing = false"
@@ -135,16 +134,21 @@
       />
     </v-dialog>
 
-    <v-dialog v-model="deleting" max-width="420">
+    <v-dialog v-if="pendingDelete" v-model="deleting" max-width="420">
       <v-card>
         <v-card-title class="text-subtitle-1">Delete this connection?</v-card-title>
         <v-card-text>
-          The record for <strong>{{ pendingDelete?.name }}</strong> and its password are removed.
+          The record for <strong>{{ pendingDelete.name }}</strong> and its password are removed.
         </v-card-text>
         <v-card-actions>
           <v-spacer />
           <v-btn text="Cancel" @click="deleting = false" />
-          <v-btn color="error" text="Delete" data-test="confirm-delete" @click="confirmDelete" />
+          <v-btn
+            color="error"
+            text="Delete"
+            data-test="confirm-delete"
+            @click="confirmDelete(pendingDelete)"
+          />
         </v-card-actions>
       </v-card>
     </v-dialog>
@@ -232,13 +236,11 @@ function askDelete(connection: SavedConnection): void {
   deleting.value = true
 }
 
-async function confirmDelete(): Promise<void> {
-  if (pendingDelete.value) {
-    explorer.removeRoot(pendingDelete.value.id)
-    await connections.remove(pendingDelete.value.id)
-  }
+async function confirmDelete(connection: SavedConnection): Promise<void> {
   deleting.value = false
   pendingDelete.value = null
+  explorer.removeRoot(connection.id)
+  await connections.remove(connection.id)
 }
 
 async function toggle(connection: SavedConnection): Promise<void> {

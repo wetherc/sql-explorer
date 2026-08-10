@@ -8,6 +8,9 @@ import type { Component } from 'vue'
 /** One Vuetify instance serves every test, because building it is slow. */
 const vuetify = createVuetify({ components, directives })
 
+/** The view of the test that ran before this one. */
+let previous: ReturnType<typeof mount> | null = null
+
 /** The options a test may give. They are loose, because a test names only
  * the props it cares about. */
 export interface MountOptions {
@@ -21,8 +24,15 @@ export interface MountOptions {
  * as a menu or a dialog, can be found.
  */
 export function mountWithPlugins(component: Component, options: MountOptions = {}) {
+  // A view that Vuetify draws in a portal stays in the document after the
+  // test that made it. Closing the view of the previous test keeps one test
+  // from finding the dialog or the menu of another, and it lets Vuetify
+  // take its own overlays down in order.
+  previous?.unmount()
+  previous = null
+  document.body.innerHTML = ''
   setActivePinia(createPinia())
-  return mount(component, {
+  const wrapper = mount(component, {
     props: options.props,
     attachTo: document.body,
     global: {
@@ -30,6 +40,8 @@ export function mountWithPlugins(component: Component, options: MountOptions = {
       ...(options.global ?? {}),
     },
   })
+  previous = wrapper
+  return wrapper
 }
 
 /** Waits until Vuetify has drawn what a click opened. */

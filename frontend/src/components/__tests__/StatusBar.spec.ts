@@ -120,3 +120,11 @@ describe('StatusBar', () => {
     expect(wrapper.find('[data-test="status-connection"]').text()).toBe('Server')
   })
 })
+
+describe('StatusBar without a tab', () => {
+  it('reports no rows when no tab is open', () => {
+    const wrapper = mountWithPlugins(StatusBar)
+    expect(wrapper.find('[data-test="status-rows"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="status-affected"]').exists()).toBe(false)
+  })
+})

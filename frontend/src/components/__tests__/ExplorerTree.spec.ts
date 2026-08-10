@@ -103,3 +103,10 @@ describe('ExplorerTree', () => {
     expect(wrapper.find('.node-hint').text()).toBe('int not null')
   })
 })
+
+describe('ExplorerTree with a branch that holds no list', () => {
+  it('says so when a branch that was read holds no list at all', () => {
+    const wrapper = mountTree([node({ loaded: true, children: undefined })], new Set(['db']))
+    expect(wrapper.text()).toContain('Nothing here')
+  })
+})

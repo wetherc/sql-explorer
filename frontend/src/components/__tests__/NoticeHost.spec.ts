@@ -64,3 +64,42 @@ describe('NoticeHost', () => {
     wrapper.unmount()
   })
 })
+
+describe('NoticeHost dialog', () => {
+  it('closes the dialog from its own button', async () => {
+    const wrapper = mountWithPlugins(NoticeHost)
+    const ui = useUiStore()
+    ui.reportError({ kind: ErrorKind.Database, message: 'no', detail: 'why' })
+    await settle()
+
+    const details = document.querySelector('[data-test="notice-details"]') as HTMLElement
+    details.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+
+    const close = [...document.querySelectorAll('.v-card-actions .v-btn')].find((button) =>
+      button.textContent?.includes('Close'),
+    )
+    close?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+    await settle()
+    expect(ui.openedNotice).toBeNull()
+    wrapper.unmount()
+  })
+
+  it('closes the dialog when the overlay reports it', async () => {
+    const wrapper = mountWithPlugins(NoticeHost)
+    const ui = useUiStore()
+    ui.reportError({ kind: ErrorKind.Database, message: 'no', detail: 'why' })
+    await settle()
+    ui.openNotice(ui.notices[0]!)
+    await settle()
+
+    const dialog = wrapper.findComponent({ name: 'VDialog' })
+    await dialog.vm.$emit('update:modelValue', false)
+    // The dialog moves the focus back on the next tick, so it must still
+    // be mounted when that runs.
+    await settle()
+    expect(ui.openedNotice).toBeNull()
+    wrapper.unmount()
+  })
+})

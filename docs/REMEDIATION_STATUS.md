@@ -114,3 +114,30 @@ now holds. Read it beside `REMEDIATION_PLAN.md`.
 - A full accessibility pass over every view.
 - Transaction control in the interface. The drivers report whether the engine
   has transactions, but no button uses it yet.
+
+## Test coverage
+
+The frontend suite covers every statement, every function and every line of
+`src/`, and every branch of the modules that carry logic:
+
+```
+Statements   : 100%   (1471/1471)
+Functions    : 100%   (546/546)
+Lines        : 100%   (1393/1393)
+Branches     : 97.94% (954/974)
+```
+
+The twenty branches that remain are one artifact, and no test can remove
+them. Vue compiles a `v-if` that has no `v-else` into a conditional whose
+second arm is a cached comment node. The tool that measures coverage never
+records that arm as run, even when one test renders the block and another
+test leaves it out. Each of the twenty sits on such a `v-if`. The threshold
+in `vitest.config.ts` therefore holds `src/lib`, `src/stores` and
+`src/types` at 100% on all four measures, and holds the views at 100% on
+statements, functions and lines with a floor of 96% on branches.
+
+The backend suite holds 153 tests. Every module has tests for its own
+behaviour: the error kinds, the dialect rules, the statement splitter, the
+connection records, the history, the settings files, the state of the open
+connections, and each driver's configuration and type conversion. SQLite is
+covered end to end, because it needs no server.

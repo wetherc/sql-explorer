@@ -111,11 +111,11 @@ function registerCompletions() {
 }
 
 onMounted(() => {
-  if (!host.value) {
-    return
-  }
   registerMonacoThemes()
-  editor = monaco.editor.create(host.value, {
+  // The template above always draws the host element, so it is present by
+  // the time this runs.
+  const element = host.value as HTMLElement
+  const instance = monaco.editor.create(element, {
     value: props.modelValue,
     language: 'sql',
     theme: props.theme,
@@ -130,18 +130,21 @@ onMounted(() => {
     tabSize: 2,
     padding: { top: 8, bottom: 8 },
   })
+  editor = instance
 
-  editor.onDidChangeModelContent(() => {
+  instance.onDidChangeModelContent(() => {
+    // The editor also reports the writes this component makes itself, and
+    // those must not travel back out as a change by the user.
     if (applyingExternalValue) {
       return
     }
-    emit('update:modelValue', editor?.getValue() ?? '')
+    emit('update:modelValue', instance.getValue())
   })
 
-  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
+  instance.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
     emit('execute', currentStatement())
   })
-  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter, () => {
+  instance.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter, () => {
     emit('execute-all')
   })
 

@@ -36,6 +36,8 @@ function stubEditor(value = 'SELECT 1;\nSELECT 2') {
     getValue: vi.fn(() => value),
     setValue: vi.fn((next: string) => {
       value = next
+      // The real editor reports a write as a change of its model.
+      contentHandler()
     }),
     getModel: vi.fn(() => ({
       getValue: () => value,
@@ -287,6 +289,42 @@ describe('SqlEditor', () => {
     wrapper.unmount()
     expect((wrapper.vm as unknown as { currentStatement: () => string }).currentStatement()).toBe(
       'SELECT 1',
+    )
+  })
+})
+
+describe('SqlEditor settings', () => {
+  beforeEach(() => {
+    vi.mocked(monaco.editor.create).mockReset()
+    vi.mocked(monaco.languages.registerCompletionItemProvider).mockReset()
+    vi.mocked(monaco.languages.registerCompletionItemProvider).mockReturnValue({
+      dispose: vi.fn(),
+    })
+  })
+
+  it('passes every setting on to the editor when one changes', async () => {
+    const stub = stubEditor()
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
+    const wrapper = mount(SqlEditor, {
+      props: { modelValue: '', wordWrap: false, showLineNumbers: true },
+    })
+
+    await wrapper.setProps({ wordWrap: true, showLineNumbers: false, readOnly: true })
+    expect(stub.editor.updateOptions).toHaveBeenCalledWith({
+      fontSize: 13,
+      wordWrap: 'on',
+      lineNumbers: 'off',
+      readOnly: true,
+    })
+  })
+
+  it('builds the editor with wrapping off and no line numbers', () => {
+    const stub = stubEditor()
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
+    mount(SqlEditor, { props: { modelValue: '', wordWrap: false, showLineNumbers: false } })
+    expect(monaco.editor.create).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ wordWrap: 'off', lineNumbers: 'off' }),
     )
   })
 })

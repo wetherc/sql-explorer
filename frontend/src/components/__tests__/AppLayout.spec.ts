@@ -177,3 +177,67 @@ describe('AppLayout', () => {
     wrapper.unmount()
   })
 })
+
+describe('AppLayout settings dialog', () => {
+  beforeEach(() => {
+    Object.values(apiStub).forEach((fn) => fn.mockReset())
+    apiStub.supportedEngines.mockResolvedValue([])
+    apiStub.getConnections.mockResolvedValue([])
+    apiStub.listActiveConnections.mockResolvedValue([])
+    apiStub.getHistory.mockResolvedValue([])
+    apiStub.getSavedQueries.mockResolvedValue([])
+    apiStub.getWorkspace.mockResolvedValue({ tabs: [], activeTabId: null })
+    apiStub.saveWorkspace.mockResolvedValue(undefined)
+    apiStub.onConnectionStatus.mockResolvedValue(() => {})
+  })
+
+  it('closes the settings from its own button', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    await wrapper.find('[data-test="open-settings"]').trigger('click')
+    await settle()
+
+    const openDialogs = () =>
+      wrapper.findAllComponents({ name: 'VDialog' }).filter((item) => item.props('modelValue'))
+    expect(openDialogs()).toHaveLength(1)
+
+    const close = [...document.querySelectorAll('.v-card-actions .v-btn')].find((button) =>
+      button.textContent?.includes('Close'),
+    )
+    close?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+    expect(openDialogs()).toHaveLength(0)
+    wrapper.unmount()
+  })
+})
+
+describe('AppLayout dialog state', () => {
+  beforeEach(() => {
+    Object.values(apiStub).forEach((fn) => fn.mockReset())
+    apiStub.supportedEngines.mockResolvedValue([])
+    apiStub.getConnections.mockResolvedValue([])
+    apiStub.listActiveConnections.mockResolvedValue([])
+    apiStub.getHistory.mockResolvedValue([])
+    apiStub.getSavedQueries.mockResolvedValue([])
+    apiStub.getWorkspace.mockResolvedValue({ tabs: [], activeTabId: null })
+    apiStub.saveWorkspace.mockResolvedValue(undefined)
+    apiStub.onConnectionStatus.mockResolvedValue(() => {})
+  })
+
+  it('closes the settings when the overlay reports it', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    await wrapper.find('[data-test="open-settings"]').trigger('click')
+    await settle()
+
+    const open = () =>
+      wrapper.findAllComponents({ name: 'VDialog' }).filter((item) => item.props('modelValue'))
+    expect(open()).toHaveLength(1)
+    await open()[0]!.vm.$emit('update:modelValue', false)
+    // The dialog moves the focus back on the next tick, so it must still
+    // be mounted when that runs.
+    await settle()
+    expect(open()).toHaveLength(0)
+    wrapper.unmount()
+  })
+})

@@ -50,7 +50,7 @@
       </v-alert>
     </div>
 
-    <div ref="scroller" class="grid-scroll" @scroll="onScroll">
+    <div :key="resultGeneration" class="grid-scroll" @scroll="onScroll">
       <table class="grid-table">
         <thead>
           <tr>
@@ -136,7 +136,8 @@ const OVERSCAN = 12
 const search = ref('')
 const sortIndex = ref<number | null>(null)
 const sortDescending = ref(false)
-const scroller = ref<HTMLElement | null>(null)
+/** Rises with each new result, which draws a fresh scroll area. */
+const resultGeneration = ref(0)
 const scrollTop = ref(0)
 const viewportHeight = ref(600)
 
@@ -250,9 +251,7 @@ watch(
     sortIndex.value = null
     sortDescending.value = false
     scrollTop.value = 0
-    if (scroller.value) {
-      scroller.value.scrollTop = 0
-    }
+    resultGeneration.value += 1
   },
 )
 </script>

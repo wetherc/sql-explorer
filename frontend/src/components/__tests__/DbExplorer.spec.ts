@@ -273,10 +273,7 @@ describe('DbExplorer', () => {
     })
     await settle()
 
-    const copy = [...document.querySelectorAll('.v-list-item')].find((item) =>
-      item.textContent?.includes('Copy the name'),
-    )
-    copy?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    menuItem('menu-copy-name')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     await settle()
 
     expect(writeText).toHaveBeenCalledWith('[orders]')
@@ -307,10 +304,7 @@ describe('DbExplorer', () => {
       },
     })
     await settle()
-    const copy = [...document.querySelectorAll('.v-list-item')].find((item) =>
-      item.textContent?.includes('Copy the name'),
-    )
-    copy?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    menuItem('menu-copy-name')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     await settle()
     expect(useUiStore().notices.some((notice) => notice.level === 'success')).toBe(true)
   })
@@ -338,10 +332,7 @@ describe('DbExplorer', () => {
       },
     })
     await settle()
-    const copy = [...document.querySelectorAll('.v-list-item')].find((item) =>
-      item.textContent?.includes('Copy the name'),
-    )
-    copy?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    menuItem('menu-copy-name')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     await settle()
     expect(useUiStore().notices.some((notice) => notice.level === 'error')).toBe(true)
   })
@@ -364,5 +355,66 @@ describe('DbExplorer', () => {
     })
     await wrapper.vm.$nextTick()
     expect(wrapper.findComponent({ name: 'ExplorerTree' }).props('selectedKey')).toBe('leaf')
+  })
+})
+
+describe('DbExplorer without a filter match', () => {
+  beforeEach(() => {
+    Object.values(apiStub).forEach((fn) => fn.mockReset())
+    apiStub.getConnections.mockResolvedValue([connectionFixture()])
+    apiStub.listActiveConnections.mockResolvedValue([infoFixture()])
+    apiStub.listDatabases.mockResolvedValue([{ name: 'Sales' }])
+  })
+
+  it('closes a branch that was already open', async () => {
+    const wrapper = mountWithPlugins(DbExplorer)
+    await useConnectionsStore().load()
+    const explorer = useExplorerStore()
+    const root = explorer.addRoot('c1')
+    await wrapper.vm.$nextTick()
+
+    await wrapper.find('[data-test="tree-row"]').trigger('click')
+    await settle()
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findAll('[data-test="tree-row"]').length).toBeGreaterThan(1)
+
+    await wrapper.find('[data-test="tree-row"]').trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findAll('[data-test="tree-row"]')).toHaveLength(1)
+    expect(root.loaded).toBe(true)
+  })
+})
+
+describe('DbExplorer menu on a column', () => {
+  beforeEach(() => {
+    Object.values(apiStub).forEach((fn) => fn.mockReset())
+    apiStub.getConnections.mockResolvedValue([connectionFixture()])
+    apiStub.listActiveConnections.mockResolvedValue([infoFixture()])
+    apiStub.listDatabases.mockResolvedValue([])
+  })
+
+  it('offers no refresh on a column, which holds nothing below it', async () => {
+    const wrapper = mountWithPlugins(DbExplorer)
+    await useConnectionsStore().load()
+    useExplorerStore().addRoot('c1')
+    await wrapper.vm.$nextTick()
+
+    await wrapper.findComponent({ name: 'ExplorerTree' }).vm.$emit('context', {
+      event: new MouseEvent('contextmenu'),
+      node: {
+        key: 'col',
+        label: 'id',
+        kind: 'column',
+        icon: 'mdi-table-column',
+        loading: false,
+        loaded: true,
+        connectionId: 'c1',
+      },
+    })
+    await settle()
+
+    expect(document.querySelector('[data-test="menu-refresh"]')).toBeNull()
+    expect(document.querySelector('[data-test="menu-preview"]')).toBeNull()
+    expect(document.querySelector('[data-test="menu-new-query"]')).not.toBeNull()
   })
 })

@@ -376,3 +376,191 @@ describe('QueryView', () => {
     expect(apiStub.cancelQuery).not.toHaveBeenCalled()
   })
 })
+
+describe('QueryView details', () => {
+  beforeEach(() => {
+    Object.values(apiStub).forEach((fn) => fn.mockReset())
+    saveDialog.mockReset()
+    apiStub.getConnections.mockResolvedValue([connectionFixture()])
+    apiStub.listActiveConnections.mockResolvedValue([infoFixture()])
+    apiStub.addHistoryEntry.mockResolvedValue([])
+    apiStub.getSavedQueries.mockResolvedValue([])
+  })
+
+  it('closes the save dialog without saving', async () => {
+    const wrapper = await mountView()
+    await wrapper.find('[data-test="save-query-button"]').trigger('click')
+    await settle()
+
+    const cancel = [...document.querySelectorAll('.v-card-actions .v-btn')].find((button) =>
+      button.textContent?.includes('Cancel'),
+    )
+    cancel?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+    expect(apiStub.saveQuery).not.toHaveBeenCalled()
+  })
+
+  it('keeps the folder the user typed for a saved statement', async () => {
+    apiStub.saveQuery.mockResolvedValue(undefined)
+    const wrapper = await mountView()
+    await wrapper.find('[data-test="save-query-button"]').trigger('click')
+    await settle()
+
+    const folder = wrapper
+      .findAllComponents({ name: 'VTextField' })
+      .find((item) => item.props('label') === 'Folder')
+    await folder?.vm.$emit('update:modelValue', 'Reports')
+
+    const confirm = document.querySelector('[data-test="save-query-confirm"]') as HTMLElement
+    confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+
+    expect(apiStub.saveQuery).toHaveBeenCalledWith(expect.objectContaining({ folder: 'Reports' }))
+  })
+
+  it('falls back to the MS SQL Server dialect for a tab without a connection', async () => {
+    const wrapper = mountWithPlugins(QueryView, {
+      props: {
+        tab: {
+          id: 't9',
+          title: 'Query 9',
+          query: '',
+          connectionId: null,
+          dirty: false,
+          savedQueryId: null,
+        },
+      },
+    })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findComponent({ name: 'SqlEditor' }).props('dialect')).toBe('msSql')
+  })
+
+  it('falls back to the MS SQL Server dialect for a connection it does not know', async () => {
+    const wrapper = mountWithPlugins(QueryView, {
+      props: {
+        tab: {
+          id: 't10',
+          title: 'Query 10',
+          query: '',
+          connectionId: 'ghost',
+          dirty: false,
+          savedQueryId: null,
+        },
+      },
+    })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findComponent({ name: 'SqlEditor' }).props('dialect')).toBe('msSql')
+  })
+
+  it('runs the text of the tab when the editor gives nothing', async () => {
+    apiStub.executeQuery.mockResolvedValue(response)
+    const wrapper = await mountView('SELECT 42')
+    const view = wrapper.vm as unknown as { runStatement: (statement?: string) => void }
+    view.runStatement()
+    await settle()
+    expect(apiStub.executeQuery).toHaveBeenCalled()
+  })
+
+  it('stays on the messages when a statement gives no result set', async () => {
+    apiStub.executeQuery.mockResolvedValue({
+      results: [],
+      messages: ['3 rows affected.'],
+      rowsAffected: 3,
+      elapsedMs: 4,
+    })
+    const wrapper = await mountView('UPDATE t SET a = 1')
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-test="query-message"]').text()).toBe('3 rows affected.')
+  })
+})
+
+describe('QueryView edge paths', () => {
+  beforeEach(() => {
+    Object.values(apiStub).forEach((fn) => fn.mockReset())
+    saveDialog.mockReset()
+    apiStub.getConnections.mockResolvedValue([connectionFixture()])
+    apiStub.listActiveConnections.mockResolvedValue([infoFixture()])
+    apiStub.addHistoryEntry.mockResolvedValue([])
+    apiStub.getSavedQueries.mockResolvedValue([])
+    apiStub.saveQuery.mockResolvedValue(undefined)
+  })
+
+  it('shows a failure that carries no cause', async () => {
+    apiStub.executeQuery.mockRejectedValue({
+      kind: 'database',
+      message: 'no such table',
+      detail: null,
+    })
+    const wrapper = await mountView('SELECT 1')
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+    await wrapper.vm.$nextTick()
+
+    const error = wrapper.find('[data-test="query-error"]')
+    expect(error.text()).toContain('no such table')
+    expect(error.find('.error-detail').exists()).toBe(false)
+  })
+
+  it('runs the text of the tab when no editor is in place', async () => {
+    apiStub.executeQuery.mockResolvedValue(response)
+    const wrapper = await mountView('SELECT 99')
+    const view = wrapper.vm as unknown as { runStatement: (statement?: string) => void }
+    wrapper.unmount()
+    view.runStatement()
+    await settle()
+    expect(apiStub.executeQuery).toHaveBeenCalledWith(
+      expect.objectContaining({ query: 'SELECT 99' }),
+    )
+  })
+
+  it('saves again under the identifier the tab came from', async () => {
+    const wrapper = mountWithPlugins(QueryView, {
+      props: {
+        tab: {
+          id: 't11',
+          title: 'Daily',
+          query: 'SELECT 1',
+          connectionId: 'c1',
+          dirty: true,
+          savedQueryId: 'q7',
+        },
+      },
+    })
+    await wrapper.vm.$nextTick()
+
+    await wrapper.find('[data-test="save-query-button"]').trigger('click')
+    await settle()
+    const confirm = document.querySelector('[data-test="save-query-confirm"]') as HTMLElement
+    confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+
+    expect(apiStub.saveQuery).toHaveBeenCalledWith(expect.objectContaining({ id: 'q7' }))
+  })
+
+  it('stays on the result that is open when a second statement runs', async () => {
+    apiStub.executeQuery.mockResolvedValue(response)
+    const wrapper = await mountView()
+
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+    await wrapper.vm.$nextTick()
+
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findAll('[data-test="result-tab"]')).toHaveLength(1)
+  })
+
+  it('closes the save dialog when the overlay reports it', async () => {
+    const wrapper = await mountView()
+    await wrapper.find('[data-test="save-query-button"]').trigger('click')
+    await settle()
+
+    const dialog = wrapper.findComponent({ name: 'VDialog' })
+    await dialog.vm.$emit('update:modelValue', false)
+    await settle()
+    expect(dialog.props('modelValue')).toBe(false)
+  })
+})

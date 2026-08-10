@@ -213,9 +213,10 @@ const dialect = computed<Dialect>(() => {
   return id ? (connections.active[id]?.dialect ?? Dialect.MsSql) : Dialect.MsSql
 })
 
-const canRun = computed(
-  () => Boolean(props.tab.connectionId) && connections.isActive(props.tab.connectionId ?? ''),
-)
+const canRun = computed(() => {
+  const id = props.tab.connectionId
+  return id !== null && connections.isActive(id)
+})
 
 function resultLabel(result: ResultSet, index: number): string {
   return `Result ${index + 1} (${formatRowCount(result.rows.length)})`
