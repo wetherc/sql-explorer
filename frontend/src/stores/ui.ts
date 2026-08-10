@@ -64,11 +64,11 @@ export const useUiStore = defineStore('ui', () => {
     })
   }
 
-  function warn(message: string): Notice {
+  function warn(message: string, detail: string | null = null): Notice {
     return push({
       level: 'warning',
       message,
-      detail: null,
+      detail,
       icon: 'mdi-alert-outline',
       timeout: 6000,
     })

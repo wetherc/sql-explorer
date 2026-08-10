@@ -3,6 +3,8 @@ import {
   SQL_KEYWORDS,
   completionsFor,
   emptySchemaIndex,
+  formatSql,
+  formatterDialect,
   isPlainIdentifier,
   quoteIdentifier,
   quoteIfNeeded,
@@ -12,6 +14,32 @@ import {
   type SchemaIndex,
 } from '@/lib/sql'
 import { Dialect } from '@/types/api'
+
+describe('formatterDialect', () => {
+  it('names the dialect of the formatter for each engine', () => {
+    expect(formatterDialect(Dialect.MsSql)).toBe('transactsql')
+    expect(formatterDialect(Dialect.MySql)).toBe('mysql')
+    expect(formatterDialect(Dialect.Postgres)).toBe('postgresql')
+    expect(formatterDialect(Dialect.Sqlite)).toBe('sqlite')
+    expect(formatterDialect(Dialect.Athena)).toBe('trino')
+  })
+})
+
+describe('formatSql', () => {
+  it('lays out a statement and puts the keywords in capitals', () => {
+    expect(formatSql('select a from t where b=1', Dialect.Postgres)).toBe(
+      'SELECT\n  a\nFROM\n  t\nWHERE\n  b = 1',
+    )
+  })
+
+  it('keeps the dialect of the connection', () => {
+    expect(formatSql('select top 1 [a] from [t]', Dialect.MsSql)).toContain('SELECT\n  TOP 1 [a]')
+  })
+
+  it('throws when the text cannot be read', () => {
+    expect(() => formatSql('SELECT * FROM (', Dialect.Sqlite)).toThrow(/Parse error/)
+  })
+})
 
 describe('quoteIdentifier', () => {
   it('uses the quotes of each engine', () => {

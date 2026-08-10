@@ -1,3 +1,4 @@
+import { format as layOutStatement, type SqlLanguage } from 'sql-formatter'
 import { Dialect } from '@/types/api'
 
 /**
@@ -267,6 +268,41 @@ export function completionsFor(
     }
   }
   return items
+}
+
+/**
+ * Maps the dialect of the connection onto the dialect of the formatter.
+ * Athena runs the Trino engine, so it takes the Trino rules.
+ */
+export function formatterDialect(dialect: Dialect): SqlLanguage {
+  switch (dialect) {
+    case Dialect.MsSql:
+      return 'transactsql'
+    case Dialect.MySql:
+      return 'mysql'
+    case Dialect.Postgres:
+      return 'postgresql'
+    case Dialect.Sqlite:
+      return 'sqlite'
+    default:
+      return 'trino'
+  }
+}
+
+/**
+ * Lays out a statement in the style of the dialect. The call throws when the
+ * text holds something the formatter cannot read, so the caller must catch.
+ *
+ * This function is the only place that knows the formatter package. A later
+ * change of package therefore touches this file alone.
+ */
+export function formatSql(text: string, dialect: Dialect): string {
+  return layOutStatement(text, {
+    language: formatterDialect(dialect),
+    // The editor indents with two spaces.
+    tabWidth: 2,
+    keywordCase: 'upper',
+  })
 }
 
 /** Reads the word that stands just before the given position. */

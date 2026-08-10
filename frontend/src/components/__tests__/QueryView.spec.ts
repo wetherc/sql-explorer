@@ -10,6 +10,7 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
   open: vi.fn(),
 }))
 
+const { monaco } = await import('@/plugins/monaco')
 const QueryView = (await import('@/components/QueryView.vue')).default
 const { mountWithPlugins, settle } = await import('./mount')
 const { useConnectionsStore } = await import('@/stores/connections')
@@ -28,6 +29,35 @@ const response = {
   messages: ['1 row returned.'],
   rowsAffected: null,
   elapsedMs: 8,
+}
+
+/**
+ * Puts an editor with a model in place of the stub, so that the format
+ * action has a text to work on. Returns the spy that records the writes.
+ */
+function editorWithText(text: string) {
+  const executeEdits = vi.fn()
+  vi.mocked(monaco.editor.create).mockReturnValue({
+    getValue: vi.fn(() => text),
+    setValue: vi.fn(),
+    getModel: vi.fn(() => ({
+      getValue: () => text,
+      getValueInRange: vi.fn(() => text),
+      getFullModelRange: vi.fn(() => ({ whole: true })),
+      getOffsetAt: vi.fn(() => 0),
+      getWordUntilPosition: vi.fn(() => ({ startColumn: 1, endColumn: 1 })),
+    })),
+    getSelection: vi.fn(() => null),
+    getPosition: vi.fn(() => null),
+    onDidChangeModelContent: vi.fn(),
+    addCommand: vi.fn(),
+    addAction: vi.fn(),
+    updateOptions: vi.fn(),
+    executeEdits,
+    focus: vi.fn(),
+    dispose: vi.fn(),
+  } as unknown as ReturnType<typeof monaco.editor.create>)
+  return executeEdits
 }
 
 async function mountView(query = 'SELECT 1') {
@@ -53,6 +83,9 @@ describe('QueryView', () => {
   beforeEach(() => {
     Object.values(apiStub).forEach((fn) => fn.mockReset())
     saveDialog.mockReset()
+    // Gives back the editor stub of the test setup, so that a test which
+    // puts its own editor in place does not reach the next one.
+    vi.mocked(monaco.editor.create).mockReset()
     apiStub.getConnections.mockResolvedValue([connectionFixture()])
     apiStub.listActiveConnections.mockResolvedValue([infoFixture()])
     apiStub.addHistoryEntry.mockResolvedValue([])
@@ -381,6 +414,9 @@ describe('QueryView details', () => {
   beforeEach(() => {
     Object.values(apiStub).forEach((fn) => fn.mockReset())
     saveDialog.mockReset()
+    // Gives back the editor stub of the test setup, so that a test which
+    // puts its own editor in place does not reach the next one.
+    vi.mocked(monaco.editor.create).mockReset()
     apiStub.getConnections.mockResolvedValue([connectionFixture()])
     apiStub.listActiveConnections.mockResolvedValue([infoFixture()])
     apiStub.addHistoryEntry.mockResolvedValue([])
@@ -480,6 +516,9 @@ describe('QueryView edge paths', () => {
   beforeEach(() => {
     Object.values(apiStub).forEach((fn) => fn.mockReset())
     saveDialog.mockReset()
+    // Gives back the editor stub of the test setup, so that a test which
+    // puts its own editor in place does not reach the next one.
+    vi.mocked(monaco.editor.create).mockReset()
     apiStub.getConnections.mockResolvedValue([connectionFixture()])
     apiStub.listActiveConnections.mockResolvedValue([infoFixture()])
     apiStub.addHistoryEntry.mockResolvedValue([])
@@ -551,6 +590,29 @@ describe('QueryView edge paths', () => {
     await settle()
     await wrapper.vm.$nextTick()
     expect(wrapper.findAll('[data-test="result-tab"]')).toHaveLength(1)
+  })
+
+  it('lays out the statement when the button is pressed', async () => {
+    const edits = editorWithText('select a from t')
+    const wrapper = await mountView('select a from t')
+
+    await wrapper.find('[data-test="format-button"]').trigger('click')
+    await settle()
+
+    expect(edits).toHaveBeenCalledWith('format', [
+      expect.objectContaining({ text: 'SELECT\n  a\nFROM\n  t' }),
+    ])
+  })
+
+  it('reports a statement that it cannot lay out', async () => {
+    editorWithText('SELECT * FROM (')
+    const wrapper = await mountView('SELECT * FROM (')
+
+    await wrapper.find('[data-test="format-button"]').trigger('click')
+    await settle()
+
+    const ui = useUiStore()
+    expect(ui.notices.some((notice) => notice.level === 'warning')).toBe(true)
   })
 
   it('closes the save dialog when the overlay reports it', async () => {

@@ -5,7 +5,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { monaco, registerMonacoThemes } from '@/plugins/monaco'
-import { completionsFor, statementAt, wordBefore, type SchemaIndex } from '@/lib/sql'
+import { completionsFor, formatSql, statementAt, wordBefore, type SchemaIndex } from '@/lib/sql'
 import { Dialect } from '@/types/api'
 
 const props = withDefaults(
@@ -34,6 +34,7 @@ const emit = defineEmits<{
   (event: 'update:modelValue', value: string): void
   (event: 'execute', statement: string): void
   (event: 'execute-all'): void
+  (event: 'format-failed', message: string): void
 }>()
 
 const host = ref<HTMLElement | null>(null)
@@ -61,6 +62,34 @@ function currentStatement(): string {
   const position = editor.getPosition()
   const offset = position ? model.getOffsetAt(position) : 0
   return statementAt(model.getValue(), offset)
+}
+
+/**
+ * Lays out the selection, or the whole text when nothing is selected. The
+ * write goes through `executeEdits`, so one undo step takes it back.
+ *
+ * The action below carries the key Shift+Alt+F. The editor holds that key
+ * for its own format action, and an action of this editor takes it over, so
+ * the key, the context menu and the toolbar button all reach this function.
+ */
+function formatText(): void {
+  const model = editor?.getModel()
+  if (!editor || !model) {
+    return
+  }
+  const selection = editor.getSelection()
+  const range = selection && !selection.isEmpty() ? selection : model.getFullModelRange()
+  const source = model.getValueInRange(range)
+  if (source.trim() === '') {
+    return
+  }
+  try {
+    editor.executeEdits('format', [
+      { range, text: formatSql(source, props.dialect), forceMoveMarkers: true },
+    ])
+  } catch (error) {
+    emit('format-failed', error instanceof Error ? error.message : String(error))
+  }
 }
 
 function registerCompletions() {
@@ -148,6 +177,14 @@ onMounted(() => {
     emit('execute-all')
   })
 
+  instance.addAction({
+    id: 'sql-explorer.format',
+    label: 'Format the statement',
+    keybindings: [monaco.KeyMod.Shift | monaco.KeyMod.Alt | monaco.KeyCode.KeyF],
+    contextMenuGroupId: 'modification',
+    run: () => formatText(),
+  })
+
   registerCompletions()
 })
 
@@ -189,6 +226,7 @@ onBeforeUnmount(() => {
 defineExpose({
   focus: () => editor?.focus(),
   currentStatement,
+  format: formatText,
   insert: (text: string) => {
     const selection = editor?.getSelection()
     if (editor && selection) {

@@ -44,6 +44,19 @@
 
       <v-divider vertical class="mx-1" />
 
+      <v-tooltip location="bottom" text="Lay out the statement (Shift + Alt + F)">
+        <template #activator="{ props: tip }">
+          <v-btn
+            v-bind="tip"
+            size="small"
+            prepend-icon="mdi-format-align-left"
+            text="Format"
+            data-test="format-button"
+            @click="formatStatement()"
+          />
+        </template>
+      </v-tooltip>
+
       <v-select
         :model-value="tab.connectionId"
         :items="connectionItems"
@@ -82,6 +95,7 @@
           @update:model-value="onQueryChange"
           @execute="runStatement"
           @execute-all="runAll"
+          @format-failed="onFormatFailed"
         />
       </pane>
       <pane :size="100 - editorSize" min-size="15">
@@ -260,6 +274,14 @@ function runAll(): void {
   void run(props.tab.query)
 }
 
+function formatStatement(): void {
+  editorRef.value?.format()
+}
+
+function onFormatFailed(message: string): void {
+  ui.warn('The statement could not be laid out.', message)
+}
+
 function cancel(): void {
   const connectionId = props.tab.connectionId
   if (connectionId) {
@@ -316,7 +338,7 @@ watch(
   },
 )
 
-defineExpose({ runStatement, runAll })
+defineExpose({ runStatement, runAll, formatStatement })
 </script>
 
 <style scoped>
