@@ -1,5 +1,8 @@
 <template>
-  <div class="results-grid">
+  <!-- The height of one row reaches the stylesheet as a custom property, so
+       the window of visible rows and the cells that draw it hold one figure
+       between them. -->
+  <div class="results-grid" :style="{ '--grid-row-height': `${ROW_HEIGHT}px` }">
     <PanelHeader
       v-model:filter="search"
       filter-placeholder="Filter rows"
@@ -539,7 +542,7 @@ watch(
 
 .grid-table td {
   padding: 4px 10px;
-  height: 30px;
+  height: var(--grid-row-height);
   max-width: 420px;
   overflow: hidden;
   text-overflow: ellipsis;

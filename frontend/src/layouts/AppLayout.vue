@@ -50,11 +50,11 @@
           <template #activator="{ props: tip }">
             <v-list-item
               v-bind="tip"
-              :active="panel === item.value"
+              :active="layout.layout.panel === item.value"
               :prepend-icon="item.icon"
               :aria-label="item.label"
               :data-test="`rail-${item.value}`"
-              @click="panel = item.value"
+              @click="layout.showPanel(item.value)"
             />
           </template>
         </v-tooltip>
@@ -62,14 +62,17 @@
     </v-navigation-drawer>
 
     <v-navigation-drawer permanent :width="320" class="side-panel">
-      <ConnectionManager v-show="panel === 'connections'" @connected="onConnected" />
-      <DbExplorer v-show="panel === 'explorer'" @open-connections="panel = 'connections'" />
-      <HistoryPanel v-show="panel === 'history'" />
+      <ConnectionManager v-show="layout.layout.panel === 'connections'" @connected="onConnected" />
+      <DbExplorer
+        v-show="layout.layout.panel === 'explorer'"
+        @open-connections="layout.showPanel('connections')"
+      />
+      <HistoryPanel v-show="layout.layout.panel === 'history'" />
     </v-navigation-drawer>
 
     <v-main class="main-area">
       <div class="main-content">
-        <QueryTabs @open-connections="panel = 'connections'" />
+        <QueryTabs @open-connections="layout.showPanel('connections')" />
         <StatusBar />
       </div>
     </v-main>
@@ -243,16 +246,16 @@ import {
 import { useConnectionsStore } from '@/stores/connections'
 import { useExplorerStore } from '@/stores/explorer'
 import { useHistoryStore } from '@/stores/history'
+import { useLayoutStore, type Panel } from '@/stores/layout'
 import { useSettingsStore } from '@/stores/settings'
 import { useTabsStore } from '@/stores/tabs'
 import { useUiStore } from '@/stores/ui'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 
-type Panel = 'connections' | 'explorer' | 'history'
-
 const connections = useConnectionsStore()
 const explorer = useExplorerStore()
 const history = useHistoryStore()
+const layout = useLayoutStore()
 const settings = useSettingsStore()
 const tabs = useTabsStore()
 const ui = useUiStore()
@@ -261,7 +264,6 @@ const theme = useTheme()
 /** True on macOS, where the key list names Cmd in place of Ctrl. */
 const apple = /mac|iphone|ipad/i.test(navigator.userAgent)
 
-const panel = ref<Panel>('connections')
 const settingsOpen = ref(false)
 let unlisten: UnlistenFn | null = null
 
@@ -272,7 +274,7 @@ const railItems: Array<{ value: Panel; icon: string; label: string }> = [
 ]
 
 function onConnected(): void {
-  panel.value = 'explorer'
+  layout.showPanel('explorer')
 }
 
 /** The actions of the tab that is open, when a tab is open. */
@@ -347,27 +349,21 @@ const commands: Command[] = [
     title: 'Show the connections',
     group: 'View',
     key: 'mod+1',
-    run: () => {
-      panel.value = 'connections'
-    },
+    run: () => layout.showPanel('connections'),
   },
   {
     id: 'view.explorer',
     title: 'Show the explorer',
     group: 'View',
     key: 'mod+2',
-    run: () => {
-      panel.value = 'explorer'
-    },
+    run: () => layout.showPanel('explorer'),
   },
   {
     id: 'view.history',
     title: 'Show the history',
     group: 'View',
     key: 'mod+3',
-    run: () => {
-      panel.value = 'history'
-    },
+    run: () => layout.showPanel('history'),
   },
   {
     id: 'app.settings',
@@ -423,6 +419,7 @@ function onKeyDown(event: KeyboardEvent): void {
 
 onMounted(async () => {
   settings.load()
+  layout.load()
   theme.change(settings.settings.theme)
   await connections.loadEngines()
   await connections.load()

@@ -9,6 +9,7 @@ const { tabActions } = await import('@/lib/commands')
 const QueryView = (await import('@/components/QueryView.vue')).default
 const { mountWithPlugins, settle } = await import('./mount')
 const { useConnectionsStore } = await import('@/stores/connections')
+const { useLayoutStore } = await import('@/stores/layout')
 const { useQueryStore } = await import('@/stores/query')
 const { useTabsStore } = await import('@/stores/tabs')
 const { useUiStore } = await import('@/stores/ui')
@@ -1016,6 +1017,27 @@ describe('QueryView edge paths', () => {
     await wrapper.find('[data-test="close-result"]').trigger('click')
     await wrapper.vm.$nextTick()
     expect(wrapper.findAll('[data-test="result-tab"]')).toHaveLength(0)
+  })
+
+  it('keeps the place of the split that a drag leaves behind', async () => {
+    const wrapper = await mountView()
+    const layout = useLayoutStore()
+
+    wrapper.findComponent({ name: 'splitpanes' }).vm.$emit('resize', [{ size: 62 }, { size: 38 }])
+    await wrapper.vm.$nextTick()
+
+    expect(layout.layout.editorSize).toBe(62)
+  })
+
+  it('leaves the split alone when the drag reports no pane', async () => {
+    const wrapper = await mountView()
+    const layout = useLayoutStore()
+    const before = layout.layout.editorSize
+
+    wrapper.findComponent({ name: 'splitpanes' }).vm.$emit('resize', [])
+    await wrapper.vm.$nextTick()
+
+    expect(layout.layout.editorSize).toBe(before)
   })
 
   it('hides the actions of a result while the messages stand open', async () => {

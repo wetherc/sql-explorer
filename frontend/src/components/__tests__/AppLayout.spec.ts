@@ -9,6 +9,7 @@ const AppLayout = (await import('@/layouts/AppLayout.vue')).default
 const App = (await import('@/App.vue')).default
 const { mountWithPlugins, settle } = await import('./mount')
 const { useConnectionsStore } = await import('@/stores/connections')
+const { LAYOUT_KEY } = await import('@/stores/layout')
 const { useExplorerStore } = await import('@/stores/explorer')
 const { useSettingsStore } = await import('@/stores/settings')
 const { useTabsStore } = await import('@/stores/tabs')
@@ -75,6 +76,18 @@ describe('AppLayout', () => {
     await wrapper.find('[data-test="rail-connections"]').trigger('click')
     await wrapper.vm.$nextTick()
     expect(wrapper.findComponent({ name: 'ConnectionManager' }).isVisible()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('opens the panel that stood open before the restart', async () => {
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ panel: 'history', editorSize: 45 }))
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+
+    expect(wrapper.findComponent({ name: 'HistoryPanel' }).isVisible()).toBe(true)
+    expect(wrapper.find('[data-test="rail-history"]').classes()).toContain('v-list-item--active')
+    localStorage.removeItem(LAYOUT_KEY)
+    wrapper.unmount()
     wrapper.unmount()
   })
 

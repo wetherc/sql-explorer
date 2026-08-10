@@ -118,7 +118,7 @@
     </div>
 
     <splitpanes horizontal class="panes" @resize="onPaneResize">
-      <pane :size="editorSize" min-size="15">
+      <pane :size="editorSize" :min-size="MIN_EDITOR_SIZE">
         <SqlEditor
           ref="editorRef"
           :model-value="tab.query"
@@ -133,7 +133,7 @@
           @show-keys="ui.setKeyboardHelpOpen(true)"
         />
       </pane>
-      <pane :size="100 - editorSize" min-size="15">
+      <pane :size="100 - editorSize" :min-size="MIN_EDITOR_SIZE">
         <div class="results-pane">
           <!-- The actions of a result sit beside the strip and act on the
                result that is open. A tab is itself a button, so a button
@@ -373,6 +373,7 @@ import { formatClockTime, formatRowCount } from '@/lib/format'
 import { useConnectionsStore } from '@/stores/connections'
 import { useExplorerStore } from '@/stores/explorer'
 import { useHistoryStore } from '@/stores/history'
+import { MIN_EDITOR_SIZE, useLayoutStore } from '@/stores/layout'
 import { newQueryState, useQueryStore } from '@/stores/query'
 import { useSettingsStore } from '@/stores/settings'
 import { useTabsStore } from '@/stores/tabs'
@@ -393,11 +394,16 @@ const queries = useQueryStore()
 const connections = useConnectionsStore()
 const explorer = useExplorerStore()
 const history = useHistoryStore()
+const layout = useLayoutStore()
 const settings = useSettingsStore()
 const ui = useUiStore()
 
 const editorRef = ref<InstanceType<typeof SqlEditor> | null>(null)
-const editorSize = ref(45)
+/**
+ * The share the editor takes of the split. It lives in the layout store, so
+ * every tab shows the same split and a restart brings it back.
+ */
+const editorSize = computed(() => layout.layout.editorSize)
 const savingQuery = ref(false)
 const saveName = ref('')
 const saveFolder = ref('')
@@ -567,7 +573,7 @@ function onConnectionChange(value: string | null): void {
 
 function onPaneResize(panes: Array<{ size: number }>): void {
   if (panes[0]) {
-    editorSize.value = panes[0].size
+    layout.setEditorSize(panes[0].size)
   }
 }
 
