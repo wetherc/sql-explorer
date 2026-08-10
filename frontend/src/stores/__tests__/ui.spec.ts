@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { useUiStore } from '@/stores/ui'
+import { ERROR_TIMEOUT_MS, MAX_NOTICES, useUiStore } from '@/stores/ui'
 import { ErrorKind } from '@/types/api'
 
 describe('ui store', () => {
@@ -140,5 +140,40 @@ describe('ui store dialog count', () => {
     ui.removeDialog()
 
     expect(ui.openDialogs).toBe(0)
+  })
+})
+
+describe('ui store holding the corner to a few notices', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  it('keeps only the newest notices when a burst arrives', () => {
+    const ui = useUiStore()
+
+    for (let index = 0; index < MAX_NOTICES + 3; index += 1) {
+      ui.info(`Notice ${index}`)
+    }
+
+    expect(ui.notices).toHaveLength(MAX_NOTICES)
+    // The oldest go, so the newest are the ones the user can still read.
+    expect(ui.notices[0]?.message).toBe('Notice 3')
+    expect(ui.notices[ui.notices.length - 1]?.message).toBe(`Notice ${MAX_NOTICES + 2}`)
+  })
+
+  it('holds an error in the corner until the user takes it away', () => {
+    const ui = useUiStore()
+
+    ui.reportError({ kind: ErrorKind.Database, message: 'It failed', detail: null })
+
+    expect(ui.notices[0]?.timeout).toBe(-1)
+  })
+
+  it('lets an error leave on its own when the same words are kept elsewhere', () => {
+    const ui = useUiStore()
+
+    ui.reportError({ kind: ErrorKind.Database, message: 'It failed', detail: null }, { kept: true })
+
+    expect(ui.notices[0]?.timeout).toBe(ERROR_TIMEOUT_MS)
   })
 })

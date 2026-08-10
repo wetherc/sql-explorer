@@ -18,6 +18,16 @@ export interface Notice {
 let nextNoticeId = 0
 
 /**
+ * The number of notices the corner holds. Each notice stands above the one
+ * before it, so a burst of them would otherwise walk off the top of the
+ * window. The oldest goes when a new one arrives above this number.
+ */
+export const MAX_NOTICES = 4
+
+/** How long an error stays when the same failure is written somewhere else. */
+export const ERROR_TIMEOUT_MS = 8000
+
+/**
  * The notices the application shows, and the state of the panels the user
  * can open and close.
  */
@@ -40,6 +50,9 @@ export const useUiStore = defineStore('ui', () => {
   function push(notice: Omit<Notice, 'id'>): Notice {
     const created: Notice = { ...notice, id: (nextNoticeId += 1) }
     notices.value.push(created)
+    if (notices.value.length > MAX_NOTICES) {
+      notices.value = notices.value.slice(notices.value.length - MAX_NOTICES)
+    }
     return created
   }
 
@@ -86,10 +99,16 @@ export const useUiStore = defineStore('ui', () => {
   }
 
   /**
-   * Reports a failed command. A command the user stopped raises no alarm,
-   * so it becomes a short note instead.
+   * Reports a failed command. A command the user stopped raises no alarm, so
+   * it becomes a short note instead.
+   *
+   * An error stays in the corner until the user takes it away, because a
+   * failure that goes by itself can be missed. A caller that writes the same
+   * failure somewhere the user can read it again, such as the messages of a
+   * tab, marks it as `kept: true`. The notice is then a passing word about
+   * something the user can still go back to, and it leaves on its own.
    */
-  function reportError(error: unknown): ErrorPayload {
+  function reportError(error: unknown, options: { kept?: boolean } = {}): ErrorPayload {
     const payload = toErrorPayload(error)
     if (isCancellation(payload)) {
       info('The statement was stopped.')
@@ -101,8 +120,7 @@ export const useUiStore = defineStore('ui', () => {
       message: payload.message,
       detail: [advice, payload.detail].filter(Boolean).join('\n\n') || null,
       icon: errorIcon(payload.kind),
-      // An error stays until the user removes it.
-      timeout: -1,
+      timeout: options.kept ? ERROR_TIMEOUT_MS : -1,
     })
     return payload
   }

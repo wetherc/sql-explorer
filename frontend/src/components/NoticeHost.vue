@@ -1,5 +1,23 @@
 <template>
   <div class="notice-host">
+    <!-- One button takes every notice away, because taking four away one at a
+         time is work the user should not have to do. It stands above the
+         notices, in the place the next one would take. -->
+    <v-snackbar
+      v-if="ui.notices.length > 1"
+      :model-value="true"
+      :timeout="-1"
+      location="bottom right"
+      color="surface-light"
+      :style="{ marginBottom: `${ui.notices.length * NOTICE_HEIGHT}px` }"
+      data-test="notice-clear-all"
+    >
+      <span class="text-caption">{{ ui.notices.length }} notices</span>
+      <template #actions>
+        <v-btn size="small" text="Dismiss all" data-test="notice-clear" @click="ui.clear()" />
+      </template>
+    </v-snackbar>
+
     <!-- Each open notice moves up by its place in the list, so two notices
          at the same corner do not cover each other. -->
     <v-snackbar
@@ -9,7 +27,7 @@
       :color="notice.level"
       :timeout="notice.timeout"
       location="bottom right"
-      :style="{ marginBottom: `${index * 64}px` }"
+      :style="{ marginBottom: `${index * NOTICE_HEIGHT}px` }"
       data-test="notice"
       @update:model-value="ui.dismiss(notice.id)"
     >
@@ -70,6 +88,9 @@
 <script setup lang="ts">
 import AppDialog from './AppDialog.vue'
 import { useUiStore } from '@/stores/ui'
+
+/** The room one notice takes, which the one above it moves up by. */
+const NOTICE_HEIGHT = 64
 
 const ui = useUiStore()
 </script>

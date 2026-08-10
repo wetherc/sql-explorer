@@ -122,3 +122,28 @@ describe('NoticeHost as a part a reader can follow', () => {
     wrapper.unmount()
   })
 })
+
+describe('NoticeHost taking many notices away at once', () => {
+  it('offers no button while one notice stands alone', async () => {
+    mountWithPlugins(NoticeHost)
+    useUiStore().info('One')
+    await settle()
+
+    expect(document.querySelector('[data-test="notice-clear"]')).toBeNull()
+  })
+
+  it('offers one button once a second notice arrives', async () => {
+    mountWithPlugins(NoticeHost)
+    const ui = useUiStore()
+    ui.info('One')
+    ui.info('Two')
+    await settle()
+
+    expect(document.body.textContent).toContain('2 notices')
+    const clear = document.querySelector('[data-test="notice-clear"]') as HTMLElement
+    clear.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+
+    expect(ui.notices).toHaveLength(0)
+  })
+})

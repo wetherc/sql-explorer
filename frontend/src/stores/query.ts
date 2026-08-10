@@ -215,7 +215,9 @@ export const useQueryStore = defineStore('query', () => {
         ui.warn('The row limit stopped the read. Raise it in the settings to see more rows.')
       }
     } catch (error) {
-      failure = ui.reportError(error)
+      // The messages of the tab hold the same failure, with its whole detail,
+      // so the notice in the corner leaves on its own.
+      failure = ui.reportError(error, { kept: true })
       state.error = failure
       state.elapsedMs = Date.now() - (state.startedAt ?? Date.now())
     } finally {
