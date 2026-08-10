@@ -9,8 +9,8 @@ use crate::db::drivers::{
     rows_returned_message, DatabaseDriver, NumberValue,
 };
 use crate::db::{
-    AppColumn, ColumnInfo, CreateQuery, Database, DriverCapabilities, ExecOptions, QueryParams,
-    QueryResponse, ResultSet, Schema, Table, TableKind,
+    AppColumn, ColumnInfo, Constraint, ConstraintKind, CreateQuery, Database, DriverCapabilities,
+    ExecOptions, IndexInfo, QueryParams, QueryResponse, ResultSet, Schema, Table, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
@@ -86,6 +86,10 @@ impl DatabaseDriver for SqliteDriver {
             supports_multiple_databases: false,
             supports_cancel: false,
             supports_transactions: true,
+            supports_routines: false,
+            supports_indexes: true,
+            supports_constraints: true,
+            supports_partitions: false,
         }
     }
 
@@ -212,6 +216,133 @@ impl DatabaseDriver for SqliteDriver {
             Ok(columns)
         })
         .await
+    }
+
+    /// Reads the indexes from the two pragmas of SQLite. One row of the
+    /// answer carries one column of one index, so the rows are folded into
+    /// one record for each index.
+    async fn list_indexes(
+        &mut self,
+        _database: &str,
+        _schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<IndexInfo>> {
+        let table = table.to_string();
+        self.with_connection(move |connection| {
+            let mut statement = connection.prepare(INDEX_QUERY)?;
+            let rows = statement.query_map([&table], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)? != 0,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })?;
+            let mut indexes: Vec<IndexInfo> = Vec::new();
+            for row in rows {
+                let (name, unique, origin, column) = row?;
+                add_index_column(&mut indexes, name, unique, origin == "pk", column);
+            }
+            Ok(indexes)
+        })
+        .await
+    }
+
+    /// Reads the primary key and the foreign keys. SQLite holds no name for
+    /// either, so the name comes from the columns.
+    async fn list_constraints(
+        &mut self,
+        _database: &str,
+        _schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<Constraint>> {
+        let table = table.to_string();
+        self.with_connection(move |connection| {
+            let mut keys = connection
+                .prepare("SELECT name FROM pragma_table_info(?1) WHERE pk > 0 ORDER BY pk")?;
+            let key_columns: Vec<String> = keys
+                .query_map([&table], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+
+            let mut constraints: Vec<Constraint> = Vec::new();
+            if !key_columns.is_empty() {
+                constraints.push(Constraint {
+                    name: format!("Primary key on {}", key_columns.join(", ")),
+                    kind: ConstraintKind::PrimaryKey,
+                    columns: key_columns,
+                    detail: None,
+                });
+            }
+
+            let mut foreign = connection.prepare(
+                "SELECT id, \"from\", \"table\", \"to\" FROM pragma_foreign_key_list(?1) \
+                 ORDER BY id, seq",
+            )?;
+            let rows = foreign.query_map([&table], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })?;
+            let mut current: Option<i64> = None;
+            for row in rows {
+                let (id, column, target, target_column) = row?;
+                let detail = match target_column {
+                    Some(name) => format!("{target}({name})"),
+                    None => target,
+                };
+                match (current, constraints.last_mut()) {
+                    (Some(seen), Some(last)) if seen == id => last.columns.push(column),
+                    _ => {
+                        current = Some(id);
+                        constraints.push(Constraint {
+                            name: format!("Foreign key to {detail}"),
+                            kind: ConstraintKind::ForeignKey,
+                            columns: vec![column],
+                            detail: Some(detail),
+                        });
+                    }
+                }
+            }
+            Ok(constraints)
+        })
+        .await
+    }
+}
+
+/// Reads one column of one index for each row. The `origin` column of the
+/// pragma names `pk` for the index that carries the primary key.
+const INDEX_QUERY: &str = "SELECT list.name, list.\"unique\", list.origin, info.name \
+     FROM pragma_index_list(?1) AS list \
+     LEFT JOIN pragma_index_info(list.name) AS info \
+     ORDER BY list.name, info.seqno";
+
+/// Adds one column to the record of its index, and starts a record when the
+/// index is new. A row without a column name gives an index with no column,
+/// which SQLite reports for an index on an expression.
+fn add_index_column(
+    indexes: &mut Vec<IndexInfo>,
+    name: String,
+    unique: bool,
+    primary: bool,
+    column: Option<String>,
+) {
+    let entry = match indexes.iter_mut().find(|index| index.name == name) {
+        Some(entry) => entry,
+        None => {
+            indexes.push(IndexInfo {
+                name,
+                columns: Vec::new(),
+                unique,
+                primary,
+            });
+            indexes.last_mut().expect("the record was just added")
+        }
+    };
+    if let Some(column) = column {
+        entry.columns.push(column);
     }
 }
 
@@ -571,6 +702,89 @@ mod tests {
         assert!(columns[1].nullable);
 
         driver.ping().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_metadata_lists_the_indexes_and_the_constraints() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("keys.db");
+        let mut driver = SqliteDriver::connect(&connection_for(&path.to_string_lossy()))
+            .await
+            .unwrap();
+        driver
+            .execute_query(
+                "CREATE TABLE customers (id INTEGER PRIMARY KEY, code TEXT); \
+                 CREATE TABLE orders ( \
+                     id INTEGER, region TEXT, customer INTEGER, \
+                     PRIMARY KEY (id, region), \
+                     FOREIGN KEY (customer) REFERENCES customers (id) \
+                 ); \
+                 CREATE UNIQUE INDEX orders_region ON orders (region, id);",
+                None,
+                &ExecOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        let indexes = driver
+            .list_indexes("keys.db", None, "orders")
+            .await
+            .unwrap();
+        let named = indexes
+            .iter()
+            .find(|index| index.name == "orders_region")
+            .expect("the index of the statement is listed");
+        assert_eq!(named.columns, vec!["region".to_string(), "id".to_string()]);
+        assert!(named.unique);
+        assert!(!named.primary);
+        assert!(indexes.iter().any(|index| index.primary));
+
+        let constraints = driver
+            .list_constraints("keys.db", None, "orders")
+            .await
+            .unwrap();
+        assert_eq!(constraints[0].kind, ConstraintKind::PrimaryKey);
+        assert_eq!(
+            constraints[0].columns,
+            vec!["id".to_string(), "region".to_string()]
+        );
+        assert_eq!(constraints[1].kind, ConstraintKind::ForeignKey);
+        assert_eq!(constraints[1].columns, vec!["customer".to_string()]);
+        assert_eq!(constraints[1].detail.as_deref(), Some("customers(id)"));
+
+        // A table without a key or an index gives an empty list, and no
+        // engine here holds a routine or a partition for SQLite.
+        assert!(driver
+            .list_constraints("keys.db", None, "customers")
+            .await
+            .unwrap()
+            .iter()
+            .all(|constraint| constraint.kind == ConstraintKind::PrimaryKey));
+        assert!(driver
+            .list_routines("keys.db", None)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(driver
+            .list_partitions("keys.db", None, "orders")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn an_index_on_an_expression_holds_no_column() {
+        let mut indexes: Vec<IndexInfo> = Vec::new();
+        add_index_column(&mut indexes, "by_total".into(), false, false, None);
+        add_index_column(
+            &mut indexes,
+            "by_total".into(),
+            false,
+            false,
+            Some("a".into()),
+        );
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(indexes[0].columns, vec!["a".to_string()]);
     }
 
     #[tokio::test]

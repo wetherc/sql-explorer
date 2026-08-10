@@ -232,6 +232,10 @@ impl DatabaseDriver for PostgresDriver {
             supports_multiple_databases: false,
             supports_cancel: true,
             supports_transactions: true,
+            supports_routines: false,
+            supports_indexes: false,
+            supports_constraints: false,
+            supports_partitions: false,
         }
     }
 

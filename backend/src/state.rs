@@ -190,6 +190,7 @@ mod tests {
                 supports_multiple_databases: true,
                 supports_cancel: true,
                 supports_transactions: true,
+                ..DriverCapabilities::default()
             }
         }
         fn dialect(&self) -> Dialect {

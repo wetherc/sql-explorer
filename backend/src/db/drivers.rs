@@ -8,8 +8,8 @@ pub mod postgres;
 pub mod sqlite;
 
 use crate::db::{
-    AppColumn, CreateQuery, Database, DriverCapabilities, ExecOptions, QueryParams, QueryResponse,
-    Schema, Table, TableKind,
+    AppColumn, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions, IndexInfo,
+    Partition, QueryParams, QueryResponse, Routine, Schema, Table, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::Dialect;
@@ -51,6 +51,47 @@ pub trait DatabaseDriver: Send + Sync {
         schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<AppColumn>>;
+
+    /// Lists the procedures and the functions of one schema. An engine that
+    /// holds none answers with an empty list, and the capability record says
+    /// so, which keeps the folder out of the tree.
+    async fn list_routines(
+        &mut self,
+        _database: &str,
+        _schema: Option<&str>,
+    ) -> Result<Vec<Routine>> {
+        Ok(Vec::new())
+    }
+
+    /// Lists the indexes of one relation, with the columns of each index.
+    async fn list_indexes(
+        &mut self,
+        _database: &str,
+        _schema: Option<&str>,
+        _table: &str,
+    ) -> Result<Vec<IndexInfo>> {
+        Ok(Vec::new())
+    }
+
+    /// Lists the constraints of one relation.
+    async fn list_constraints(
+        &mut self,
+        _database: &str,
+        _schema: Option<&str>,
+        _table: &str,
+    ) -> Result<Vec<Constraint>> {
+        Ok(Vec::new())
+    }
+
+    /// Lists the partitions of one relation that holds its data in parts.
+    async fn list_partitions(
+        &mut self,
+        _database: &str,
+        _schema: Option<&str>,
+        _table: &str,
+    ) -> Result<Vec<Partition>> {
+        Ok(Vec::new())
+    }
 
     /// Returns the statement that reads the CREATE text of one object from
     /// the engine. An engine that gives no such text returns `None`, and the
@@ -231,12 +272,7 @@ mod tests {
     #[async_trait]
     impl DatabaseDriver for BareDriver {
         fn capabilities(&self) -> DriverCapabilities {
-            DriverCapabilities {
-                supports_schemas: false,
-                supports_multiple_databases: false,
-                supports_cancel: false,
-                supports_transactions: false,
-            }
+            DriverCapabilities::default()
         }
         fn dialect(&self) -> Dialect {
             Dialect::Sqlite

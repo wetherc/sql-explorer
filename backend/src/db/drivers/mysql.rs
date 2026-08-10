@@ -206,6 +206,10 @@ impl DatabaseDriver for MysqlDriver {
             supports_multiple_databases: true,
             supports_cancel: true,
             supports_transactions: true,
+            supports_routines: false,
+            supports_indexes: false,
+            supports_constraints: false,
+            supports_partitions: false,
         }
     }
 

@@ -203,6 +203,62 @@ pub struct AppColumn {
     pub is_primary_key: bool,
 }
 
+/// The kind of a routine that a schema holds.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RoutineKind {
+    Procedure,
+    Function,
+}
+
+/// One procedure or one function of a schema.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Routine {
+    pub name: String,
+    pub kind: RoutineKind,
+}
+
+/// One index of a relation, with the columns it covers in their order.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexInfo {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub unique: bool,
+    /// True when the index carries the primary key of the relation.
+    pub primary: bool,
+}
+
+/// The kind of a constraint of a relation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ConstraintKind {
+    PrimaryKey,
+    ForeignKey,
+    Unique,
+    Check,
+}
+
+/// One constraint of a relation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Constraint {
+    pub name: String,
+    pub kind: ConstraintKind,
+    pub columns: Vec<String>,
+    /// The relation a foreign key points at, or the rule of a check.
+    pub detail: Option<String>,
+}
+
+/// One partition of a relation that holds its data in parts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Partition {
+    /// The values of the partition columns, as the engine reports them.
+    pub values: String,
+}
+
 /// The statement that reads the CREATE text of one object from the engine,
 /// and the column of the answer that carries that text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,8 +277,9 @@ impl CreateQuery {
 }
 
 /// What one driver can do. The user interface hides the actions that the
-/// active engine does not support.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+/// active engine does not support. The default answers no to every question,
+/// which serves a test that cares about one field alone.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DriverCapabilities {
     /// True when the engine puts schemas below databases.
@@ -233,6 +290,15 @@ pub struct DriverCapabilities {
     pub supports_cancel: bool,
     /// True when the engine has transactions.
     pub supports_transactions: bool,
+    /// True when the driver lists the procedures and the functions of a
+    /// schema.
+    pub supports_routines: bool,
+    /// True when the driver lists the indexes of a relation.
+    pub supports_indexes: bool,
+    /// True when the driver lists the constraints of a relation.
+    pub supports_constraints: bool,
+    /// True when the driver lists the partitions of a relation.
+    pub supports_partitions: bool,
 }
 
 /// What the connection form needs to know about one engine. The form
@@ -467,8 +533,9 @@ mod tests {
         let capabilities = DriverCapabilities {
             supports_schemas: true,
             supports_multiple_databases: true,
-            supports_cancel: false,
             supports_transactions: true,
+            supports_indexes: true,
+            ..DriverCapabilities::default()
         };
         assert_eq!(
             serde_json::from_str::<DriverCapabilities>(

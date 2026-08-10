@@ -474,6 +474,10 @@ impl DatabaseDriver for AthenaDriver {
             supports_cancel: true,
             // Athena runs each statement on its own.
             supports_transactions: false,
+            supports_routines: false,
+            supports_indexes: false,
+            supports_constraints: false,
+            supports_partitions: false,
         }
     }
 

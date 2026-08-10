@@ -5,8 +5,8 @@ use crate::db::drivers::{
     sqlite::SqliteDriver,
 };
 use crate::db::{
-    self, drivers::DatabaseDriver, AppColumn, Database, ExecOptions, QueryParams, QueryResponse,
-    Schema, Table, TableKind,
+    self, drivers::DatabaseDriver, AppColumn, Constraint, Database, ExecOptions, IndexInfo,
+    Partition, QueryParams, QueryResponse, Routine, Schema, Table, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::history::{HistoryEntry, SavedQuery};
@@ -301,6 +301,93 @@ pub async fn list_columns<R: Runtime>(
         .lock()
         .await
         .list_columns(&database, schema_name.as_deref(), &table_name)
+        .await;
+    if result.is_ok() {
+        open.mark_ok().await;
+    }
+    result
+}
+
+#[tauri::command]
+pub async fn list_routines<R: Runtime>(
+    app: AppHandle<R>,
+    connection_id: String,
+    database: String,
+    schema_name: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<Routine>> {
+    let open = ensure_healthy(&app, &state, &connection_id).await?;
+    let result = open
+        .driver
+        .lock()
+        .await
+        .list_routines(&database, schema_name.as_deref())
+        .await;
+    if result.is_ok() {
+        open.mark_ok().await;
+    }
+    result
+}
+
+#[tauri::command]
+pub async fn list_indexes<R: Runtime>(
+    app: AppHandle<R>,
+    connection_id: String,
+    database: String,
+    schema_name: Option<String>,
+    table_name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<IndexInfo>> {
+    let open = ensure_healthy(&app, &state, &connection_id).await?;
+    let result = open
+        .driver
+        .lock()
+        .await
+        .list_indexes(&database, schema_name.as_deref(), &table_name)
+        .await;
+    if result.is_ok() {
+        open.mark_ok().await;
+    }
+    result
+}
+
+#[tauri::command]
+pub async fn list_constraints<R: Runtime>(
+    app: AppHandle<R>,
+    connection_id: String,
+    database: String,
+    schema_name: Option<String>,
+    table_name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<Constraint>> {
+    let open = ensure_healthy(&app, &state, &connection_id).await?;
+    let result = open
+        .driver
+        .lock()
+        .await
+        .list_constraints(&database, schema_name.as_deref(), &table_name)
+        .await;
+    if result.is_ok() {
+        open.mark_ok().await;
+    }
+    result
+}
+
+#[tauri::command]
+pub async fn list_partitions<R: Runtime>(
+    app: AppHandle<R>,
+    connection_id: String,
+    database: String,
+    schema_name: Option<String>,
+    table_name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<Partition>> {
+    let open = ensure_healthy(&app, &state, &connection_id).await?;
+    let result = open
+        .driver
+        .lock()
+        .await
+        .list_partitions(&database, schema_name.as_deref(), &table_name)
         .await;
     if result.is_ok() {
         open.mark_ok().await;
