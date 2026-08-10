@@ -175,6 +175,23 @@ pub fn unique_column_names(columns: &[ColumnInfo]) -> Vec<String> {
     names
 }
 
+/// Which plan of a statement the user asked for.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PlanKind {
+    /// The plan the engine builds without running the statement.
+    Estimated,
+    /// The plan the engine reports after it ran the statement.
+    Actual,
+}
+
+impl PlanKind {
+    /// True when the engine runs the statement to give this plan.
+    pub fn runs_the_statement(self) -> bool {
+        self == PlanKind::Actual
+    }
+}
+
 /// The limits that apply to one execution.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -402,6 +419,8 @@ pub struct DriverCapabilities {
     pub supports_constraints: bool,
     /// True when the driver lists the partitions of a relation.
     pub supports_partitions: bool,
+    /// True when the driver can read the plan of a statement.
+    pub supports_explain: bool,
 }
 
 /// What the connection form needs to know about one engine. The form
@@ -503,6 +522,18 @@ pub fn supported_engines() -> Vec<EngineInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_actual_plan_is_the_one_that_runs_the_statement() {
+        assert!(PlanKind::Actual.runs_the_statement());
+        assert!(!PlanKind::Estimated.runs_the_statement());
+        assert_eq!(
+            serde_json::to_string(&PlanKind::Estimated).unwrap(),
+            "\"estimated\""
+        );
+        let parsed: PlanKind = serde_json::from_str("\"actual\"").unwrap();
+        assert_eq!(parsed, PlanKind::Actual);
+    }
 
     #[test]
     fn a_message_carries_a_level_and_a_detail() {

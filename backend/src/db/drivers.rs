@@ -9,11 +9,11 @@ pub mod sqlite;
 
 use crate::db::{
     AppColumn, Constraint, ConstraintKind, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, Message, Partition, QueryParams, QueryResponse, Routine, RoutineKind, Schema,
-    SchemaSnapshot, SnapshotColumn, SnapshotRelation, Table, TableFact, TableKind,
+    IndexInfo, Message, Partition, PlanKind, QueryParams, QueryResponse, Routine, RoutineKind,
+    Schema, SchemaSnapshot, SnapshotColumn, SnapshotRelation, Table, TableFact, TableKind,
 };
 use crate::error::{Error, Result};
-use crate::sql::Dialect;
+use crate::sql::{split_statements, Dialect};
 use async_trait::async_trait;
 use base64::Engine as _;
 use serde_json::Value as JsonValue;
@@ -162,6 +162,22 @@ pub trait DatabaseDriver: Send + Sync {
         Ok(snapshot)
     }
 
+    /// Reads the plan of one statement. The estimated plan does not run the
+    /// statement. The actual plan runs it, so the interface asks the user
+    /// first.
+    ///
+    /// A driver that gives no plan keeps this default and refuses.
+    async fn explain(
+        &mut self,
+        _query: &str,
+        _kind: PlanKind,
+        _options: &ExecOptions,
+    ) -> Result<QueryResponse> {
+        Err(Error::Unsupported(
+            "This engine gives no plan of a statement.".to_string(),
+        ))
+    }
+
     /// Returns the statement that reads the CREATE text of one object from
     /// the engine. An engine that gives no such text returns `None`, and the
     /// command layer builds a draft from the column list instead.
@@ -262,6 +278,36 @@ pub fn size_text(bytes: u64) -> String {
     } else {
         format!("{value:.1} {}", units[unit])
     }
+}
+
+/// Takes the one statement of a plan request.
+///
+/// A plan covers one statement, because the keyword that asks for it stands
+/// in front of that statement. A request with two statements is therefore
+/// refused, and the trailing semicolon goes, so that the statement fits
+/// behind a keyword.
+pub fn single_statement(query: &str, dialect: Dialect) -> Result<String> {
+    let statements = split_statements(query, dialect);
+    match statements.len() {
+        0 => Err(Error::Configuration(
+            "There is no statement to read a plan for.".to_string(),
+        )),
+        1 => Ok(statements[0]
+            .trim()
+            .trim_end_matches(';')
+            .trim()
+            .to_string()),
+        count => Err(Error::Configuration(format!(
+            "The text holds {count} statements. Select one statement to read its plan."
+        ))),
+    }
+}
+
+/// Builds the plan statement of an engine that puts a keyword in front of
+/// the statement.
+pub fn prefixed_plan(query: &str, dialect: Dialect, prefix: &str) -> Result<String> {
+    let statement = single_statement(query, dialect)?;
+    Ok(format!("{prefix} {statement}"))
 }
 
 /// Adds one column of one relation to a snapshot, and starts a record when
@@ -420,6 +466,30 @@ pub fn rows_returned_message(count: usize, truncated: bool) -> Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plan_takes_one_statement_without_its_semicolon() {
+        assert_eq!(
+            single_statement("SELECT 1;", Dialect::MsSql).unwrap(),
+            "SELECT 1"
+        );
+        assert_eq!(
+            prefixed_plan("SELECT 1", Dialect::Postgres, "EXPLAIN").unwrap(),
+            "EXPLAIN SELECT 1"
+        );
+    }
+
+    #[test]
+    fn a_plan_refuses_no_statement_and_more_than_one() {
+        let none = single_statement("   ", Dialect::MsSql).unwrap_err();
+        assert!(none.to_string().contains("no statement"));
+
+        let many = single_statement("SELECT 1; SELECT 2;", Dialect::MsSql).unwrap_err();
+        assert!(many.to_string().contains("2 statements"));
+
+        let refused = prefixed_plan("SELECT 1; SELECT 2", Dialect::MsSql, "EXPLAIN").unwrap_err();
+        assert!(refused.to_string().contains("Select one statement"));
+    }
 
     #[test]
     fn a_size_takes_the_largest_unit_that_fits() {

@@ -2,14 +2,14 @@
 
 use crate::db::drivers::{
     add_constraint_column, add_index_column, add_snapshot_column, bytes_to_json, constraint_kind,
-    f64_to_json, number_out_of_range, number_value, parameter_type_refused, routine_kind,
-    rows_affected_message, rows_returned_message, size_text, table_kind, CancelHandle,
-    DatabaseDriver, NumberValue,
+    f64_to_json, number_out_of_range, number_value, parameter_type_refused, prefixed_plan,
+    routine_kind, rows_affected_message, rows_returned_message, size_text, table_kind,
+    CancelHandle, DatabaseDriver, NumberValue,
 };
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, Message, QueryParams, QueryResponse, ResultSet, Routine, Schema, SchemaSnapshot,
-    SnapshotColumn, Table, TableFact, TableKind,
+    IndexInfo, Message, PlanKind, QueryParams, QueryResponse, ResultSet, Routine, Schema,
+    SchemaSnapshot, SnapshotColumn, Table, TableFact, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
@@ -215,6 +215,7 @@ impl DatabaseDriver for MysqlDriver {
             supports_indexes: true,
             supports_constraints: true,
             supports_partitions: false,
+            supports_explain: true,
         }
     }
 
@@ -260,6 +261,16 @@ impl DatabaseDriver for MysqlDriver {
 
         response.elapsed_ms = started.elapsed().as_millis() as u64;
         Ok(response)
+    }
+
+    async fn explain(
+        &mut self,
+        query: &str,
+        kind: PlanKind,
+        options: &ExecOptions,
+    ) -> Result<QueryResponse> {
+        let statement = prefixed_plan(query, Dialect::MySql, plan_prefix(kind))?;
+        self.execute_query(&statement, None, options).await
     }
 
     async fn list_databases(&mut self) -> Result<Vec<Database>> {
@@ -540,6 +551,16 @@ impl CancelHandle for MysqlCancel {
 }
 
 /// Converts one row into an array of JSON values.
+/// The keyword that asks MySQL or MariaDB for a plan. `EXPLAIN ANALYZE` runs
+/// the statement, and it needs MySQL 8.0.18 or MariaDB 10.1 or a later
+/// version.
+pub fn plan_prefix(kind: PlanKind) -> &'static str {
+    match kind {
+        PlanKind::Estimated => "EXPLAIN",
+        PlanKind::Actual => "EXPLAIN ANALYZE",
+    }
+}
+
 /// Builds the statement that reads the CREATE text of one object. MySQL and
 /// MariaDB answer `SHOW CREATE` with the name in the first column and the
 /// text in the second one.
@@ -639,6 +660,12 @@ pub fn format_time(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_analysed_plan_runs_the_statement() {
+        assert_eq!(plan_prefix(PlanKind::Estimated), "EXPLAIN");
+        assert_eq!(plan_prefix(PlanKind::Actual), "EXPLAIN ANALYZE");
+    }
 
     #[test]
     fn the_create_statement_names_the_kind_of_the_object() {

@@ -5,13 +5,13 @@
 //! The metadata comes from the data catalog through the same service.
 
 use crate::db::drivers::{
-    add_snapshot_column, f64_to_json, rows_returned_message, table_kind, CancelHandle,
-    DatabaseDriver,
+    add_snapshot_column, f64_to_json, prefixed_plan, rows_returned_message, table_kind,
+    CancelHandle, DatabaseDriver,
 };
 use crate::db::{
     AppColumn, ColumnInfo, CreateQuery, Database, DriverCapabilities, ExecOptions, Partition,
-    QueryParams, QueryResponse, QueryStats, ResultSet, Schema, SchemaSnapshot, SnapshotColumn,
-    Table, TableKind,
+    PlanKind, QueryParams, QueryResponse, QueryStats, ResultSet, Schema, SchemaSnapshot,
+    SnapshotColumn, Table, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
@@ -489,6 +489,7 @@ impl DatabaseDriver for AthenaDriver {
             supports_indexes: false,
             supports_constraints: false,
             supports_partitions: true,
+            supports_explain: true,
         }
     }
 
@@ -542,6 +543,16 @@ impl DatabaseDriver for AthenaDriver {
         }
         response.elapsed_ms = started.elapsed().as_millis() as u64;
         Ok(response)
+    }
+
+    async fn explain(
+        &mut self,
+        query: &str,
+        kind: PlanKind,
+        options: &ExecOptions,
+    ) -> Result<QueryResponse> {
+        let statement = prefixed_plan(query, Dialect::Athena, plan_prefix(kind))?;
+        self.execute_query(&statement, None, options).await
     }
 
     async fn list_databases(&mut self) -> Result<Vec<Database>> {
@@ -770,6 +781,15 @@ fn describe<E: std::error::Error + 'static, R: std::fmt::Debug>(
 }
 
 /// Doubles the wait between two checks, up to two seconds.
+/// The keyword that asks Athena for a plan. The analysed form runs the
+/// statement, so it scans data and it costs money.
+pub fn plan_prefix(kind: PlanKind) -> &'static str {
+    match kind {
+        PlanKind::Estimated => "EXPLAIN",
+        PlanKind::Actual => "EXPLAIN ANALYZE",
+    }
+}
+
 pub fn next_wait(current: Duration) -> Duration {
     std::cmp::min(current * 2, Duration::from_secs(2))
 }
@@ -826,6 +846,12 @@ pub fn typed_value(text: &str, type_name: &str) -> JsonValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_analysed_plan_of_athena_scans_data() {
+        assert_eq!(plan_prefix(PlanKind::Estimated), "EXPLAIN");
+        assert_eq!(plan_prefix(PlanKind::Actual), "EXPLAIN ANALYZE");
+    }
 
     #[test]
     fn a_relation_without_partitions_is_recognised() {

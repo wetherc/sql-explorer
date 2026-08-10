@@ -7,13 +7,14 @@
 
 use crate::db::drivers::{
     add_constraint_column, add_index_column, add_snapshot_column, bytes_to_json, constraint_kind,
-    f64_to_json, number_out_of_range, number_value, routine_kind, rows_affected_message,
-    rows_returned_message, size_text, table_kind, CancelHandle, DatabaseDriver, NumberValue,
+    f64_to_json, number_out_of_range, number_value, prefixed_plan, routine_kind,
+    rows_affected_message, rows_returned_message, size_text, table_kind, CancelHandle,
+    DatabaseDriver, NumberValue,
 };
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, Message, MessageLevel, QueryParams, QueryResponse, ResultSet, Routine, Schema,
-    SchemaSnapshot, SnapshotColumn, Table, TableFact, TableKind,
+    IndexInfo, Message, MessageLevel, PlanKind, QueryParams, QueryResponse, ResultSet, Routine,
+    Schema, SchemaSnapshot, SnapshotColumn, Table, TableFact, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::Dialect;
@@ -313,6 +314,7 @@ impl DatabaseDriver for PostgresDriver {
             supports_indexes: true,
             supports_constraints: true,
             supports_partitions: false,
+            supports_explain: true,
         }
     }
 
@@ -365,6 +367,16 @@ impl DatabaseDriver for PostgresDriver {
         response.messages.splice(0..0, notices);
         response.elapsed_ms = started.elapsed().as_millis() as u64;
         Ok(response)
+    }
+
+    async fn explain(
+        &mut self,
+        query: &str,
+        kind: PlanKind,
+        options: &ExecOptions,
+    ) -> Result<QueryResponse> {
+        let statement = prefixed_plan(query, Dialect::Postgres, plan_prefix(kind))?;
+        self.execute_query(&statement, None, options).await
     }
 
     async fn list_databases(&mut self) -> Result<Vec<Database>> {
@@ -751,6 +763,15 @@ impl PostgresDriver {
 }
 
 /// Adds a result set and the message that belongs to it.
+/// The keyword that asks PostgreSQL for a plan. The analysed form runs the
+/// statement, so a statement that writes rows writes them.
+pub fn plan_prefix(kind: PlanKind) -> &'static str {
+    match kind {
+        PlanKind::Estimated => "EXPLAIN (FORMAT TEXT)",
+        PlanKind::Actual => "EXPLAIN (ANALYZE, BUFFERS)",
+    }
+}
+
 /// Builds the statement that reads the CREATE text of one view. PostgreSQL
 /// keeps no text for a table, so a table gives no statement and the command
 /// layer builds a draft instead.
@@ -883,6 +904,12 @@ fn get<'a, T: tokio_postgres::types::FromSql<'a>>(row: &'a Row, index: usize) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_plan_keyword_names_the_form_of_the_answer() {
+        assert_eq!(plan_prefix(PlanKind::Estimated), "EXPLAIN (FORMAT TEXT)");
+        assert_eq!(plan_prefix(PlanKind::Actual), "EXPLAIN (ANALYZE, BUFFERS)");
+    }
 
     #[test]
     fn the_severity_of_a_notice_decides_its_level() {

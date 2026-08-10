@@ -102,6 +102,31 @@ that holds no partition and for a view, and the driver answers with an empty
 list when the refusal names that cause. Another refusal reaches the user as
 an error.
 
+## A plan covers one statement
+
+The keyword that asks for a plan stands in front of one statement, so the
+application refuses a request that holds two statements. Select the statement
+first, or put the cursor in it and read the plan of that statement.
+
+The actual plan runs the statement. A statement that writes rows writes them,
+and a statement on Athena scans data and costs money, so the interface asks
+before it reads an actual plan.
+
+MS SQL Server holds the plan switch for the whole session, so the driver turns
+the switch off again after each plan. A switch that cannot be turned off leaves
+the session in the plan state, and the driver then reports the fault and closes
+the connection. `EXPLAIN ANALYZE` of MySQL needs version 8.0.18, and of MariaDB
+version 10.1. SQLite reports one plan, which it builds without running the
+statement, so a request for the actual plan gives that plan with a message.
+
+## The time limit closes the connection
+
+The time limit of a connection now applies to every engine. A statement that
+passes the limit is dropped in the middle of the exchange with the server, so
+the connection is no longer in a known state and the application closes it.
+Stop does the same. MS SQL Server keeps its statement running after that,
+because the driver sends no attention packet.
+
 ## Athena takes no bound parameters
 
 The driver refuses a statement that carries a parameter, because the client

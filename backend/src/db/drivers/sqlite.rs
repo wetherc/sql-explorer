@@ -5,13 +5,13 @@
 //! closure takes for the length of one call.
 
 use crate::db::drivers::{
-    add_index_column, bytes_to_json, f64_to_json, number_out_of_range, number_value,
+    add_index_column, bytes_to_json, f64_to_json, number_out_of_range, number_value, prefixed_plan,
     rows_affected_message, rows_returned_message, DatabaseDriver, NumberValue,
 };
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, ConstraintKind, CreateQuery, Database, DriverCapabilities,
-    ExecOptions, IndexInfo, QueryParams, QueryResponse, ResultSet, Schema, Table, TableFact,
-    TableKind,
+    ExecOptions, IndexInfo, Message, PlanKind, QueryParams, QueryResponse, ResultSet, Schema,
+    Table, TableFact, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
@@ -91,6 +91,7 @@ impl DatabaseDriver for SqliteDriver {
             supports_indexes: true,
             supports_constraints: true,
             supports_partitions: false,
+            supports_explain: true,
         }
     }
 
@@ -142,6 +143,25 @@ impl DatabaseDriver for SqliteDriver {
             .await?;
 
         response.elapsed_ms = started.elapsed().as_millis() as u64;
+        Ok(response)
+    }
+
+    /// SQLite holds one plan, which it gives without running the statement.
+    /// A request for the actual plan therefore gives the same rows, with a
+    /// message that says so.
+    async fn explain(
+        &mut self,
+        query: &str,
+        kind: PlanKind,
+        options: &ExecOptions,
+    ) -> Result<QueryResponse> {
+        let statement = prefixed_plan(query, Dialect::Sqlite, "EXPLAIN QUERY PLAN")?;
+        let mut response = self.execute_query(&statement, None, options).await?;
+        if kind.runs_the_statement() {
+            response.messages.push(Message::info(
+                "SQLite reports one plan, so this is the plan it builds before the run.",
+            ));
+        }
         Ok(response)
     }
 
@@ -502,6 +522,72 @@ mod tests {
         );
         input.options.file_path = None;
         assert!(SqliteDriver::connect(&input).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_plan_of_a_statement_names_the_steps_of_the_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("plan.db");
+        let mut driver = SqliteDriver::connect(&connection_for(&path.to_string_lossy()))
+            .await
+            .unwrap();
+        driver
+            .execute_query(
+                "CREATE TABLE person (id INTEGER PRIMARY KEY, name TEXT)",
+                None,
+                &ExecOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        let estimated = driver
+            .explain(
+                "SELECT * FROM person WHERE id = 1;",
+                PlanKind::Estimated,
+                &ExecOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(estimated.results.len(), 1);
+        let plan = estimated.results[0].rows[0]
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(plan.to_lowercase().contains("person"), "{plan}");
+
+        // SQLite holds one plan, so the actual plan carries a message that
+        // names what the rows are.
+        let actual = driver
+            .explain(
+                "SELECT * FROM person",
+                PlanKind::Actual,
+                &ExecOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert!(actual
+            .messages
+            .iter()
+            .any(|message| message.text.contains("SQLite reports one plan")));
+    }
+
+    #[tokio::test]
+    async fn a_plan_of_two_statements_is_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("plan_two.db");
+        let mut driver = SqliteDriver::connect(&connection_for(&path.to_string_lossy()))
+            .await
+            .unwrap();
+        let error = driver
+            .explain(
+                "SELECT 1; SELECT 2",
+                PlanKind::Estimated,
+                &ExecOptions::default(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), crate::error::ErrorKind::Configuration);
     }
 
     #[tokio::test]

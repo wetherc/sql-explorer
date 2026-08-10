@@ -6,8 +6,8 @@ use crate::db::drivers::{
 };
 use crate::db::{
     self, drivers::DatabaseDriver, AppColumn, Constraint, Database, ExecOptions, IndexInfo,
-    Partition, QueryParams, QueryResponse, Routine, Schema, SchemaSnapshot, Table, TableDetails,
-    TableKind,
+    Partition, PlanKind, QueryParams, QueryResponse, Routine, Schema, SchemaSnapshot, Table,
+    TableDetails, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::history::{HistoryEntry, SavedQuery};
@@ -20,6 +20,7 @@ use crate::storage::{DbType, SavedConnection};
 use crate::store;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Runtime};
+use tokio_util::sync::CancellationToken;
 
 /// Opens the driver that belongs to the engine of the record.
 pub async fn open_driver(connection: &SavedConnection) -> Result<Box<dyn DatabaseDriver>> {
@@ -172,6 +173,51 @@ async fn ensure_healthy<R: Runtime>(
     }
 }
 
+/// Waits for the number of seconds, or forever when the number is zero.
+async fn until_the_limit(timeout_secs: u64) {
+    if timeout_secs == 0 {
+        std::future::pending::<()>().await
+    } else {
+        tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)).await
+    }
+}
+
+/// How one exchange with a server ended.
+pub enum Bounded<T> {
+    /// The driver answered, with a result or with an error of its own.
+    Answered(Result<T>),
+    /// A limit ended the exchange before the driver answered.
+    Stopped(Error),
+}
+
+/// Runs one exchange with a server under the two limits that apply to it: the
+/// Stop button of the user, and the time limit of the connection.
+///
+/// A limit that ends the exchange drops it in the middle of a message, so the
+/// answer says which of the two ended it and the caller then closes the
+/// connection. An error that the driver itself reports leaves the connection
+/// open.
+pub async fn run_bounded<T, F>(work: F, token: &CancellationToken, timeout_secs: u64) -> Bounded<T>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    tokio::select! {
+        result = work => Bounded::Answered(result),
+        () = token.cancelled() => Bounded::Stopped(Error::Cancelled),
+        () = until_the_limit(timeout_secs) => Bounded::Stopped(Error::Timeout(timeout_secs)),
+    }
+}
+
+/// Reports what the interface shows when a limit ended an exchange.
+fn limit_reason(error: &Error) -> String {
+    match error {
+        Error::Timeout(seconds) => format!(
+            "The statement passed the limit of {seconds} seconds, so the connection was closed."
+        ),
+        _ => "The statement was stopped, so the connection was closed.".to_string(),
+    }
+}
+
 #[tauri::command]
 pub async fn execute_query<R: Runtime>(
     app: AppHandle<R>,
@@ -189,32 +235,73 @@ pub async fn execute_query<R: Runtime>(
     let outcome = {
         let driver = open.driver.clone();
         let mut guard = driver.lock().await;
-        tokio::select! {
-            result = guard.execute_query(&query, query_params.as_ref(), &options) => result,
-            () = token.cancelled() => Err(Error::Cancelled),
-        }
+        run_bounded(
+            guard.execute_query(&query, query_params.as_ref(), &options),
+            &token,
+            options.timeout_secs,
+        )
+        .await
     };
 
     state.end_request(&request_id).await;
+    finish_run(&app, &state, &connection_id, &open, outcome).await
+}
 
+/// Reads the plan of one statement and gives it back as a result set.
+#[tauri::command]
+pub async fn explain_query<R: Runtime>(
+    app: AppHandle<R>,
+    connection_id: String,
+    request_id: String,
+    query: String,
+    kind: PlanKind,
+    options: Option<ExecOptions>,
+    state: tauri::State<'_, AppState>,
+) -> Result<QueryResponse> {
+    let open = ensure_healthy(&app, &state, &connection_id).await?;
+    let options = options.unwrap_or_else(|| open.descriptor.exec_options());
+    let token = state.start_request(&request_id).await;
+
+    let outcome = {
+        let driver = open.driver.clone();
+        let mut guard = driver.lock().await;
+        run_bounded(
+            guard.explain(&query, kind, &options),
+            &token,
+            options.timeout_secs,
+        )
+        .await
+    };
+
+    state.end_request(&request_id).await;
+    finish_run(&app, &state, &connection_id, &open, outcome).await
+}
+
+/// Closes the accounts of one exchange. A limit that ended the exchange left
+/// the connection in the middle of a message, so that connection goes.
+async fn finish_run<R: Runtime, T>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    connection_id: &str,
+    open: &OpenConnection,
+    outcome: Bounded<T>,
+) -> Result<T> {
     match outcome {
-        Ok(response) => {
+        Bounded::Answered(Ok(value)) => {
             open.mark_ok().await;
-            Ok(response)
+            Ok(value)
         }
-        Err(Error::Cancelled) => {
-            // The statement was dropped in the middle of the exchange with
-            // the server, so the connection is no longer in a known state.
-            state.remove(&connection_id).await;
+        Bounded::Answered(Err(error)) => Err(error),
+        Bounded::Stopped(error) => {
+            state.remove(connection_id).await;
             announce(
-                &app,
-                &connection_id,
+                app,
+                connection_id,
                 ConnectionHealth::Disconnected,
-                Some("The statement was stopped, so the connection was closed.".to_string()),
+                Some(limit_reason(&error)),
             );
-            Err(Error::Cancelled)
+            Err(error)
         }
-        Err(error) => Err(error),
     }
 }
 
@@ -934,6 +1021,48 @@ mod tests {
     use crate::secrets::MemoryStore;
     use crate::sql::Dialect;
     use crate::storage::ConnectionOptions;
+
+    #[tokio::test]
+    async fn a_bounded_run_gives_the_answer_of_the_work() {
+        let token = CancellationToken::new();
+        let outcome = run_bounded(async { Ok(7_u8) }, &token, 30).await;
+        assert!(matches!(outcome, Bounded::Answered(Ok(7))));
+
+        // An error of the driver is an answer, so the connection stays open.
+        let failed: Bounded<u8> = run_bounded(async { Err(Error::Cancelled) }, &token, 30).await;
+        assert!(matches!(failed, Bounded::Answered(Err(Error::Cancelled))));
+    }
+
+    #[tokio::test]
+    async fn a_bounded_run_stops_when_the_user_asks() {
+        let token = CancellationToken::new();
+        token.cancel();
+        let outcome: Bounded<u8> = run_bounded(std::future::pending(), &token, 30).await;
+        assert!(matches!(outcome, Bounded::Stopped(Error::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn a_bounded_run_stops_at_the_time_limit() {
+        tokio::time::pause();
+        let token = CancellationToken::new();
+        let outcome: Bounded<u8> = run_bounded(std::future::pending(), &token, 5).await;
+        assert!(matches!(outcome, Bounded::Stopped(Error::Timeout(5))));
+    }
+
+    #[tokio::test]
+    async fn a_limit_of_zero_seconds_is_no_limit() {
+        tokio::time::pause();
+        let waiting = tokio::spawn(until_the_limit(0));
+        tokio::time::advance(std::time::Duration::from_secs(60 * 60)).await;
+        assert!(!waiting.is_finished());
+        waiting.abort();
+    }
+
+    #[test]
+    fn a_limit_that_ended_a_run_names_the_limit() {
+        assert!(limit_reason(&Error::Timeout(90)).contains("limit of 90 seconds"));
+        assert!(limit_reason(&Error::Cancelled).contains("stopped"));
+    }
 
     fn response_with(rows: Vec<Vec<serde_json::Value>>) -> QueryResponse {
         let mut set = ResultSet::new(vec![ColumnInfo::new("text", "text")]);

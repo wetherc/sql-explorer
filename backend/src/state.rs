@@ -288,6 +288,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_driver_that_reads_no_plan_refuses_the_request() {
+        let mut driver = StubDriver;
+        let error = driver
+            .explain(
+                "SELECT 1",
+                crate::db::PlanKind::Estimated,
+                &ExecOptions::default(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), crate::error::ErrorKind::Unsupported);
+    }
+
+    #[tokio::test]
     async fn a_connection_that_just_answered_needs_no_check() {
         let open = OpenConnection::new(descriptor(), Box::new(StubDriver));
         assert!(!open.needs_check().await);

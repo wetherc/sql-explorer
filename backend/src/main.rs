@@ -39,6 +39,7 @@ fn main() {
             commands::disconnect,
             commands::list_active_connections,
             commands::execute_query,
+            commands::explain_query,
             commands::cancel_query,
             commands::list_databases,
             commands::list_schemas,

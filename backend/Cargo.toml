@@ -109,6 +109,8 @@ custom-protocol = ["tauri/custom-protocol"]
 
 [dev-dependencies]
 tempfile = "3"
+# A test of a time limit moves the clock of the runtime instead of waiting.
+tokio = { version = "1", features = ["test-util"] }
 # The probe under `examples/` prints the trace of `tiberius`, which uses
 # `tracing` and not the `log` crate that the application itself uses.
 tracing = "0.1"

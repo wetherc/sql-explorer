@@ -8,13 +8,13 @@
 use crate::db::drivers::{
     add_constraint_column, add_index_column, add_snapshot_column, bytes_to_json, constraint_kind,
     f64_to_json, number_out_of_range, number_value, parameter_type_refused, routine_kind,
-    rows_affected_message, rows_returned_message, size_text, table_kind, DatabaseDriver,
-    NumberValue,
+    rows_affected_message, rows_returned_message, single_statement, size_text, table_kind,
+    DatabaseDriver, NumberValue,
 };
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, QueryParams, QueryResponse, ResultSet, Routine, Schema, SchemaSnapshot,
-    SnapshotColumn, Table, TableFact, TableKind,
+    IndexInfo, Message, PlanKind, QueryParams, QueryResponse, ResultSet, Routine, Schema,
+    SchemaSnapshot, SnapshotColumn, Table, TableFact, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
@@ -228,6 +228,60 @@ impl MssqlDriver {
             .map_err(|error| describe_login(error, connection.effective_auth()))?;
         Ok(Box::new(MssqlDriver { client }))
     }
+
+    /// Runs one statement through the path that keeps rows, and collects every
+    /// result set it produced.
+    async fn collect_sets(
+        &mut self,
+        statement: &str,
+        params: &[&dyn tiberius::ToSql],
+        options: &ExecOptions,
+    ) -> Result<Vec<ResultSet>> {
+        let mut stream = self.client.query(statement, params).await?;
+        let mut sets: Vec<ResultSet> = Vec::new();
+        let mut current: Option<ResultSet> = None;
+
+        while let Some(item) = stream.try_next().await? {
+            match item {
+                QueryItem::Metadata(metadata) => {
+                    if let Some(set) = current.take() {
+                        sets.push(set);
+                    }
+                    current = Some(ResultSet::new(
+                        metadata
+                            .columns()
+                            .iter()
+                            .map(|column| {
+                                ColumnInfo::new(column.name(), type_name(column.column_type()))
+                            })
+                            .collect(),
+                    ));
+                }
+                QueryItem::Row(row) => {
+                    let Some(set) = current.as_mut() else {
+                        continue;
+                    };
+                    if set.rows.len() >= options.max_rows {
+                        set.truncated = true;
+                        continue;
+                    }
+                    set.rows.push(row_to_json(&row));
+                }
+            }
+        }
+        if let Some(set) = current.take() {
+            sets.push(set);
+        }
+        Ok(sets)
+    }
+
+    /// Runs one statement of the session that carries no rows back, such as
+    /// the switch that turns the plan on or off.
+    async fn run_switch(&mut self, statement: &str) -> Result<()> {
+        let mut stream = self.client.simple_query(statement).await?;
+        while stream.try_next().await?.is_some() {}
+        Ok(())
+    }
 }
 
 /// Names the reason a login failed. Kerberos reports a missing ticket in
@@ -277,9 +331,6 @@ async fn while_connecting<F: std::future::Future>(limit: Duration, future: F) ->
     })
 }
 
-/// True when the first keyword of the statement introduces a statement that
-/// gives rows back. A statement that does not is sent through `execute`, so
-/// that the number of changed rows reaches the user.
 /// Builds the statement that reads the CREATE text of one view. MS SQL
 /// Server keeps no text for a table, so a table gives no statement and the
 /// command layer builds a draft instead.
@@ -302,6 +353,42 @@ fn create_query_text(
     ))
 }
 
+/// The name MS SQL Server gives the column that holds a plan. Both plan
+/// switches use this name.
+pub const PLAN_COLUMN: &str = "Microsoft SQL Server 2005 XML Showplan";
+
+/// The switch that asks the session for a plan. `SHOWPLAN_XML` compiles the
+/// statement and does not run it. `STATISTICS XML` runs it and adds the plan
+/// after each result set of the statement.
+pub fn plan_switch(kind: PlanKind) -> &'static str {
+    match kind {
+        PlanKind::Estimated => "SHOWPLAN_XML",
+        PlanKind::Actual => "STATISTICS XML",
+    }
+}
+
+/// True when one result set holds a plan.
+pub fn is_plan_set(set: &ResultSet) -> bool {
+    set.columns.len() == 1 && set.columns[0].name == PLAN_COLUMN
+}
+
+/// Keeps the plan sets of a run and drops the rows of the statement itself.
+///
+/// `STATISTICS XML` sends one plan after each result set, so a run gives the
+/// data of the statement and its plan together. The second value of the answer
+/// is false when the run held no plan at all, and the caller then keeps every
+/// set and says so.
+pub fn select_plan_sets(sets: Vec<ResultSet>) -> (Vec<ResultSet>, bool) {
+    if sets.iter().any(is_plan_set) {
+        (sets.into_iter().filter(is_plan_set).collect(), true)
+    } else {
+        (sets, false)
+    }
+}
+
+/// True when the first keyword of the statement introduces a statement that
+/// gives rows back. A statement that does not is sent through `execute`, so
+/// that the number of changed rows reaches the user.
 pub fn returns_rows(statement: &str) -> bool {
     let keyword = first_keyword(statement);
     !matches!(
@@ -392,6 +479,7 @@ impl DatabaseDriver for MssqlDriver {
             supports_indexes: true,
             supports_constraints: true,
             supports_partitions: false,
+            supports_explain: true,
         }
     }
 
@@ -438,44 +526,9 @@ impl DatabaseDriver for MssqlDriver {
                 bound.iter().map(|value| value.as_ref()).collect();
 
             if returns_rows(&statement) {
-                let mut stream = self.client.query(&statement, borrowed.as_slice()).await?;
-                let mut sets: Vec<ResultSet> = Vec::new();
-                let mut current: Option<ResultSet> = None;
-
-                while let Some(item) = stream.try_next().await? {
-                    match item {
-                        QueryItem::Metadata(metadata) => {
-                            if let Some(set) = current.take() {
-                                sets.push(set);
-                            }
-                            current = Some(ResultSet::new(
-                                metadata
-                                    .columns()
-                                    .iter()
-                                    .map(|column| {
-                                        ColumnInfo::new(
-                                            column.name(),
-                                            type_name(column.column_type()),
-                                        )
-                                    })
-                                    .collect(),
-                            ));
-                        }
-                        QueryItem::Row(row) => {
-                            let Some(set) = current.as_mut() else {
-                                continue;
-                            };
-                            if set.rows.len() >= options.max_rows {
-                                set.truncated = true;
-                                continue;
-                            }
-                            set.rows.push(row_to_json(&row));
-                        }
-                    }
-                }
-                if let Some(set) = current.take() {
-                    sets.push(set);
-                }
+                let sets = self
+                    .collect_sets(&statement, borrowed.as_slice(), options)
+                    .await?;
                 for set in &sets {
                     response
                         .messages
@@ -491,6 +544,52 @@ impl DatabaseDriver for MssqlDriver {
         }
 
         response.elapsed_ms = started.elapsed().as_millis() as u64;
+        Ok(response)
+    }
+
+    /// Reads the plan of one statement.
+    ///
+    /// The switch that asks for a plan must stand alone in its batch, and it
+    /// holds for the whole session, so the switch goes on, the statement runs,
+    /// and the switch goes off again even when the statement failed.
+    ///
+    /// The statement goes through the path that keeps rows, whatever its first
+    /// keyword is, because with the plan switch on an INSERT also answers with
+    /// a plan.
+    async fn explain(
+        &mut self,
+        query: &str,
+        kind: PlanKind,
+        options: &ExecOptions,
+    ) -> Result<QueryResponse> {
+        let statement = single_statement(query, Dialect::MsSql)?;
+        let switch = plan_switch(kind);
+        let started = Instant::now();
+
+        self.run_switch(&format!("SET {switch} ON")).await?;
+        let outcome = self.collect_sets(&statement, &[], options).await;
+        if let Err(error) = self.run_switch(&format!("SET {switch} OFF")).await {
+            // The switch holds for the session, so a session that keeps it on
+            // answers every later statement with a plan. The connection is
+            // therefore no longer fit for use.
+            log::warn!("The plan switch stayed on: {error}");
+            return Err(Error::Connection(format!(
+                "The plan switch '{switch}' could not be turned off again, so this connection was \
+                 left in the plan state. Open the connection again. {error}"
+            )));
+        }
+
+        let (results, found) = select_plan_sets(outcome?);
+        let mut response = QueryResponse {
+            results,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            ..QueryResponse::default()
+        };
+        if !found {
+            response.messages.push(Message::warning(
+                "The server sent no plan, so these are the sets the statement returned.",
+            ));
+        }
         Ok(response)
     }
 
@@ -1003,6 +1102,32 @@ fn read<T>(result: tiberius::Result<Option<T>>) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_plan_has_its_own_session_switch() {
+        assert_eq!(plan_switch(PlanKind::Estimated), "SHOWPLAN_XML");
+        assert_eq!(plan_switch(PlanKind::Actual), "STATISTICS XML");
+    }
+
+    #[test]
+    fn the_plan_sets_of_a_run_are_kept_and_the_rows_are_dropped() {
+        let mut rows = ResultSet::new(vec![ColumnInfo::new("id", "int")]);
+        rows.rows.push(vec![serde_json::json!(1)]);
+        let plan = ResultSet::new(vec![ColumnInfo::new(PLAN_COLUMN, "xml")]);
+
+        assert!(is_plan_set(&plan));
+        assert!(!is_plan_set(&rows));
+
+        let (kept, found) = select_plan_sets(vec![rows.clone(), plan]);
+        assert!(found);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].columns[0].name, PLAN_COLUMN);
+
+        // A run that held no plan keeps every set, and the caller says so.
+        let (kept, found) = select_plan_sets(vec![rows]);
+        assert!(!found);
+        assert_eq!(kept.len(), 1);
+    }
 
     #[test]
     fn the_fact_statement_reads_the_rows_the_pages_and_the_change() {
