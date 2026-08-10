@@ -32,9 +32,8 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   (event: 'update:modelValue', value: string): void
-  (event: 'execute', statement: string): void
-  (event: 'execute-all'): void
   (event: 'format-failed', message: string): void
+  (event: 'show-keys'): void
 }>()
 
 const host = ref<HTMLElement | null>(null)
@@ -170,11 +169,14 @@ onMounted(() => {
     emit('update:modelValue', instance.getValue())
   })
 
-  instance.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
-    emit('execute', currentStatement())
-  })
-  instance.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter, () => {
-    emit('execute-all')
+  // The keys of the application are bound once by the shell. The editor
+  // therefore binds only the two keys that the editor itself already holds
+  // for something else, so that they reach the command of this application.
+  instance.addAction({
+    id: 'sql-explorer.keys',
+    label: 'Show the key list',
+    keybindings: [monaco.KeyCode.F1],
+    run: () => emit('show-keys'),
   })
 
   instance.addAction({

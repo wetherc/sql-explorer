@@ -11,6 +11,7 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
 }))
 
 const { monaco } = await import('@/plugins/monaco')
+const { tabActions } = await import('@/lib/commands')
 const QueryView = (await import('@/components/QueryView.vue')).default
 const { mountWithPlugins, settle } = await import('./mount')
 const { useConnectionsStore } = await import('@/stores/connections')
@@ -50,7 +51,6 @@ function editorWithText(text: string) {
     getSelection: vi.fn(() => null),
     getPosition: vi.fn(() => null),
     onDidChangeModelContent: vi.fn(),
-    addCommand: vi.fn(),
     addAction: vi.fn(),
     updateOptions: vi.fn(),
     executeEdits,
@@ -352,24 +352,64 @@ describe('QueryView', () => {
     expect(wrapper.findComponent({ name: 'splitpanes' }).exists()).toBe(true)
   })
 
-  it('runs the statement the editor asks for', async () => {
+  it('runs the statement that a command of the shell asks for', async () => {
     apiStub.executeQuery.mockResolvedValue(response)
-    const wrapper = await mountView('SELECT 1;\nSELECT 2')
-    await wrapper.findComponent({ name: 'SqlEditor' }).vm.$emit('execute', 'SELECT 2')
-    await settle()
-    expect(apiStub.executeQuery).toHaveBeenCalledWith(
-      expect.objectContaining({ query: 'SELECT 2' }),
-    )
-  })
-
-  it('runs the whole script when the editor asks for it', async () => {
-    apiStub.executeQuery.mockResolvedValue(response)
-    const wrapper = await mountView('SELECT 1;\nSELECT 2')
-    await wrapper.findComponent({ name: 'SqlEditor' }).vm.$emit('execute-all')
+    await mountView('SELECT 1;\nSELECT 2')
+    tabActions('t1')?.runStatement()
     await settle()
     expect(apiStub.executeQuery).toHaveBeenCalledWith(
       expect.objectContaining({ query: 'SELECT 1;\nSELECT 2' }),
     )
+  })
+
+  it('runs the whole script that a command of the shell asks for', async () => {
+    apiStub.executeQuery.mockResolvedValue(response)
+    await mountView('SELECT 1;\nSELECT 2')
+    tabActions('t1')?.runAll()
+    await settle()
+    expect(apiStub.executeQuery).toHaveBeenCalledWith(
+      expect.objectContaining({ query: 'SELECT 1;\nSELECT 2' }),
+    )
+  })
+
+  it('lays out the statement when a command of the shell asks', async () => {
+    const edits = editorWithText('select a from t')
+    await mountView('select a from t')
+
+    tabActions('t1')?.format()
+    expect(edits).toHaveBeenCalled()
+  })
+
+  it('stops the statement that runs when a command of the shell asks', async () => {
+    let release: (value: unknown) => void = () => {}
+    apiStub.executeQuery.mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve
+      }),
+    )
+    apiStub.cancelQuery.mockResolvedValue(undefined)
+    await mountView()
+
+    tabActions('t1')?.runAll()
+    await settle()
+    tabActions('t1')?.cancel()
+    await settle()
+    expect(apiStub.cancelQuery).toHaveBeenCalled()
+
+    release(response)
+    await settle()
+  })
+
+  it('forgets its actions when the tab goes away', async () => {
+    const wrapper = await mountView()
+    wrapper.unmount()
+    expect(tabActions('t1')).toBeNull()
+  })
+
+  it('asks for the key list when the editor reports the key', async () => {
+    const wrapper = await mountView()
+    await wrapper.findComponent({ name: 'SqlEditor' }).vm.$emit('show-keys')
+    expect(useUiStore().keyboardHelpOpen).toBe(true)
   })
 
   it('says so when a tab has no message yet', async () => {

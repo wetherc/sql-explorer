@@ -12,6 +12,8 @@ const { useConnectionsStore } = await import('@/stores/connections')
 const { useExplorerStore } = await import('@/stores/explorer')
 const { useSettingsStore } = await import('@/stores/settings')
 const { useTabsStore } = await import('@/stores/tabs')
+const { useUiStore } = await import('@/stores/ui')
+const { forgetTabActions, registerTabActions } = await import('@/lib/commands')
 const { ConnectionHealth } = await import('@/types/api')
 
 describe('AppLayout', () => {
@@ -239,5 +241,188 @@ describe('AppLayout dialog state', () => {
     await settle()
     expect(open()).toHaveLength(0)
     wrapper.unmount()
+  })
+})
+
+describe('AppLayout keys', () => {
+  beforeEach(() => {
+    document.body.innerHTML = ''
+    Object.values(apiStub).forEach((fn) => fn.mockReset())
+    apiStub.supportedEngines.mockResolvedValue([])
+    apiStub.getConnections.mockResolvedValue([connectionFixture()])
+    apiStub.listActiveConnections.mockResolvedValue([])
+    apiStub.getHistory.mockResolvedValue([])
+    apiStub.getSavedQueries.mockResolvedValue([])
+    apiStub.getWorkspace.mockResolvedValue({ tabs: [], activeTabId: null })
+    apiStub.saveWorkspace.mockResolvedValue(undefined)
+    apiStub.onConnectionStatus.mockResolvedValue(() => {})
+    forgetTabActions('key-tab')
+  })
+
+  /** Sends one key to the window, as the host does. */
+  function press(code: string, parts: { shift?: boolean; alt?: boolean; mod?: boolean } = {}) {
+    const event = new KeyboardEvent('keydown', {
+      code,
+      ctrlKey: parts.mod ?? true,
+      shiftKey: parts.shift ?? false,
+      altKey: parts.alt ?? false,
+      cancelable: true,
+    })
+    window.dispatchEvent(event)
+    return event
+  }
+
+  it('opens a tab and closes it again', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const tabs = useTabsStore()
+
+    press('KeyT')
+    expect(tabs.tabs).toHaveLength(1)
+
+    press('KeyW')
+    expect(tabs.tabs).toHaveLength(0)
+    wrapper.unmount()
+  })
+
+  it('moves between the three panels', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+
+    press('Digit2')
+    await settle()
+    expect(wrapper.find('[data-test="rail-explorer"]').classes()).toContain('v-list-item--active')
+
+    press('Digit3')
+    await settle()
+    expect(wrapper.find('[data-test="rail-history"]').classes()).toContain('v-list-item--active')
+
+    press('Digit1')
+    await settle()
+    expect(wrapper.find('[data-test="rail-connections"]').classes()).toContain(
+      'v-list-item--active',
+    )
+    wrapper.unmount()
+  })
+
+  it('opens the settings, the palette and the key list', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const ui = useUiStore()
+
+    press('Comma')
+    await settle()
+    expect(document.querySelector('[data-test="setting-max-rows"]')).not.toBeNull()
+
+    // A dialog holds the keys, so the next two are opened through the store.
+    ui.setPaletteOpen(true)
+    await settle()
+    expect(document.querySelector('[data-test="palette-filter"]')).not.toBeNull()
+    ui.setPaletteOpen(false)
+    await settle()
+
+    ui.setKeyboardHelpOpen(true)
+    await settle()
+    expect(document.querySelectorAll('[data-test="key-list-row"]').length).toBeGreaterThan(5)
+
+    const keyList = document
+      .querySelector('[data-test="key-list-row"]')
+      ?.closest('.v-card') as HTMLElement
+    const close = [...keyList.querySelectorAll('button')].find(
+      (button) => button.textContent?.trim() === 'Close',
+    ) as HTMLElement
+    close.click()
+    await settle()
+    expect(ui.keyboardHelpOpen).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('opens the palette and the key list with their keys', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const ui = useUiStore()
+
+    press('KeyP', { shift: true })
+    expect(ui.paletteOpen).toBe(true)
+    ui.setPaletteOpen(false)
+    await settle()
+
+    press('F1', { mod: false })
+    expect(ui.keyboardHelpOpen).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('reaches the view of the tab that is open', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const tabs = useTabsStore()
+    tabs.tabs = [
+      {
+        id: 'key-tab',
+        title: 'Query 1',
+        query: 'SELECT 1',
+        connectionId: null,
+        dirty: false,
+        savedQueryId: null,
+      },
+    ]
+    tabs.activeTabId = 'key-tab'
+    const actions = {
+      runStatement: vi.fn(),
+      runAll: vi.fn(),
+      cancel: vi.fn(),
+      format: vi.fn(),
+    }
+    registerTabActions('key-tab', actions)
+
+    press('Enter')
+    press('Enter', { shift: true })
+    press('KeyC', { shift: true })
+    press('KeyF', { mod: false, shift: true, alt: true })
+
+    expect(actions.runStatement).toHaveBeenCalled()
+    expect(actions.runAll).toHaveBeenCalled()
+    expect(actions.cancel).toHaveBeenCalled()
+    expect(actions.format).toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('leaves a key alone when no command holds it', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const event = press('KeyZ')
+    expect(event.defaultPrevented).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('leaves a command alone while it cannot run', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    // No tab is open, so the commands of a query cannot run.
+    const event = press('Enter')
+    expect(event.defaultPrevented).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('lets a dialog keep the keys while it stands open', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    await wrapper.find('[data-test="open-settings"]').trigger('click')
+    await settle()
+
+    const tabs = useTabsStore()
+    press('KeyT')
+    expect(tabs.tabs).toHaveLength(0)
+    wrapper.unmount()
+  })
+
+  it('stops listening once it is gone', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    wrapper.unmount()
+    await settle()
+    const tabs = useTabsStore()
+    press('KeyT')
+    expect(tabs.tabs).toHaveLength(0)
   })
 })

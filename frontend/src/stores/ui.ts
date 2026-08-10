@@ -25,6 +25,10 @@ export const useUiStore = defineStore('ui', () => {
   const notices = ref<Notice[]>([])
   /** The notice whose whole text the user asked to read. */
   const openedNotice = ref<Notice | null>(null)
+  /** True while the command palette stands open. */
+  const paletteOpen = ref(false)
+  /** True while the list of the keys stands open. */
+  const keyboardHelpOpen = ref(false)
 
   function push(notice: Omit<Notice, 'id'>): Notice {
     const created: Notice = { ...notice, id: (nextNoticeId += 1) }
@@ -104,9 +108,25 @@ export const useUiStore = defineStore('ui', () => {
     openedNotice.value = null
   }
 
+  /**
+   * The two overlays of the shell live here, because the editor and the
+   * key handler both open them and neither one is a child of the shell.
+   */
+  function setPaletteOpen(open: boolean): void {
+    paletteOpen.value = open
+  }
+
+  function setKeyboardHelpOpen(open: boolean): void {
+    keyboardHelpOpen.value = open
+  }
+
   return {
     notices,
     openedNotice,
+    paletteOpen,
+    keyboardHelpOpen,
+    setPaletteOpen,
+    setKeyboardHelpOpen,
     push,
     dismiss,
     clear,

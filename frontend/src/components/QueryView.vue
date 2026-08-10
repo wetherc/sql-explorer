@@ -93,9 +93,8 @@
           :schema-index="explorer.schemaIndex"
           :dialect="dialect"
           @update:model-value="onQueryChange"
-          @execute="runStatement"
-          @execute-all="runAll"
           @format-failed="onFormatFailed"
+          @show-keys="ui.setKeyboardHelpOpen(true)"
         />
       </pane>
       <pane :size="100 - editorSize" min-size="15">
@@ -177,13 +176,14 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Splitpanes, Pane } from 'splitpanes'
 import 'splitpanes/dist/splitpanes.css'
 import { save as saveFileDialog } from '@tauri-apps/plugin-dialog'
 import SqlEditor from './SqlEditor.vue'
 import ResultsGrid from './ResultsGrid.vue'
 import { api } from '@/lib/api'
+import { forgetTabActions, registerTabActions } from '@/lib/commands'
 import { exportFileName, toCsv, toJson } from '@/lib/export'
 import { formatRowCount } from '@/lib/format'
 import { useConnectionsStore } from '@/stores/connections'
@@ -337,6 +337,21 @@ watch(
     }
   },
 )
+
+// The shell holds the keys, and the editor of this tab holds the text, so
+// the view of each tab records what it can do under its own identifier.
+onMounted(() => {
+  registerTabActions(props.tab.id, {
+    runStatement: () => runStatement(),
+    runAll,
+    cancel,
+    format: formatStatement,
+  })
+})
+
+onBeforeUnmount(() => {
+  forgetTabActions(props.tab.id)
+})
 
 defineExpose({ runStatement, runAll, formatStatement })
 </script>

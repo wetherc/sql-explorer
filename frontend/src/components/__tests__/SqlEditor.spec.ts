@@ -8,6 +8,11 @@ import { Dialect } from '@/types/api'
 
 type Handler = () => void
 
+/** Reads the statement that the editor reports to its parent. */
+function statementOf(wrapper: { vm: unknown }): string {
+  return (wrapper.vm as { currentStatement: () => string }).currentStatement()
+}
+
 /** Hands the stub to the code under test, which only calls what it needs. */
 function asEditor(stub: unknown): MonacoEditor.IStandaloneCodeEditor {
   return stub as MonacoEditor.IStandaloneCodeEditor
@@ -30,7 +35,6 @@ function suggestionsOf(
 
 /** Builds a stand-in for the editor and records what it was asked to do. */
 function stubEditor(value = 'SELECT 1;\nSELECT 2') {
-  const commands: Record<number, Handler> = {}
   const actions: Record<string, Handler> = {}
   let contentHandler: Handler = () => {}
   const editor = {
@@ -54,9 +58,6 @@ function stubEditor(value = 'SELECT 1;\nSELECT 2') {
     onDidChangeModelContent: vi.fn((handler: Handler) => {
       contentHandler = handler
     }),
-    addCommand: vi.fn((key: number, handler: Handler) => {
-      commands[key] = handler
-    }),
     addAction: vi.fn((action: { id: string; run: Handler }) => {
       actions[action.id] = action.run
       return { dispose: vi.fn() }
@@ -68,7 +69,6 @@ function stubEditor(value = 'SELECT 1;\nSELECT 2') {
   }
   return {
     editor,
-    commands,
     actions,
     fireContentChange: () => contentHandler(),
     setValue: (next: string) => {
@@ -77,9 +77,8 @@ function stubEditor(value = 'SELECT 1;\nSELECT 2') {
   }
 }
 
-const RUN_STATEMENT = monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter
-const RUN_ALL = monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter
 const FORMAT_ACTION = 'sql-explorer.format'
+const KEYS_ACTION = 'sql-explorer.keys'
 
 describe('SqlEditor', () => {
   beforeEach(() => {
@@ -124,29 +123,19 @@ describe('SqlEditor', () => {
     expect(wrapper.emitted('update:modelValue')).toEqual([['SELECT 9']])
   })
 
-  it('asks to run the statement under the cursor', () => {
+  it('gives the statement under the cursor', () => {
     const stub = stubEditor('SELECT 1;\nSELECT 2')
     vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
     const wrapper = mount(SqlEditor, { props: { modelValue: 'SELECT 1;\nSELECT 2' } })
-    stub.commands[RUN_STATEMENT]?.()
-    expect(wrapper.emitted('execute')).toEqual([['SELECT 1']])
+    expect(statementOf(wrapper)).toBe('SELECT 1')
   })
 
-  it('asks to run the selection when there is one', () => {
+  it('gives the selection when there is one', () => {
     const stub = stubEditor()
     stub.editor.getSelection.mockReturnValue({ isEmpty: () => false } as never)
     vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
     const wrapper = mount(SqlEditor, { props: { modelValue: 'SELECT 1' } })
-    stub.commands[RUN_STATEMENT]?.()
-    expect(wrapper.emitted('execute')).toEqual([['SELECTED']])
-  })
-
-  it('asks to run the whole script', () => {
-    const stub = stubEditor()
-    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
-    const wrapper = mount(SqlEditor, { props: { modelValue: 'SELECT 1' } })
-    stub.commands[RUN_ALL]?.()
-    expect(wrapper.emitted('execute-all')).toHaveLength(1)
+    expect(statementOf(wrapper)).toBe('SELECTED')
   })
 
   it('gives the whole text when the editor holds no model', () => {
@@ -154,8 +143,7 @@ describe('SqlEditor', () => {
     stub.editor.getModel.mockReturnValue(null as never)
     vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
     const wrapper = mount(SqlEditor, { props: { modelValue: 'SELECT 1' } })
-    stub.commands[RUN_STATEMENT]?.()
-    expect(wrapper.emitted('execute')).toEqual([['SELECT 1']])
+    expect(statementOf(wrapper)).toBe('SELECT 1')
   })
 
   it('reads from the start when the cursor is nowhere', () => {
@@ -163,8 +151,19 @@ describe('SqlEditor', () => {
     stub.editor.getPosition.mockReturnValue(null as never)
     vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
     const wrapper = mount(SqlEditor, { props: { modelValue: 'SELECT 7' } })
-    stub.commands[RUN_STATEMENT]?.()
-    expect(wrapper.emitted('execute')).toEqual([['SELECT 7']])
+    expect(statementOf(wrapper)).toBe('SELECT 7')
+  })
+
+  it('asks for the key list, which the editor otherwise keeps for itself', () => {
+    const stub = stubEditor()
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
+    const wrapper = mount(SqlEditor, { props: { modelValue: '' } })
+
+    expect(stub.editor.addAction).toHaveBeenCalledWith(
+      expect.objectContaining({ id: KEYS_ACTION, keybindings: [monaco.KeyCode.F1] }),
+    )
+    stub.actions[KEYS_ACTION]?.()
+    expect(wrapper.emitted('show-keys')).toHaveLength(1)
   })
 
   it('writes a new text into the editor and reports nothing back', async () => {

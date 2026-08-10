@@ -68,7 +68,6 @@ vi.mock('@/plugins/monaco', () => {
           getSelection: vi.fn(() => null),
           getPosition: vi.fn(() => null),
           onDidChangeModelContent: vi.fn(),
-          addCommand: vi.fn(),
           addAction: vi.fn(() => disposable),
           updateOptions: vi.fn(),
           executeEdits: vi.fn(),
@@ -90,7 +89,7 @@ vi.mock('@/plugins/monaco', () => {
       },
       // The real values, so that two shortcuts never fold onto one key.
       KeyMod: { CtrlCmd: 2048, Shift: 1024, Alt: 512 },
-      KeyCode: { Enter: 3, KeyF: 36 },
+      KeyCode: { Enter: 3, KeyF: 36, F1: 59 },
     },
   }
 })
