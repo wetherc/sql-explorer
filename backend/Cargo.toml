@@ -121,16 +121,15 @@ opt-level = "s"
 panic = "abort"
 strip = true
 
-# `libgssapi` 0.4.6 builds a slice from the address of an empty GSSAPI buffer,
-# which is undefined behaviour and aborts a build that checks it. The release
-# 0.11 carries the guard, but `tiberius` asks for 0.4, so the fix lives in a
-# copy of the crate under `vendor/`.
-[patch.crates-io]
-libgssapi = { path = "vendor/libgssapi" }
-
 # `tiberius` 0.12.3 holds each write of the TLS handshake in a buffer and sends
 # it only when the caller flushes. A TLS library that the crate drives itself
 # flushes, and the library of the operating system does not, so the first
 # handshake message never left the machine and the connection waited until its
 # time limit ran out. The copy under `vendor/` sends each write at once.
+#
+# The copy also asks for `libgssapi` 0.8.1 in place of the 0.4 that the release
+# asks for. Release 0.4.6 builds a slice from the address of an empty GSSAPI
+# buffer, which is undefined behaviour and stops a build that checks it. The
+# same change is in the source of `tiberius` but not in any release.
+[patch.crates-io]
 tiberius = { path = "vendor/tiberius" }

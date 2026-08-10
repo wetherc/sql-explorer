@@ -3,14 +3,15 @@
 This file records what the application cannot do, and why. Each entry names
 the cause and the state of any fix.
 
-## Two dependencies are held as copies
+## One dependency is held as a copy
 
-`backend/vendor` holds a copy of two crates. Cargo is pointed at each copy
-through `[patch.crates-io]` in `backend/Cargo.toml`. Both copies carry a small
-change that the release on crates.io does not. Read this list before an
-upgrade, because an upgrade drops a copy and brings the defect back.
+`backend/vendor/tiberius` holds a copy of `tiberius` 0.12.3, which is the
+newest release. Cargo is pointed at the copy through `[patch.crates-io]` in
+`backend/Cargo.toml`. The copy carries two changes that the release does not.
+Read this list before an upgrade, because an upgrade drops the copy and brings
+each defect back.
 
-### `tiberius` 0.12.3
+### The TLS handshake is not sent
 
 The crate holds each write of the TLS handshake in a buffer and sends the
 buffer only when the caller flushes it. A TLS library that the crate drives
@@ -24,18 +25,20 @@ round of the handshake then travels in one packet, which is what the server
 expects.
 
 The change is in `src/client/tls.rs`, in `poll_read` of
-`TlsPreloginWrapper`.
+`TlsPreloginWrapper`. The source of `tiberius` does not hold this change.
 
-### `libgssapi` 0.4.6
+### The Kerberos library needs a newer `libgssapi`
 
-The crate builds a slice from the address of a GSSAPI buffer that holds
-nothing. The Kerberos library of macOS returns such a buffer. That is
+`libgssapi` 0.4.6 builds a slice from the address of a GSSAPI buffer that
+holds nothing. The Kerberos library of macOS returns such a buffer. That is
 undefined behaviour, and the current release of Rust answers it with a panic
 that cannot unwind, which stops the whole application.
 
-Release 0.11 of the crate carries a guard, but `tiberius` asks for release
-0.4, so the guard is applied to a copy of 0.4.6 instead. The change is in
-`src/util.rs`, at the four places that read such a buffer.
+Release 0.8.1 of `libgssapi` carries a guard at each such buffer, and the
+release of `tiberius` asks for 0.4. The copy asks for 0.8.1 and calls the two
+methods of `ClientCtx` that the newer release changed. The change is in
+`Cargo.toml` and in `src/client/connection.rs`. The source of `tiberius` holds
+the same change, so this part goes away with the next release.
 
 ## MS SQL Server does not show the text of PRINT
 
