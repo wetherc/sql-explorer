@@ -213,7 +213,7 @@ describe('ConnectionManager', () => {
   it('reads the list again on request', async () => {
     const wrapper = await mountManager()
     apiStub.getConnections.mockClear()
-    await wrapper.findAll('.header .v-btn')[1]!.trigger('click')
+    await wrapper.find('[data-test="refresh-connections"]').trigger('click')
     await settle()
     expect(apiStub.getConnections).toHaveBeenCalled()
   })

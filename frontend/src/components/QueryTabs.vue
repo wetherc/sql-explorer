@@ -54,12 +54,13 @@
         />
       </template>
 
-      <div v-if="!tabs.hasTabs" class="empty-state">
-        <v-icon size="56" color="primary" class="mb-3">mdi-database-search-outline</v-icon>
-        <div class="text-h6 mb-1">No open tabs</div>
-        <p class="text-body-2 text-medium-emphasis mb-4">
-          {{ emptyHint }}
-        </p>
+      <EmptyState
+        v-if="!tabs.hasTabs"
+        size="page"
+        icon="mdi-database-search-outline"
+        title="No open tabs"
+        :hint="emptyHint"
+      >
         <v-btn
           v-if="connections.hasActive"
           color="primary"
@@ -78,13 +79,14 @@
           data-test="empty-open-connections"
           @click="emit('open-connections')"
         />
-      </div>
+      </EmptyState>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import EmptyState from './EmptyState.vue'
 import QueryView from './QueryView.vue'
 import { useConnectionsStore } from '@/stores/connections'
 import { useTabsStore } from '@/stores/tabs'
@@ -157,15 +159,5 @@ function newTab(): void {
 
 .tab-body > * {
   height: 100%;
-}
-
-.empty-state {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-  padding: 24px;
 }
 </style>

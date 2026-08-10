@@ -1,28 +1,32 @@
 <template>
   <div class="connection-manager">
-    <div class="header d-flex align-center ga-1 px-2 py-1">
-      <v-btn
-        color="primary"
-        variant="flat"
-        size="small"
-        prepend-icon="mdi-plus"
-        text="New"
-        data-test="new-connection"
-        @click="startNew"
-      />
-      <v-spacer />
-      <v-tooltip location="bottom" text="Read the connections again">
-        <template #activator="{ props: tip }">
-          <v-btn
-            v-bind="tip"
-            icon="mdi-refresh"
-            size="small"
-            aria-label="Read the connections again"
-            @click="connections.load()"
-          />
-        </template>
-      </v-tooltip>
-    </div>
+    <PanelHeader>
+      <template #lead>
+        <v-btn
+          color="primary"
+          variant="flat"
+          size="small"
+          prepend-icon="mdi-plus"
+          text="New"
+          data-test="new-connection"
+          @click="startNew"
+        />
+      </template>
+      <template #actions>
+        <v-tooltip location="bottom" text="Read the connections again">
+          <template #activator="{ props: tip }">
+            <v-btn
+              v-bind="tip"
+              icon="mdi-refresh"
+              size="small"
+              aria-label="Read the connections again"
+              data-test="refresh-connections"
+              @click="connections.load()"
+            />
+          </template>
+        </v-tooltip>
+      </template>
+    </PanelHeader>
 
     <v-progress-linear v-if="connections.loading" indeterminate height="2" />
 
@@ -107,12 +111,12 @@
         </div>
       </template>
 
-      <div v-else class="empty-state pa-6 text-center">
-        <v-icon size="44" class="mb-3 text-medium-emphasis">mdi-lan-pending</v-icon>
-        <div class="text-body-2 mb-1">No connections yet</div>
-        <p class="text-caption text-medium-emphasis mb-4">
-          Add a server to see its databases, tables and columns.
-        </p>
+      <EmptyState
+        v-else
+        icon="mdi-lan-pending"
+        title="No connections yet"
+        hint="Add a server to see its databases, tables and columns."
+      >
         <v-btn
           color="primary"
           variant="flat"
@@ -122,7 +126,7 @@
           data-test="empty-new-connection"
           @click="startNew"
         />
-      </div>
+      </EmptyState>
     </div>
 
     <v-dialog v-if="draft" v-model="editing" max-width="620" persistent scrollable>
@@ -158,6 +162,8 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import ConnectionForm from './ConnectionForm.vue'
+import EmptyState from './EmptyState.vue'
+import PanelHeader from './PanelHeader.vue'
 import { connectionSubtitle, newConnection, useConnectionsStore } from '@/stores/connections'
 import { useExplorerStore } from '@/stores/explorer'
 import { ConnectionHealth, DbType, type SavedConnection } from '@/types/api'
@@ -274,11 +280,6 @@ function onSaved(): void {
   flex-direction: column;
   height: 100%;
   min-height: 0;
-}
-
-.header {
-  flex: 0 0 auto;
-  border-bottom: var(--app-divider);
 }
 
 .list-body {

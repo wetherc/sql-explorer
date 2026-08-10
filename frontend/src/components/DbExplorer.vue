@@ -1,28 +1,26 @@
 <template>
   <div class="db-explorer">
-    <div class="explorer-header d-flex align-center ga-1 px-2 py-1">
-      <v-text-field
-        v-model="explorer.filter"
-        density="compact"
-        hide-details
-        clearable
-        placeholder="Filter objects"
-        prepend-inner-icon="mdi-magnify"
-        data-test="explorer-filter"
-      />
-      <v-tooltip location="bottom" text="Read the objects again">
-        <template #activator="{ props: tip }">
-          <v-btn
-            v-bind="tip"
-            icon="mdi-refresh"
-            size="small"
-            aria-label="Read the objects again"
-            data-test="explorer-refresh"
-            @click="refreshRoots"
-          />
-        </template>
-      </v-tooltip>
-    </div>
+    <PanelHeader
+      v-model:filter="explorer.filter"
+      filter-placeholder="Filter objects"
+      filter-label="Filter the objects"
+      filter-test-id="explorer-filter"
+    >
+      <template #actions>
+        <v-tooltip location="bottom" text="Read the objects again">
+          <template #activator="{ props: tip }">
+            <v-btn
+              v-bind="tip"
+              icon="mdi-refresh"
+              size="small"
+              aria-label="Read the objects again"
+              data-test="explorer-refresh"
+              @click="refreshRoots"
+            />
+          </template>
+        </v-tooltip>
+      </template>
+    </PanelHeader>
 
     <v-progress-linear v-if="explorer.loading" indeterminate height="2" />
 
@@ -36,10 +34,7 @@
         @context="onContext"
       />
 
-      <div v-else class="empty-state pa-6 text-center">
-        <v-icon size="44" class="mb-3 text-medium-emphasis">mdi-database-off-outline</v-icon>
-        <div class="text-body-2 mb-1">{{ emptyTitle }}</div>
-        <p class="text-caption text-medium-emphasis mb-4">{{ emptyHint }}</p>
+      <EmptyState v-else icon="mdi-database-off-outline" :title="emptyTitle" :hint="emptyHint">
         <v-btn
           v-if="!connections.hasActive"
           color="primary"
@@ -50,7 +45,7 @@
           data-test="explorer-open-connections"
           @click="emit('open-connections')"
         />
-      </div>
+      </EmptyState>
     </div>
 
     <v-menu v-model="menu.open" :target="[menu.x, menu.y]" data-test="explorer-menu">
@@ -120,7 +115,9 @@
 
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue'
+import EmptyState from './EmptyState.vue'
 import ExplorerTree from './ExplorerTree.vue'
+import PanelHeader from './PanelHeader.vue'
 import TableProperties from './TableProperties.vue'
 import { api } from '@/lib/api'
 import { isExpandable, type ExplorerNode } from '@/stores/explorer'
@@ -289,11 +286,6 @@ async function copyName(node: ExplorerNode): Promise<void> {
   flex-direction: column;
   height: 100%;
   min-height: 0;
-}
-
-.explorer-header {
-  flex: 0 0 auto;
-  border-bottom: var(--app-divider);
 }
 
 .explorer-body {

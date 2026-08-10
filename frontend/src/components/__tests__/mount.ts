@@ -15,6 +15,7 @@ let previous: ReturnType<typeof mount> | null = null
  * the props it cares about. */
 export interface MountOptions {
   props?: Record<string, unknown>
+  slots?: Record<string, unknown>
   global?: Record<string, unknown>
 }
 
@@ -34,6 +35,7 @@ export function mountWithPlugins(component: Component, options: MountOptions = {
   setActivePinia(createPinia())
   const wrapper = mount(component, {
     props: options.props,
+    slots: options.slots,
     attachTo: document.body,
     global: {
       plugins: [vuetify],

@@ -1,75 +1,71 @@
 <template>
   <div class="results-grid">
-    <div class="grid-toolbar d-flex align-center ga-1 px-2 py-1">
-      <v-text-field
-        v-model="search"
-        density="compact"
-        hide-details
-        clearable
-        placeholder="Filter rows"
-        prepend-inner-icon="mdi-magnify"
-        class="grid-filter"
-        data-test="grid-filter"
-      />
-      <v-spacer />
-      <span class="text-caption text-medium-emphasis mr-2" data-test="grid-count">
-        {{ countLabel }}
-      </span>
-      <v-tooltip location="top" text="Copy the rows as text">
-        <template #activator="{ props: tip }">
-          <v-btn
-            v-bind="tip"
-            icon="mdi-content-copy"
-            size="small"
-            aria-label="Copy the rows as text"
-            data-test="grid-copy"
-            @click="copyAll"
-          />
-        </template>
-      </v-tooltip>
-      <v-menu>
-        <template #activator="{ props: menu }">
-          <v-btn
-            v-bind="menu"
-            icon="mdi-download"
-            size="small"
-            aria-label="Export the rows"
-            data-test="grid-export"
-          />
-        </template>
-        <v-list density="compact">
-          <v-list-item
-            v-for="entry in exportItems"
-            :key="entry.format"
-            :title="entry.title"
-            data-test="grid-export-item"
-            @click="askExport(entry.format)"
-          />
-          <template v-if="result.truncated">
-            <v-divider />
-            <v-list-item
-              title="Write every row to a CSV file"
-              subtitle="Runs the statement again and writes from the server"
-              data-test="grid-export-all-csv"
-              @click="emit('export-all', 'csv')"
-            />
-            <v-list-item
-              title="Write every row to a JSON file"
-              subtitle="Runs the statement again and writes from the server"
-              data-test="grid-export-all-json"
-              @click="emit('export-all', 'json')"
+    <PanelHeader
+      v-model:filter="search"
+      filter-placeholder="Filter rows"
+      filter-label="Filter the rows"
+      filter-test-id="grid-filter"
+    >
+      <template #actions>
+        <span class="text-caption text-medium-emphasis mr-2" data-test="grid-count">
+          {{ countLabel }}
+        </span>
+        <v-tooltip location="top" text="Copy the rows as text">
+          <template #activator="{ props: tip }">
+            <v-btn
+              v-bind="tip"
+              icon="mdi-content-copy"
+              size="small"
+              aria-label="Copy the rows as text"
+              data-test="grid-copy"
+              @click="copyAll"
             />
           </template>
-          <v-divider v-if="hasSelection" />
-          <v-list-item
-            v-if="hasSelection"
-            title="Clear the selection"
-            data-test="grid-clear-selection"
-            @click="clearSelection()"
-          />
-        </v-list>
-      </v-menu>
-    </div>
+        </v-tooltip>
+        <v-menu>
+          <template #activator="{ props: menu }">
+            <v-btn
+              v-bind="menu"
+              icon="mdi-download"
+              size="small"
+              aria-label="Export the rows"
+              data-test="grid-export"
+            />
+          </template>
+          <v-list density="compact">
+            <v-list-item
+              v-for="entry in exportItems"
+              :key="entry.format"
+              :title="entry.title"
+              data-test="grid-export-item"
+              @click="askExport(entry.format)"
+            />
+            <template v-if="result.truncated">
+              <v-divider />
+              <v-list-item
+                title="Write every row to a CSV file"
+                subtitle="Runs the statement again and writes from the server"
+                data-test="grid-export-all-csv"
+                @click="emit('export-all', 'csv')"
+              />
+              <v-list-item
+                title="Write every row to a JSON file"
+                subtitle="Runs the statement again and writes from the server"
+                data-test="grid-export-all-json"
+                @click="emit('export-all', 'json')"
+              />
+            </template>
+            <v-divider v-if="hasSelection" />
+            <v-list-item
+              v-if="hasSelection"
+              title="Clear the selection"
+              data-test="grid-clear-selection"
+              @click="clearSelection()"
+            />
+          </v-list>
+        </v-menu>
+      </template>
+    </PanelHeader>
 
     <div v-if="result.truncated" class="px-3 py-1">
       <v-alert type="warning" density="compact" variant="tonal" data-test="grid-truncated">
@@ -152,6 +148,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import PanelHeader from './PanelHeader.vue'
 import { compareCells, formatCell, isNullCell, truncate } from '@/lib/format'
 import { toTabSeparated } from '@/lib/export'
 import type { CellValue, ResultSet } from '@/types/api'
@@ -467,10 +464,6 @@ watch(
   flex-direction: column;
   height: 100%;
   min-height: 0;
-}
-
-.grid-filter {
-  max-width: 260px;
 }
 
 .grid-scroll {

@@ -1,36 +1,31 @@
 <template>
   <div class="history-panel">
-    <div class="header d-flex align-center ga-1 px-2 py-1">
-      <v-btn-toggle v-model="mode" density="compact" mandatory divided>
-        <v-btn value="history" size="small" text="History" data-test="mode-history" />
-        <v-btn value="saved" size="small" text="Saved" data-test="mode-saved" />
-      </v-btn-toggle>
-      <v-spacer />
-      <v-tooltip v-if="mode === 'history'" location="bottom" text="Empty the history">
-        <template #activator="{ props: tip }">
-          <v-btn
-            v-bind="tip"
-            icon="mdi-delete-sweep-outline"
-            size="small"
-            aria-label="Empty the history"
-            data-test="clear-history"
-            @click="history.clear()"
-          />
-        </template>
-      </v-tooltip>
-    </div>
-
-    <div class="px-2 pb-1">
-      <v-text-field
-        v-model="history.filter"
-        density="compact"
-        hide-details
-        clearable
-        placeholder="Filter"
-        prepend-inner-icon="mdi-magnify"
-        data-test="history-filter"
-      />
-    </div>
+    <PanelHeader
+      v-model:filter="history.filter"
+      filter-label="Filter the statements"
+      filter-test-id="history-filter"
+    >
+      <template #switch>
+        <v-btn-toggle v-model="mode" density="compact" mandatory divided>
+          <v-btn value="history" size="small" text="History" data-test="mode-history" />
+          <v-btn value="saved" size="small" text="Saved" data-test="mode-saved" />
+        </v-btn-toggle>
+      </template>
+      <template #actions>
+        <v-tooltip v-if="mode === 'history'" location="bottom" text="Empty the history">
+          <template #activator="{ props: tip }">
+            <v-btn
+              v-bind="tip"
+              icon="mdi-delete-sweep-outline"
+              size="small"
+              aria-label="Empty the history"
+              data-test="clear-history"
+              @click="history.clear()"
+            />
+          </template>
+        </v-tooltip>
+      </template>
+    </PanelHeader>
 
     <div class="body">
       <template v-if="mode === 'history'">
@@ -59,9 +54,12 @@
             </v-list-item-subtitle>
           </v-list-item>
         </v-list>
-        <div v-else class="empty pa-6 text-center text-caption text-medium-emphasis">
-          No statement has run yet.
-        </div>
+        <EmptyState
+          v-else
+          icon="mdi-history"
+          title="No statement has run yet"
+          hint="Every statement you run appears here, with the time it took."
+        />
       </template>
 
       <template v-else>
@@ -91,9 +89,12 @@
             </template>
           </v-list-item>
         </v-list>
-        <div v-else class="empty pa-6 text-center text-caption text-medium-emphasis">
-          No statement is saved yet.
-        </div>
+        <EmptyState
+          v-else
+          icon="mdi-bookmark-outline"
+          title="No statement is saved yet"
+          hint="Save a statement from its tab to open it again later."
+        />
       </template>
     </div>
   </div>
@@ -101,6 +102,8 @@
 
 <script setup lang="ts">
 import { ref } from 'vue'
+import EmptyState from './EmptyState.vue'
+import PanelHeader from './PanelHeader.vue'
 import { formatDuration, formatRowCount, formatTimestamp, summariseQuery } from '@/lib/format'
 import { useHistoryStore } from '@/stores/history'
 import { useTabsStore } from '@/stores/tabs'
@@ -136,10 +139,6 @@ function openSaved(query: SavedQuery): void {
   flex-direction: column;
   height: 100%;
   min-height: 0;
-}
-
-.header {
-  flex: 0 0 auto;
 }
 
 .body {
