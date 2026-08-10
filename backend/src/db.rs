@@ -301,6 +301,34 @@ pub struct Partition {
     pub values: String,
 }
 
+/// One fact about a relation, such as the number of rows it holds. The
+/// engines report different facts, so each is a name and a value.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TableFact {
+    pub name: String,
+    pub value: String,
+}
+
+impl TableFact {
+    pub fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            value: value.into(),
+        }
+    }
+}
+
+/// Everything the properties dialog shows about one relation.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TableDetails {
+    pub facts: Vec<TableFact>,
+    pub columns: Vec<AppColumn>,
+    pub indexes: Vec<IndexInfo>,
+    pub constraints: Vec<Constraint>,
+}
+
 /// One column of a relation in a snapshot. The snapshot carries the name and
 /// the type alone, because the editor shows nothing else.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

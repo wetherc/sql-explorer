@@ -6,7 +6,8 @@ use crate::db::drivers::{
 };
 use crate::db::{
     self, drivers::DatabaseDriver, AppColumn, Constraint, Database, ExecOptions, IndexInfo,
-    Partition, QueryParams, QueryResponse, Routine, Schema, SchemaSnapshot, Table, TableKind,
+    Partition, QueryParams, QueryResponse, Routine, Schema, SchemaSnapshot, Table, TableDetails,
+    TableKind,
 };
 use crate::error::{Error, Result};
 use crate::history::{HistoryEntry, SavedQuery};
@@ -394,6 +395,38 @@ pub async fn list_partitions<R: Runtime>(
         open.mark_ok().await;
     }
     result
+}
+
+/// Collects everything the properties dialog shows about one relation: the
+/// facts, the columns, the indexes and the constraints.
+///
+/// The four lists travel together, so the dialog opens with one call and the
+/// lock of the driver is taken once.
+#[tauri::command]
+pub async fn table_details<R: Runtime>(
+    app: AppHandle<R>,
+    connection_id: String,
+    database: String,
+    schema_name: Option<String>,
+    table_name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<TableDetails> {
+    let open = ensure_healthy(&app, &state, &connection_id).await?;
+    let schema = schema_name.as_deref();
+    let mut guard = open.driver.lock().await;
+
+    let details = TableDetails {
+        facts: guard.table_facts(&database, schema, &table_name).await?,
+        columns: guard.list_columns(&database, schema, &table_name).await?,
+        indexes: guard.list_indexes(&database, schema, &table_name).await?,
+        constraints: guard
+            .list_constraints(&database, schema, &table_name)
+            .await?,
+    };
+
+    drop(guard);
+    open.mark_ok().await;
+    Ok(details)
 }
 
 /// The number of columns a snapshot keeps when the caller names no bound.

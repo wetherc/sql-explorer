@@ -74,6 +74,13 @@
         </template>
         <v-list-item
           v-if="isRelation(menuNode)"
+          prepend-icon="mdi-information-outline"
+          title="Properties"
+          data-test="menu-properties"
+          @click="openProperties(menuNode)"
+        />
+        <v-list-item
+          v-if="isRelation(menuNode)"
           prepend-icon="mdi-format-list-bulleted"
           title="Copy the name"
           data-test="menu-copy-name"
@@ -102,12 +109,19 @@
         />
       </v-list>
     </v-menu>
+
+    <TableProperties
+      :open="propertiesOpen"
+      :node="propertiesNode"
+      @close="propertiesOpen = false"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue'
 import ExplorerTree from './ExplorerTree.vue'
+import TableProperties from './TableProperties.vue'
 import { api } from '@/lib/api'
 import { isExpandable, type ExplorerNode } from '@/stores/explorer'
 import type { ScriptKind } from '@/types/api'
@@ -130,6 +144,14 @@ const emit = defineEmits<{ (event: 'open-connections'): void }>()
 const openKeys = ref(new Set<string>())
 const selectedKey = ref<string | null>(null)
 const menu = reactive({ open: false, x: 0, y: 0, node: null as ExplorerNode | null })
+const propertiesOpen = ref(false)
+const propertiesNode = ref<ExplorerNode | null>(null)
+
+/** Opens the properties of one relation. */
+function openProperties(node: ExplorerNode): void {
+  propertiesNode.value = node
+  propertiesOpen.value = true
+}
 
 /**
  * The node the menu belongs to. The menu draws nothing without one, so

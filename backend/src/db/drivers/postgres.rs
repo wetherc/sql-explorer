@@ -8,12 +8,12 @@
 use crate::db::drivers::{
     add_constraint_column, add_index_column, add_snapshot_column, bytes_to_json, constraint_kind,
     f64_to_json, number_out_of_range, number_value, routine_kind, rows_affected_message,
-    rows_returned_message, table_kind, CancelHandle, DatabaseDriver, NumberValue,
+    rows_returned_message, size_text, table_kind, CancelHandle, DatabaseDriver, NumberValue,
 };
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
     IndexInfo, Message, MessageLevel, QueryParams, QueryResponse, ResultSet, Routine, Schema,
-    SchemaSnapshot, SnapshotColumn, Table, TableKind,
+    SchemaSnapshot, SnapshotColumn, Table, TableFact, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::Dialect;
@@ -461,6 +461,43 @@ impl DatabaseDriver for PostgresDriver {
                 is_primary_key: row.get(3),
             })
             .collect())
+    }
+
+    /// Reads the facts of one relation. The number of rows is the estimate
+    /// that the catalog holds, which the planner keeps and which ANALYZE
+    /// refreshes.
+    async fn table_facts(
+        &mut self,
+        _database: &str,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<TableFact>> {
+        let schema = schema.unwrap_or("public");
+        let rows = self
+            .client
+            .query(
+                "SELECT c.reltuples::bigint, \
+                        pg_catalog.pg_total_relation_size(c.oid)::bigint, \
+                        pg_catalog.pg_get_userbyid(c.relowner) \
+                 FROM pg_catalog.pg_class AS c \
+                 JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace \
+                 WHERE n.nspname = $1 AND c.relname = $2",
+                &[&schema, &table],
+            )
+            .await?;
+        let Some(row) = rows.first() else {
+            return Ok(Vec::new());
+        };
+
+        let mut facts = Vec::new();
+        let estimate: i64 = row.get(0);
+        if estimate >= 0 {
+            facts.push(TableFact::new("Rows", format!("about {estimate}")));
+        }
+        let bytes: i64 = row.get(1);
+        facts.push(TableFact::new("Size", size_text(bytes.max(0) as u64)));
+        facts.push(TableFact::new("Owner", row.get::<_, String>(2)));
+        Ok(facts)
     }
 
     /// Reads every relation and every column of the database of the

@@ -20,6 +20,7 @@ import type {
   SchemaRef,
   SchemaSnapshot,
   ScriptKind,
+  TableDetails,
   TableRef,
 } from '@/types/api'
 
@@ -124,6 +125,19 @@ export const api = {
     tableName: string,
   ): Promise<PartitionRef[]> {
     return invoke('list_partitions', { connectionId, database, schemaName, tableName })
+  },
+
+  /**
+   * Reads the facts, the columns, the indexes and the constraints of one
+   * relation, for the properties dialog.
+   */
+  tableDetails(
+    connectionId: string,
+    database: string,
+    schemaName: string | null,
+    tableName: string,
+  ): Promise<TableDetails> {
+    return invoke('table_details', { connectionId, database, schemaName, tableName })
   },
 
   /**

@@ -201,6 +201,16 @@ describe('api', () => {
     expect(invoke).toHaveBeenCalledWith('preview_query', expect.objectContaining({ limit: null }))
   })
 
+  it('names the relation whose parts it reads', async () => {
+    await api.tableDetails('c1', 'db', 'dbo', 't')
+    expect(invoke).toHaveBeenCalledWith('table_details', {
+      connectionId: 'c1',
+      database: 'db',
+      schemaName: 'dbo',
+      tableName: 't',
+    })
+  })
+
   it('sends the bounds of a read of a schema', async () => {
     await api.schemaSnapshot({
       connectionId: 'c1',

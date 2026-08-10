@@ -10,7 +10,7 @@ pub mod sqlite;
 use crate::db::{
     AppColumn, Constraint, ConstraintKind, CreateQuery, Database, DriverCapabilities, ExecOptions,
     IndexInfo, Message, Partition, QueryParams, QueryResponse, Routine, RoutineKind, Schema,
-    SchemaSnapshot, SnapshotColumn, SnapshotRelation, Table, TableKind,
+    SchemaSnapshot, SnapshotColumn, SnapshotRelation, Table, TableFact, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::Dialect;
@@ -91,6 +91,18 @@ pub trait DatabaseDriver: Send + Sync {
         _schema: Option<&str>,
         _table: &str,
     ) -> Result<Vec<Partition>> {
+        Ok(Vec::new())
+    }
+
+    /// Reads the facts of one relation, such as the number of rows it holds
+    /// and its size on disk. An engine that reports none answers with an
+    /// empty list.
+    async fn table_facts(
+        &mut self,
+        _database: &str,
+        _schema: Option<&str>,
+        _table: &str,
+    ) -> Result<Vec<TableFact>> {
         Ok(Vec::new())
     }
 
@@ -231,6 +243,24 @@ pub fn f64_to_json(value: f64) -> JsonValue {
     match serde_json::Number::from_f64(value) {
         Some(number) => JsonValue::Number(number),
         None => JsonValue::String(value.to_string()),
+    }
+}
+
+/// Writes a size in bytes in the largest unit that keeps it above one, so a
+/// reader sees "1.5 GB" and not a long row of digits.
+pub fn size_text(bytes: u64) -> String {
+    const STEP: f64 = 1024.0;
+    let units = ["bytes", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= STEP && unit + 1 < units.len() {
+        value /= STEP;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", units[0])
+    } else {
+        format!("{value:.1} {}", units[unit])
     }
 }
 
@@ -390,6 +420,17 @@ pub fn rows_returned_message(count: usize, truncated: bool) -> Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_size_takes_the_largest_unit_that_fits() {
+        assert_eq!(size_text(0), "0 bytes");
+        assert_eq!(size_text(512), "512 bytes");
+        assert_eq!(size_text(2048), "2.0 KB");
+        assert_eq!(size_text(5 * 1024 * 1024), "5.0 MB");
+        assert_eq!(size_text(3 * 1024 * 1024 * 1024), "3.0 GB");
+        // The largest unit holds, however big the figure is.
+        assert_eq!(size_text(2048_u64 * 1024 * 1024 * 1024 * 1024), "2048.0 TB");
+    }
     use crate::db::MessageLevel;
 
     #[test]

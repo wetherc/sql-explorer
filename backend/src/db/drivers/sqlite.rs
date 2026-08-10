@@ -10,7 +10,8 @@ use crate::db::drivers::{
 };
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, ConstraintKind, CreateQuery, Database, DriverCapabilities,
-    ExecOptions, IndexInfo, QueryParams, QueryResponse, ResultSet, Schema, Table, TableKind,
+    ExecOptions, IndexInfo, QueryParams, QueryResponse, ResultSet, Schema, Table, TableFact,
+    TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
@@ -214,6 +215,26 @@ impl DatabaseDriver for SqliteDriver {
                 columns.push(column?);
             }
             Ok(columns)
+        })
+        .await
+    }
+
+    /// Counts the rows of one relation. SQLite keeps no such figure, so the
+    /// count is read with a statement. The file is local, so the read costs
+    /// little.
+    async fn table_facts(
+        &mut self,
+        _database: &str,
+        _schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<TableFact>> {
+        let name = Dialect::Sqlite.quote_identifier(table);
+        self.with_connection(move |connection| {
+            let count: i64 =
+                connection.query_row(&format!("SELECT COUNT(*) FROM {name}"), [], |row| {
+                    row.get(0)
+                })?;
+            Ok(vec![TableFact::new("Rows", count.to_string())])
         })
         .await
     }
@@ -803,6 +824,44 @@ mod tests {
         let part = driver.schema_snapshot("snap.db", 1).await.unwrap();
         assert!(!part.complete);
         assert_eq!(part.relations.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_facts_of_a_relation_count_its_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("facts.db");
+        let mut driver = SqliteDriver::connect(&connection_for(&path.to_string_lossy()))
+            .await
+            .unwrap();
+        driver
+            .execute_query(
+                "CREATE TABLE orders (id INTEGER); INSERT INTO orders VALUES (1), (2), (3);",
+                None,
+                &ExecOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        let facts = driver
+            .table_facts("facts.db", None, "orders")
+            .await
+            .unwrap();
+        assert_eq!(facts, vec![TableFact::new("Rows", "3")]);
+
+        // A name that holds a quote reaches the statement safely.
+        driver
+            .execute_query(
+                "CREATE TABLE \"odd\"\"name\" (id INTEGER);",
+                None,
+                &ExecOptions::default(),
+            )
+            .await
+            .unwrap();
+        let odd = driver
+            .table_facts("facts.db", None, "odd\"name")
+            .await
+            .unwrap();
+        assert_eq!(odd, vec![TableFact::new("Rows", "0")]);
     }
 
     #[tokio::test]

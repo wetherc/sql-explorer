@@ -296,6 +296,46 @@ describe('DbExplorer', () => {
     expect(useUiStore().notices.some((notice) => notice.message.includes('no column'))).toBe(true)
   })
 
+  it('opens the properties of a relation', async () => {
+    apiStub.tableDetails.mockResolvedValue({
+      facts: [{ name: 'Rows', value: '3' }],
+      columns: [],
+      indexes: [],
+      constraints: [],
+    })
+    const wrapper = await mountExplorer()
+    const explorer = useExplorerStore()
+    explorer.addRoot('c1')
+    await wrapper.vm.$nextTick()
+
+    await wrapper.findComponent({ name: 'ExplorerTree' }).vm.$emit('context', {
+      event: new MouseEvent('contextmenu'),
+      node: {
+        key: 't',
+        label: 'orders',
+        kind: 'table',
+        icon: 'mdi-table',
+        loading: false,
+        loaded: false,
+        connectionId: 'c1',
+        database: 'Sales',
+        schema: 'dbo',
+        table: 'orders',
+      },
+    })
+    await settle()
+
+    menuItem('menu-properties')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+
+    expect(apiStub.tableDetails).toHaveBeenCalledWith('c1', 'Sales', 'dbo', 'orders')
+    expect(document.querySelector('[data-test="properties-dialog"]')).toBeTruthy()
+
+    await wrapper.findComponent({ name: 'TableProperties' }).vm.$emit('close')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findComponent({ name: 'TableProperties' }).props('open')).toBe(false)
+  })
+
   it('reports a failure to build the preview statement', async () => {
     apiStub.previewQuery.mockRejectedValue({ kind: 'notConnected', message: 'gone', detail: null })
     const wrapper = await mountExplorer()

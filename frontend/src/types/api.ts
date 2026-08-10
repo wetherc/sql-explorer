@@ -235,6 +235,20 @@ export interface PartitionRef {
   values: string
 }
 
+/** One fact about a relation, such as the number of rows it holds. */
+export interface TableFact {
+  name: string
+  value: string
+}
+
+/** Everything the properties dialog shows about one relation. */
+export interface TableDetails {
+  facts: TableFact[]
+  columns: ColumnRef[]
+  indexes: IndexRef[]
+  constraints: ConstraintRef[]
+}
+
 export interface SnapshotColumn {
   name: string
   dataType: string

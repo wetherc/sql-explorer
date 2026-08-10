@@ -8,12 +8,13 @@
 use crate::db::drivers::{
     add_constraint_column, add_index_column, add_snapshot_column, bytes_to_json, constraint_kind,
     f64_to_json, number_out_of_range, number_value, parameter_type_refused, routine_kind,
-    rows_affected_message, rows_returned_message, table_kind, DatabaseDriver, NumberValue,
+    rows_affected_message, rows_returned_message, size_text, table_kind, DatabaseDriver,
+    NumberValue,
 };
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
     IndexInfo, QueryParams, QueryResponse, ResultSet, Routine, Schema, SchemaSnapshot,
-    SnapshotColumn, Table, TableKind,
+    SnapshotColumn, Table, TableFact, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
@@ -612,6 +613,38 @@ impl DatabaseDriver for MssqlDriver {
         Ok(columns)
     }
 
+    /// Reads the rows and the size of a relation from the partition figures
+    /// of the engine, together with the day the object last changed.
+    async fn table_facts(
+        &mut self,
+        database: &str,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<TableFact>> {
+        let name =
+            Dialect::MsSql.qualified_name(Some(database), Some(schema.unwrap_or("dbo")), table);
+        let query = fact_query(&Dialect::MsSql.quote_identifier(database));
+        let mut stream = self.client.query(query, &[&name.as_str()]).await?;
+        let mut facts = Vec::new();
+        while let Some(item) = stream.try_next().await? {
+            let QueryItem::Row(row) = item else { continue };
+            if let Some(rows) = row.try_get::<i64, _>(0)? {
+                facts.push(TableFact::new("Rows", rows.max(0).to_string()));
+            }
+            if let Some(pages) = row.try_get::<i64, _>(1)? {
+                // One page of MS SQL Server holds eight kilobytes.
+                facts.push(TableFact::new(
+                    "Size",
+                    size_text(pages.max(0) as u64 * 8 * 1024),
+                ));
+            }
+            if let Some(changed) = row.try_get::<NaiveDateTime, _>(2)? {
+                facts.push(TableFact::new("Last change", changed.to_string()));
+            }
+        }
+        Ok(facts)
+    }
+
     async fn schema_snapshot(
         &mut self,
         database: &str,
@@ -714,6 +747,18 @@ impl DatabaseDriver for MssqlDriver {
         }
         Ok(constraints)
     }
+}
+
+/// Reads the rows, the pages and the day of the last change of one relation.
+fn fact_query(catalog: &str) -> String {
+    format!(
+        "SELECT SUM(CASE WHEN s.index_id IN (0, 1) THEN s.row_count ELSE 0 END), \
+                SUM(s.used_page_count), \
+                MAX(o.modify_date) \
+         FROM {catalog}.sys.dm_db_partition_stats AS s \
+         JOIN {catalog}.sys.objects AS o ON o.object_id = s.object_id \
+         WHERE s.object_id = OBJECT_ID(@P1)"
+    )
 }
 
 /// Reads every relation and every column of one database in one statement.
@@ -958,6 +1003,14 @@ fn read<T>(result: tiberius::Result<Option<T>>) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_fact_statement_reads_the_rows_the_pages_and_the_change() {
+        let text = fact_query("[Sales]");
+        assert!(text.contains("FROM [Sales].sys.dm_db_partition_stats AS s"));
+        assert!(text.contains("JOIN [Sales].sys.objects AS o"));
+        assert!(text.contains("WHERE s.object_id = OBJECT_ID(@P1)"));
+    }
 
     #[test]
     fn the_snapshot_statement_reads_the_columns_and_the_kind() {

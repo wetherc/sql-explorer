@@ -3,13 +3,13 @@
 use crate::db::drivers::{
     add_constraint_column, add_index_column, add_snapshot_column, bytes_to_json, constraint_kind,
     f64_to_json, number_out_of_range, number_value, parameter_type_refused, routine_kind,
-    rows_affected_message, rows_returned_message, table_kind, CancelHandle, DatabaseDriver,
-    NumberValue,
+    rows_affected_message, rows_returned_message, size_text, table_kind, CancelHandle,
+    DatabaseDriver, NumberValue,
 };
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
     IndexInfo, Message, QueryParams, QueryResponse, ResultSet, Routine, Schema, SchemaSnapshot,
-    SnapshotColumn, Table, TableKind,
+    SnapshotColumn, Table, TableFact, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
@@ -326,6 +326,55 @@ impl DatabaseDriver for MysqlDriver {
                 is_primary_key: key.eq_ignore_ascii_case("PRI"),
             })
             .collect())
+    }
+
+    /// Reads the facts that `information_schema` holds for one relation. The
+    /// number of rows of a table of InnoDB is an estimate of the engine.
+    async fn table_facts(
+        &mut self,
+        database: &str,
+        _schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<TableFact>> {
+        let rows: Vec<(
+            Option<u64>,
+            Option<u64>,
+            Option<u64>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )> = self
+            .conn()?
+            .exec(
+                "SELECT TABLE_ROWS, DATA_LENGTH, INDEX_LENGTH, ENGINE, TABLE_COLLATION, \
+                        CAST(UPDATE_TIME AS CHAR) \
+                 FROM information_schema.TABLES \
+                 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+                (database, table),
+            )
+            .await?;
+        let Some((count, data, index, engine, collation, changed)) = rows.into_iter().next() else {
+            return Ok(Vec::new());
+        };
+
+        let mut facts = Vec::new();
+        if let Some(count) = count {
+            facts.push(TableFact::new("Rows", format!("about {count}")));
+        }
+        if data.is_some() || index.is_some() {
+            let total = data.unwrap_or(0) + index.unwrap_or(0);
+            facts.push(TableFact::new("Size", size_text(total)));
+        }
+        if let Some(engine) = engine {
+            facts.push(TableFact::new("Engine", engine));
+        }
+        if let Some(collation) = collation {
+            facts.push(TableFact::new("Collation", collation));
+        }
+        if let Some(changed) = changed {
+            facts.push(TableFact::new("Last change", changed));
+        }
+        Ok(facts)
     }
 
     /// Reads every relation and every column of one database in one
