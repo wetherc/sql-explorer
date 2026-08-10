@@ -8,19 +8,24 @@
         class="flex-grow-1"
         @update:model-value="(id) => tabs.activate(String(id))"
       >
+        <!-- A tab is itself a button, so the close mark inside it cannot be a
+             second button. The mark answers the mouse, and the Delete key on
+             the tab closes it for a user of the keyboard. -->
         <v-tab
           v-for="tab in tabs.tabs"
           :key="tab.id"
           :value="tab.id"
           class="query-tab"
           data-test="query-tab"
+          @keydown.delete.prevent="tabs.close(tab.id)"
         >
           <span class="tab-title">{{ tab.title }}</span>
-          <span v-if="tab.dirty" class="dirty-mark" aria-label="This tab has changes">●</span>
+          <span v-if="tab.dirty" class="dirty-mark" aria-hidden="true">●</span>
+          <span v-if="tab.dirty" class="app-visually-hidden">, has changes</span>
           <v-icon
             size="x-small"
-            class="ml-2"
-            aria-label="Close the tab"
+            class="ml-2 close-mark"
+            aria-hidden="true"
             data-test="close-tab"
             @click.stop="tabs.close(tab.id)"
           >
@@ -149,6 +154,17 @@ function newTab(): void {
   margin-left: 6px;
   font-size: var(--app-text-xs);
   color: rgb(var(--v-theme-warning));
+}
+
+/* The mark grows a background under the pointer, so the area it answers is
+   plain to see before the click. */
+.close-mark {
+  border-radius: 50%;
+  padding: 2px;
+}
+
+.close-mark:hover {
+  background: rgba(var(--v-theme-on-surface), 0.12);
 }
 
 .tab-body {

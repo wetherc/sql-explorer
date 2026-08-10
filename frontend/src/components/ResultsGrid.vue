@@ -83,14 +83,22 @@
               :key="`${column.name}-${index}`"
               :class="{ sorted: sortIndex === index }"
               :aria-sort="ariaSort(index)"
-              data-test="grid-header"
-              @click="toggleSort(index)"
+              data-test="grid-header-cell"
             >
-              <span class="header-name">{{ column.name }}</span>
-              <span class="header-type">{{ column.typeName }}</span>
-              <v-icon v-if="sortIndex === index" size="x-small">
-                {{ sortDescending ? 'mdi-arrow-down' : 'mdi-arrow-up' }}
-              </v-icon>
+              <!-- The button carries the sort, so the key and the pointer
+                   reach it the same way. -->
+              <button
+                type="button"
+                class="header-button"
+                data-test="grid-header"
+                @click="toggleSort(index)"
+              >
+                <span class="header-name">{{ column.name }}</span>
+                <span class="header-type">{{ column.typeName }}</span>
+                <v-icon v-if="sortIndex === index" size="x-small" aria-hidden="true">
+                  {{ sortDescending ? 'mdi-arrow-down' : 'mdi-arrow-up' }}
+                </v-icon>
+              </button>
             </th>
           </tr>
         </thead>
@@ -486,11 +494,32 @@ watch(
   z-index: 1;
   background: rgb(var(--v-theme-grid-header));
   text-align: left;
-  padding: 4px 10px;
-  cursor: pointer;
+  padding: 0;
   white-space: nowrap;
   border-bottom: var(--app-divider);
+}
+
+.header-button {
+  display: block;
+  width: 100%;
+  padding: 4px 10px;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
   user-select: none;
+}
+
+.header-button:hover {
+  background: rgba(var(--v-theme-on-surface), 0.08);
+}
+
+.header-button:focus-visible {
+  outline: 2px solid rgb(var(--v-theme-primary));
+  outline-offset: -2px;
 }
 
 .grid-table th.sorted {

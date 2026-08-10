@@ -68,6 +68,28 @@ describe('QueryTabs', () => {
     expect(tabs.tabs).toHaveLength(0)
   })
 
+  it('closes the tab that holds the focus when the Delete key arrives', async () => {
+    const wrapper = mountWithPlugins(QueryTabs)
+    const tabs = useTabsStore()
+    tabs.add()
+    await settle()
+
+    await wrapper.find('[data-test="query-tab"]').trigger('keydown', { key: 'Delete' })
+    expect(tabs.tabs).toHaveLength(0)
+  })
+
+  it('speaks the change of a tab that a reader cannot see', async () => {
+    const wrapper = mountWithPlugins(QueryTabs)
+    const tabs = useTabsStore()
+    const tab = tabs.add({ query: 'SELECT 1' })
+    tabs.setQuery(tab.id, 'SELECT 2')
+    await settle()
+
+    expect(wrapper.find('.app-visually-hidden').text()).toBe(', has changes')
+    // The mark itself stays out of the reading, so the state is said once.
+    expect(wrapper.find('.dirty-mark').attributes('aria-hidden')).toBe('true')
+  })
+
   it('moves to the tab the user chose', async () => {
     const wrapper = mountWithPlugins(QueryTabs)
     const tabs = useTabsStore()

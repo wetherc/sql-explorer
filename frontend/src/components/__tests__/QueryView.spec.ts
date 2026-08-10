@@ -1005,6 +1005,26 @@ describe('QueryView edge paths', () => {
     expect(wrapper.findAll('[data-test="result-tab"]')).toHaveLength(1)
   })
 
+  it('closes a result that is not kept', async () => {
+    apiStub.executeQuery.mockResolvedValue(response)
+    const wrapper = await mountView()
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findAll('[data-test="result-tab"]')).toHaveLength(1)
+
+    await wrapper.find('[data-test="close-result"]').trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findAll('[data-test="result-tab"]')).toHaveLength(0)
+  })
+
+  it('hides the actions of a result while the messages stand open', async () => {
+    const wrapper = await mountView()
+
+    expect(wrapper.find('[data-test="pin-result"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="close-result"]').exists()).toBe(false)
+  })
+
   it('moves between a result and the messages', async () => {
     apiStub.executeQuery.mockResolvedValue(response)
     const wrapper = await mountView()

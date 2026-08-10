@@ -135,45 +135,67 @@
       </pane>
       <pane :size="100 - editorSize" min-size="15">
         <div class="results-pane">
-          <v-tabs
-            :model-value="state.activePaneId ?? MESSAGES_TAB"
-            density="compact"
-            class="results-tabs"
-            @update:model-value="onResultTabChange"
-          >
-            <v-tab
-              v-for="pane in state.panes"
-              :key="pane.id"
-              :value="pane.id"
-              data-test="result-tab"
+          <!-- The actions of a result sit beside the strip and act on the
+               result that is open. A tab is itself a button, so a button
+               inside it would nest one inside another, and the two would
+               fight for the same click. -->
+          <div class="results-tab-row d-flex align-center">
+            <v-tabs
+              :model-value="state.activePaneId ?? MESSAGES_TAB"
+              density="compact"
+              show-arrows
+              class="results-tabs flex-grow-1"
+              @update:model-value="onResultTabChange"
             >
-              <v-icon
-                size="x-small"
-                class="mr-1"
-                :color="pane.pinned ? 'warning' : undefined"
-                :aria-label="pane.pinned ? 'Let this result go' : 'Keep this result'"
-                data-test="pin-result"
-                @click.stop="queries.togglePin(tab.id, pane.id)"
+              <v-tab
+                v-for="pane in state.panes"
+                :key="pane.id"
+                :value="pane.id"
+                data-test="result-tab"
               >
-                {{ pane.pinned ? 'mdi-pin' : 'mdi-pin-outline' }}
-              </v-icon>
-              <span>{{ paneLabel(pane) }}</span>
-              <v-icon
-                v-if="pane.pinned"
-                size="x-small"
-                class="ml-2"
-                aria-label="Close this result"
-                data-test="close-result"
-                @click.stop="queries.closePane(tab.id, pane.id)"
+                <v-icon v-if="pane.pinned" size="x-small" class="mr-1" aria-hidden="true">
+                  mdi-pin
+                </v-icon>
+                <span>{{ paneLabel(pane) }}</span>
+                <span v-if="pane.pinned" class="app-visually-hidden">, kept</span>
+              </v-tab>
+              <v-tab :value="MESSAGES_TAB" data-test="messages-tab">
+                Messages
+                <v-badge v-if="state.error" color="error" dot inline />
+              </v-tab>
+            </v-tabs>
+
+            <div v-if="activePane" class="results-actions d-flex align-center ga-1 px-1">
+              <v-tooltip
+                location="bottom"
+                :text="activePane.pinned ? 'Let this result go' : 'Keep this result'"
               >
-                mdi-close
-              </v-icon>
-            </v-tab>
-            <v-tab :value="MESSAGES_TAB" data-test="messages-tab">
-              Messages
-              <v-badge v-if="state.error" color="error" dot inline />
-            </v-tab>
-          </v-tabs>
+                <template #activator="{ props: tip }">
+                  <v-btn
+                    v-bind="tip"
+                    :icon="activePane.pinned ? 'mdi-pin' : 'mdi-pin-outline'"
+                    :color="activePane.pinned ? 'warning' : undefined"
+                    size="small"
+                    :aria-label="activePane.pinned ? 'Let this result go' : 'Keep this result'"
+                    data-test="pin-result"
+                    @click="queries.togglePin(tab.id, activePane.id)"
+                  />
+                </template>
+              </v-tooltip>
+              <v-tooltip location="bottom" text="Close this result">
+                <template #activator="{ props: tip }">
+                  <v-btn
+                    v-bind="tip"
+                    icon="mdi-close"
+                    size="small"
+                    aria-label="Close this result"
+                    data-test="close-result"
+                    @click="queries.closePane(tab.id, activePane.id)"
+                  />
+                </template>
+              </v-tooltip>
+            </div>
+          </div>
 
           <div class="results-body">
             <!-- The grids stay mounted behind v-show, so the filter, the
@@ -433,6 +455,14 @@ const canRun = computed(() => {
   const id = props.tab.connectionId
   return id !== null && connections.isActive(id)
 })
+
+/**
+ * The result that is open, or nothing while the messages stand in its place.
+ * The actions beside the tab strip act on this result.
+ */
+const activePane = computed(
+  () => state.value.panes.find((pane) => pane.id === state.value.activePaneId) ?? null,
+)
 
 /**
  * Names a result. A result the user keeps also carries the time of its run,
@@ -787,9 +817,13 @@ defineExpose({ runStatement, runAll, formatStatement, readPlan })
   background: rgb(var(--v-theme-surface));
 }
 
-.results-tabs {
+.results-tab-row {
   flex: 0 0 auto;
   border-bottom: var(--app-divider);
+}
+
+.results-tabs {
+  min-width: 0;
 }
 
 .results-body {

@@ -62,27 +62,35 @@ describe('ResultsGrid', () => {
   it('sorts up, then down, then not at all', async () => {
     const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
     const header = wrapper.findAll('[data-test="grid-header"]')[0]!
+    const cell = wrapper.findAll('[data-test="grid-header-cell"]')[0]!
 
     await header.trigger('click')
-    expect(header.attributes('aria-sort')).toBe('ascending')
+    expect(cell.attributes('aria-sort')).toBe('ascending')
     expect(wrapper.findAll('[data-test="grid-row"]')[0]?.text()).toContain('Ada')
 
     await header.trigger('click')
-    expect(header.attributes('aria-sort')).toBe('descending')
+    expect(cell.attributes('aria-sort')).toBe('descending')
     expect(wrapper.findAll('[data-test="grid-row"]')[0]?.text()).toContain('3')
 
     await header.trigger('click')
-    expect(header.attributes('aria-sort')).toBe('none')
+    expect(cell.attributes('aria-sort')).toBe('none')
     expect(wrapper.findAll('[data-test="grid-row"]')[0]?.text()).toContain('Grace')
+  })
+
+  it('puts the sort on a button, which a key can reach', () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+
+    expect(wrapper.findAll('[data-test="grid-header"]')[0]!.element.tagName).toBe('BUTTON')
   })
 
   it('moves the sort to another column', async () => {
     const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
     const headers = wrapper.findAll('[data-test="grid-header"]')
+    const cells = wrapper.findAll('[data-test="grid-header-cell"]')
     await headers[0]!.trigger('click')
     await headers[1]!.trigger('click')
-    expect(headers[0]?.attributes('aria-sort')).toBe('none')
-    expect(headers[1]?.attributes('aria-sort')).toBe('ascending')
+    expect(cells[0]?.attributes('aria-sort')).toBe('none')
+    expect(cells[1]?.attributes('aria-sort')).toBe('ascending')
   })
 
   it('keeps only the rows that match the filter after a short pause', async () => {
@@ -153,7 +161,9 @@ describe('ResultsGrid', () => {
     await wrapper.find('[data-test="grid-filter"] input').setValue('ada')
 
     await wrapper.setProps({ result: result({ rows: [[9, 'New']] }) })
-    expect(wrapper.findAll('[data-test="grid-header"]')[0]?.attributes('aria-sort')).toBe('none')
+    expect(wrapper.findAll('[data-test="grid-header-cell"]')[0]?.attributes('aria-sort')).toBe(
+      'none',
+    )
     expect(wrapper.findAll('[data-test="grid-row"]')).toHaveLength(1)
   })
 

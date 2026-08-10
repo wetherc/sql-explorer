@@ -33,6 +33,21 @@ body,
   font-size: var(--app-text-md);
 }
 
+/* Text that a screen reader speaks and the eye does not see. It gives a
+   state, such as a change that is not saved, to a reader that cannot see the
+   mark which shows that state. */
+.app-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* The scroll bars follow the theme, so they do not stand out on a dark
    surface. */
 * {
