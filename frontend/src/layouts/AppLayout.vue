@@ -401,7 +401,10 @@ const commandsWithKeys = computed(() => commands.filter((command) => command.key
  * through a dialog, because the dialog holds the attention of the user.
  */
 function dialogIsOpen(): boolean {
-  return document.querySelector('.v-dialog.v-overlay--active') !== null
+  // The ARIA role marks a dialog whatever the component library names its
+  // classes, and the class covers a Vuetify dialog that has not set the
+  // role yet.
+  return document.querySelector('[role="dialog"], .v-dialog.v-overlay--active') !== null
 }
 
 function onKeyDown(event: KeyboardEvent): void {

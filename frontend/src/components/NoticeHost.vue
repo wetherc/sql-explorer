@@ -1,12 +1,15 @@
 <template>
   <div class="notice-host">
+    <!-- Each open notice moves up by its place in the list, so two notices
+         at the same corner do not cover each other. -->
     <v-snackbar
-      v-for="notice in ui.notices"
+      v-for="(notice, index) in ui.notices"
       :key="notice.id"
       :model-value="true"
       :color="notice.level"
       :timeout="notice.timeout"
       location="bottom right"
+      :style="{ marginBottom: `${index * 64}px` }"
       data-test="notice"
       @update:model-value="ui.dismiss(notice.id)"
     >

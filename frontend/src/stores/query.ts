@@ -238,12 +238,13 @@ export const useQueryStore = defineStore('query', () => {
     query: string,
     queryParams?: Record<string, unknown>,
   ): Promise<boolean> {
+    const text = query.trim()
     return runRequest(
       tabId,
       connectionId,
-      query,
+      text,
       (requestId, options) =>
-        api.executeQuery({ connectionId, requestId, query: query.trim(), queryParams, options }),
+        api.executeQuery({ connectionId, requestId, query: text, queryParams, options }),
       undefined,
       queryParams,
     )
@@ -260,15 +261,16 @@ export const useQueryStore = defineStore('query', () => {
     kind: PlanKind,
     queryParams?: Record<string, unknown>,
   ): Promise<boolean> {
+    const text = query.trim()
     return runRequest(
       tabId,
       connectionId,
-      query,
+      text,
       (requestId, options) =>
         api.explainQuery({
           connectionId,
           requestId,
-          query: query.trim(),
+          query: text,
           kind,
           queryParams,
           options,

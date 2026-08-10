@@ -290,11 +290,15 @@ describe('connections store', () => {
     expect(connections.selectedId).toBeNull()
   })
 
-  it('closes a connection even when the backend refuses', async () => {
+  it('keeps a connection that the backend refused to close', async () => {
+    apiStub.getConnections.mockResolvedValue([connectionFixture()])
+    apiStub.listActiveConnections.mockResolvedValue([infoFixture()])
     apiStub.disconnect.mockRejectedValue({ kind: 'internal', message: 'no', detail: null })
     const connections = useConnectionsStore()
+    await connections.load()
     await connections.disconnect('c1')
-    expect(connections.isActive('c1')).toBe(false)
+    expect(connections.isActive('c1')).toBe(true)
+    expect(useUiStore().notices.some((notice) => notice.level === 'error')).toBe(true)
   })
 
   it('tests a record and reports the answer', async () => {

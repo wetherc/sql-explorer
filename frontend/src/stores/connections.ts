@@ -172,11 +172,21 @@ export const useConnectionsStore = defineStore('connections', () => {
       saved.value = await api.getConnections()
       const open = await api.listActiveConnections()
       const map: Record<string, ConnectionInfo> = {}
+      // The health map is rebuilt from the connections that exist, so an
+      // entry for a deleted connection does not stay behind.
+      const knownHealth: Record<string, ConnectionHealth> = {}
+      for (const record of saved.value) {
+        const existing = health.value[record.id]
+        if (existing) {
+          knownHealth[record.id] = existing
+        }
+      }
       for (const info of open) {
         map[info.connectionId] = info
-        health.value[info.connectionId] = ConnectionHealth.Connected
+        knownHealth[info.connectionId] = ConnectionHealth.Connected
       }
       active.value = map
+      health.value = knownHealth
     } catch (error) {
       ui.reportError(error)
     } finally {
@@ -238,7 +248,10 @@ export const useConnectionsStore = defineStore('connections', () => {
     try {
       await api.disconnect(id)
     } catch (error) {
+      // The backend may still hold the connection open, so the view keeps
+      // it and the user can close it again.
       ui.reportError(error)
+      return
     }
     const rest = { ...active.value }
     delete rest[id]

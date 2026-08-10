@@ -264,6 +264,19 @@ describe('tabs store', () => {
     expect(tabs.tabs).toHaveLength(1)
   })
 
+  it('continues the titles after the highest restored one', async () => {
+    apiStub.getWorkspace.mockResolvedValue({
+      tabs: [
+        { id: 'a', query: 'SELECT 1', title: 'Query 5' },
+        { id: 'b', query: 'SELECT 2', title: 'Orders' },
+      ],
+      activeTabId: 'a',
+    })
+    const tabs = useTabsStore()
+    await tabs.restore()
+    expect(tabs.add().title).toBe('Query 6')
+  })
+
   it('restores the tabs of the last session', async () => {
     apiStub.getWorkspace.mockResolvedValue({
       tabs: [{ id: 'a', query: 'SELECT 1', title: 'One' }],

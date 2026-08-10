@@ -476,6 +476,12 @@ async function withParams(
   const rows = alignParams(names, props.tab.params)
   tabs.setParams(props.tab.id, rows)
   if (rows.some(needsAValue)) {
+    // One run at a time waits for its values. A second request would take
+    // the place of the first one without a word.
+    if (askingParams.value) {
+      ui.warn('The dialog for the parameter values is already open.')
+      return
+    }
     paramRows.value = rows.map((row) => ({ ...row }))
     pendingRun = (values) => action(values)
     askingParams.value = true

@@ -193,7 +193,12 @@ export const useTabsStore = defineStore('tabs', () => {
       const workspace = parseWorkspace(await api.getWorkspace())
       tabs.value = workspace.tabs.map((tab) => ({ ...tab, dirty: false }))
       activeTabId.value = workspace.activeTabId
-      counter = tabs.value.length
+      // The counter continues after the highest restored title, so a new
+      // tab does not repeat the name of a restored one.
+      counter = tabs.value.reduce((highest, tab) => {
+        const match = /^Query (\d+)$/.exec(tab.title)
+        return match ? Math.max(highest, Number(match[1])) : highest
+      }, tabs.value.length)
     } catch {
       tabs.value = []
       activeTabId.value = null
