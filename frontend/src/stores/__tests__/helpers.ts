@@ -10,6 +10,7 @@ export function makeApiStub() {
     disconnect: vi.fn(),
     listActiveConnections: vi.fn(),
     executeQuery: vi.fn(),
+    explainQuery: vi.fn(),
     cancelQuery: vi.fn(),
     listDatabases: vi.fn(),
     listSchemas: vi.fn(),
@@ -75,6 +76,7 @@ export function infoFixture(connectionId = 'c1', supportsSchemas = true) {
       supportsIndexes: true,
       supportsConstraints: true,
       supportsPartitions: false,
+      supportsExplain: true,
     },
     dialect: Dialect.MsSql,
   }

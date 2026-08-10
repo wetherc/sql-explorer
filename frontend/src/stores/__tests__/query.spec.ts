@@ -209,6 +209,39 @@ describe('query store', () => {
     )
   })
 
+  it('reads the estimated plan and names the result', async () => {
+    apiStub.explainQuery.mockResolvedValue(response())
+    const connections = useConnectionsStore()
+    await connections.load()
+    const queries = useQueryStore()
+
+    expect(await queries.explain('t1', 'c1', ' SELECT 1 ', 'estimated')).toBe(true)
+    expect(apiStub.explainQuery).toHaveBeenCalledWith({
+      connectionId: 'c1',
+      requestId: expect.any(String),
+      query: 'SELECT 1',
+      kind: 'estimated',
+      options: { maxRows: 10000, timeoutSecs: 300 },
+    })
+    expect(queries.stateFor('t1').panes[0]?.label).toBe('Estimated plan')
+    // A plan is not the statement of the user, so the history holds none.
+    expect(apiStub.addHistoryEntry).not.toHaveBeenCalled()
+  })
+
+  it('names the result of an actual plan', async () => {
+    apiStub.explainQuery.mockResolvedValue(response())
+    const queries = useQueryStore()
+    await queries.explain('t1', 'c1', 'SELECT 1', 'actual')
+    expect(queries.stateFor('t1').panes[0]?.label).toBe('Actual plan')
+    expect(apiStub.explainQuery).toHaveBeenCalledWith(expect.objectContaining({ kind: 'actual' }))
+  })
+
+  it('refuses a plan of an empty statement', async () => {
+    const queries = useQueryStore()
+    expect(await queries.explain('t1', 'c1', '  ', 'estimated')).toBe(false)
+    expect(apiStub.explainQuery).not.toHaveBeenCalled()
+  })
+
   it('asks the backend to stop a statement that runs', async () => {
     let release: (value: unknown) => void = () => {}
     apiStub.executeQuery.mockReturnValue(

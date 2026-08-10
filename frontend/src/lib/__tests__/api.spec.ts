@@ -176,6 +176,31 @@ describe('api', () => {
     expect(invoke).toHaveBeenCalledWith('execute_query', expect.objectContaining({ options: null }))
   })
 
+  it('asks for the plan of a statement, with and without limits', async () => {
+    await api.explainQuery({
+      connectionId: 'c1',
+      requestId: 'r1',
+      query: 'SELECT 1',
+      kind: 'actual',
+      options: { maxRows: 10, timeoutSecs: 5 },
+    })
+    expect(invoke).toHaveBeenCalledWith('explain_query', {
+      connectionId: 'c1',
+      requestId: 'r1',
+      query: 'SELECT 1',
+      kind: 'actual',
+      options: { maxRows: 10, timeoutSecs: 5 },
+    })
+
+    await api.explainQuery({
+      connectionId: 'c1',
+      requestId: 'r1',
+      query: 'SELECT 1',
+      kind: 'estimated',
+    })
+    expect(invoke).toHaveBeenCalledWith('explain_query', expect.objectContaining({ options: null }))
+  })
+
   it('sends the preview request with and without a limit', async () => {
     await api.previewQuery({
       connectionId: 'c1',

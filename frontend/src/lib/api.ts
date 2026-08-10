@@ -13,6 +13,7 @@ import type {
   HistoryEntry,
   IndexRef,
   PartitionRef,
+  PlanKind,
   QueryResponse,
   RoutineRef,
   SavedConnection,
@@ -59,6 +60,22 @@ export const api = {
       requestId: request.requestId,
       query: request.query,
       queryParams: null,
+      options: request.options ?? null,
+    })
+  },
+
+  explainQuery(request: {
+    connectionId: string
+    requestId: string
+    query: string
+    kind: PlanKind
+    options?: ExecOptions
+  }): Promise<QueryResponse> {
+    return invoke('explain_query', {
+      connectionId: request.connectionId,
+      requestId: request.requestId,
+      query: request.query,
+      kind: request.kind,
       options: request.options ?? null,
     })
   },

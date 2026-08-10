@@ -177,6 +177,91 @@ describe('QueryView', () => {
     )
   })
 
+  it('reads the estimated plan from the menu', async () => {
+    apiStub.explainQuery.mockResolvedValue(response)
+    const wrapper = await mountView()
+
+    await wrapper.find('[data-test="plan-button"]').trigger('click')
+    await wrapper.vm.$nextTick()
+    const item = document.querySelector('[data-test="plan-estimated"]') as HTMLElement
+    item.click()
+    await settle()
+
+    expect(apiStub.explainQuery).toHaveBeenCalledWith(
+      expect.objectContaining({ query: 'SELECT 1', kind: 'estimated' }),
+    )
+  })
+
+  it('asks before it runs the statement for an actual plan', async () => {
+    apiStub.explainQuery.mockResolvedValue(response)
+    const wrapper = await mountView()
+
+    await wrapper.find('[data-test="plan-button"]').trigger('click')
+    await wrapper.vm.$nextTick()
+    ;(document.querySelector('[data-test="plan-actual"]') as HTMLElement).click()
+    await wrapper.vm.$nextTick()
+    expect(apiStub.explainQuery).not.toHaveBeenCalled()
+
+    const confirm = document.querySelector('[data-test="plan-actual-confirm"]') as HTMLElement
+    confirm.click()
+    await settle()
+    expect(apiStub.explainQuery).toHaveBeenCalledWith(expect.objectContaining({ kind: 'actual' }))
+  })
+
+  it('closes the plan question without a run', async () => {
+    const wrapper = await mountView()
+    await wrapper.find('[data-test="plan-button"]').trigger('click')
+    await wrapper.vm.$nextTick()
+    ;(document.querySelector('[data-test="plan-actual"]') as HTMLElement).click()
+    await settle()
+
+    const dialog = wrapper
+      .findAllComponents({ name: 'VDialog' })
+      .find((item) => item.props('modelValue'))!
+    const cancel = [...document.querySelectorAll('.v-btn')].find(
+      (button) => button.textContent?.trim() === 'Cancel',
+    ) as HTMLElement
+    cancel.click()
+    await settle()
+    expect(apiStub.explainQuery).not.toHaveBeenCalled()
+
+    // The overlay reports the same close, and the dialog follows it.
+    await dialog.vm.$emit('update:modelValue', false)
+    await settle()
+    expect(dialog.props('modelValue')).toBe(false)
+  })
+
+  it('holds no plan button for an engine that reads no plan', async () => {
+    const info = infoFixture()
+    apiStub.listActiveConnections.mockResolvedValue([
+      { ...info, capabilities: { ...info.capabilities, supportsExplain: false } },
+    ])
+    const wrapper = await mountView()
+    expect(wrapper.find('[data-test="plan-button"]').exists()).toBe(false)
+  })
+
+  it('refuses a plan without a connection', async () => {
+    const wrapper = mountWithPlugins(QueryView, {
+      props: {
+        tab: {
+          id: 't1',
+          title: 'Query 1',
+          query: 'SELECT 1',
+          connectionId: null,
+          dirty: false,
+          savedQueryId: null,
+        },
+      },
+    })
+    await wrapper.vm.$nextTick()
+
+    wrapper.vm.readPlan('estimated')
+    await settle()
+    expect(apiStub.explainQuery).not.toHaveBeenCalled()
+    const notices = useUiStore().notices
+    expect(notices[notices.length - 1]?.message).toBe('Choose a connection before you read a plan.')
+  })
+
   it('sends the whole script when Run all is pressed', async () => {
     apiStub.executeQuery.mockResolvedValue(response)
     const wrapper = await mountView('SELECT 1;\nSELECT 2')

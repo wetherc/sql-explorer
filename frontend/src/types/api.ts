@@ -85,6 +85,7 @@ export interface DriverCapabilities {
   supportsIndexes: boolean
   supportsConstraints: boolean
   supportsPartitions: boolean
+  supportsExplain: boolean
 }
 
 export interface ConnectionInfo {
@@ -273,6 +274,15 @@ export interface SchemaSnapshot {
   /** False when the bound on the columns stopped the read. */
   complete: boolean
 }
+
+/** Which plan of a statement the user asked for. */
+export const PlanKind = {
+  /** The plan the engine builds without running the statement. */
+  Estimated: 'estimated',
+  /** The plan the engine reports after it ran the statement. */
+  Actual: 'actual',
+} as const
+export type PlanKind = (typeof PlanKind)[keyof typeof PlanKind]
 
 /** The statement that the explorer builds for one object. */
 export const ScriptKind = {

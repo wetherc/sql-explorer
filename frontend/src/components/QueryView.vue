@@ -57,6 +57,29 @@
         </template>
       </v-tooltip>
 
+      <v-menu v-if="supportsExplain">
+        <template #activator="{ props: menu }">
+          <v-btn
+            v-bind="menu"
+            :disabled="!canRun"
+            size="small"
+            prepend-icon="mdi-sitemap-outline"
+            text="Plan"
+            data-test="plan-button"
+          />
+        </template>
+        <v-list density="compact">
+          <v-list-item data-test="plan-estimated" @click="readPlan(PlanKind.Estimated)">
+            <v-list-item-title>Estimated plan</v-list-item-title>
+            <v-list-item-subtitle>The statement does not run.</v-list-item-subtitle>
+          </v-list-item>
+          <v-list-item data-test="plan-actual" @click="askForActualPlan()">
+            <v-list-item-title>Actual plan</v-list-item-title>
+            <v-list-item-subtitle>The statement runs.</v-list-item-subtitle>
+          </v-list-item>
+        </v-list>
+      </v-menu>
+
       <v-select
         :model-value="tab.connectionId"
         :items="connectionItems"
@@ -216,6 +239,26 @@
       </v-card>
     </v-dialog>
 
+    <v-dialog v-model="askingPlan" max-width="460">
+      <v-card>
+        <v-card-title class="text-subtitle-1">Run the statement for its plan</v-card-title>
+        <v-card-text>
+          The actual plan comes from a real run. The statement runs on the server, so a statement
+          that writes rows writes them, and a statement on Athena scans data.
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn text="Cancel" @click="askingPlan = false" />
+          <v-btn
+            color="primary"
+            text="Run it"
+            data-test="plan-actual-confirm"
+            @click="confirmActualPlan"
+          />
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
     <v-dialog v-model="savingQuery" max-width="480">
       <v-card>
         <v-card-title class="text-subtitle-1">Save this statement</v-card-title>
@@ -252,7 +295,7 @@ import { useQueryStore } from '@/stores/query'
 import { useSettingsStore } from '@/stores/settings'
 import { useTabsStore } from '@/stores/tabs'
 import { useUiStore } from '@/stores/ui'
-import { Dialect, type ResultSet } from '@/types/api'
+import { Dialect, PlanKind, type ResultSet } from '@/types/api'
 import type { ExportFormat } from './ResultsGrid.vue'
 import type { ResultPane } from '@/stores/query'
 import type { QueryTab } from '@/stores/tabs'
@@ -276,6 +319,7 @@ const savingQuery = ref(false)
 const saveName = ref('')
 const saveFolder = ref('')
 const askingTable = ref(false)
+const askingPlan = ref(false)
 const insertTable = ref('')
 /** The rows that wait while the user names the table for the INSERT form. */
 let pendingInsert: ResultSet | null = null
@@ -305,6 +349,11 @@ const dialect = computed<Dialect>(() => {
   return id ? (connections.active[id]?.dialect ?? Dialect.MsSql) : Dialect.MsSql
 })
 
+const supportsExplain = computed(() => {
+  const id = props.tab.connectionId
+  return id !== null && (connections.active[id]?.capabilities.supportsExplain ?? false)
+})
+
 const canRun = computed(() => {
   const id = props.tab.connectionId
   return id !== null && connections.isActive(id)
@@ -315,7 +364,8 @@ const canRun = computed(() => {
  * so that two results of the same statement can be told apart.
  */
 function paneLabel(pane: ResultPane): string {
-  const head = `Result ${pane.number} (${formatRowCount(pane.result.rows.length)})`
+  const name = pane.label ?? `Result ${pane.number}`
+  const head = `${name} (${formatRowCount(pane.result.rows.length)})`
   return pane.pinned ? `${head} at ${formatClockTime(pane.ranAt)}` : head
 }
 
@@ -358,6 +408,26 @@ function runStatement(statement?: string): void {
 
 function runAll(): void {
   void run(props.tab.query)
+}
+
+/** Reads the plan of the statement under the cursor. */
+function readPlan(kind: PlanKind): void {
+  const connectionId = props.tab.connectionId
+  if (!connectionId) {
+    ui.warn('Choose a connection before you read a plan.')
+    return
+  }
+  const text = editorRef.value?.currentStatement() ?? props.tab.query
+  void queries.explain(props.tab.id, connectionId, text, kind)
+}
+
+function askForActualPlan(): void {
+  askingPlan.value = true
+}
+
+function confirmActualPlan(): void {
+  askingPlan.value = false
+  readPlan(PlanKind.Actual)
 }
 
 function formatStatement(): void {
@@ -513,7 +583,7 @@ onBeforeUnmount(() => {
   forgetTabActions(props.tab.id)
 })
 
-defineExpose({ runStatement, runAll, formatStatement })
+defineExpose({ runStatement, runAll, formatStatement, readPlan })
 </script>
 
 <style scoped>

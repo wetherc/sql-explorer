@@ -8,7 +8,15 @@ import { useSettingsStore } from './settings'
 import { useUiStore } from './ui'
 import { toErrorPayload } from '@/lib/errors'
 import { scanCost } from '@/lib/format'
-import type { ErrorPayload, Message, QueryStats, ResultSet } from '@/types/api'
+import { PlanKind } from '@/types/api'
+import type {
+  ErrorPayload,
+  ExecOptions,
+  Message,
+  QueryResponse,
+  QueryStats,
+  ResultSet,
+} from '@/types/api'
 
 /** One gigabyte, as a storage unit counts it. */
 const BYTES_IN_GIGABYTE = 1024 ** 3
@@ -27,6 +35,8 @@ export interface ResultPane {
   ranAt: number
   /** True while the user keeps this result against the next run. */
   pinned: boolean
+  /** The name of the result, for a result that is not a plain result set. */
+  label?: string
 }
 
 export interface QueryState {
@@ -103,10 +113,19 @@ export const useQueryStore = defineStore('query', () => {
   }
 
   /**
-   * Runs a statement for one tab. The identifier of the request lets the
-   * user stop the statement while it runs.
+   * Runs one statement for one tab and holds what came back.
+   *
+   * The identifier of the request lets the user stop the statement while it
+   * runs. The caller gives the call that reaches the backend, so that a run
+   * and a plan share the state of the tab.
    */
-  async function execute(tabId: string, connectionId: string, query: string): Promise<boolean> {
+  async function runRequest(
+    tabId: string,
+    connectionId: string,
+    query: string,
+    call: (requestId: string, options: ExecOptions) => Promise<QueryResponse>,
+    label?: string,
+  ): Promise<boolean> {
     const trimmed = query.trim()
     if (trimmed === '') {
       ui.warn('There is no statement to run.')
@@ -140,14 +159,9 @@ export const useQueryStore = defineStore('query', () => {
     let fresh: ResultSet[] = []
 
     try {
-      const response = await api.executeQuery({
-        connectionId,
-        requestId,
-        query: trimmed,
-        options: {
-          maxRows: settings.settings.maxRows,
-          timeoutSecs: connections.byId(connectionId)?.options.queryTimeoutSecs ?? 300,
-        },
+      const response = await call(requestId, {
+        maxRows: settings.settings.maxRows,
+        timeoutSecs: connections.byId(connectionId)?.options.queryTimeoutSecs ?? 300,
       })
       const ranAt = Date.now()
       fresh = response.results
@@ -159,6 +173,7 @@ export const useQueryStore = defineStore('query', () => {
           number: index + 1,
           ranAt,
           pinned: false,
+          label,
         })),
       ]
       state.activePaneId = lastPane(state.panes)?.id ?? null
@@ -181,17 +196,48 @@ export const useQueryStore = defineStore('query', () => {
       state.startedAt = null
     }
 
-    await history.record({
-      connectionId,
-      connectionName,
-      query: trimmed,
-      elapsedMs: state.elapsedMs,
-      rowCount: totalRows(fresh),
-      succeeded,
-      error: failure ? failure.message : null,
-    })
+    // A plan is not the statement of the user, so the history holds the runs
+    // alone.
+    if (label === undefined) {
+      await history.record({
+        connectionId,
+        connectionName,
+        query: trimmed,
+        elapsedMs: state.elapsedMs,
+        rowCount: totalRows(fresh),
+        succeeded,
+        error: failure ? failure.message : null,
+      })
+    }
 
     return succeeded
+  }
+
+  /** Runs a statement for one tab. */
+  function execute(tabId: string, connectionId: string, query: string): Promise<boolean> {
+    return runRequest(tabId, connectionId, query, (requestId, options) =>
+      api.executeQuery({ connectionId, requestId, query: query.trim(), options }),
+    )
+  }
+
+  /**
+   * Reads the plan of one statement and shows it as a result. The actual plan
+   * runs the statement, and the caller asks the user before it calls this.
+   */
+  function explain(
+    tabId: string,
+    connectionId: string,
+    query: string,
+    kind: PlanKind,
+  ): Promise<boolean> {
+    return runRequest(
+      tabId,
+      connectionId,
+      query,
+      (requestId, options) =>
+        api.explainQuery({ connectionId, requestId, query: query.trim(), kind, options }),
+      kind === PlanKind.Actual ? 'Actual plan' : 'Estimated plan',
+    )
   }
 
   /**
@@ -278,6 +324,7 @@ export const useQueryStore = defineStore('query', () => {
     stateFor,
     clear,
     execute,
+    explain,
     cancel,
     selectPane,
     togglePin,
