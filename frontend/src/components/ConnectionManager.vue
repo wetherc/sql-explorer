@@ -149,6 +149,17 @@
     >
       The record for <strong>{{ pendingDelete.name }}</strong> and its password are removed.
     </ConfirmDialog>
+
+    <ConfirmDialog
+      v-if="pendingDisconnect"
+      :open="pendingDisconnect !== null"
+      title="Close this connection?"
+      :message="runningMessage(pendingDisconnect.id)"
+      confirm-text="Close it"
+      danger
+      @confirm="confirmDisconnect(pendingDisconnect)"
+      @cancel="pendingDisconnect = null"
+    />
   </div>
 </template>
 
@@ -159,12 +170,15 @@ import ConnectionForm from './ConnectionForm.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import EmptyState from './EmptyState.vue'
 import PanelHeader from './PanelHeader.vue'
+import { stoppedStatementsMessage } from '@/lib/format'
 import { connectionSubtitle, newConnection, useConnectionsStore } from '@/stores/connections'
 import { useExplorerStore } from '@/stores/explorer'
+import { useQueryStore } from '@/stores/query'
 import { ConnectionHealth, DbType, type SavedConnection } from '@/types/api'
 
 const connections = useConnectionsStore()
 const explorer = useExplorerStore()
+const queries = useQueryStore()
 
 const emit = defineEmits<{ (event: 'connected', id: string): void }>()
 
@@ -173,6 +187,8 @@ const isNew = ref(true)
 const draft = ref<SavedConnection | null>(null)
 const deleting = ref(false)
 const pendingDelete = ref<SavedConnection | null>(null)
+/** The connection that waits on an answer, while statements run on it. */
+const pendingDisconnect = ref<SavedConnection | null>(null)
 
 function inGroup(group: string): SavedConnection[] {
   return connections.saved.filter(
@@ -246,8 +262,14 @@ async function confirmDelete(connection: SavedConnection): Promise<void> {
 
 async function toggle(connection: SavedConnection): Promise<void> {
   if (connections.isActive(connection.id)) {
-    await connections.disconnect(connection.id)
-    explorer.removeRoot(connection.id)
+    // A close stops every statement that runs on the connection, so it asks
+    // first when one does. A connection with nothing running closes at once,
+    // because it takes nothing away.
+    if (queries.runningOn(connection.id) > 0) {
+      pendingDisconnect.value = connection
+      return
+    }
+    await closeConnection(connection.id)
     return
   }
   const opened = await connections.connect(connection)
@@ -256,6 +278,21 @@ async function toggle(connection: SavedConnection): Promise<void> {
     await explorer.expand(root)
     emit('connected', connection.id)
   }
+}
+
+/** Says how many statements the close of one connection would stop. */
+function runningMessage(id: string): string {
+  return stoppedStatementsMessage(queries.runningOn(id))
+}
+
+async function closeConnection(id: string): Promise<void> {
+  await connections.disconnect(id)
+  explorer.removeRoot(id)
+}
+
+async function confirmDisconnect(connection: SavedConnection): Promise<void> {
+  pendingDisconnect.value = null
+  await closeConnection(connection.id)
 }
 
 function selectConnection(connection: SavedConnection): void {

@@ -107,6 +107,17 @@
       </v-list>
     </v-menu>
 
+    <ConfirmDialog
+      v-if="pendingDisconnect"
+      :open="pendingDisconnect !== null"
+      title="Close this connection?"
+      :message="stoppedStatementsMessage(queries.runningOn(pendingDisconnect))"
+      confirm-text="Close it"
+      danger
+      @confirm="confirmDisconnect(pendingDisconnect)"
+      @cancel="pendingDisconnect = null"
+    />
+
     <TableProperties
       :open="propertiesOpen"
       :node="propertiesNode"
@@ -117,11 +128,13 @@
 
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue'
+import ConfirmDialog from './ConfirmDialog.vue'
 import EmptyState from './EmptyState.vue'
 import ExplorerTree from './ExplorerTree.vue'
 import PanelHeader from './PanelHeader.vue'
 import TableProperties from './TableProperties.vue'
 import { api } from '@/lib/api'
+import { stoppedStatementsMessage } from '@/lib/format'
 import { isExpandable, type ExplorerNode } from '@/stores/explorer'
 import type { ScriptKind } from '@/types/api'
 import { useConnectionsStore } from '@/stores/connections'
@@ -145,6 +158,8 @@ const selectedKey = ref<string | null>(null)
 const menu = reactive({ open: false, x: 0, y: 0, node: null as ExplorerNode | null })
 const propertiesOpen = ref(false)
 const propertiesNode = ref<ExplorerNode | null>(null)
+/** The connection that waits on an answer, while statements run on it. */
+const pendingDisconnect = ref<string | null>(null)
 
 /** Opens the properties of one relation. */
 function openProperties(node: ExplorerNode): void {
@@ -211,9 +226,26 @@ async function refreshRoots(): Promise<void> {
   }
 }
 
+/**
+ * Closes the connection of one node. A close stops every statement that runs
+ * on the connection, so it asks first when one does.
+ */
 async function disconnectHere(node: ExplorerNode): Promise<void> {
-  await connections.disconnect(node.connectionId)
-  explorer.removeRoot(node.connectionId)
+  if (queries.runningOn(node.connectionId) > 0) {
+    pendingDisconnect.value = node.connectionId
+    return
+  }
+  await closeConnection(node.connectionId)
+}
+
+async function closeConnection(id: string): Promise<void> {
+  await connections.disconnect(id)
+  explorer.removeRoot(id)
+}
+
+async function confirmDisconnect(id: string): Promise<void> {
+  pendingDisconnect.value = null
+  await closeConnection(id)
 }
 
 /**

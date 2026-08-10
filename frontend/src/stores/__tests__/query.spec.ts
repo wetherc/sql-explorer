@@ -473,3 +473,39 @@ describe('query store', () => {
     expect(queries.stateFor('t1').panes).toHaveLength(2)
   })
 })
+
+describe('query store counting what runs on a connection', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    Object.values(apiStub).forEach((fn) => fn.mockReset())
+  })
+
+  it('counts none while nothing runs', () => {
+    expect(useQueryStore().runningOn('c1')).toBe(0)
+  })
+
+  it('counts the statements that run against one connection alone', () => {
+    const queries = useQueryStore()
+    const first = queries.stateFor('t1')
+    first.running = true
+    first.requestConnectionId = 'c1'
+    const second = queries.stateFor('t2')
+    second.running = true
+    second.requestConnectionId = 'c1'
+    const other = queries.stateFor('t3')
+    other.running = true
+    other.requestConnectionId = 'c2'
+
+    expect(queries.runningOn('c1')).toBe(2)
+    expect(queries.runningOn('c2')).toBe(1)
+  })
+
+  it('leaves out a statement that has finished', () => {
+    const queries = useQueryStore()
+    const state = queries.stateFor('t1')
+    state.running = false
+    state.requestConnectionId = 'c1'
+
+    expect(queries.runningOn('c1')).toBe(0)
+  })
+})

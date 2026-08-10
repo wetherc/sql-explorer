@@ -128,3 +128,12 @@ export function summariseQuery(query: string, limit = 90): string {
   const oneLine = query.replace(/\s+/g, ' ').trim()
   return truncate(oneLine, limit)
 }
+
+/**
+ * Says what a close of one connection would stop. The question before a close
+ * uses it, so the user reads the same words wherever the close begins.
+ */
+export function stoppedStatementsMessage(count: number): string {
+  const head = count === 1 ? 'One statement is' : `${count} statements are`
+  return `${head} running on this connection. Closing it stops them, and their rows are lost.`
+}

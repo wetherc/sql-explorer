@@ -10,6 +10,7 @@ import {
   formatCell,
   formatDuration,
   formatRowCount,
+  stoppedStatementsMessage,
   formatTimestamp,
   isNullCell,
   summariseQuery,
@@ -172,5 +173,19 @@ describe('formatCost', () => {
 
   it('keeps four places for a price below one cent', () => {
     expect(formatCost(0.0004)).toBe('$0.0004')
+  })
+})
+
+describe('stoppedStatementsMessage', () => {
+  it('names one statement in the singular', () => {
+    expect(stoppedStatementsMessage(1)).toContain('One statement is running')
+  })
+
+  it('counts more than one', () => {
+    expect(stoppedStatementsMessage(3)).toContain('3 statements are running')
+  })
+
+  it('says what the close costs', () => {
+    expect(stoppedStatementsMessage(2)).toContain('their rows are lost')
   })
 })

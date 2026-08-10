@@ -117,6 +117,17 @@ export const useQueryStore = defineStore('query', () => {
     delete states[tabId]
   }
 
+  /**
+   * The number of statements that run against one connection. Closing that
+   * connection stops each of them, so the interface asks first when this is
+   * more than none.
+   */
+  function runningOn(connectionId: string): number {
+    return Object.values(states).filter(
+      (state) => state.running && state.requestConnectionId === connectionId,
+    ).length
+  }
+
   function paneOf(state: QueryState, paneId: string): ResultPane | undefined {
     return state.panes.find((pane) => pane.id === paneId)
   }
@@ -366,6 +377,7 @@ export const useQueryStore = defineStore('query', () => {
     sessionScannedBytes,
     stateFor,
     clear,
+    runningOn,
     execute,
     explain,
     cancel,

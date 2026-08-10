@@ -9,6 +9,7 @@ const ConnectionManager = (await import('@/components/ConnectionManager.vue')).d
 const { mountWithPlugins, settle } = await import('./mount')
 const { useConnectionsStore } = await import('@/stores/connections')
 const { useExplorerStore } = await import('@/stores/explorer')
+const { useQueryStore } = await import('@/stores/query')
 const { ConnectionHealth, DbType } = await import('@/types/api')
 type EngineInfo = import('@/types/api').EngineInfo
 
@@ -290,5 +291,65 @@ describe('ConnectionManager delete dialog', () => {
     await settle()
     expect(confirm.props('open')).toBe(false)
     expect(apiStub.deleteConnection).not.toHaveBeenCalled()
+  })
+})
+
+describe('ConnectionManager closing a connection that is busy', () => {
+  beforeEach(() => {
+    document.body.innerHTML = ''
+    Object.values(apiStub).forEach((fn) => fn.mockReset())
+    apiStub.getConnections.mockResolvedValue([connectionFixture()])
+    apiStub.listActiveConnections.mockResolvedValue([infoFixture()])
+    apiStub.supportedEngines.mockResolvedValue([])
+    apiStub.disconnect.mockResolvedValue(undefined)
+  })
+
+  /** Marks one tab as running a statement against the given connection. */
+  function runOn(connectionId: string, tabId = 't1') {
+    const state = useQueryStore().stateFor(tabId)
+    state.running = true
+    state.requestConnectionId = connectionId
+  }
+
+  it('asks before it stops the statements that run on the connection', async () => {
+    const wrapper = await mountManager()
+    useExplorerStore().addRoot('c1')
+    runOn('c1')
+
+    await wrapper.find('[data-test="toggle-connection"]').trigger('click')
+    await settle()
+
+    expect(apiStub.disconnect).not.toHaveBeenCalled()
+    expect(document.body.textContent).toContain('One statement is running on this connection')
+
+    const confirm = document.querySelector('[data-test="confirm-accept"]') as HTMLElement
+    confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+
+    expect(apiStub.disconnect).toHaveBeenCalledWith('c1')
+    expect(useExplorerStore().roots).toHaveLength(0)
+  })
+
+  it('keeps the connection when the question is refused', async () => {
+    const wrapper = await mountManager()
+    runOn('c1')
+
+    await wrapper.find('[data-test="toggle-connection"]').trigger('click')
+    await settle()
+    const cancel = document.querySelector('[data-test="confirm-cancel"]') as HTMLElement
+    cancel.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+
+    expect(apiStub.disconnect).not.toHaveBeenCalled()
+  })
+
+  it('closes at once when a statement runs on another connection', async () => {
+    const wrapper = await mountManager()
+    runOn('c2')
+
+    await wrapper.find('[data-test="toggle-connection"]').trigger('click')
+    await settle()
+
+    expect(apiStub.disconnect).toHaveBeenCalledWith('c1')
   })
 })

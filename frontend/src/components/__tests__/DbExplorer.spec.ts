@@ -8,6 +8,7 @@ const DbExplorer = (await import('@/components/DbExplorer.vue')).default
 const { mountWithPlugins, settle } = await import('./mount')
 const { useConnectionsStore } = await import('@/stores/connections')
 const { useExplorerStore } = await import('@/stores/explorer')
+const { useQueryStore } = await import('@/stores/query')
 const { useSettingsStore } = await import('@/stores/settings')
 const { useTabsStore } = await import('@/stores/tabs')
 const { useUiStore } = await import('@/stores/ui')
@@ -398,6 +399,50 @@ describe('DbExplorer', () => {
 
     expect(apiStub.disconnect).toHaveBeenCalledWith('c1')
     expect(useExplorerStore().roots).toHaveLength(0)
+  })
+
+  it('asks before it closes a connection that a statement runs on', async () => {
+    apiStub.disconnect.mockResolvedValue(undefined)
+    const wrapper = await mountExplorer()
+    useExplorerStore().addRoot('c1')
+    const state = useQueryStore().stateFor('t1')
+    state.running = true
+    state.requestConnectionId = 'c1'
+    await wrapper.vm.$nextTick()
+
+    await openMenu(wrapper, 0)
+    menuItem('menu-disconnect')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+
+    expect(apiStub.disconnect).not.toHaveBeenCalled()
+    expect(document.body.textContent).toContain('One statement is running on this connection')
+
+    const confirm = document.querySelector('[data-test="confirm-accept"]') as HTMLElement
+    confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+
+    expect(apiStub.disconnect).toHaveBeenCalledWith('c1')
+    expect(useExplorerStore().roots).toHaveLength(0)
+  })
+
+  it('keeps the connection of the tree when the question is refused', async () => {
+    apiStub.disconnect.mockResolvedValue(undefined)
+    const wrapper = await mountExplorer()
+    useExplorerStore().addRoot('c1')
+    const state = useQueryStore().stateFor('t1')
+    state.running = true
+    state.requestConnectionId = 'c1'
+    await wrapper.vm.$nextTick()
+
+    await openMenu(wrapper, 0)
+    menuItem('menu-disconnect')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+    const cancel = document.querySelector('[data-test="confirm-cancel"]') as HTMLElement
+    cancel.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+
+    expect(apiStub.disconnect).not.toHaveBeenCalled()
+    expect(useExplorerStore().roots).toHaveLength(1)
   })
 
   it('copies the quoted name of a relation', async () => {
