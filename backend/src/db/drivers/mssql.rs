@@ -60,7 +60,10 @@ pub async fn build_config(connection: &SavedConnection) -> Result<Config> {
             config.application_name(name);
         }
         config.authentication(auth_method(connection).await?);
-        config.encryption(encryption_level(connection.options.tls_mode));
+        config.encryption(level_for(
+            connection.options.tls_mode,
+            connection.effective_auth(),
+        ));
         if !connection.options.tls_mode.verifies_certificate() {
             config.trust_cert();
         }
@@ -194,6 +197,26 @@ pub fn encryption_level(mode: TlsMode) -> EncryptionLevel {
     }
 }
 
+/// Gives the encryption level for one connection.
+///
+/// `Off` means that TLS covers the login packet and nothing after it. The
+/// driver drops the TLS layer as soon as it has sent the login, and Kerberos
+/// needs one more exchange after that point. The server keeps that exchange
+/// inside TLS, the client reads it as plain bytes, and the connection waits
+/// until the time limit runs out. Kerberos therefore keeps the encryption for
+/// the whole session.
+pub fn level_for(mode: TlsMode, auth: MssqlAuth) -> EncryptionLevel {
+    let level = encryption_level(mode);
+    if auth == MssqlAuth::Integrated && level == EncryptionLevel::Off {
+        log::info!(
+            "Windows Authentication keeps the encryption on for the whole session, because the \
+             exchange of the credentials continues after the login packet."
+        );
+        return EncryptionLevel::Required;
+    }
+    level
+}
+
 impl MssqlDriver {
     pub async fn connect(connection: &SavedConnection) -> Result<Box<dyn DatabaseDriver>> {
         let config = build_config(connection).await?;
@@ -211,16 +234,16 @@ impl MssqlDriver {
 
         let tcp = if uses_instance {
             use tiberius::SqlBrowser;
-            with_timeout(limit, TcpStream::connect_named(&config)).await??
+            while_connecting(limit, TcpStream::connect_named(&config)).await??
         } else {
-            with_timeout(limit, TcpStream::connect(config.get_addr())).await??
+            while_connecting(limit, TcpStream::connect(config.get_addr())).await??
         };
 
         if let Err(error) = tcp.set_nodelay(true) {
             log::warn!("Could not disable the Nagle algorithm: {error}");
         }
 
-        let client = with_timeout(limit, Client::connect(config, tcp.compat_write()))
+        let client = while_connecting(limit, Client::connect(config, tcp.compat_write()))
             .await?
             .map_err(|error| describe_login(error, connection.effective_auth()))?;
         Ok(Box::new(MssqlDriver { client }))
@@ -262,11 +285,16 @@ fn names_a_ticket_fault(text: &str) -> bool {
     .any(|mark| lower.contains(mark))
 }
 
-/// Runs a future and turns the expiry of the limit into a timeout error.
-async fn with_timeout<F: std::future::Future>(limit: Duration, future: F) -> Result<F::Output> {
-    tokio::time::timeout(limit, future)
-        .await
-        .map_err(|_| Error::Timeout(limit.as_secs()))
+/// Runs a step of the opening of a connection under the time limit. A step
+/// that does not finish reports the connection and not the statement, because
+/// the advice for a slow statement does not fit a server that never answered.
+async fn while_connecting<F: std::future::Future>(limit: Duration, future: F) -> Result<F::Output> {
+    tokio::time::timeout(limit, future).await.map_err(|_| {
+        Error::Connection(format!(
+            "The server did not finish opening the connection inside {} seconds.",
+            limit.as_secs()
+        ))
+    })
 }
 
 /// True when the first keyword of the statement introduces a statement that
@@ -1152,6 +1180,27 @@ mod tests {
             )
             .kind(),
             crate::error::ErrorKind::Database
+        );
+    }
+    #[test]
+    fn kerberos_keeps_the_encryption_for_the_whole_session() {
+        // The login-only level cannot work with Kerberos, so it rises.
+        assert_eq!(
+            level_for(TlsMode::Prefer, MssqlAuth::Integrated),
+            EncryptionLevel::Required
+        );
+        // Every other level and every other method stay as they are.
+        assert_eq!(
+            level_for(TlsMode::Prefer, MssqlAuth::SqlLogin),
+            EncryptionLevel::Off
+        );
+        assert_eq!(
+            level_for(TlsMode::Disable, MssqlAuth::Integrated),
+            EncryptionLevel::NotSupported
+        );
+        assert_eq!(
+            level_for(TlsMode::VerifyFull, MssqlAuth::Integrated),
+            EncryptionLevel::Required
         );
     }
 }
