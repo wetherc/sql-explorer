@@ -19,6 +19,7 @@ use aws_sdk_athena::types::{
 };
 use aws_sdk_athena::Client;
 use serde_json::Value as JsonValue;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -37,6 +38,35 @@ pub struct AthenaDriver {
     /// The identifier of the statement that runs, so that a request to
     /// stop it can reach the service.
     running: Arc<Mutex<Option<String>>>,
+    /// True while the metadata API of Athena still answers. A catalog can
+    /// hold a record that the API cannot write as JSON, and the driver then
+    /// reads the catalog with statements for the rest of the session.
+    metadata_api_works: Arc<AtomicBool>,
+}
+
+/// Writes a value as a literal of SQL, for a name that reaches a statement.
+fn quote_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+/// True when the answer of the service could not be read. A catalog of Glue
+/// can hold a record whose map carries a value that is absent, and the parser
+/// of the SDK refuses such a map. The metadata API is then unusable for that
+/// catalog, and the driver reads the catalog with statements instead.
+fn answer_is_unreadable(error: &Error) -> bool {
+    let text = error.to_string().to_lowercase();
+    text.contains("dense map")
+        || text.contains("failed to parse json")
+        || text.contains("cannot contain null")
+}
+
+/// Reads a cell of a result as text.
+fn cell_text(row: &[JsonValue], index: usize) -> Option<String> {
+    match row.get(index) {
+        Some(JsonValue::String(text)) => Some(text.clone()),
+        Some(JsonValue::Null) | None => None,
+        Some(other) => Some(other.to_string()),
+    }
 }
 
 /// Reads the numbers of one execution. A number that the service leaves out
@@ -96,6 +126,7 @@ impl AthenaDriver {
             result_reuse: connection.options.athena_result_reuse,
             result_reuse_max_age_minutes: connection.options.athena_result_reuse_max_age_minutes,
             running: Arc::new(Mutex::new(None)),
+            metadata_api_works: Arc::new(AtomicBool::new(true)),
         };
 
         // The credentials and the permissions are checked once, so that a
@@ -294,7 +325,100 @@ impl AthenaDriver {
         }
     }
 
+    /// Runs a statement that reads the catalog and gives back its rows.
+    async fn catalog_rows(&self, statement: &str) -> Result<Vec<Vec<JsonValue>>> {
+        // A statement against `information_schema` scans no data in storage,
+        // so it costs nothing and needs no row limit of its own.
+        let options = ExecOptions {
+            max_rows: 100_000,
+            timeout_secs: 60,
+        };
+        let (set, _) = self.run_statement(statement, &options).await?;
+        Ok(set.map(|set| set.rows).unwrap_or_default())
+    }
+
+    /// Records that the metadata API cannot answer for this catalog.
+    fn note_unreadable_metadata(&self, error: &Error) {
+        if self.metadata_api_works.swap(false, Ordering::Relaxed) {
+            log::warn!(
+                "The metadata API of Athena gave an answer that could not be read, so the \
+                 catalog is read with statements from here on: {error}"
+            );
+        }
+    }
+
+    fn metadata_api_usable(&self) -> bool {
+        self.metadata_api_works.load(Ordering::Relaxed)
+    }
+
+    async fn databases_from_statement(&self) -> Result<Vec<Database>> {
+        let rows = self
+            .catalog_rows("SELECT schema_name FROM information_schema.schemata")
+            .await?;
+        let mut names: Vec<Database> = rows
+            .iter()
+            .filter_map(|row| cell_text(row, 0))
+            .filter(|name| name != "information_schema")
+            .map(|name| Database { name })
+            .collect();
+        names.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(names)
+    }
+
+    async fn tables_from_statement(&self, database: &str) -> Result<Vec<Table>> {
+        let rows = self
+            .catalog_rows(&format!(
+                "SELECT table_name, table_type FROM information_schema.tables \
+                 WHERE table_schema = {} ORDER BY table_name",
+                quote_literal(database)
+            ))
+            .await?;
+        Ok(rows
+            .iter()
+            .filter_map(|row| {
+                let name = cell_text(row, 0)?;
+                let kind = cell_text(row, 1).unwrap_or_default();
+                Some(if kind.eq_ignore_ascii_case("VIEW") {
+                    Table::view(name)
+                } else {
+                    Table::table(name)
+                })
+            })
+            .collect())
+    }
+
+    async fn columns_from_statement(&self, database: &str, table: &str) -> Result<Vec<AppColumn>> {
+        let rows = self
+            .catalog_rows(&format!(
+                "SELECT column_name, data_type, is_nullable, extra_info \
+                 FROM information_schema.columns \
+                 WHERE table_schema = {} AND table_name = {} ORDER BY ordinal_position",
+                quote_literal(database),
+                quote_literal(table)
+            ))
+            .await?;
+        Ok(rows
+            .iter()
+            .filter_map(|row| {
+                let name = cell_text(row, 0)?;
+                let extra = cell_text(row, 3).unwrap_or_default();
+                Some(AppColumn {
+                    name,
+                    data_type: cell_text(row, 1).unwrap_or_else(|| "unknown".to_string()),
+                    nullable: !cell_text(row, 2)
+                        .is_some_and(|value| value.eq_ignore_ascii_case("NO")),
+                    // Athena names a partition key in this column, and the
+                    // explorer marks such a column as a key.
+                    is_primary_key: extra.to_lowercase().contains("partition key"),
+                })
+            })
+            .collect())
+    }
+
     async fn list_databases_inner(&self) -> Result<Vec<Database>> {
+        if !self.metadata_api_usable() {
+            return self.databases_from_statement().await;
+        }
         let mut names = Vec::new();
         let mut token: Option<String> = None;
         loop {
@@ -305,7 +429,15 @@ impl AthenaDriver {
                 .set_next_token(token)
                 .send()
                 .await
-                .map_err(|error| describe(error, "The databases could not be listed"))?;
+                .map_err(|error| describe(error, "The databases could not be listed"));
+            let page = match page {
+                Ok(page) => page,
+                Err(error) if answer_is_unreadable(&error) => {
+                    self.note_unreadable_metadata(&error);
+                    return self.databases_from_statement().await;
+                }
+                Err(error) => return Err(error),
+            };
             for database in page.database_list() {
                 names.push(Database {
                     name: database.name().to_string(),
@@ -385,6 +517,9 @@ impl DatabaseDriver for AthenaDriver {
     }
 
     async fn list_tables(&mut self, database: &str, _schema: Option<&str>) -> Result<Vec<Table>> {
+        if !self.metadata_api_usable() {
+            return self.tables_from_statement(database).await;
+        }
         let mut tables = Vec::new();
         let mut token: Option<String> = None;
         loop {
@@ -396,7 +531,15 @@ impl DatabaseDriver for AthenaDriver {
                 .set_next_token(token)
                 .send()
                 .await
-                .map_err(|error| describe(error, "The tables could not be listed"))?;
+                .map_err(|error| describe(error, "The tables could not be listed"));
+            let page = match page {
+                Ok(page) => page,
+                Err(error) if answer_is_unreadable(&error) => {
+                    self.note_unreadable_metadata(&error);
+                    return self.tables_from_statement(database).await;
+                }
+                Err(error) => return Err(error),
+            };
             for table in page.table_metadata_list() {
                 let name = table.name().to_string();
                 tables.push(match table.table_type() {
@@ -419,6 +562,10 @@ impl DatabaseDriver for AthenaDriver {
         _schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<AppColumn>> {
+        if !self.metadata_api_usable() {
+            return self.columns_from_statement(database, table).await;
+        }
+
         let metadata = self
             .client
             .get_table_metadata()
@@ -427,7 +574,15 @@ impl DatabaseDriver for AthenaDriver {
             .table_name(table)
             .send()
             .await
-            .map_err(|error| describe(error, "The columns could not be read"))?;
+            .map_err(|error| describe(error, "The columns could not be read"));
+        let metadata = match metadata {
+            Ok(metadata) => metadata,
+            Err(error) if answer_is_unreadable(&error) => {
+                self.note_unreadable_metadata(&error);
+                return self.columns_from_statement(database, table).await;
+            }
+            Err(error) => return Err(error),
+        };
 
         let Some(table) = metadata.table_metadata() else {
             return Ok(Vec::new());
@@ -707,5 +862,36 @@ mod tests {
         let default = crate::storage::ConnectionOptions::default();
         assert!(!default.athena_result_reuse);
         assert_eq!(default.athena_result_reuse_max_age_minutes, 60);
+    }
+    #[test]
+    fn a_literal_doubles_a_quote() {
+        assert_eq!(quote_literal("plain"), "'plain'");
+        assert_eq!(quote_literal("it's"), "'it''s'");
+    }
+
+    #[test]
+    fn an_answer_that_cannot_be_read_is_recognised() {
+        let unreadable = Error::Athena(
+            "service error: unhandled error: failed to parse JSON: dense map cannot contain null \
+             values"
+                .to_string(),
+        );
+        assert!(answer_is_unreadable(&unreadable));
+        assert!(!answer_is_unreadable(&Error::Athena(
+            "The database does not exist.".to_string()
+        )));
+    }
+
+    #[test]
+    fn a_cell_is_read_as_text() {
+        let row = vec![
+            serde_json::json!("name"),
+            serde_json::json!(null),
+            serde_json::json!(7),
+        ];
+        assert_eq!(cell_text(&row, 0), Some("name".to_string()));
+        assert_eq!(cell_text(&row, 1), None);
+        assert_eq!(cell_text(&row, 2), Some("7".to_string()));
+        assert_eq!(cell_text(&row, 9), None);
     }
 }
