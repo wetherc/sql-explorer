@@ -101,6 +101,12 @@ pub struct ConnectionOptions {
     /// The S3 location that Athena writes the results to.
     pub athena_output_location: Option<String>,
     pub athena_catalog: Option<String>,
+    /// True when Athena may give the result of an earlier run of the same
+    /// statement. A reused result costs nothing, because the engine scans
+    /// no data for it.
+    pub athena_result_reuse: bool,
+    /// The age in minutes up to which a result may be reused.
+    pub athena_result_reuse_max_age_minutes: u32,
 
     /// A complete connection string that replaces the fields above. Use it
     /// for an option the form does not show.
@@ -125,6 +131,8 @@ impl Default for ConnectionOptions {
             athena_workgroup: None,
             athena_output_location: None,
             athena_catalog: None,
+            athena_result_reuse: false,
+            athena_result_reuse_max_age_minutes: 60,
             connection_url: None,
         }
     }
@@ -414,5 +422,21 @@ mod tests {
         assert_eq!(connection.password, None);
         assert_eq!(connection.host, None);
         assert_eq!(connection.effective_port(), Some(3306));
+    }
+    #[test]
+    fn a_record_written_before_the_new_options_still_reads() {
+        // The options carry `serde(default)`, so a file that a former
+        // release wrote parses and the new fields take their defaults.
+        let text = r#"{
+            "id": "c1",
+            "name": "Old",
+            "dbType": "athena",
+            "options": { "awsRegion": "us-east-1" }
+        }"#;
+        let parsed: SavedConnection = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed.options.aws_region.as_deref(), Some("us-east-1"));
+        assert!(!parsed.options.athena_result_reuse);
+        assert_eq!(parsed.options.athena_result_reuse_max_age_minutes, 60);
+        assert_eq!(parsed.options.max_rows, 10_000);
     }
 }

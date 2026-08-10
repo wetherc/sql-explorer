@@ -21,6 +21,19 @@
       <div data-test="status-affected">{{ formatRowCount(state.rowsAffected) }} affected</div>
     </template>
 
+    <template v-if="scannedBytes !== null">
+      <v-divider vertical />
+      <v-tooltip location="top" :text="scanTooltip">
+        <template #activator="{ props: tip }">
+          <div v-bind="tip" data-test="status-scan">
+            {{ formatBytes(scannedBytes) }} scanned, {{ formatCost(lastCost) }} est.
+          </div>
+        </template>
+      </v-tooltip>
+      <v-divider vertical />
+      <div data-test="status-session-cost">{{ formatCost(sessionCost) }} this session</div>
+    </template>
+
     <v-spacer />
 
     <div v-if="tab" data-test="status-dialect">{{ dialectLabel }}</div>
@@ -29,9 +42,10 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { formatDuration, formatRowCount } from '@/lib/format'
+import { formatBytes, formatCost, formatDuration, formatRowCount, scanCost } from '@/lib/format'
 import { useConnectionsStore } from '@/stores/connections'
 import { useQueryStore } from '@/stores/query'
+import { useSettingsStore } from '@/stores/settings'
 import { useTabsStore } from '@/stores/tabs'
 import { resultsOf, totalRows } from '@/stores/query'
 import { ConnectionHealth, Dialect } from '@/types/api'
@@ -39,6 +53,7 @@ import { ConnectionHealth, Dialect } from '@/types/api'
 const connections = useConnectionsStore()
 const tabs = useTabsStore()
 const queries = useQueryStore()
+const settings = useSettingsStore()
 
 const tab = computed(() => tabs.activeTab)
 const state = computed(() => (tab.value ? queries.stateFor(tab.value.id) : null))
@@ -83,6 +98,25 @@ const stateLabel = computed(() => {
     return `Failed: ${state.value.error.kind}`
   }
   return 'Ready'
+})
+
+/** The bytes the last statement of this tab scanned, when it reported them. */
+const scannedBytes = computed(() => state.value?.stats?.scannedBytes ?? null)
+
+const lastCost = computed(() =>
+  scanCost(scannedBytes.value ?? 0, settings.settings.athenaPricePerTerabyte),
+)
+
+const sessionCost = computed(() =>
+  scanCost(queries.sessionScannedBytes, settings.settings.athenaPricePerTerabyte),
+)
+
+const scanTooltip = computed(() => {
+  const rate = `The rate is $${settings.settings.athenaPricePerTerabyte} for each terabyte.`
+  const reused = state.value?.stats?.resultReused
+    ? ' The engine gave the result of an earlier run, which costs nothing.'
+    : ''
+  return `An estimate. ${rate}${reused}`
 })
 
 const dialectLabel = computed(() => {

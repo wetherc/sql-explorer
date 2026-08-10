@@ -42,6 +42,10 @@ export interface ConnectionOptions {
   athenaWorkgroup: string | null
   athenaOutputLocation: string | null
   athenaCatalog: string | null
+  /** True when Athena may give the result of an earlier run. */
+  athenaResultReuse: boolean
+  /** The age in minutes up to which a result may be reused. */
+  athenaResultReuseMaxAgeMinutes: number
   connectionUrl: string | null
 }
 
@@ -101,11 +105,22 @@ export interface ResultSet {
   truncated: boolean
 }
 
+/** What one execution cost, for an engine that reports it. */
+export interface QueryStats {
+  scannedBytes: number | null
+  engineMs: number | null
+  queueMs: number | null
+  /** True when the engine gave the result of an earlier run. */
+  resultReused: boolean | null
+}
+
 export interface QueryResponse {
   results: ResultSet[]
   messages: string[]
   rowsAffected: number | null
   elapsedMs: number
+  /** What the execution cost, when the engine reports it. */
+  stats: QueryStats | null
 }
 
 /** What an export to a file needs to know. */
@@ -231,6 +246,8 @@ export function defaultConnectionOptions(): ConnectionOptions {
     athenaWorkgroup: null,
     athenaOutputLocation: null,
     athenaCatalog: null,
+    athenaResultReuse: false,
+    athenaResultReuseMaxAgeMinutes: 60,
     connectionUrl: null,
   }
 }

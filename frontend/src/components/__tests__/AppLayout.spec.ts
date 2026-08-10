@@ -243,6 +243,18 @@ describe('AppLayout dialog state', () => {
       .find((item) => item.attributes('data-test') === 'setting-export-limit')
     await limit!.vm.$emit('update:modelValue', '5000')
     expect(useSettingsStore().settings.exportRowLimit).toBe(5000)
+
+    const price = wrapper
+      .findAllComponents({ name: 'VTextField' })
+      .find((item) => item.attributes('data-test') === 'setting-athena-price')
+    await price!.vm.$emit('update:modelValue', '6.5')
+    expect(useSettingsStore().settings.athenaPricePerTerabyte).toBe(6.5)
+
+    const warn = wrapper
+      .findAllComponents({ name: 'VTextField' })
+      .find((item) => item.attributes('data-test') === 'setting-athena-warning')
+    await warn!.vm.$emit('update:modelValue', '25')
+    expect(useSettingsStore().settings.athenaScanWarningGb).toBe(25)
     wrapper.unmount()
   })
 

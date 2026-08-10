@@ -119,6 +119,32 @@ describe('StatusBar', () => {
     expect(wrapper.find('[data-test="status-affected"]').text()).toBe('3 rows affected')
   })
 
+  it('reports the scan, its estimated cost and the total of the session', async () => {
+    const wrapper = mountWithPlugins(StatusBar)
+    const tab = useTabsStore().add({ connectionId: 'c1' })
+    const queries = useQueryStore()
+    const state = queries.stateFor(tab.id)
+    state.panes = []
+    state.stats = {
+      scannedBytes: 1024 ** 4 / 2,
+      engineMs: 100,
+      queueMs: 1,
+      resultReused: false,
+    }
+    queries.sessionScannedBytes = 1024 ** 4
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('[data-test="status-scan"]').text()).toBe('512.00 GB scanned, $2.50 est.')
+    expect(wrapper.find('[data-test="status-session-cost"]').text()).toBe('$5.00 this session')
+  })
+
+  it('says nothing about a scan for an engine that reports none', async () => {
+    const wrapper = mountWithPlugins(StatusBar)
+    useTabsStore().add({ connectionId: 'c1' })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-test="status-scan"]').exists()).toBe(false)
+  })
+
   it('falls back to the connection of the explorer when no tab is open', async () => {
     const wrapper = mountWithPlugins(StatusBar)
     const connections = useConnectionsStore()

@@ -52,6 +52,53 @@ impl ResultSet {
     }
 }
 
+/// What one execution cost, for an engine that reports it. Athena charges
+/// for the bytes it scans, so a user of Athena needs these numbers.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryStats {
+    /// The bytes the engine read from storage.
+    pub scanned_bytes: Option<u64>,
+    /// The time the engine spent on the statement.
+    pub engine_ms: Option<u64>,
+    /// The time the statement waited before it started.
+    pub queue_ms: Option<u64>,
+    /// True when the engine gave the result of an earlier run, which costs
+    /// nothing.
+    pub result_reused: Option<bool>,
+}
+
+impl QueryStats {
+    /// True when the record holds no number at all.
+    pub fn is_empty(&self) -> bool {
+        self.scanned_bytes.is_none()
+            && self.engine_ms.is_none()
+            && self.queue_ms.is_none()
+            && self.result_reused.is_none()
+    }
+
+    /// Adds the numbers of another record to this one.
+    pub fn add(&mut self, other: &QueryStats) {
+        self.scanned_bytes = sum_option(self.scanned_bytes, other.scanned_bytes);
+        self.engine_ms = sum_option(self.engine_ms, other.engine_ms);
+        self.queue_ms = sum_option(self.queue_ms, other.queue_ms);
+        // A run of statements counts as reused only when every part was.
+        self.result_reused = match (self.result_reused, other.result_reused) {
+            (None, value) => value,
+            (value, None) => value,
+            (Some(left), Some(right)) => Some(left && right),
+        };
+    }
+}
+
+/// Adds two numbers that may be absent, and keeps absent when both are.
+fn sum_option(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (None, None) => None,
+        (left, right) => Some(left.unwrap_or(0) + right.unwrap_or(0)),
+    }
+}
+
 /// Everything one execution produced.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -60,6 +107,8 @@ pub struct QueryResponse {
     pub messages: Vec<String>,
     pub rows_affected: Option<u64>,
     pub elapsed_ms: u64,
+    /// What the execution cost, when the engine reports it.
+    pub stats: Option<QueryStats>,
 }
 
 /// Makes every column name different from the others, so that a JSON object
@@ -422,6 +471,66 @@ mod tests {
         assert_eq!(
             unique_column_names(&columns),
             vec!["id".to_string(), "id_2".to_string(), "column".to_string()]
+        );
+    }
+    #[test]
+    fn the_numbers_of_two_executions_add_up() {
+        let mut total = QueryStats::default();
+        assert!(total.is_empty());
+
+        total.add(&QueryStats {
+            scanned_bytes: Some(1000),
+            engine_ms: Some(20),
+            queue_ms: None,
+            result_reused: Some(true),
+        });
+        total.add(&QueryStats {
+            scanned_bytes: Some(500),
+            engine_ms: None,
+            queue_ms: Some(5),
+            result_reused: Some(false),
+        });
+
+        assert!(!total.is_empty());
+        assert_eq!(total.scanned_bytes, Some(1500));
+        assert_eq!(total.engine_ms, Some(20));
+        assert_eq!(total.queue_ms, Some(5));
+        // A run counts as reused only when every statement of it was.
+        assert_eq!(total.result_reused, Some(false));
+    }
+
+    #[test]
+    fn a_number_that_the_engine_leaves_out_stays_absent() {
+        let mut total = QueryStats::default();
+        total.add(&QueryStats::default());
+        assert_eq!(total.scanned_bytes, None);
+        assert_eq!(total.result_reused, None);
+
+        let mut kept = QueryStats {
+            result_reused: Some(true),
+            ..QueryStats::default()
+        };
+        kept.add(&QueryStats::default());
+        assert_eq!(kept.result_reused, Some(true));
+    }
+
+    #[test]
+    fn a_response_carries_the_numbers_through_json() {
+        let response = QueryResponse {
+            stats: Some(QueryStats {
+                scanned_bytes: Some(2048),
+                engine_ms: Some(31),
+                queue_ms: Some(2),
+                result_reused: Some(false),
+            }),
+            ..QueryResponse::default()
+        };
+        let text = serde_json::to_string(&response).unwrap();
+        assert!(text.contains("scannedBytes"));
+        assert!(text.contains("resultReused"));
+        assert_eq!(
+            serde_json::from_str::<QueryResponse>(&text).unwrap(),
+            response
         );
     }
 }

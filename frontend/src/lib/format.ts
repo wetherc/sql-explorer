@@ -87,6 +87,37 @@ export function formatTimestamp(value: string): string {
   return moment.toLocaleString()
 }
 
+/** The number of bytes in one terabyte, as a storage unit counts them. */
+export const BYTES_IN_TERABYTE = 1024 ** 4
+
+/** Writes a byte count in the largest unit that keeps the number above one. */
+export function formatBytes(bytes: number): string {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = bytes
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  return unit === 0 ? `${Math.round(value)} B` : `${value.toFixed(2)} ${units[unit]}`
+}
+
+/**
+ * Gives the price of a scan, from a rate for each terabyte. The figure is an
+ * estimate, because the rate changes by region and by contract.
+ */
+export function scanCost(bytes: number, pricePerTerabyte: number): number {
+  return (bytes / BYTES_IN_TERABYTE) * pricePerTerabyte
+}
+
+/**
+ * Writes a price in US dollars. A price below one cent keeps four places, so
+ * that a small scan does not read as nothing.
+ */
+export function formatCost(dollars: number): string {
+  return dollars > 0 && dollars < 0.01 ? `$${dollars.toFixed(4)}` : `$${dollars.toFixed(2)}`
+}
+
 /** Writes a moment as a local time of day, for the title of a kept result. */
 export function formatClockTime(milliseconds: number): string {
   return new Date(milliseconds).toLocaleTimeString()

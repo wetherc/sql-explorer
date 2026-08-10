@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { reactive } from 'vue'
+import { reactive, ref } from 'vue'
 import { api } from '@/lib/api'
 import { createId } from './connections'
 import { useConnectionsStore } from './connections'
@@ -7,7 +7,11 @@ import { useHistoryStore } from './history'
 import { useSettingsStore } from './settings'
 import { useUiStore } from './ui'
 import { toErrorPayload } from '@/lib/errors'
-import type { ErrorPayload, ResultSet } from '@/types/api'
+import { scanCost } from '@/lib/format'
+import type { ErrorPayload, QueryStats, ResultSet } from '@/types/api'
+
+/** One gigabyte, as a storage unit counts it. */
+const BYTES_IN_GIGABYTE = 1024 ** 3
 
 /**
  * One result set that the interface shows. The record carries an identifier
@@ -38,6 +42,8 @@ export interface QueryState {
   startedAt: number | null
   /** The result the user reads, or `null` for the messages. */
   activePaneId: string | null
+  /** What the execution cost, for an engine that reports it. */
+  stats: QueryStats | null
 }
 
 /** Builds the state a tab starts with. */
@@ -52,6 +58,7 @@ export function newQueryState(): QueryState {
     elapsedMs: 0,
     startedAt: null,
     activePaneId: null,
+    stats: null,
   }
 }
 
@@ -77,6 +84,8 @@ export const useQueryStore = defineStore('query', () => {
   const settings = useSettingsStore()
 
   const states = reactive<Record<string, QueryState>>({})
+  /** The bytes every statement of this session scanned, over all tabs. */
+  const sessionScannedBytes = ref(0)
 
   function stateFor(tabId: string): QueryState {
     if (!states[tabId]) {
@@ -121,6 +130,7 @@ export const useQueryStore = defineStore('query', () => {
     state.elapsedMs = 0
     state.startedAt = Date.now()
     state.activePaneId = null
+    state.stats = null
 
     const connectionName = connections.byId(connectionId)?.name ?? connectionId
     let succeeded = false
@@ -153,6 +163,8 @@ export const useQueryStore = defineStore('query', () => {
       state.messages = response.messages
       state.rowsAffected = response.rowsAffected
       state.elapsedMs = response.elapsedMs
+      state.stats = response.stats ?? null
+      recordScan(state.stats)
       succeeded = true
       if (response.results.some((result) => result.truncated)) {
         ui.warn('The row limit stopped the read. Raise it in the settings to see more rows.')
@@ -178,6 +190,26 @@ export const useQueryStore = defineStore('query', () => {
     })
 
     return succeeded
+  }
+
+  /**
+   * Adds the scan of one execution to the total of the session, and warns
+   * when the scan passes the limit in the settings.
+   */
+  function recordScan(stats: QueryStats | null): void {
+    const bytes = stats?.scannedBytes ?? null
+    if (bytes === null) {
+      return
+    }
+    sessionScannedBytes.value += bytes
+    const limit = settings.settings.athenaScanWarningGb * BYTES_IN_GIGABYTE
+    if (bytes > limit) {
+      const cost = scanCost(bytes, settings.settings.athenaPricePerTerabyte)
+      ui.warn(
+        `That statement scanned more than the warning limit of ${settings.settings.athenaScanWarningGb} GB.`,
+        `The estimated cost is $${cost.toFixed(2)}. Change the limit in the settings.`,
+      )
+    }
   }
 
   /** Asks the backend to stop the statement of one tab. */
@@ -240,6 +272,7 @@ export const useQueryStore = defineStore('query', () => {
 
   return {
     states,
+    sessionScannedBytes,
     stateFor,
     clear,
     execute,

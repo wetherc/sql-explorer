@@ -49,6 +49,7 @@ describe('newQueryState', () => {
       elapsedMs: 0,
       startedAt: null,
       activePaneId: null,
+      stats: null,
     })
   })
 })
@@ -350,6 +351,41 @@ describe('query store', () => {
     queries.selectPane('t1', second)
     queries.closePane('t1', state.panes[0]!.id)
     expect(state.activePaneId).toBe(second)
+  })
+
+  it('records the scan of a statement and adds it to the session', async () => {
+    apiStub.executeQuery.mockResolvedValue({
+      ...response(),
+      stats: { scannedBytes: 1024 ** 3, engineMs: 120, queueMs: 3, resultReused: false },
+    })
+    const queries = useQueryStore()
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    await queries.execute('t2', 'c1', 'SELECT 2')
+
+    expect(queries.stateFor('t1').stats?.scannedBytes).toBe(1024 ** 3)
+    expect(queries.sessionScannedBytes).toBe(2 * 1024 ** 3)
+  })
+
+  it('warns about a scan above the limit of the settings', async () => {
+    useSettingsStore().update({ athenaScanWarningGb: 1, athenaPricePerTerabyte: 5 })
+    apiStub.executeQuery.mockResolvedValue({
+      ...response(),
+      stats: { scannedBytes: 2 * 1024 ** 3, engineMs: null, queueMs: null, resultReused: null },
+    })
+    const queries = useQueryStore()
+    await queries.execute('t1', 'c1', 'SELECT 1')
+
+    const notice = useUiStore().notices.find((item) => item.level === 'warning')
+    expect(notice?.message).toContain('warning limit of 1 GB')
+    expect(notice?.detail).toContain('$0.01')
+  })
+
+  it('counts nothing for an engine that reports no scan', async () => {
+    apiStub.executeQuery.mockResolvedValue(response())
+    const queries = useQueryStore()
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    expect(queries.stateFor('t1').stats).toBeNull()
+    expect(queries.sessionScannedBytes).toBe(0)
   })
 
   it('closes nothing for a result that is not there', async () => {

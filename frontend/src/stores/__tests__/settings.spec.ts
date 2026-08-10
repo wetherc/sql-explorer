@@ -27,6 +27,8 @@ describe('parseSettings', () => {
       autoRunPreview: false,
       maxPinnedResults: 8,
       exportRowLimit: 2000,
+      athenaPricePerTerabyte: 6.25,
+      athenaScanWarningGb: 50,
     })
     expect(parseSettings(stored)).toEqual({
       theme: 'sqlExplorerLight',
@@ -37,6 +39,8 @@ describe('parseSettings', () => {
       autoRunPreview: false,
       maxPinnedResults: 8,
       exportRowLimit: 2000,
+      athenaPricePerTerabyte: 6.25,
+      athenaScanWarningGb: 50,
     })
   })
 

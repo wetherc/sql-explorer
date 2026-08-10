@@ -103,6 +103,24 @@
           label="Data catalog"
           placeholder="AwsDataCatalog"
         />
+        <v-switch
+          v-model="draft.options.athenaResultReuse"
+          label="Reuse the result of an earlier run"
+          hint="A reused result scans no data, so it costs nothing."
+          persistent-hint
+          density="compact"
+          data-test="athena-reuse-switch"
+        />
+        <v-text-field
+          v-if="draft.options.athenaResultReuse"
+          :model-value="draft.options.athenaResultReuseMaxAgeMinutes"
+          label="Reuse a result up to this age in minutes"
+          type="number"
+          data-test="athena-reuse-age-field"
+          @update:model-value="
+            (value) => (draft.options.athenaResultReuseMaxAgeMinutes = Number(value))
+          "
+        />
       </template>
 
       <v-expansion-panels variant="accordion" class="mt-2">

@@ -168,6 +168,28 @@
             data-test="setting-export-limit"
             @update:model-value="(value) => settings.update({ exportRowLimit: Number(value) })"
           />
+          <v-text-field
+            :model-value="settings.settings.athenaPricePerTerabyte"
+            label="Athena price for each terabyte"
+            type="number"
+            step="0.01"
+            prefix="$"
+            hint="An estimate. The rate changes by region and by contract."
+            persistent-hint
+            data-test="setting-athena-price"
+            @update:model-value="
+              (value) => settings.update({ athenaPricePerTerabyte: Number(value) })
+            "
+          />
+          <v-text-field
+            :model-value="settings.settings.athenaScanWarningGb"
+            label="Warn above this scan in gigabytes"
+            type="number"
+            hint="A statement that scans more than this raises a warning."
+            persistent-hint
+            data-test="setting-athena-warning"
+            @update:model-value="(value) => settings.update({ athenaScanWarningGb: Number(value) })"
+          />
         </v-card-text>
         <v-card-actions>
           <v-spacer />

@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
+  BYTES_IN_TERABYTE,
   NULL_TEXT,
+  formatBytes,
+  formatCost,
+  scanCost,
   formatClockTime,
   compareCells,
   formatCell,
@@ -137,5 +141,36 @@ describe('formatClockTime', () => {
   it('writes the time of day of a moment', () => {
     const moment = new Date(2026, 0, 2, 13, 45, 7).getTime()
     expect(formatClockTime(moment)).toBe(new Date(moment).toLocaleTimeString())
+  })
+})
+
+describe('formatBytes', () => {
+  it('uses the largest unit that keeps the number above one', () => {
+    expect(formatBytes(0)).toBe('0 B')
+    expect(formatBytes(512)).toBe('512 B')
+    expect(formatBytes(2048)).toBe('2.00 KB')
+    expect(formatBytes(5 * 1024 ** 2)).toBe('5.00 MB')
+    expect(formatBytes(3 * 1024 ** 3)).toBe('3.00 GB')
+    expect(formatBytes(4 * BYTES_IN_TERABYTE)).toBe('4.00 TB')
+    expect(formatBytes(4096 * BYTES_IN_TERABYTE)).toBe('4096.00 TB')
+  })
+})
+
+describe('scanCost', () => {
+  it('gives the price of a scan from the rate for each terabyte', () => {
+    expect(scanCost(BYTES_IN_TERABYTE, 5)).toBe(5)
+    expect(scanCost(BYTES_IN_TERABYTE / 2, 5)).toBe(2.5)
+    expect(scanCost(0, 5)).toBe(0)
+  })
+})
+
+describe('formatCost', () => {
+  it('writes a price in dollars', () => {
+    expect(formatCost(0)).toBe('$0.00')
+    expect(formatCost(2.5)).toBe('$2.50')
+  })
+
+  it('keeps four places for a price below one cent', () => {
+    expect(formatCost(0.0004)).toBe('$0.0004')
   })
 })

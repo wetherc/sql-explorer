@@ -16,6 +16,13 @@ export interface Settings {
   maxPinnedResults: number
   /** The row limit of an export that writes straight to a file. */
   exportRowLimit: number
+  /**
+   * The price of one terabyte that Athena scans, in US dollars. The rate
+   * changes by region and by contract, so the figure is an estimate.
+   */
+  athenaPricePerTerabyte: number
+  /** A scan above this size in gigabytes raises a warning. */
+  athenaScanWarningGb: number
 }
 
 /** The settings a new installation starts with. */
@@ -29,6 +36,8 @@ export function defaultSettings(): Settings {
     autoRunPreview: true,
     maxPinnedResults: 5,
     exportRowLimit: 1000000,
+    athenaPricePerTerabyte: 5,
+    athenaScanWarningGb: 100,
   }
 }
 
@@ -58,10 +67,29 @@ export function parseSettings(raw: string | null): Settings {
           : defaults.autoRunPreview,
       maxPinnedResults: numberOr(parsed.maxPinnedResults, defaults.maxPinnedResults, 1, 20),
       exportRowLimit: numberOr(parsed.exportRowLimit, defaults.exportRowLimit, 1000, 100000000),
+      // The price keeps its fraction, so it does not go through `numberOr`.
+      athenaPricePerTerabyte: priceOr(
+        parsed.athenaPricePerTerabyte,
+        defaults.athenaPricePerTerabyte,
+      ),
+      athenaScanWarningGb: numberOr(
+        parsed.athenaScanWarningGb,
+        defaults.athenaScanWarningGb,
+        1,
+        1000000,
+      ),
     }
   } catch {
     return defaults
   }
+}
+
+/** Keeps a price at or above zero, and falls back when it is not a number. */
+function priceOr(value: unknown, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    return fallback
+  }
+  return value
 }
 
 /** Keeps a number inside its limits, and falls back when it is not a number. */

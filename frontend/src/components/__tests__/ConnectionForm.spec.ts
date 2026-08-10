@@ -455,6 +455,38 @@ describe('ConnectionForm with every field filled', () => {
     )
   })
 
+  it('keeps the reuse of results with its age', async () => {
+    const athena = connectionFixture({ dbType: DbType.Athena, host: null, port: null })
+    athena.options.awsRegion = 'us-east-1'
+    athena.options.athenaWorkgroup = 'primary'
+    const wrapper = await mountForm(athena)
+
+    // The age appears only once the reuse is on.
+    expect(wrapper.find('[data-test="athena-reuse-age-field"]').exists()).toBe(false)
+    const reuse = wrapper
+      .findAllComponents({ name: 'VSwitch' })
+      .find((item) => item.attributes('data-test') === 'athena-reuse-switch')
+    await reuse!.vm.$emit('update:modelValue', true)
+    await wrapper.vm.$nextTick()
+
+    const age = wrapper
+      .findAllComponents({ name: 'VTextField' })
+      .find((item) => item.attributes('data-test') === 'athena-reuse-age-field')
+    await age!.vm.$emit('update:modelValue', '15')
+
+    await wrapper.find('[data-test="save-button"]').trigger('click')
+    await settle()
+
+    expect(apiStub.saveConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        options: expect.objectContaining({
+          athenaResultReuse: true,
+          athenaResultReuseMaxAgeMinutes: 15,
+        }),
+      }),
+    )
+  })
+
   it('keeps every AWS field', async () => {
     const athena = connectionFixture({ dbType: DbType.Athena, host: null, port: null })
     athena.options.awsRegion = 'us-east-1'

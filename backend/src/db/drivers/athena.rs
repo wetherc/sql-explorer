@@ -7,14 +7,15 @@
 use crate::db::drivers::{f64_to_json, rows_returned_message, CancelHandle, DatabaseDriver};
 use crate::db::{
     AppColumn, ColumnInfo, Database, DriverCapabilities, ExecOptions, QueryParams, QueryResponse,
-    ResultSet, Schema, Table,
+    QueryStats, ResultSet, Schema, Table,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
 use crate::storage::SavedConnection;
 use async_trait::async_trait;
 use aws_sdk_athena::types::{
-    QueryExecutionContext, QueryExecutionState, ResultConfiguration, Row as AthenaRow,
+    QueryExecutionContext, QueryExecutionState, QueryExecutionStatistics, ResultConfiguration,
+    ResultReuseByAgeConfiguration, ResultReuseConfiguration, Row as AthenaRow,
 };
 use aws_sdk_athena::Client;
 use serde_json::Value as JsonValue;
@@ -29,9 +30,35 @@ pub struct AthenaDriver {
     database: Option<String>,
     workgroup: Option<String>,
     output_location: Option<String>,
+    /// True when the service may give the result of an earlier run.
+    result_reuse: bool,
+    /// The age in minutes up to which a result may be reused.
+    result_reuse_max_age_minutes: u32,
     /// The identifier of the statement that runs, so that a request to
     /// stop it can reach the service.
     running: Arc<Mutex<Option<String>>>,
+}
+
+/// Reads the numbers of one execution. A number that the service leaves out
+/// stays absent, so that a missing figure is not read as a zero.
+fn read_statistics(statistics: Option<&QueryExecutionStatistics>) -> QueryStats {
+    let Some(statistics) = statistics else {
+        return QueryStats::default();
+    };
+    QueryStats {
+        scanned_bytes: statistics
+            .data_scanned_in_bytes()
+            .map(|value| value.max(0) as u64),
+        engine_ms: statistics
+            .engine_execution_time_in_millis()
+            .map(|value| value.max(0) as u64),
+        queue_ms: statistics
+            .query_queue_time_in_millis()
+            .map(|value| value.max(0) as u64),
+        result_reused: statistics
+            .result_reuse_information()
+            .map(|information| information.reused_previous_result()),
+    }
 }
 
 /// The name Athena gives to the catalog that AWS Glue provides.
@@ -66,6 +93,8 @@ impl AthenaDriver {
             workgroup: trimmed(connection.options.athena_workgroup.as_deref()).map(str::to_string),
             output_location: trimmed(connection.options.athena_output_location.as_deref())
                 .map(str::to_string),
+            result_reuse: connection.options.athena_result_reuse,
+            result_reuse_max_age_minutes: connection.options.athena_result_reuse_max_age_minutes,
             running: Arc::new(Mutex::new(None)),
         };
 
@@ -80,7 +109,7 @@ impl AthenaDriver {
         &self,
         statement: &str,
         options: &ExecOptions,
-    ) -> Result<(Option<ResultSet>, Vec<String>)> {
+    ) -> Result<(Option<ResultSet>, QueryStats)> {
         let mut start = self
             .client
             .start_query_execution()
@@ -102,6 +131,18 @@ impl AthenaDriver {
                     .build(),
             );
         }
+        if self.result_reuse {
+            start = start.result_reuse_configuration(
+                ResultReuseConfiguration::builder()
+                    .result_reuse_by_age_configuration(
+                        ResultReuseByAgeConfiguration::builder()
+                            .enabled(true)
+                            .max_age_in_minutes(self.result_reuse_max_age_minutes as i32)
+                            .build(),
+                    )
+                    .build(),
+            );
+        }
 
         let started = start
             .send()
@@ -112,16 +153,16 @@ impl AthenaDriver {
 
         let outcome = self.wait_for(&execution_id, options).await;
         self.set_running(None);
-        let messages = outcome?;
+        let stats = outcome?;
 
         let set = self.read_results(&execution_id, options).await?;
-        Ok((set, messages))
+        Ok((set, stats))
     }
 
     /// Waits until the statement reaches a final state. The wait grows
     /// step by step, so that a short statement answers quickly and a long
     /// statement does not flood the service with requests.
-    async fn wait_for(&self, execution_id: &str, options: &ExecOptions) -> Result<Vec<String>> {
+    async fn wait_for(&self, execution_id: &str, options: &ExecOptions) -> Result<QueryStats> {
         let deadline = Instant::now() + Duration::from_secs(options.timeout_secs.max(1));
         let mut wait = Duration::from_millis(200);
 
@@ -142,16 +183,7 @@ impl AthenaDriver {
 
             match state {
                 Some(QueryExecutionState::Succeeded) => {
-                    let mut messages = Vec::new();
-                    if let Some(statistics) = execution.statistics() {
-                        if let Some(bytes) = statistics.data_scanned_in_bytes() {
-                            messages.push(format!("{} scanned.", format_bytes(bytes as u64)));
-                        }
-                        if let Some(millis) = statistics.engine_execution_time_in_millis() {
-                            messages.push(format!("The engine ran for {millis} ms."));
-                        }
-                    }
-                    return Ok(messages);
+                    return Ok(read_statistics(execution.statistics()));
                 }
                 Some(QueryExecutionState::Failed) => {
                     let reason = status
@@ -325,15 +357,19 @@ impl DatabaseDriver for AthenaDriver {
 
         let started = Instant::now();
         let mut response = QueryResponse::default();
+        let mut total = QueryStats::default();
         for statement in split_statements(query, Dialect::Athena) {
-            let (set, mut messages) = self.run_statement(&statement, options).await?;
-            response.messages.append(&mut messages);
+            let (set, stats) = self.run_statement(&statement, options).await?;
+            total.add(&stats);
             if let Some(set) = set {
                 response
                     .messages
                     .push(rows_returned_message(set.rows.len(), set.truncated));
                 response.results.push(set);
             }
+        }
+        if !total.is_empty() {
+            response.stats = Some(total);
         }
         response.elapsed_ms = started.elapsed().as_millis() as u64;
         Ok(response)
@@ -480,22 +516,6 @@ pub fn next_wait(current: Duration) -> Duration {
     std::cmp::min(current * 2, Duration::from_secs(2))
 }
 
-/// Writes a byte count in the largest unit that keeps the number above one.
-pub fn format_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} {}", UNITS[0])
-    } else {
-        format!("{value:.2} {}", UNITS[unit])
-    }
-}
-
 /// True when the row repeats the column names. Athena puts such a row at
 /// the top of the first page of a `SELECT` result.
 pub fn is_header(row: &AthenaRow, columns: &[ColumnInfo]) -> bool {
@@ -561,17 +581,6 @@ mod tests {
             Duration::from_secs(2)
         );
         assert_eq!(next_wait(Duration::from_secs(2)), Duration::from_secs(2));
-    }
-
-    #[test]
-    fn a_byte_count_uses_the_largest_unit() {
-        assert_eq!(format_bytes(0), "0 B");
-        assert_eq!(format_bytes(512), "512 B");
-        assert_eq!(format_bytes(2048), "2.00 KB");
-        assert_eq!(format_bytes(5 * 1024 * 1024), "5.00 MB");
-        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.00 GB");
-        assert_eq!(format_bytes(4 * 1024_u64.pow(4)), "4.00 TB");
-        assert_eq!(format_bytes(4 * 1024_u64.pow(5)), "4096.00 TB");
     }
 
     fn row(values: &[Option<&str>]) -> AthenaRow {
@@ -659,5 +668,44 @@ mod tests {
                 .kind(),
             crate::error::ErrorKind::Configuration
         );
+    }
+
+    #[test]
+    fn the_numbers_of_an_execution_are_read_as_numbers() {
+        use aws_sdk_athena::types::{QueryExecutionStatistics, ResultReuseInformation};
+
+        assert_eq!(read_statistics(None), QueryStats::default());
+
+        let statistics = QueryExecutionStatistics::builder()
+            .data_scanned_in_bytes(2048)
+            .engine_execution_time_in_millis(120)
+            .query_queue_time_in_millis(9)
+            .result_reuse_information(
+                ResultReuseInformation::builder()
+                    .reused_previous_result(true)
+                    .build(),
+            )
+            .build();
+        let stats = read_statistics(Some(&statistics));
+        assert_eq!(stats.scanned_bytes, Some(2048));
+        assert_eq!(stats.engine_ms, Some(120));
+        assert_eq!(stats.queue_ms, Some(9));
+        assert_eq!(stats.result_reused, Some(true));
+    }
+
+    #[test]
+    fn a_negative_figure_from_the_service_becomes_zero() {
+        use aws_sdk_athena::types::QueryExecutionStatistics;
+        let statistics = QueryExecutionStatistics::builder()
+            .data_scanned_in_bytes(-5)
+            .build();
+        assert_eq!(read_statistics(Some(&statistics)).scanned_bytes, Some(0));
+    }
+
+    #[test]
+    fn the_reuse_of_results_has_an_age_and_is_off_by_default() {
+        let default = crate::storage::ConnectionOptions::default();
+        assert!(!default.athena_result_reuse);
+        assert_eq!(default.athena_result_reuse_max_age_minutes, 60);
     }
 }
