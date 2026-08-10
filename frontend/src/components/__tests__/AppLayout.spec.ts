@@ -226,6 +226,20 @@ describe('AppLayout dialog state', () => {
     apiStub.onConnectionStatus.mockResolvedValue(() => {})
   })
 
+  it('writes the limit of the kept results', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    await wrapper.find('[data-test="open-settings"]').trigger('click')
+    await settle()
+
+    const field = wrapper
+      .findAllComponents({ name: 'VTextField' })
+      .find((item) => item.attributes('data-test') === 'setting-max-pinned')
+    await field!.vm.$emit('update:modelValue', '3')
+    expect(useSettingsStore().settings.maxPinnedResults).toBe(3)
+    wrapper.unmount()
+  })
+
   it('closes the settings when the overlay reports it', async () => {
     const wrapper = mountWithPlugins(AppLayout)
     await settle()

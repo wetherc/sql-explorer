@@ -9,9 +9,9 @@
 
     <div data-test="status-state">{{ stateLabel }}</div>
 
-    <template v-if="state && !state.running && state.results.length > 0">
+    <template v-if="state && !state.running && state.panes.length > 0">
       <v-divider vertical />
-      <div data-test="status-rows">{{ formatRowCount(totalRows(state.results)) }}</div>
+      <div data-test="status-rows">{{ formatRowCount(totalRows(resultsOf(state.panes))) }}</div>
       <v-divider vertical />
       <div data-test="status-elapsed">{{ formatDuration(state.elapsedMs) }}</div>
     </template>
@@ -33,7 +33,7 @@ import { formatDuration, formatRowCount } from '@/lib/format'
 import { useConnectionsStore } from '@/stores/connections'
 import { useQueryStore } from '@/stores/query'
 import { useTabsStore } from '@/stores/tabs'
-import { totalRows } from '@/stores/query'
+import { resultsOf, totalRows } from '@/stores/query'
 import { ConnectionHealth, Dialect } from '@/types/api'
 
 const connections = useConnectionsStore()

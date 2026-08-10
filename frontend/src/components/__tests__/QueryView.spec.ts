@@ -655,6 +655,46 @@ describe('QueryView edge paths', () => {
     expect(ui.notices.some((notice) => notice.level === 'warning')).toBe(true)
   })
 
+  it('keeps a result, names it with the time, and closes it again', async () => {
+    apiStub.executeQuery.mockResolvedValue(response)
+    const wrapper = await mountView()
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+    await wrapper.vm.$nextTick()
+
+    await wrapper.find('[data-test="pin-result"]').trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.text()).toContain('Result 1 (1 row) at')
+
+    // A second run keeps the result and adds the new one beside it.
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findAll('[data-test="result-tab"]')).toHaveLength(2)
+
+    await wrapper.find('[data-test="close-result"]').trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findAll('[data-test="result-tab"]')).toHaveLength(1)
+  })
+
+  it('moves between a result and the messages', async () => {
+    apiStub.executeQuery.mockResolvedValue(response)
+    const wrapper = await mountView()
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+    await wrapper.vm.$nextTick()
+
+    const tabs = wrapper.findComponent({ name: 'VTabs' })
+    await tabs.vm.$emit('update:model-value', 'messages')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-test="query-message"]').exists()).toBe(true)
+
+    const paneId = useQueryStore().stateFor('t1').panes[0]!.id
+    await tabs.vm.$emit('update:model-value', paneId)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findComponent({ name: 'ResultsGrid' }).exists()).toBe(true)
+  })
+
   it('closes the save dialog when the overlay reports it', async () => {
     const wrapper = await mountView()
     await wrapper.find('[data-test="save-query-button"]').trigger('click')

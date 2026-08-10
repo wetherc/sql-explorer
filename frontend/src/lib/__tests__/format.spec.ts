@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   NULL_TEXT,
+  formatClockTime,
   compareCells,
   formatCell,
   formatDuration,
@@ -129,5 +130,12 @@ describe('summariseQuery', () => {
 
   it('cuts a long statement', () => {
     expect(summariseQuery('SELECT '.repeat(40), 10)).toHaveLength(11)
+  })
+})
+
+describe('formatClockTime', () => {
+  it('writes the time of day of a moment', () => {
+    const moment = new Date(2026, 0, 2, 13, 45, 7).getTime()
+    expect(formatClockTime(moment)).toBe(new Date(moment).toLocaleTimeString())
   })
 })

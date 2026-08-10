@@ -99,31 +99,57 @@
       </pane>
       <pane :size="100 - editorSize" min-size="15">
         <div class="results-pane">
-          <v-tabs v-model="activeResultTab" density="compact" class="results-tabs">
+          <v-tabs
+            :model-value="state.activePaneId ?? MESSAGES_TAB"
+            density="compact"
+            class="results-tabs"
+            @update:model-value="onResultTabChange"
+          >
             <v-tab
-              v-for="(result, index) in state.results"
-              :key="index"
-              :value="`result-${index}`"
-              :text="resultLabel(result, index)"
+              v-for="pane in state.panes"
+              :key="pane.id"
+              :value="pane.id"
               data-test="result-tab"
-            />
-            <v-tab value="messages" data-test="messages-tab">
+            >
+              <v-icon
+                size="x-small"
+                class="mr-1"
+                :color="pane.pinned ? 'warning' : undefined"
+                :aria-label="pane.pinned ? 'Let this result go' : 'Keep this result'"
+                data-test="pin-result"
+                @click.stop="queries.togglePin(tab.id, pane.id)"
+              >
+                {{ pane.pinned ? 'mdi-pin' : 'mdi-pin-outline' }}
+              </v-icon>
+              <span>{{ paneLabel(pane) }}</span>
+              <v-icon
+                v-if="pane.pinned"
+                size="x-small"
+                class="ml-2"
+                aria-label="Close this result"
+                data-test="close-result"
+                @click.stop="queries.closePane(tab.id, pane.id)"
+              >
+                mdi-close
+              </v-icon>
+            </v-tab>
+            <v-tab :value="MESSAGES_TAB" data-test="messages-tab">
               Messages
               <v-badge v-if="state.error" color="error" dot inline />
             </v-tab>
           </v-tabs>
 
           <div class="results-body">
-            <template v-for="(result, index) in state.results" :key="index">
+            <template v-for="pane in state.panes" :key="pane.id">
               <ResultsGrid
-                v-if="activeResultTab === `result-${index}`"
-                :result="result"
-                @export="(format) => exportResult(result, format)"
+                v-if="state.activePaneId === pane.id"
+                :result="pane.result"
+                @export="(format) => exportResult(pane.result, format)"
                 @copied="onCopied"
               />
             </template>
 
-            <div v-if="activeResultTab === 'messages'" class="messages pa-3">
+            <div v-if="state.activePaneId === null" class="messages pa-3">
               <v-alert
                 v-if="state.error"
                 type="error"
@@ -185,7 +211,7 @@ import ResultsGrid from './ResultsGrid.vue'
 import { api } from '@/lib/api'
 import { forgetTabActions, registerTabActions } from '@/lib/commands'
 import { exportFileName, toCsv, toJson } from '@/lib/export'
-import { formatRowCount } from '@/lib/format'
+import { formatClockTime, formatRowCount } from '@/lib/format'
 import { useConnectionsStore } from '@/stores/connections'
 import { useExplorerStore } from '@/stores/explorer'
 import { useHistoryStore } from '@/stores/history'
@@ -194,7 +220,11 @@ import { useSettingsStore } from '@/stores/settings'
 import { useTabsStore } from '@/stores/tabs'
 import { useUiStore } from '@/stores/ui'
 import { Dialect, type ResultSet } from '@/types/api'
+import type { ResultPane } from '@/stores/query'
 import type { QueryTab } from '@/stores/tabs'
+
+/** The value that stands for the Messages tab. */
+const MESSAGES_TAB = 'messages'
 
 const props = defineProps<{ tab: QueryTab }>()
 
@@ -208,7 +238,6 @@ const ui = useUiStore()
 
 const editorRef = ref<InstanceType<typeof SqlEditor> | null>(null)
 const editorSize = ref(45)
-const activeResultTab = ref('messages')
 const savingQuery = ref(false)
 const saveName = ref('')
 const saveFolder = ref('')
@@ -232,8 +261,18 @@ const canRun = computed(() => {
   return id !== null && connections.isActive(id)
 })
 
-function resultLabel(result: ResultSet, index: number): string {
-  return `Result ${index + 1} (${formatRowCount(result.rows.length)})`
+/**
+ * Names a result. A result the user keeps also carries the time of its run,
+ * so that two results of the same statement can be told apart.
+ */
+function paneLabel(pane: ResultPane): string {
+  const head = `Result ${pane.number} (${formatRowCount(pane.result.rows.length)})`
+  return pane.pinned ? `${head} at ${formatClockTime(pane.ranAt)}` : head
+}
+
+function onResultTabChange(value: unknown): void {
+  const id = String(value)
+  queries.selectPane(props.tab.id, id === MESSAGES_TAB ? null : id)
 }
 
 function onQueryChange(value: string): void {
@@ -260,9 +299,7 @@ async function run(statement: string): Promise<void> {
     ui.warn('Choose a connection before you run a statement.')
     return
   }
-  const succeeded = await queries.execute(props.tab.id, connectionId, statement)
-  const current = queries.stateFor(props.tab.id)
-  activeResultTab.value = succeeded && current.results.length > 0 ? 'result-0' : 'messages'
+  await queries.execute(props.tab.id, connectionId, statement)
 }
 
 function runStatement(statement?: string): void {
@@ -327,16 +364,6 @@ watch(savingQuery, (open) => {
     saveName.value = props.tab.title
   }
 })
-
-// A new result set moves the view to the first result.
-watch(
-  () => state.value.results.length,
-  (count) => {
-    if (count > 0 && activeResultTab.value === 'messages') {
-      activeResultTab.value = 'result-0'
-    }
-  },
-)
 
 // The shell holds the keys, and the editor of this tab holds the text, so
 // the view of each tab records what it can do under its own identifier.

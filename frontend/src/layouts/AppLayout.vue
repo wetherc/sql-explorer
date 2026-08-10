@@ -150,6 +150,15 @@
             data-test="setting-max-rows"
             @update:model-value="(value) => settings.update({ maxRows: Number(value) })"
           />
+          <v-text-field
+            :model-value="settings.settings.maxPinnedResults"
+            label="Results a tab keeps"
+            type="number"
+            hint="The largest number of results one tab keeps against the next run."
+            persistent-hint
+            data-test="setting-max-pinned"
+            @update:model-value="(value) => settings.update({ maxPinnedResults: Number(value) })"
+          />
         </v-card-text>
         <v-card-actions>
           <v-spacer />

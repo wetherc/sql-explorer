@@ -26,18 +26,29 @@ function response(rows = [[1]]) {
   }
 }
 
+/** A response with two result sets, for the tests of the kept results. */
+function twoResults() {
+  return {
+    ...response(),
+    results: [
+      { columns: [], rows: [[1]], truncated: false },
+      { columns: [], rows: [[2]], truncated: false },
+    ],
+  }
+}
+
 describe('newQueryState', () => {
   it('starts at rest', () => {
     expect(newQueryState()).toEqual({
       running: false,
       requestId: null,
       error: null,
-      results: [],
+      panes: [],
       messages: [],
       rowsAffected: null,
       elapsedMs: 0,
       startedAt: null,
-      activeResultIndex: 0,
+      activePaneId: null,
     })
   })
 })
@@ -102,7 +113,9 @@ describe('query store', () => {
     })
 
     const state = queries.stateFor('t1')
-    expect(state.results).toHaveLength(1)
+    expect(state.panes).toHaveLength(1)
+    expect(state.panes[0]?.number).toBe(1)
+    expect(state.activePaneId).toBe(state.panes[0]?.id)
     expect(state.messages).toEqual(['1 row returned.'])
     expect(state.elapsedMs).toBe(12)
     expect(state.running).toBe(false)
@@ -233,21 +246,117 @@ describe('query store', () => {
     await running
   })
 
-  it('moves to a result set that is there', async () => {
-    apiStub.executeQuery.mockResolvedValue({
-      ...response(),
-      results: [
-        { columns: [], rows: [], truncated: false },
-        { columns: [], rows: [], truncated: false },
-      ],
-    })
+  it('moves to a result that is there, and to the messages', async () => {
+    apiStub.executeQuery.mockResolvedValue(twoResults())
     const queries = useQueryStore()
     await queries.execute('t1', 'c1', 'SELECT 1')
-    queries.selectResult('t1', 1)
-    expect(queries.stateFor('t1').activeResultIndex).toBe(1)
-    queries.selectResult('t1', 9)
-    expect(queries.stateFor('t1').activeResultIndex).toBe(1)
-    queries.selectResult('t1', -1)
-    expect(queries.stateFor('t1').activeResultIndex).toBe(1)
+    const state = queries.stateFor('t1')
+    const first = state.panes[0]!.id
+
+    queries.selectPane('t1', first)
+    expect(state.activePaneId).toBe(first)
+
+    queries.selectPane('t1', 'no-such-result')
+    expect(state.activePaneId).toBe(first)
+
+    queries.selectPane('t1', null)
+    expect(state.activePaneId).toBeNull()
+  })
+
+  it('keeps a result against the next run and lets it go again', async () => {
+    apiStub.executeQuery.mockResolvedValue(twoResults())
+    const queries = useQueryStore()
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    const state = queries.stateFor('t1')
+    const kept = state.panes[0]!.id
+
+    queries.togglePin('t1', kept)
+    expect(state.panes.find((pane) => pane.id === kept)?.pinned).toBe(true)
+
+    await queries.execute('t1', 'c1', 'SELECT 2')
+    // The kept result stays, and the run added two more.
+    expect(state.panes).toHaveLength(3)
+    expect(state.panes[0]?.id).toBe(kept)
+
+    queries.togglePin('t1', kept)
+    await queries.execute('t1', 'c1', 'SELECT 3')
+    expect(state.panes).toHaveLength(2)
+  })
+
+  it('numbers the results of the run and not of the list', async () => {
+    apiStub.executeQuery.mockResolvedValue(twoResults())
+    const queries = useQueryStore()
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    const state = queries.stateFor('t1')
+    queries.togglePin('t1', state.panes[0]!.id)
+    await queries.execute('t1', 'c1', 'SELECT 2')
+    expect(state.panes.map((pane) => pane.number)).toEqual([1, 1, 2])
+  })
+
+  it('refuses to keep more results than the settings allow', async () => {
+    apiStub.executeQuery.mockResolvedValue(twoResults())
+    const queries = useQueryStore()
+    useSettingsStore().update({ maxPinnedResults: 1 })
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    const state = queries.stateFor('t1')
+
+    queries.togglePin('t1', state.panes[0]!.id)
+    queries.togglePin('t1', state.panes[1]!.id)
+    expect(state.panes[1]?.pinned).toBe(false)
+    expect(useUiStore().notices.some((notice) => notice.level === 'warning')).toBe(true)
+  })
+
+  it('keeps nothing for a result that is not there', async () => {
+    apiStub.executeQuery.mockResolvedValue(twoResults())
+    const queries = useQueryStore()
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    queries.togglePin('t1', 'no-such-result')
+    expect(queries.stateFor('t1').panes.every((pane) => !pane.pinned)).toBe(true)
+  })
+
+  it('closes a result and shows the one that takes its place', async () => {
+    apiStub.executeQuery.mockResolvedValue(twoResults())
+    const queries = useQueryStore()
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    const state = queries.stateFor('t1')
+    const [first, second] = [state.panes[0]!.id, state.panes[1]!.id]
+
+    queries.selectPane('t1', first)
+    queries.closePane('t1', first)
+    expect(state.panes).toHaveLength(1)
+    expect(state.activePaneId).toBe(second)
+
+    queries.closePane('t1', second)
+    expect(state.activePaneId).toBeNull()
+  })
+
+  it('closes the last result and steps back to the one before it', async () => {
+    apiStub.executeQuery.mockResolvedValue(twoResults())
+    const queries = useQueryStore()
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    const state = queries.stateFor('t1')
+    const last = state.panes[1]!.id
+    queries.closePane('t1', last)
+    expect(state.activePaneId).toBe(state.panes[0]?.id)
+  })
+
+  it('keeps the result on show when another one closes', async () => {
+    apiStub.executeQuery.mockResolvedValue(twoResults())
+    const queries = useQueryStore()
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    const state = queries.stateFor('t1')
+    const second = state.panes[1]!.id
+
+    queries.selectPane('t1', second)
+    queries.closePane('t1', state.panes[0]!.id)
+    expect(state.activePaneId).toBe(second)
+  })
+
+  it('closes nothing for a result that is not there', async () => {
+    apiStub.executeQuery.mockResolvedValue(twoResults())
+    const queries = useQueryStore()
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    queries.closePane('t1', 'no-such-result')
+    expect(queries.stateFor('t1').panes).toHaveLength(2)
   })
 })

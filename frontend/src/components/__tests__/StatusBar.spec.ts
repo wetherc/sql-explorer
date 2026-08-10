@@ -101,7 +101,15 @@ describe('StatusBar', () => {
     const wrapper = mountWithPlugins(StatusBar)
     const tab = useTabsStore().add({ connectionId: 'c1' })
     const state = useQueryStore().stateFor(tab.id)
-    state.results = [{ columns: [], rows: [[1], [2]], truncated: false }]
+    state.panes = [
+      {
+        id: 'p1',
+        result: { columns: [], rows: [[1], [2]], truncated: false },
+        number: 1,
+        ranAt: 0,
+        pinned: false,
+      },
+    ]
     state.elapsedMs = 1500
     state.rowsAffected = 3
     await wrapper.vm.$nextTick()

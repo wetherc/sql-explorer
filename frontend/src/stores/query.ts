@@ -9,18 +9,35 @@ import { useUiStore } from './ui'
 import { toErrorPayload } from '@/lib/errors'
 import type { ErrorPayload, ResultSet } from '@/types/api'
 
+/**
+ * One result set that the interface shows. The record carries an identifier
+ * of its own, because a kept result outlives the run that made it and the
+ * position in a list is therefore not an identity.
+ */
+export interface ResultPane {
+  id: string
+  result: ResultSet
+  /** The place of the set inside the execution that made it, from one. */
+  number: number
+  /** The moment of the run, which the title of a kept result holds. */
+  ranAt: number
+  /** True while the user keeps this result against the next run. */
+  pinned: boolean
+}
+
 export interface QueryState {
   running: boolean
   /** The identifier the backend uses to stop this statement. */
   requestId: string | null
   error: ErrorPayload | null
-  results: ResultSet[]
+  panes: ResultPane[]
   messages: string[]
   rowsAffected: number | null
   elapsedMs: number
   /** The moment the statement started, so the elapsed time can be shown. */
   startedAt: number | null
-  activeResultIndex: number
+  /** The result the user reads, or `null` for the messages. */
+  activePaneId: string | null
 }
 
 /** Builds the state a tab starts with. */
@@ -29,18 +46,28 @@ export function newQueryState(): QueryState {
     running: false,
     requestId: null,
     error: null,
-    results: [],
+    panes: [],
     messages: [],
     rowsAffected: null,
     elapsedMs: 0,
     startedAt: null,
-    activeResultIndex: 0,
+    activePaneId: null,
   }
 }
 
 /** Counts the rows of every result set of one execution. */
 export function totalRows(results: ResultSet[]): number {
   return results.reduce((sum, result) => sum + result.rows.length, 0)
+}
+
+/** Gives the last result of a list, or nothing when the list is empty. */
+function lastPane(panes: ResultPane[]): ResultPane | undefined {
+  return panes.length > 0 ? panes[panes.length - 1] : undefined
+}
+
+/** Gives the result sets of a list of panes, in their order. */
+export function resultsOf(panes: ResultPane[]): ResultSet[] {
+  return panes.map((pane) => pane.result)
 }
 
 export const useQueryStore = defineStore('query', () => {
@@ -60,6 +87,10 @@ export const useQueryStore = defineStore('query', () => {
 
   function clear(tabId: string): void {
     delete states[tabId]
+  }
+
+  function paneOf(state: QueryState, paneId: string): ResultPane | undefined {
+    return state.panes.find((pane) => pane.id === paneId)
   }
 
   /**
@@ -83,16 +114,18 @@ export const useQueryStore = defineStore('query', () => {
     state.running = true
     state.requestId = requestId
     state.error = null
-    state.results = []
+    // A result the user kept stays. Every other result goes.
+    state.panes = state.panes.filter((pane) => pane.pinned)
     state.messages = []
     state.rowsAffected = null
     state.elapsedMs = 0
     state.startedAt = Date.now()
-    state.activeResultIndex = 0
+    state.activePaneId = null
 
     const connectionName = connections.byId(connectionId)?.name ?? connectionId
     let succeeded = false
     let failure: ErrorPayload | null = null
+    let fresh: ResultSet[] = []
 
     try {
       const response = await api.executeQuery({
@@ -104,7 +137,19 @@ export const useQueryStore = defineStore('query', () => {
           timeoutSecs: connections.byId(connectionId)?.options.queryTimeoutSecs ?? 300,
         },
       })
-      state.results = response.results
+      const ranAt = Date.now()
+      fresh = response.results
+      state.panes = [
+        ...state.panes,
+        ...response.results.map((result, index) => ({
+          id: createId(),
+          result,
+          number: index + 1,
+          ranAt,
+          pinned: false,
+        })),
+      ]
+      state.activePaneId = lastPane(state.panes)?.id ?? null
       state.messages = response.messages
       state.rowsAffected = response.rowsAffected
       state.elapsedMs = response.elapsedMs
@@ -127,7 +172,7 @@ export const useQueryStore = defineStore('query', () => {
       connectionName,
       query: trimmed,
       elapsedMs: state.elapsedMs,
-      rowCount: totalRows(state.results),
+      rowCount: totalRows(fresh),
       succeeded,
       error: failure ? failure.message : null,
     })
@@ -149,12 +194,58 @@ export const useQueryStore = defineStore('query', () => {
     }
   }
 
-  function selectResult(tabId: string, index: number): void {
+  /** Shows one result, or the messages when the identifier is `null`. */
+  function selectPane(tabId: string, paneId: string | null): void {
     const state = stateFor(tabId)
-    if (index >= 0 && index < state.results.length) {
-      state.activeResultIndex = index
+    if (paneId === null || paneOf(state, paneId)) {
+      state.activePaneId = paneId
     }
   }
 
-  return { states, stateFor, clear, execute, cancel, selectResult }
+  /**
+   * Keeps a result against the next run, or lets it go again. The number of
+   * kept results has a limit, because each one holds its rows in memory.
+   */
+  function togglePin(tabId: string, paneId: string): void {
+    const state = stateFor(tabId)
+    const pane = paneOf(state, paneId)
+    if (!pane) {
+      return
+    }
+    if (!pane.pinned) {
+      const kept = state.panes.filter((item) => item.pinned).length
+      if (kept >= settings.settings.maxPinnedResults) {
+        ui.warn(
+          `This tab already keeps ${kept} results. Close one, or raise the limit in the settings.`,
+        )
+        return
+      }
+    }
+    pane.pinned = !pane.pinned
+  }
+
+  /** Closes one result. The next result takes its place in the view. */
+  function closePane(tabId: string, paneId: string): void {
+    const state = stateFor(tabId)
+    const position = state.panes.findIndex((pane) => pane.id === paneId)
+    if (position < 0) {
+      return
+    }
+    state.panes.splice(position, 1)
+    if (state.activePaneId === paneId) {
+      const next = state.panes[position] ?? lastPane(state.panes) ?? null
+      state.activePaneId = next ? next.id : null
+    }
+  }
+
+  return {
+    states,
+    stateFor,
+    clear,
+    execute,
+    cancel,
+    selectPane,
+    togglePin,
+    closePane,
+  }
 })

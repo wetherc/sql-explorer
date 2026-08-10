@@ -12,6 +12,8 @@ export interface Settings {
   maxRows: number
   /** True when a statement runs as soon as the user opens a preview. */
   autoRunPreview: boolean
+  /** The largest number of results one tab keeps against the next run. */
+  maxPinnedResults: number
 }
 
 /** The settings a new installation starts with. */
@@ -23,6 +25,7 @@ export function defaultSettings(): Settings {
     showLineNumbers: true,
     maxRows: 10000,
     autoRunPreview: true,
+    maxPinnedResults: 5,
   }
 }
 
@@ -50,6 +53,7 @@ export function parseSettings(raw: string | null): Settings {
         typeof parsed.autoRunPreview === 'boolean'
           ? parsed.autoRunPreview
           : defaults.autoRunPreview,
+      maxPinnedResults: numberOr(parsed.maxPinnedResults, defaults.maxPinnedResults, 1, 20),
     }
   } catch {
     return defaults

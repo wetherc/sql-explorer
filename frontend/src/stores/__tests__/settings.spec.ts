@@ -25,6 +25,7 @@ describe('parseSettings', () => {
       showLineNumbers: false,
       maxRows: 500,
       autoRunPreview: false,
+      maxPinnedResults: 8,
     })
     expect(parseSettings(stored)).toEqual({
       theme: 'sqlExplorerLight',
@@ -33,6 +34,7 @@ describe('parseSettings', () => {
       showLineNumbers: false,
       maxRows: 500,
       autoRunPreview: false,
+      maxPinnedResults: 8,
     })
   })
 

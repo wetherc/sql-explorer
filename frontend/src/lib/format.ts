@@ -87,6 +87,11 @@ export function formatTimestamp(value: string): string {
   return moment.toLocaleString()
 }
 
+/** Writes a moment as a local time of day, for the title of a kept result. */
+export function formatClockTime(milliseconds: number): string {
+  return new Date(milliseconds).toLocaleTimeString()
+}
+
 /** Shortens a statement to one line, for a list of past statements. */
 export function summariseQuery(query: string, limit = 90): string {
   const oneLine = query.replace(/\s+/g, ' ').trim()
