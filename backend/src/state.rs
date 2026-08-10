@@ -93,9 +93,16 @@ pub struct ConnectionInfo {
     pub dialect: Dialect,
 }
 
+/// A driver that only background work uses.
+pub type BackgroundDriver = Arc<Mutex<Box<dyn DatabaseDriver>>>;
+
 /// The state that every command shares.
 pub struct AppState {
     pub connections: Mutex<HashMap<String, OpenConnection>>,
+    /// A second driver for each connection that has asked for one. Background
+    /// work runs there, so that it never waits behind a statement of the user
+    /// and no statement of the user waits behind it.
+    pub background: Mutex<HashMap<String, BackgroundDriver>>,
     /// One token for each statement that runs, keyed by the identifier the
     /// user interface gave it.
     pub running: Mutex<HashMap<String, CancellationToken>>,
@@ -106,9 +113,29 @@ impl AppState {
     pub fn new(secrets: Box<dyn SecretStore>) -> Self {
         Self {
             connections: Mutex::new(HashMap::new()),
+            background: Mutex::new(HashMap::new()),
             running: Mutex::new(HashMap::new()),
             secrets,
         }
+    }
+
+    /// Returns the background driver of a connection, when one is open.
+    pub async fn background_driver(&self, connection_id: &str) -> Option<BackgroundDriver> {
+        self.background.lock().await.get(connection_id).cloned()
+    }
+
+    /// Keeps a background driver for a connection and returns it.
+    pub async fn set_background_driver(
+        &self,
+        connection_id: &str,
+        driver: Box<dyn DatabaseDriver>,
+    ) -> BackgroundDriver {
+        let held: BackgroundDriver = Arc::new(Mutex::new(driver));
+        self.background
+            .lock()
+            .await
+            .insert(connection_id.to_string(), held.clone());
+        held
     }
 
     /// Returns the open connection with the given identifier.
@@ -135,8 +162,10 @@ impl AppState {
         info
     }
 
-    /// Removes an open connection. Returns true when one was present.
+    /// Removes an open connection, together with its background driver.
+    /// Returns true when one was present.
     pub async fn remove(&self, connection_id: &str) -> bool {
+        self.background.lock().await.remove(connection_id);
         self.connections
             .lock()
             .await

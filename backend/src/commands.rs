@@ -6,7 +6,7 @@ use crate::db::drivers::{
 };
 use crate::db::{
     self, drivers::DatabaseDriver, AppColumn, Constraint, Database, ExecOptions, IndexInfo,
-    Partition, QueryParams, QueryResponse, Routine, Schema, Table, TableKind,
+    Partition, QueryParams, QueryResponse, Routine, Schema, SchemaSnapshot, Table, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::history::{HistoryEntry, SavedQuery};
@@ -17,6 +17,7 @@ use crate::state::{
 };
 use crate::storage::{DbType, SavedConnection};
 use crate::store;
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Runtime};
 
 /// Opens the driver that belongs to the engine of the record.
@@ -393,6 +394,70 @@ pub async fn list_partitions<R: Runtime>(
         open.mark_ok().await;
     }
     result
+}
+
+/// The number of columns a snapshot keeps when the caller names no bound.
+pub const DEFAULT_SNAPSHOT_COLUMNS: usize = 20_000;
+
+/// Reads every relation and every column of one database, for the
+/// completions of the editor.
+///
+/// The read runs on a second driver of the same record, so that it never
+/// waits behind a statement of the user and no statement of the user waits
+/// behind it. A caller that asks for the one session, and a second driver
+/// that cannot open, put the read on the session of the user instead.
+#[tauri::command]
+pub async fn schema_snapshot<R: Runtime>(
+    app: AppHandle<R>,
+    connection_id: String,
+    database: String,
+    max_columns: Option<usize>,
+    own_connection: Option<bool>,
+    state: tauri::State<'_, AppState>,
+) -> Result<SchemaSnapshot> {
+    let open = ensure_healthy(&app, &state, &connection_id).await?;
+    let limit = max_columns.unwrap_or(DEFAULT_SNAPSHOT_COLUMNS).max(1);
+
+    let driver = match own_connection.unwrap_or(true) {
+        true => background_driver(&state, &connection_id, &open).await,
+        false => open.driver.clone(),
+    };
+
+    let result = driver.lock().await.schema_snapshot(&database, limit).await;
+    if result.is_ok() {
+        open.mark_ok().await;
+    }
+    result
+}
+
+/// Returns the background driver of a connection, and opens one when the
+/// connection has none. A driver that cannot open gives the driver of the
+/// user, because a snapshot that waits is better than no completions.
+async fn background_driver(
+    state: &AppState,
+    connection_id: &str,
+    open: &OpenConnection,
+) -> Arc<tokio::sync::Mutex<Box<dyn DatabaseDriver>>> {
+    if let Some(driver) = state.background_driver(connection_id).await {
+        return driver;
+    }
+    let full = match with_password(state, open.descriptor.clone()) {
+        Ok(full) => full,
+        Err(error) => {
+            log::warn!("The password of '{connection_id}' could not be read: {error}");
+            return open.driver.clone();
+        }
+    };
+    match open_driver(&full).await {
+        Ok(driver) => state.set_background_driver(connection_id, driver).await,
+        Err(error) => {
+            log::warn!(
+                "A second connection for '{connection_id}' could not open, so the schema is \
+                 read on the connection of the user: {error}"
+            );
+            open.driver.clone()
+        }
+    }
 }
 
 /// Builds one statement for an object of the tree: the CREATE text, or a

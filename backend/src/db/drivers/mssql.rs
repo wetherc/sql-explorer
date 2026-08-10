@@ -6,13 +6,14 @@
 //! loses any password that holds a semicolon or a brace.
 
 use crate::db::drivers::{
-    add_constraint_column, add_index_column, bytes_to_json, constraint_kind, f64_to_json,
-    number_out_of_range, number_value, parameter_type_refused, routine_kind, rows_affected_message,
-    rows_returned_message, DatabaseDriver, NumberValue,
+    add_constraint_column, add_index_column, add_snapshot_column, bytes_to_json, constraint_kind,
+    f64_to_json, number_out_of_range, number_value, parameter_type_refused, routine_kind,
+    rows_affected_message, rows_returned_message, table_kind, DatabaseDriver, NumberValue,
 };
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, QueryParams, QueryResponse, ResultSet, Routine, Schema, Table, TableKind,
+    IndexInfo, QueryParams, QueryResponse, ResultSet, Routine, Schema, SchemaSnapshot,
+    SnapshotColumn, Table, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
@@ -611,6 +612,38 @@ impl DatabaseDriver for MssqlDriver {
         Ok(columns)
     }
 
+    async fn schema_snapshot(
+        &mut self,
+        database: &str,
+        max_columns: usize,
+    ) -> Result<SchemaSnapshot> {
+        let query = snapshot_query(&Dialect::MsSql.quote_identifier(database));
+        let mut stream = self.client.query(query, &[]).await?;
+        let mut snapshot = SchemaSnapshot {
+            database: database.to_string(),
+            complete: true,
+            ..SchemaSnapshot::default()
+        };
+        while let Some(item) = stream.try_next().await? {
+            let QueryItem::Row(row) = item else { continue };
+            let kept = add_snapshot_column(
+                &mut snapshot,
+                max_columns,
+                row.try_get::<&str, _>(0)?.map(str::to_string),
+                row.try_get::<&str, _>(1)?.unwrap_or_default().to_string(),
+                table_kind(row.try_get::<&str, _>(2)?.unwrap_or_default()),
+                SnapshotColumn {
+                    name: row.try_get::<&str, _>(3)?.unwrap_or_default().to_string(),
+                    data_type: row.try_get::<&str, _>(4)?.unwrap_or_default().to_string(),
+                },
+            );
+            if !kept {
+                break;
+            }
+        }
+        Ok(snapshot)
+    }
+
     async fn list_routines(
         &mut self,
         database: &str,
@@ -681,6 +714,18 @@ impl DatabaseDriver for MssqlDriver {
         }
         Ok(constraints)
     }
+}
+
+/// Reads every relation and every column of one database in one statement.
+/// The rows arrive in the order of the relation, which the fold needs.
+fn snapshot_query(catalog: &str) -> String {
+    format!(
+        "SELECT c.TABLE_SCHEMA, c.TABLE_NAME, t.TABLE_TYPE, c.COLUMN_NAME, c.DATA_TYPE \
+         FROM {catalog}.INFORMATION_SCHEMA.COLUMNS AS c \
+         JOIN {catalog}.INFORMATION_SCHEMA.TABLES AS t \
+           ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME \
+         ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION"
+    )
 }
 
 /// Reads the procedures and the functions of one schema. The name of the
@@ -913,6 +958,14 @@ fn read<T>(result: tiberius::Result<Option<T>>) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_snapshot_statement_reads_the_columns_and_the_kind() {
+        let text = snapshot_query("[Sales]");
+        assert!(text.contains("FROM [Sales].INFORMATION_SCHEMA.COLUMNS AS c"));
+        assert!(text.contains("JOIN [Sales].INFORMATION_SCHEMA.TABLES AS t"));
+        assert!(text.contains("ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION"));
+    }
 
     #[test]
     fn the_catalog_statements_name_the_database_of_the_connection() {

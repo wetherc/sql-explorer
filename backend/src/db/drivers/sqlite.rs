@@ -761,6 +761,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_snapshot_holds_every_relation_and_stops_at_the_bound() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snap.db");
+        let mut driver = SqliteDriver::connect(&connection_for(&path.to_string_lossy()))
+            .await
+            .unwrap();
+        driver
+            .execute_query(
+                "CREATE TABLE orders (id INTEGER PRIMARY KEY, total REAL); \
+                 CREATE VIEW big AS SELECT * FROM orders WHERE total > 10;",
+                None,
+                &ExecOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        let snapshot = driver.schema_snapshot("snap.db", 100).await.unwrap();
+        assert_eq!(snapshot.database, "snap.db");
+        assert!(snapshot.complete);
+        assert_eq!(snapshot.column_count, 4);
+        let orders = snapshot
+            .relations
+            .iter()
+            .find(|relation| relation.name == "orders")
+            .unwrap();
+        assert_eq!(orders.kind, TableKind::Table);
+        assert_eq!(orders.schema, None);
+        assert_eq!(orders.columns[0].name, "id");
+        assert_eq!(orders.columns[1].data_type, "REAL");
+        assert!(snapshot
+            .relations
+            .iter()
+            .any(|relation| relation.kind == TableKind::View));
+
+        // The bound stops the read before the second relation.
+        let part = driver.schema_snapshot("snap.db", 1).await.unwrap();
+        assert!(!part.complete);
+        assert_eq!(part.relations.len(), 1);
+    }
+
+    #[tokio::test]
     async fn a_database_name_falls_back_to_the_whole_path() {
         let mut driver = SqliteDriver::connect(&connection_for("file:x?mode=memory"))
             .await

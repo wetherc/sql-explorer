@@ -259,6 +259,39 @@ pub struct Partition {
     pub values: String,
 }
 
+/// One column of a relation in a snapshot. The snapshot carries the name and
+/// the type alone, because the editor shows nothing else.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotColumn {
+    pub name: String,
+    pub data_type: String,
+}
+
+/// One relation in a snapshot, with its columns.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotRelation {
+    pub name: String,
+    pub schema: Option<String>,
+    pub kind: TableKind,
+    pub columns: Vec<SnapshotColumn>,
+}
+
+/// Every relation and every column of one database, read in as few round
+/// trips as the engine allows. The editor offers these names as completions.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaSnapshot {
+    pub database: String,
+    pub relations: Vec<SnapshotRelation>,
+    /// The number of columns the snapshot holds.
+    pub column_count: usize,
+    /// False when the bound on the columns stopped the read, so the names
+    /// are not the whole catalog.
+    pub complete: bool,
+}
+
 /// The statement that reads the CREATE text of one object from the engine,
 /// and the column of the answer that carries that text.
 #[derive(Debug, Clone, PartialEq, Eq)]

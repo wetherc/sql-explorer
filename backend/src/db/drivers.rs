@@ -9,8 +9,8 @@ pub mod sqlite;
 
 use crate::db::{
     AppColumn, Constraint, ConstraintKind, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, Partition, QueryParams, QueryResponse, Routine, RoutineKind, Schema, Table,
-    TableKind,
+    IndexInfo, Partition, QueryParams, QueryResponse, Routine, RoutineKind, Schema, SchemaSnapshot,
+    SnapshotColumn, SnapshotRelation, Table, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::Dialect;
@@ -94,6 +94,62 @@ pub trait DatabaseDriver: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Reads every relation and every column of one database.
+    ///
+    /// The default walks the lists of the tree, which costs one call for each
+    /// relation. An engine whose catalog answers in one statement overrides
+    /// this method.
+    ///
+    /// The read stops when the columns reach the bound, and the answer then
+    /// reports that it is not complete.
+    async fn schema_snapshot(
+        &mut self,
+        database: &str,
+        max_columns: usize,
+    ) -> Result<SchemaSnapshot> {
+        let mut snapshot = SchemaSnapshot {
+            database: database.to_string(),
+            complete: true,
+            ..SchemaSnapshot::default()
+        };
+        let schemas = self.list_schemas(database).await?;
+        let places: Vec<Option<String>> = if schemas.is_empty() {
+            vec![None]
+        } else {
+            schemas
+                .into_iter()
+                .map(|schema| Some(schema.name))
+                .collect()
+        };
+
+        for place in places {
+            let tables = self.list_tables(database, place.as_deref()).await?;
+            for table in tables {
+                if snapshot.column_count >= max_columns {
+                    snapshot.complete = false;
+                    return Ok(snapshot);
+                }
+                let columns = self
+                    .list_columns(database, place.as_deref(), &table.name)
+                    .await?;
+                snapshot.column_count += columns.len();
+                snapshot.relations.push(SnapshotRelation {
+                    name: table.name,
+                    schema: place.clone(),
+                    kind: table.kind,
+                    columns: columns
+                        .into_iter()
+                        .map(|column| SnapshotColumn {
+                            name: column.name,
+                            data_type: column.data_type,
+                        })
+                        .collect(),
+                });
+            }
+        }
+        Ok(snapshot)
+    }
+
     /// Returns the statement that reads the CREATE text of one object from
     /// the engine. An engine that gives no such text returns `None`, and the
     /// command layer builds a draft from the column list instead.
@@ -175,6 +231,55 @@ pub fn f64_to_json(value: f64) -> JsonValue {
     match serde_json::Number::from_f64(value) {
         Some(number) => JsonValue::Number(number),
         None => JsonValue::String(value.to_string()),
+    }
+}
+
+/// Adds one column of one relation to a snapshot, and starts a record when
+/// the relation is new. The rows must arrive in the order of the relation,
+/// because the record of a relation that comes back a second time starts
+/// again.
+///
+/// Returns false when the columns have reached the bound, and the caller then
+/// stops reading and reports that the snapshot is not complete.
+pub fn add_snapshot_column(
+    snapshot: &mut SchemaSnapshot,
+    max_columns: usize,
+    schema: Option<String>,
+    relation: String,
+    kind: TableKind,
+    column: SnapshotColumn,
+) -> bool {
+    if snapshot.column_count >= max_columns {
+        snapshot.complete = false;
+        return false;
+    }
+    let last = snapshot.relations.last_mut();
+    let entry = match last {
+        Some(entry) if entry.name == relation && entry.schema == schema => entry,
+        _ => {
+            snapshot.relations.push(SnapshotRelation {
+                name: relation,
+                schema,
+                kind,
+                columns: Vec::new(),
+            });
+            snapshot
+                .relations
+                .last_mut()
+                .expect("the record was just added")
+        }
+    };
+    entry.columns.push(column);
+    snapshot.column_count += 1;
+    true
+}
+
+/// Reads the word of `INFORMATION_SCHEMA` that names the kind of a relation.
+pub fn table_kind(word: &str) -> TableKind {
+    if word.trim().eq_ignore_ascii_case("VIEW") {
+        TableKind::View
+    } else {
+        TableKind::Table
     }
 }
 
@@ -283,6 +388,86 @@ pub fn rows_returned_message(count: usize, truncated: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_rows_of_a_snapshot_fold_into_one_record_for_each_relation() {
+        let mut snapshot = SchemaSnapshot {
+            database: "Sales".into(),
+            complete: true,
+            ..SchemaSnapshot::default()
+        };
+        let column = |name: &str| SnapshotColumn {
+            name: name.to_string(),
+            data_type: "int".to_string(),
+        };
+        assert!(add_snapshot_column(
+            &mut snapshot,
+            10,
+            Some("dbo".into()),
+            "orders".into(),
+            TableKind::Table,
+            column("id"),
+        ));
+        assert!(add_snapshot_column(
+            &mut snapshot,
+            10,
+            Some("dbo".into()),
+            "orders".into(),
+            TableKind::Table,
+            column("total"),
+        ));
+        assert!(add_snapshot_column(
+            &mut snapshot,
+            10,
+            Some("staging".into()),
+            "orders".into(),
+            TableKind::View,
+            column("id"),
+        ));
+
+        assert_eq!(snapshot.relations.len(), 2);
+        assert_eq!(snapshot.relations[0].columns.len(), 2);
+        assert_eq!(snapshot.relations[1].schema.as_deref(), Some("staging"));
+        assert_eq!(snapshot.relations[1].kind, TableKind::View);
+        assert_eq!(snapshot.column_count, 3);
+        assert!(snapshot.complete);
+    }
+
+    #[test]
+    fn the_bound_stops_a_snapshot_and_marks_it_as_a_part() {
+        let mut snapshot = SchemaSnapshot {
+            complete: true,
+            ..SchemaSnapshot::default()
+        };
+        let column = SnapshotColumn {
+            name: "id".into(),
+            data_type: "int".into(),
+        };
+        assert!(add_snapshot_column(
+            &mut snapshot,
+            1,
+            None,
+            "orders".into(),
+            TableKind::Table,
+            column.clone(),
+        ));
+        assert!(!add_snapshot_column(
+            &mut snapshot,
+            1,
+            None,
+            "orders".into(),
+            TableKind::Table,
+            column,
+        ));
+        assert!(!snapshot.complete);
+        assert_eq!(snapshot.column_count, 1);
+    }
+
+    #[test]
+    fn the_word_of_the_catalog_names_a_view() {
+        assert_eq!(table_kind("VIEW"), TableKind::View);
+        assert_eq!(table_kind("BASE TABLE"), TableKind::Table);
+    }
 
     #[test]
     fn the_rows_of_an_index_fold_into_one_record() {

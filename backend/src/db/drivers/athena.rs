@@ -4,10 +4,14 @@
 //! state to reach a final value, and then it reads the pages of the result.
 //! The metadata comes from the data catalog through the same service.
 
-use crate::db::drivers::{f64_to_json, rows_returned_message, CancelHandle, DatabaseDriver};
+use crate::db::drivers::{
+    add_snapshot_column, f64_to_json, rows_returned_message, table_kind, CancelHandle,
+    DatabaseDriver,
+};
 use crate::db::{
     AppColumn, ColumnInfo, CreateQuery, Database, DriverCapabilities, ExecOptions, Partition,
-    QueryParams, QueryResponse, QueryStats, ResultSet, Schema, Table, TableKind,
+    QueryParams, QueryResponse, QueryStats, ResultSet, Schema, SchemaSnapshot, SnapshotColumn,
+    Table, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
@@ -642,6 +646,51 @@ impl DatabaseDriver for AthenaDriver {
         }));
 
         Ok(columns)
+    }
+
+    /// Reads every relation and every column of one database with one
+    /// statement against `information_schema`. Such a statement scans no data
+    /// in storage, so the snapshot costs nothing.
+    async fn schema_snapshot(
+        &mut self,
+        database: &str,
+        max_columns: usize,
+    ) -> Result<SchemaSnapshot> {
+        let rows = self
+            .catalog_rows(&format!(
+                "SELECT c.table_name, t.table_type, c.column_name, c.data_type \
+                 FROM information_schema.columns AS c \
+                 JOIN information_schema.tables AS t \
+                   ON t.table_schema = c.table_schema AND t.table_name = c.table_name \
+                 WHERE c.table_schema = {} \
+                 ORDER BY c.table_name, c.ordinal_position",
+                quote_literal(database)
+            ))
+            .await?;
+        let mut snapshot = SchemaSnapshot {
+            database: database.to_string(),
+            complete: true,
+            ..SchemaSnapshot::default()
+        };
+        for row in &rows {
+            let Some(relation) = cell_text(row, 0) else {
+                continue;
+            };
+            if !add_snapshot_column(
+                &mut snapshot,
+                max_columns,
+                None,
+                relation,
+                table_kind(&cell_text(row, 1).unwrap_or_default()),
+                SnapshotColumn {
+                    name: cell_text(row, 2).unwrap_or_default(),
+                    data_type: cell_text(row, 3).unwrap_or_else(|| "unknown".to_string()),
+                },
+            ) {
+                break;
+            }
+        }
+        Ok(snapshot)
     }
 
     /// Reads the partitions with `SHOW PARTITIONS`. A relation that holds no

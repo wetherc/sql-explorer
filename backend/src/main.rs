@@ -48,6 +48,7 @@ fn main() {
             commands::list_indexes,
             commands::list_constraints,
             commands::list_partitions,
+            commands::schema_snapshot,
             commands::preview_query,
             commands::script_object,
             commands::quote_identifier,

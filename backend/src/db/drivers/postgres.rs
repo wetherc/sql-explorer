@@ -6,13 +6,14 @@
 //! type mapping can fail.
 
 use crate::db::drivers::{
-    add_constraint_column, add_index_column, bytes_to_json, constraint_kind, f64_to_json,
-    number_out_of_range, number_value, routine_kind, rows_affected_message, rows_returned_message,
-    CancelHandle, DatabaseDriver, NumberValue,
+    add_constraint_column, add_index_column, add_snapshot_column, bytes_to_json, constraint_kind,
+    f64_to_json, number_out_of_range, number_value, routine_kind, rows_affected_message,
+    rows_returned_message, table_kind, CancelHandle, DatabaseDriver, NumberValue,
 };
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, QueryParams, QueryResponse, ResultSet, Routine, Schema, Table, TableKind,
+    IndexInfo, QueryParams, QueryResponse, ResultSet, Routine, Schema, SchemaSnapshot,
+    SnapshotColumn, Table, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::Dialect;
@@ -368,6 +369,49 @@ impl DatabaseDriver for PostgresDriver {
                 is_primary_key: row.get(3),
             })
             .collect())
+    }
+
+    /// Reads every relation and every column of the database of the
+    /// connection in one statement. One PostgreSQL connection reaches one
+    /// database, so the name of the database is not part of the statement.
+    async fn schema_snapshot(
+        &mut self,
+        database: &str,
+        max_columns: usize,
+    ) -> Result<SchemaSnapshot> {
+        let rows = self
+            .client
+            .query(
+                "SELECT c.table_schema, c.table_name, t.table_type, c.column_name, c.data_type \
+                 FROM information_schema.columns AS c \
+                 JOIN information_schema.tables AS t \
+                   ON t.table_schema = c.table_schema AND t.table_name = c.table_name \
+                 WHERE c.table_schema NOT IN ('pg_catalog', 'information_schema') \
+                 ORDER BY c.table_schema, c.table_name, c.ordinal_position",
+                &[],
+            )
+            .await?;
+        let mut snapshot = SchemaSnapshot {
+            database: database.to_string(),
+            complete: true,
+            ..SchemaSnapshot::default()
+        };
+        for row in &rows {
+            if !add_snapshot_column(
+                &mut snapshot,
+                max_columns,
+                row.get(0),
+                row.get(1),
+                table_kind(row.get(2)),
+                SnapshotColumn {
+                    name: row.get(3),
+                    data_type: row.get(4),
+                },
+            ) {
+                break;
+            }
+        }
+        Ok(snapshot)
     }
 
     async fn list_routines(

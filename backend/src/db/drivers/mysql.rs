@@ -1,13 +1,15 @@
 //! The MySQL and MariaDB driver.
 
 use crate::db::drivers::{
-    add_constraint_column, add_index_column, bytes_to_json, constraint_kind, f64_to_json,
-    number_out_of_range, number_value, parameter_type_refused, routine_kind, rows_affected_message,
-    rows_returned_message, CancelHandle, DatabaseDriver, NumberValue,
+    add_constraint_column, add_index_column, add_snapshot_column, bytes_to_json, constraint_kind,
+    f64_to_json, number_out_of_range, number_value, parameter_type_refused, routine_kind,
+    rows_affected_message, rows_returned_message, table_kind, CancelHandle, DatabaseDriver,
+    NumberValue,
 };
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, QueryParams, QueryResponse, ResultSet, Routine, Schema, Table, TableKind,
+    IndexInfo, QueryParams, QueryResponse, ResultSet, Routine, Schema, SchemaSnapshot,
+    SnapshotColumn, Table, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
@@ -322,6 +324,46 @@ impl DatabaseDriver for MysqlDriver {
                 is_primary_key: key.eq_ignore_ascii_case("PRI"),
             })
             .collect())
+    }
+
+    /// Reads every relation and every column of one database in one
+    /// statement. MySQL holds no schema level, so the schema of a relation
+    /// stays absent.
+    async fn schema_snapshot(
+        &mut self,
+        database: &str,
+        max_columns: usize,
+    ) -> Result<SchemaSnapshot> {
+        let rows: Vec<(String, String, String, String)> = self
+            .conn()?
+            .exec(
+                "SELECT c.TABLE_NAME, t.TABLE_TYPE, c.COLUMN_NAME, c.COLUMN_TYPE \
+                 FROM information_schema.COLUMNS AS c \
+                 JOIN information_schema.TABLES AS t \
+                   ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME \
+                 WHERE c.TABLE_SCHEMA = ? \
+                 ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION",
+                (database,),
+            )
+            .await?;
+        let mut snapshot = SchemaSnapshot {
+            database: database.to_string(),
+            complete: true,
+            ..SchemaSnapshot::default()
+        };
+        for (relation, kind, name, data_type) in rows {
+            if !add_snapshot_column(
+                &mut snapshot,
+                max_columns,
+                None,
+                relation,
+                table_kind(&kind),
+                SnapshotColumn { name, data_type },
+            ) {
+                break;
+            }
+        }
+        Ok(snapshot)
     }
 
     async fn list_routines(
