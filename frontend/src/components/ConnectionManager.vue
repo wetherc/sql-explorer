@@ -1,155 +1,300 @@
 <template>
-  <v-container>
-    <v-row>
-      <v-col cols="12">
-        <v-btn color="primary" @click="newConnection" prepend-icon="mdi-plus">New Connection</v-btn>
-      </v-col>
-    </v-row>
-    <v-row>
-      <v-col cols="12">
-        <v-list>
-          <v-list-item
-            v-for="conn in connections"
-            :key="conn.id"
-            :title="conn.name"
-            :subtitle="conn.host"
-            :active="isActive(conn)"
-            @click="selectConnectionForExplorer(conn)"
-          >
-            <template v-slot:append>
-              <v-tooltip location="top">
-                <template v-slot:activator="{ props }">
-                  <v-btn
-                    v-bind="props"
-                    :icon="isActive(conn) ? 'mdi-lan-disconnect' : 'mdi-lan-connect'"
-                    variant="text"
-                    :color="isActive(conn) ? 'error' : 'success'"
-                    @click.stop="handleConnectionToggle(conn)"
-                  ></v-btn>
-                </template>
-                <span>{{ isActive(conn) ? 'Disconnect' : 'Connect' }}</span>
-              </v-tooltip>
+  <div class="connection-manager">
+    <div class="header d-flex align-center ga-1 px-2 py-1">
+      <v-btn
+        color="primary"
+        variant="flat"
+        size="small"
+        prepend-icon="mdi-plus"
+        text="New"
+        data-test="new-connection"
+        @click="startNew"
+      />
+      <v-spacer />
+      <v-tooltip location="bottom" text="Read the connections again">
+        <template #activator="{ props: tip }">
+          <v-btn
+            v-bind="tip"
+            icon="mdi-refresh"
+            size="small"
+            aria-label="Read the connections again"
+            @click="connections.load()"
+          />
+        </template>
+      </v-tooltip>
+    </div>
 
-              <v-tooltip location="top">
-                <template v-slot:activator="{ props }">
-                  <v-btn
-                    v-bind="props"
-                    icon="mdi-pencil"
-                    variant="text"
-                    @click.stop="editConnection(conn)"
-                    color="info"
-                  ></v-btn>
-                </template>
-                <span>Edit Connection</span>
-              </v-tooltip>
+    <v-progress-linear v-if="connections.loading" indeterminate height="2" />
 
-              <v-tooltip location="top">
-                <template v-slot:activator="{ props }">
-                  <v-btn
-                    v-bind="props"
-                    icon="mdi-delete"
-                    variant="text"
-                    @click.stop="deleteConnection(conn.id)"
-                    color="error"
-                  ></v-btn>
-                </template>
-                <span>Delete Connection</span>
-              </v-tooltip>
-            </template>
-          </v-list-item>
-        </v-list>
-        <div v-if="loading">Loading connections...</div>
-        <div v-if="error">{{ error }}</div>
-      </v-col>
-    </v-row>
+    <div class="list-body">
+      <template v-if="connections.saved.length > 0">
+        <div v-for="group in connections.groups" :key="group" class="group">
+          <div class="group-title px-3 py-1">{{ group }}</div>
+          <v-list density="compact" class="pa-0">
+            <v-list-item
+              v-for="connection in inGroup(group)"
+              :key="connection.id"
+              :active="connections.selectedId === connection.id"
+              class="connection-item"
+              data-test="connection-item"
+              @click="selectConnection(connection)"
+            >
+              <template #prepend>
+                <v-badge
+                  :color="healthColor(connection.id)"
+                  dot
+                  offset-x="2"
+                  offset-y="10"
+                  :aria-label="healthLabel(connection.id)"
+                >
+                  <v-icon :color="connection.color ?? undefined" size="small">
+                    {{ engineIcon(connection.dbType) }}
+                  </v-icon>
+                </v-badge>
+              </template>
 
-    <v-dialog v-model="showConnectionForm" persistent max-width="600px">
-      <ConnectionForm />
+              <v-list-item-title>{{ connection.name }}</v-list-item-title>
+              <v-list-item-subtitle>{{ subtitle(connection) }}</v-list-item-subtitle>
+
+              <template #append>
+                <v-btn
+                  :icon="connections.isActive(connection.id) ? 'mdi-lan-disconnect' : 'mdi-lan-connect'"
+                  :color="connections.isActive(connection.id) ? 'error' : 'success'"
+                  :loading="connections.connecting[connection.id] === true"
+                  size="x-small"
+                  :aria-label="connections.isActive(connection.id) ? 'Close' : 'Open'"
+                  data-test="toggle-connection"
+                  @click.stop="toggle(connection)"
+                />
+                <v-menu>
+                  <template #activator="{ props: menu }">
+                    <v-btn
+                      v-bind="menu"
+                      icon="mdi-dots-vertical"
+                      size="x-small"
+                      aria-label="More actions"
+                      data-test="connection-menu"
+                      @click.stop
+                    />
+                  </template>
+                  <v-list density="compact">
+                    <v-list-item
+                      prepend-icon="mdi-pencil"
+                      title="Edit"
+                      data-test="edit-connection"
+                      @click="startEdit(connection)"
+                    />
+                    <v-list-item
+                      prepend-icon="mdi-content-duplicate"
+                      title="Duplicate"
+                      data-test="duplicate-connection"
+                      @click="duplicate(connection)"
+                    />
+                    <v-list-item
+                      prepend-icon="mdi-delete"
+                      title="Delete"
+                      base-color="error"
+                      data-test="delete-connection"
+                      @click="askDelete(connection)"
+                    />
+                  </v-list>
+                </v-menu>
+              </template>
+            </v-list-item>
+          </v-list>
+        </div>
+      </template>
+
+      <div v-else class="empty-state pa-6 text-center">
+        <v-icon size="44" class="mb-3 text-medium-emphasis">mdi-lan-pending</v-icon>
+        <div class="text-body-2 mb-1">No connections yet</div>
+        <p class="text-caption text-medium-emphasis mb-4">
+          Add a server to see its databases, tables and columns.
+        </p>
+        <v-btn
+          color="primary"
+          variant="flat"
+          size="small"
+          prepend-icon="mdi-plus"
+          text="New connection"
+          data-test="empty-new-connection"
+          @click="startNew"
+        />
+      </div>
+    </div>
+
+    <v-dialog v-model="editing" max-width="620" persistent scrollable>
+      <ConnectionForm
+        v-if="draft"
+        :connection="draft"
+        :is-new="isNew"
+        @close="editing = false"
+        @saved="onSaved"
+      />
     </v-dialog>
 
-    <v-dialog v-model="disconnectDialog" persistent max-width="400px">
+    <v-dialog v-model="deleting" max-width="420">
       <v-card>
-        <v-card-title>Confirm Disconnect</v-card-title>
+        <v-card-title class="text-subtitle-1">Delete this connection?</v-card-title>
         <v-card-text>
-          Are you sure you want to disconnect from <strong>{{ connectionToDisconnect?.name }}</strong>?
+          The record for <strong>{{ pendingDelete?.name }}</strong> and its password are removed.
         </v-card-text>
         <v-card-actions>
-          <v-spacer></v-spacer>
-          <v-btn text @click="disconnectDialog = false">Cancel</v-btn>
-          <v-btn color="error" @click="confirmDisconnect">Disconnect</v-btn>
+          <v-spacer />
+          <v-btn text="Cancel" @click="deleting = false" />
+          <v-btn color="error" text="Delete" data-test="confirm-delete" @click="confirmDelete" />
         </v-card-actions>
       </v-card>
     </v-dialog>
-  </v-container>
+  </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, computed, ref } from 'vue'
-import { storeToRefs } from 'pinia'
-import { useConnectionManagerStore, type SavedConnection } from '@/stores/connectionManager'
-import { useConnectionStore } from '@/stores/connection'
-import { useNavigationStore } from '@/stores/navigation'
+import { ref } from 'vue'
 import ConnectionForm from './ConnectionForm.vue'
+import {
+  connectionSubtitle,
+  newConnection,
+  useConnectionsStore,
+} from '@/stores/connections'
+import { useExplorerStore } from '@/stores/explorer'
+import { ConnectionHealth, DbType, type SavedConnection } from '@/types/api'
 
-const connectionManagerStore = useConnectionManagerStore()
-const connectionStore = useConnectionStore()
-const navigationStore = useNavigationStore()
+const connections = useConnectionsStore()
+const explorer = useExplorerStore()
 
-const { connections, loading, error, showConnectionForm } = storeToRefs(connectionManagerStore)
-const { fetchConnections, newConnection, editConnection, deleteConnection } = connectionManagerStore
+const emit = defineEmits<{ (event: 'connected', id: string): void }>()
 
-const disconnectDialog = ref(false)
-const connectionToDisconnect = ref<SavedConnection | null>(null)
+const editing = ref(false)
+const isNew = ref(true)
+const draft = ref<SavedConnection | null>(null)
+const deleting = ref(false)
+const pendingDelete = ref<SavedConnection | null>(null)
 
-const isActive = (conn: SavedConnection) => {
-  return !!connectionStore.activeConnections[conn.id]
+function inGroup(group: string): SavedConnection[] {
+  return connections.saved.filter(
+    (connection) => (connection.group?.trim() || 'Connections') === group,
+  )
 }
 
-onMounted(() => {
-  fetchConnections()
-})
+function subtitle(connection: SavedConnection): string {
+  return connectionSubtitle(connection)
+}
 
-function handleConnectionToggle(connection: SavedConnection) {
-  if (isActive(connection)) {
-    promptToDisconnect(connection)
-  } else {
-    connectToDatabase(connection)
+function engineIcon(dbType: DbType): string {
+  switch (dbType) {
+    case DbType.Mssql:
+      return 'mdi-microsoft'
+    case DbType.Athena:
+      return 'mdi-aws'
+    case DbType.Postgres:
+      return 'mdi-elephant'
+    case DbType.Mysql:
+      return 'mdi-dolphin'
+    default:
+      return 'mdi-file-cabinet'
   }
 }
 
-function selectConnectionForExplorer(connection: SavedConnection) {
-  if (isActive(connection)) {
-    navigationStore.setSelectedExplorerConnectionId(connection.id)
-    navigationStore.setActiveView('explorer')
+function healthColor(id: string): string {
+  switch (connections.health[id]) {
+    case ConnectionHealth.Connected:
+      return 'success'
+    case ConnectionHealth.Reconnecting:
+      return 'warning'
+    default:
+      return 'transparent'
   }
 }
 
-function promptToDisconnect(connection: SavedConnection) {
-  connectionToDisconnect.value = connection
-  disconnectDialog.value = true
+function healthLabel(id: string): string {
+  return connections.health[id] ?? 'not connected'
 }
 
-function confirmDisconnect() {
-  if (connectionToDisconnect.value) {
-    connectionStore.disconnect(connectionToDisconnect.value.id)
-    // If the disconnected connection was the one being explored, unset it
-    if (navigationStore.selectedExplorerConnectionId === connectionToDisconnect.value.id) {
-      navigationStore.setSelectedExplorerConnectionId(null)
-    }
-  }
-  disconnectDialog.value = false
-  connectionToDisconnect.value = null
-  navigationStore.setActiveView('connections')
+function startNew(): void {
+  draft.value = newConnection()
+  isNew.value = true
+  editing.value = true
 }
 
-async function connectToDatabase(connection: SavedConnection) {
-  try {
-    await connectionStore.connect(connection)
-    navigationStore.setSelectedExplorerConnectionId(connection.id)
-    navigationStore.setActiveView('explorer')
-  } catch (e: any) {
-    console.error('Failed to connect:', e)
-    // TODO: Show error to user
+function startEdit(connection: SavedConnection): void {
+  draft.value = { ...connection, options: { ...connection.options }, password: '' }
+  isNew.value = false
+  editing.value = true
+}
+
+function duplicate(connection: SavedConnection): void {
+  draft.value = connections.duplicate(connection)
+  isNew.value = true
+  editing.value = true
+}
+
+function askDelete(connection: SavedConnection): void {
+  pendingDelete.value = connection
+  deleting.value = true
+}
+
+async function confirmDelete(): Promise<void> {
+  if (pendingDelete.value) {
+    explorer.removeRoot(pendingDelete.value.id)
+    await connections.remove(pendingDelete.value.id)
   }
+  deleting.value = false
+  pendingDelete.value = null
+}
+
+async function toggle(connection: SavedConnection): Promise<void> {
+  if (connections.isActive(connection.id)) {
+    await connections.disconnect(connection.id)
+    explorer.removeRoot(connection.id)
+    return
+  }
+  const opened = await connections.connect(connection)
+  if (opened) {
+    const root = explorer.addRoot(connection.id)
+    await explorer.expand(root)
+    emit('connected', connection.id)
+  }
+}
+
+function selectConnection(connection: SavedConnection): void {
+  if (connections.isActive(connection.id)) {
+    connections.select(connection.id)
+  }
+}
+
+function onSaved(): void {
+  editing.value = false
 }
 </script>
+
+<style scoped>
+.connection-manager {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.header {
+  flex: 0 0 auto;
+  border-bottom: 1px solid rgb(var(--v-theme-surface-variant));
+}
+
+.list-body {
+  flex: 1 1 auto;
+  overflow: auto;
+  min-height: 0;
+}
+
+.group-title {
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: rgb(var(--v-theme-null-value));
+}
+
+.connection-item {
+  padding-inline-start: 10px !important;
+}
+</style>

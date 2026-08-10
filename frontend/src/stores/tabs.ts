@@ -1,84 +1,190 @@
-// src/stores/tabs.ts
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
-import { useConnectionStore } from './connection'
+import { computed, ref } from 'vue'
+import { api } from '@/lib/api'
+import { useConnectionsStore } from './connections'
+import { createId } from './connections'
 
 export interface QueryTab {
   id: string
   title: string
   query: string
-  connectionId: string
+  connectionId: string | null
+  /** True when the text differs from the saved statement it came from. */
+  dirty: boolean
+  /** The saved statement this tab came from, when it came from one. */
+  savedQueryId: string | null
 }
 
-let tabIdCounter = 0
+/** The shape the open tabs take in the workspace file. */
+export interface Workspace {
+  tabs: Array<Pick<QueryTab, 'id' | 'title' | 'query' | 'connectionId' | 'savedQueryId'>>
+  activeTabId: string | null
+}
+
+/** Reads a workspace record and drops anything that is not usable. */
+export function parseWorkspace(value: unknown): Workspace {
+  const empty: Workspace = { tabs: [], activeTabId: null }
+  if (typeof value !== 'object' || value === null) {
+    return empty
+  }
+  const record = value as Record<string, unknown>
+  if (!Array.isArray(record.tabs)) {
+    return empty
+  }
+  const tabs = record.tabs
+    .filter((tab): tab is Record<string, unknown> => typeof tab === 'object' && tab !== null)
+    .filter((tab) => typeof tab.id === 'string' && typeof tab.query === 'string')
+    .map((tab) => ({
+      id: tab.id as string,
+      title: typeof tab.title === 'string' ? tab.title : 'Query',
+      query: tab.query as string,
+      connectionId: typeof tab.connectionId === 'string' ? tab.connectionId : null,
+      savedQueryId: typeof tab.savedQueryId === 'string' ? tab.savedQueryId : null,
+    }))
+  const activeTabId =
+    typeof record.activeTabId === 'string' && tabs.some((tab) => tab.id === record.activeTabId)
+      ? record.activeTabId
+      : (tabs[0]?.id ?? null)
+  return { tabs, activeTabId }
+}
 
 export const useTabsStore = defineStore('tabs', () => {
+  const connections = useConnectionsStore()
+
   const tabs = ref<QueryTab[]>([])
   const activeTabId = ref<string | null>(null)
+  let counter = 0
 
-  function addTab(connectionId: string, query: string = '') {
-    const connectionStore = useConnectionStore()
-    const connection = connectionStore.activeConnections[connectionId]
-    const connectionName = connection ? connection.name : 'Unknown'
+  const activeTab = computed(() => tabs.value.find((tab) => tab.id === activeTabId.value) ?? null)
+  const hasTabs = computed(() => tabs.value.length > 0)
 
-    const newId = `tab-${tabIdCounter++}`
-    const newTab: QueryTab = {
-      id: newId,
-      title: `[${connectionName}] - Query ${tabIdCounter}`,
-      query: query,
-      connectionId: connectionId,
-    }
-    tabs.value.push(newTab)
-    activeTabId.value = newId
+  function nextTitle(): string {
+    counter += 1
+    return `Query ${counter}`
   }
 
-  function closeTab(id: string) {
-    const index = tabs.value.findIndex(t => t.id === id)
-    if (index === -1) return
+  function add(options: { connectionId?: string | null; query?: string; title?: string } = {}): QueryTab {
+    const tab: QueryTab = {
+      id: createId(),
+      title: options.title ?? nextTitle(),
+      query: options.query ?? '',
+      connectionId: options.connectionId ?? connections.selectedId,
+      dirty: false,
+      savedQueryId: null,
+    }
+    tabs.value = [...tabs.value, tab]
+    activeTabId.value = tab.id
+    return tab
+  }
 
-    tabs.value.splice(index, 1)
-
-    // If the closed tab was the active one, set a new active tab
+  function close(id: string): void {
+    const index = tabs.value.findIndex((tab) => tab.id === id)
+    if (index === -1) {
+      return
+    }
+    tabs.value = tabs.value.filter((tab) => tab.id !== id)
     if (activeTabId.value === id) {
-      if (tabs.value.length > 0) {
-        // Activate the previous tab or the first one
-        const newActiveIndex = Math.max(0, index - 1)
-        const newActiveTab = tabs.value[newActiveIndex]
-        if (newActiveTab) {
-          activeTabId.value = newActiveTab.id
-        }
-      } else {
-        activeTabId.value = null
-      }
+      const next = tabs.value[Math.max(0, index - 1)]
+      activeTabId.value = next ? next.id : null
     }
   }
 
-  function setActiveTab(id: string) {
-    activeTabId.value = id
+  function closeOthers(id: string): void {
+    tabs.value = tabs.value.filter((tab) => tab.id === id)
+    activeTabId.value = tabs.value[0]?.id ?? null
   }
 
-  function updateTabConnection(tabId: string, newConnectionId: string) {
-    const tab = tabs.value.find(t => t.id === tabId)
+  function closeAll(): void {
+    tabs.value = []
+    activeTabId.value = null
+  }
+
+  function activate(id: string): void {
+    if (tabs.value.some((tab) => tab.id === id)) {
+      activeTabId.value = id
+    }
+  }
+
+  function setQuery(id: string, query: string): void {
+    const tab = tabs.value.find((item) => item.id === id)
+    if (tab && tab.query !== query) {
+      tab.query = query
+      tab.dirty = true
+    }
+  }
+
+  function setConnection(id: string, connectionId: string | null): void {
+    const tab = tabs.value.find((item) => item.id === id)
     if (tab) {
-      const connectionStore = useConnectionStore()
-      const connection = connectionStore.activeConnections[newConnectionId]
-      const connectionName = connection ? connection.name : 'Unknown'
-      
-      tab.connectionId = newConnectionId
-      // Keep the query number consistent
-      const oldTitle = tab.title
-      const queryNumberMatch = oldTitle.match(/Query (\d+)/)
-      const queryNumber = queryNumberMatch ? queryNumberMatch[1] : tabIdCounter
-      tab.title = `[${connectionName}] - Query ${queryNumber}`
+      tab.connectionId = connectionId
+    }
+  }
+
+  function rename(id: string, title: string): void {
+    const tab = tabs.value.find((item) => item.id === id)
+    if (tab && title.trim()) {
+      tab.title = title.trim()
+    }
+  }
+
+  function markClean(id: string): void {
+    const tab = tabs.value.find((item) => item.id === id)
+    if (tab) {
+      tab.dirty = false
+    }
+  }
+
+  /** Builds the record that the workspace file holds. */
+  function snapshot(): Workspace {
+    return {
+      tabs: tabs.value.map((tab) => ({
+        id: tab.id,
+        title: tab.title,
+        query: tab.query,
+        connectionId: tab.connectionId,
+        savedQueryId: tab.savedQueryId,
+      })),
+      activeTabId: activeTabId.value,
+    }
+  }
+
+  async function persist(): Promise<void> {
+    try {
+      await api.saveWorkspace(snapshot())
+    } catch {
+      // A workspace that cannot be written is not worth an alarm; the tabs
+      // stay open for this session.
+    }
+  }
+
+  async function restore(): Promise<void> {
+    try {
+      const workspace = parseWorkspace(await api.getWorkspace())
+      tabs.value = workspace.tabs.map((tab) => ({ ...tab, dirty: false }))
+      activeTabId.value = workspace.activeTabId
+      counter = tabs.value.length
+    } catch {
+      tabs.value = []
+      activeTabId.value = null
     }
   }
 
   return {
     tabs,
     activeTabId,
-    addTab,
-    closeTab,
-    setActiveTab,
-    updateTabConnection,
+    activeTab,
+    hasTabs,
+    add,
+    close,
+    closeOthers,
+    closeAll,
+    activate,
+    setQuery,
+    setConnection,
+    rename,
+    markClean,
+    snapshot,
+    persist,
+    restore,
   }
 })

@@ -13,18 +13,28 @@ export default mergeConfig(
       root: fileURLToPath(new URL('./', import.meta.url)),
       server: {
         deps: {
-          inline: true,
+          inline: ['vuetify'],
         },
       },
       setupFiles: ['./vitest.setup.ts'],
-      mock: {
-        css: true,
-      },
       coverage: {
         provider: 'v8',
-        reporter: ['text', 'json', 'html'],
-        exclude: ['**/node_modules/**', '**/dist/**', '**/*.d.ts'],
+        reporter: ['text-summary', 'json', 'html'],
+        include: ['src/**/*.{ts,vue}'],
+        exclude: [
+          // Entry points and plugin wiring hold no branches of their own.
+          'src/main.ts',
+          'src/plugins/**',
+          'src/env.d.ts',
+          'src/**/*.d.ts',
+        ],
+        thresholds: {
+          lines: 100,
+          branches: 100,
+          functions: 100,
+          statements: 100,
+        },
       },
-    }
-  })
+    },
+  }),
 )

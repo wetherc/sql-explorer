@@ -1,120 +1,257 @@
 <template>
-  <div>
-    <v-progress-linear v-if="explorerStore.loading" indeterminate></v-progress-linear>
-    <AppTreeview :nodes="treeviewNodes" @expand="onExpand" @node-click="onNodeClick" @contextmenu="onContextMenu" />
+  <div class="db-explorer">
+    <div class="explorer-header d-flex align-center ga-1 px-2 py-1">
+      <v-text-field
+        v-model="explorer.filter"
+        density="compact"
+        hide-details
+        clearable
+        placeholder="Filter objects"
+        prepend-inner-icon="mdi-magnify"
+        data-test="explorer-filter"
+      />
+      <v-tooltip location="bottom" text="Read the objects again">
+        <template #activator="{ props: tip }">
+          <v-btn
+            v-bind="tip"
+            icon="mdi-refresh"
+            size="small"
+            aria-label="Read the objects again"
+            data-test="explorer-refresh"
+            @click="refreshRoots"
+          />
+        </template>
+      </v-tooltip>
+    </div>
 
-    <v-menu
-      v-model="contextMenu.visible"
-      :style="{ top: `${contextMenu.y}px`, left: `${contextMenu.x}px` }"
-      absolute
-    >
-      <v-list dense>
-        <v-list-item @click="handleContextMenuAction('new_query')">
-          <v-list-item-title>New Query</v-list-item-title>
-        </v-list-item>
-        <v-list-item v-if="contextMenu.node?.data.type === 'table'" @click="handleContextMenuAction('select_top_1000')">
-          <v-list-item-title>Select Top 1000 Rows</v-list-item-title>
-        </v-list-item>
+    <v-progress-linear v-if="explorer.loading" indeterminate height="2" />
+
+    <div class="explorer-body">
+      <ExplorerTree
+        v-if="explorer.visibleNodes.length > 0"
+        :nodes="explorer.visibleNodes"
+        :open-keys="openKeys"
+        :selected-key="selectedKey"
+        @activate="onActivate"
+        @context="onContext"
+      />
+
+      <div v-else class="empty-state pa-6 text-center">
+        <v-icon size="44" class="mb-3 text-medium-emphasis">mdi-database-off-outline</v-icon>
+        <div class="text-body-2 mb-1">{{ emptyTitle }}</div>
+        <p class="text-caption text-medium-emphasis mb-4">{{ emptyHint }}</p>
+        <v-btn
+          v-if="!connections.hasActive"
+          color="primary"
+          variant="flat"
+          size="small"
+          prepend-icon="mdi-lan-connect"
+          text="Open a connection"
+          data-test="explorer-open-connections"
+          @click="emit('open-connections')"
+        />
+      </div>
+    </div>
+
+    <v-menu v-model="menu.open" :target="[menu.x, menu.y]" data-test="explorer-menu">
+      <v-list density="compact" min-width="220">
+        <v-list-item
+          v-if="menu.node && isRelation(menu.node)"
+          prepend-icon="mdi-table-eye"
+          title="Select the first 1000 rows"
+          data-test="menu-preview"
+          @click="previewRows"
+        />
+        <v-list-item
+          v-if="menu.node && isRelation(menu.node)"
+          prepend-icon="mdi-format-list-bulleted"
+          title="Copy the name"
+          @click="copyName"
+        />
+        <v-list-item
+          prepend-icon="mdi-file-document-outline"
+          title="New query on this connection"
+          data-test="menu-new-query"
+          @click="newQueryHere"
+        />
+        <v-divider />
+        <v-list-item
+          v-if="menu.node && canExpandNode(menu.node)"
+          prepend-icon="mdi-refresh"
+          title="Read this branch again"
+          data-test="menu-refresh"
+          @click="refreshNode"
+        />
+        <v-list-item
+          v-if="menu.node && menu.node.kind === 'connection'"
+          prepend-icon="mdi-lan-disconnect"
+          title="Close this connection"
+          data-test="menu-disconnect"
+          @click="disconnectHere"
+        />
       </v-list>
     </v-menu>
-
-    <v-alert v-if="explorerStore.error" type="error" density="compact" class="mt-2">
-      {{ explorerStore.error }}
-    </v-alert>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, watch } from 'vue'
-import { storeToRefs } from 'pinia'
-import { useExplorerStore, type ExplorerNode } from '@/stores/explorer'
-import { useConnectionStore } from '@/stores/connection'
+import { computed, reactive, ref } from 'vue'
+import ExplorerTree from './ExplorerTree.vue'
+import { api } from '@/lib/api'
+import { isExpandable, type ExplorerNode } from '@/stores/explorer'
+import { useConnectionsStore } from '@/stores/connections'
+import { useExplorerStore } from '@/stores/explorer'
+import { useQueryStore } from '@/stores/query'
+import { useSettingsStore } from '@/stores/settings'
 import { useTabsStore } from '@/stores/tabs'
-import { useNavigationStore } from '@/stores/navigation'
-import AppTreeview from './AppTreeview.vue'
+import { useUiStore } from '@/stores/ui'
 
-const explorerStore = useExplorerStore()
-const connectionStore = useConnectionStore()
-const tabsStore = useTabsStore()
-const navigationStore = useNavigationStore()
+const explorer = useExplorerStore()
+const connections = useConnectionsStore()
+const tabs = useTabsStore()
+const queries = useQueryStore()
+const settings = useSettingsStore()
+const ui = useUiStore()
 
-const { selectedExplorerConnectionId } = storeToRefs(navigationStore)
-const { activeConnections } = storeToRefs(connectionStore)
+const emit = defineEmits<{ (event: 'open-connections'): void }>()
 
-const treeviewNodes = computed<ExplorerNode[]>(() => {
-  const connectionId = selectedExplorerConnectionId.value
-  if (!connectionId) return []
+const openKeys = ref(new Set<string>())
+const selectedKey = ref<string | null>(null)
+const menu = reactive({ open: false, x: 0, y: 0, node: null as ExplorerNode | null })
 
-  const connection = activeConnections.value[connectionId]
-  if (!connection) return []
+const emptyTitle = computed(() =>
+  connections.hasActive ? 'Nothing matches the filter' : 'No open connection',
+)
+const emptyHint = computed(() =>
+  connections.hasActive
+    ? 'Clear the filter to see the whole tree.'
+    : 'Open a connection to see its databases, tables and columns.',
+)
 
-  return [
-    {
-      key: `conn-${connection.id}`,
-      label: connection.name,
-      icon: 'mdi-server',
-      children: explorerStore.nodes,
-      data: { type: 'connection', connectionId: connection.id },
-    }
-  ]
-})
+function isRelation(node: ExplorerNode): boolean {
+  return node.kind === 'table' || node.kind === 'view'
+}
 
-const contextMenu = reactive({
-  visible: false,
-  x: 0,
-  y: 0,
-  node: null as ExplorerNode | null,
-})
+function canExpandNode(node: ExplorerNode): boolean {
+  return isExpandable(node)
+}
 
-// Fetch databases when the selected connection for the explorer changes
-watch(selectedExplorerConnectionId, (newId) => {
-  if (newId) {
-    explorerStore.fetchDatabases(newId)
-  } else {
-    explorerStore.clearExplorer()
+async function onActivate(node: ExplorerNode): Promise<void> {
+  selectedKey.value = node.key
+  if (!isExpandable(node)) {
+    return
   }
-}, { immediate: true })
-
-function onExpand(node: ExplorerNode) {
-  explorerStore.expandNode(node)
-}
-
-function onNodeClick(_node: ExplorerNode) {
-  // Could be used to preview table data, etc. in the future
-}
-
-function onContextMenu({ event, node }: { event: MouseEvent, node: ExplorerNode }) {
-  contextMenu.visible = false // Hide first to recalculate position
-  contextMenu.x = event.clientX
-  contextMenu.y = event.clientY
-  contextMenu.node = node
-  contextMenu.visible = true
-}
-
-function handleContextMenuAction(action: 'new_query' | 'select_top_1000') {
-  const node = contextMenu.node
-  if (!node) return
-
-  const connectionId = node.data.connectionId
-  if (!connectionId) return
-  
-  if (action === 'new_query') {
-    tabsStore.addTab(connectionId)
-  } else if (action === 'select_top_1000' && node.data.type === 'table') {
-    const { db, schema, table } = node.data
-    let query = ''
-    const activeConnection = connectionStore.activeConnections[connectionId]
-    if (activeConnection?.dbType === 'mysql') {
-      query = `SELECT * FROM \`${db}\`.\`${table}\` LIMIT 1000;`
-    } else if (activeConnection?.dbType === 'postgres') {
-      query = `SELECT * FROM "${schema}"."${table}" LIMIT 1000;`
-    } else {
-      // Generic fallback for other SQL dialects
-      query = `SELECT * FROM ${table} LIMIT 1000;`
-    }
-    tabsStore.addTab(connectionId, query)
+  const next = new Set(openKeys.value)
+  if (next.has(node.key)) {
+    next.delete(node.key)
+    openKeys.value = next
+    return
   }
+  next.add(node.key)
+  openKeys.value = next
+  await explorer.expand(node)
+}
 
-  contextMenu.visible = false
+function onContext({ event, node }: { event: MouseEvent; node: ExplorerNode }): void {
+  menu.open = false
+  menu.x = event.clientX
+  menu.y = event.clientY
+  menu.node = node
+  menu.open = true
+}
+
+async function refreshRoots(): Promise<void> {
+  for (const root of explorer.roots) {
+    await explorer.refresh(root)
+  }
+}
+
+async function refreshNode(): Promise<void> {
+  if (menu.node) {
+    await explorer.refresh(menu.node)
+  }
+}
+
+function newQueryHere(): void {
+  const node = menu.node
+  if (node) {
+    tabs.add({ connectionId: node.connectionId })
+  }
+}
+
+async function disconnectHere(): Promise<void> {
+  const node = menu.node
+  if (node) {
+    await connections.disconnect(node.connectionId)
+    explorer.removeRoot(node.connectionId)
+  }
+}
+
+/**
+ * Asks the backend to build the statement, so that every name is quoted
+ * for the engine and no dialect rule lives in the interface.
+ */
+async function previewRows(): Promise<void> {
+  const node = menu.node
+  if (!node || !isRelation(node)) {
+    return
+  }
+  try {
+    const statement = await api.previewQuery({
+      connectionId: node.connectionId,
+      database: node.database ?? null,
+      schemaName: node.schema ?? null,
+      tableName: node.table ?? node.label,
+      limit: 1000,
+    })
+    const tab = tabs.add({
+      connectionId: node.connectionId,
+      query: statement,
+      title: node.label,
+    })
+    if (settings.settings.autoRunPreview) {
+      await queries.execute(tab.id, node.connectionId, statement)
+    }
+  } catch (error) {
+    ui.reportError(error)
+  }
+}
+
+async function copyName(): Promise<void> {
+  const node = menu.node
+  if (!node) {
+    return
+  }
+  try {
+    const quoted = await api.quoteIdentifier(node.connectionId, node.table ?? node.label)
+    const clipboard = globalThis.navigator?.clipboard
+    if (clipboard) {
+      await clipboard.writeText(quoted)
+    }
+    ui.success('The name is on the clipboard.')
+  } catch (error) {
+    ui.reportError(error)
+  }
 }
 </script>
+
+<style scoped>
+.db-explorer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.explorer-header {
+  flex: 0 0 auto;
+  border-bottom: 1px solid rgb(var(--v-theme-surface-variant));
+}
+
+.explorer-body {
+  flex: 1 1 auto;
+  overflow: auto;
+  min-height: 0;
+  padding-top: 4px;
+}
+</style>

@@ -3,10 +3,18 @@
   "private": true,
   "scripts": {
     "bootstrap": "pnpm install",
-    "dev": "cd backend && RUST_LOG=debug tauri dev",
-    "build": "cd backend && tauri build"
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "tauri": "tauri",
+    "test": "pnpm --filter frontend test:unit && cd backend && cargo test",
+    "test:unit": "pnpm --filter frontend test:unit",
+    "test:coverage": "pnpm --filter frontend test:coverage",
+    "lint": "pnpm --filter frontend lint && cd backend && cargo clippy --all-targets -- -D warnings && cargo fmt --check",
+    "format": "pnpm --filter frontend format && cd backend && cargo fmt",
+    "verify": "pnpm lint && pnpm test",
+    "prepare": "git config core.hooksPath .githooks || true"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^1.5.9"
+    "@tauri-apps/cli": "^2.11.4"
   }
 }

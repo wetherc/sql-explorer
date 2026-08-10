@@ -1,74 +1,152 @@
 <template>
-  <v-tabs v-model="activeTabId" show-arrows>
-    <v-tab v-for="tab in tabs" :key="tab.id" :value="tab.id" class="query-tab">
-      {{ tab.title }}
-      <v-icon size="x-small" @click.stop="closeTab(tab.id)">mdi-close</v-icon>
-    </v-tab>
-    <v-tab @click="addTab">
-      <v-icon start>mdi-plus</v-icon>
-      New Query
-    </v-tab>
-  </v-tabs>
+  <div class="query-tabs">
+    <div class="tab-strip d-flex align-center">
+      <v-tabs
+        :model-value="tabs.activeTabId"
+        density="compact"
+        show-arrows
+        class="flex-grow-1"
+        @update:model-value="(id) => tabs.activate(String(id))"
+      >
+        <v-tab
+          v-for="tab in tabs.tabs"
+          :key="tab.id"
+          :value="tab.id"
+          class="query-tab"
+          data-test="query-tab"
+        >
+          <span class="tab-title">{{ tab.title }}</span>
+          <span v-if="tab.dirty" class="dirty-mark" aria-label="This tab has changes">●</span>
+          <v-icon
+            size="x-small"
+            class="ml-2"
+            aria-label="Close the tab"
+            data-test="close-tab"
+            @click.stop="tabs.close(tab.id)"
+          >
+            mdi-close
+          </v-icon>
+        </v-tab>
+      </v-tabs>
+      <v-tooltip location="bottom" text="Open a new tab">
+        <template #activator="{ props: tip }">
+          <v-btn
+            v-bind="tip"
+            icon="mdi-plus"
+            size="small"
+            aria-label="Open a new tab"
+            data-test="new-tab"
+            @click="newTab"
+          />
+        </template>
+      </v-tooltip>
+    </div>
 
-  <v-window v-model="activeTabId">
-    <v-window-item v-for="tab in tabs" :key="tab.id" :value="tab.id" class="fill-height">
-      <QueryView :initial-query="tab.query" :tab-id="tab.id" />
-    </v-window-item>
-  </v-window>
+    <div class="tab-body">
+      <template v-for="tab in tabs.tabs" :key="tab.id">
+        <QueryView v-show="tab.id === tabs.activeTabId" :tab="tab" />
+      </template>
+
+      <div v-if="!tabs.hasTabs" class="empty-state">
+        <v-icon size="56" color="primary" class="mb-3">mdi-database-search-outline</v-icon>
+        <div class="text-h6 mb-1">No open tabs</div>
+        <p class="text-body-2 text-medium-emphasis mb-4">
+          {{ emptyHint }}
+        </p>
+        <v-btn
+          v-if="connections.hasActive"
+          color="primary"
+          variant="flat"
+          prepend-icon="mdi-plus"
+          text="New query"
+          data-test="empty-new-tab"
+          @click="newTab"
+        />
+        <v-btn
+          v-else
+          color="primary"
+          variant="flat"
+          prepend-icon="mdi-lan-connect"
+          text="Open the connections"
+          data-test="empty-open-connections"
+          @click="emit('open-connections')"
+        />
+      </div>
+    </div>
+  </div>
 </template>
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { storeToRefs } from 'pinia'
-import { useTabsStore } from '@/stores/tabs'
-import { useConnectionManagerStore } from '@/stores/connectionManager'
-import { useNavigationStore } from '@/stores/navigation'
 import QueryView from './QueryView.vue'
+import { useConnectionsStore } from '@/stores/connections'
+import { useTabsStore } from '@/stores/tabs'
 
-const tabsStore = useTabsStore()
-const navigationStore = useNavigationStore()
-const connectionManagerStore = useConnectionManagerStore()
+const tabs = useTabsStore()
+const connections = useConnectionsStore()
 
-const { selectedExplorerConnectionId } = storeToRefs(navigationStore)
+const emit = defineEmits<{ (event: 'open-connections'): void }>()
 
-const tabs = computed(() => tabsStore.tabs)
-const activeTabId = computed({
-  get: () => tabsStore.activeTabId,
-  set: (id) => {
-    if (id) tabsStore.setActiveTab(id)
-  },
-})
+const emptyHint = computed(() =>
+  connections.hasActive
+    ? 'Open a tab to write a statement against the connection you selected.'
+    : 'Open a connection first. Its objects then appear in the explorer.',
+)
 
-const addTab = () => {
-  if (selectedExplorerConnectionId.value) {
-    tabsStore.addTab(selectedExplorerConnectionId.value)
-  } else {
-    navigationStore.setActiveView('connections')
-    connectionManagerStore.newConnection()
-  }
+function newTab(): void {
+  tabs.add()
 }
-const closeTab = (id: string) => tabsStore.closeTab(id)
 </script>
 
 <style scoped>
-.v-tabs {
-  background-color: #272727; /* Dark background for the tab bar area */
+.query-tabs {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.tab-strip {
+  flex: 0 0 auto;
+  background: rgb(var(--v-theme-surface-light));
+  border-bottom: 1px solid rgb(var(--v-theme-surface-variant));
 }
 
 .query-tab {
-  background-color: #333333; /* Lighter background for inactive tabs */
-  border-top-left-radius: 6px;
-  border-top-right-radius: 6px;
-  margin-right: 2px;
+  text-transform: none;
+  letter-spacing: normal;
 }
 
-.query-tab.v-tab--selected {
-  background-color: #1E1E1E; /* Match a common editor background color */
-  color: white;
+.tab-title {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-/* Style the close icon on the active tab to be visible */
-.query-tab.v-tab--selected .v-icon {
-  color: white;
+.dirty-mark {
+  margin-left: 6px;
+  font-size: 0.7rem;
+  color: rgb(var(--v-theme-warning));
+}
+
+.tab-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+}
+
+.tab-body > * {
+  height: 100%;
+}
+
+.empty-state {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 24px;
 }
 </style>

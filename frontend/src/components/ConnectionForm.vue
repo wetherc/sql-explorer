@@ -1,125 +1,359 @@
 <template>
   <v-card>
-    <v-card-title>
-      {{ editingConnection ? 'Edit Connection' : 'New Connection' }}
+    <v-card-title class="text-subtitle-1">
+      {{ isNew ? 'New connection' : `Edit ${draft.name || 'connection'}` }}
     </v-card-title>
-    <v-card-text>
-      <v-form ref="form" v-model="valid" lazy-validation>
-        <v-text-field
-          v-model="connection.name"
-          label="Connection Name"
-          :rules="[rules.required]"
-          required
-        ></v-text-field>
 
-        <v-select
-          v-model="connection.dbType"
-          :items="dbTypes"
-          label="Database Type"
-          :rules="[rules.required]"
-          required
-        ></v-select>
+    <v-card-text class="form-body">
+      <v-select
+        v-model="draft.dbType"
+        :items="engineItems"
+        item-title="title"
+        item-value="value"
+        label="Engine"
+        data-test="engine-select"
+        @update:model-value="onEngineChange"
+      />
 
-        <v-text-field
-          v-model="connection.host"
-          label="Host"
-          :rules="[rules.required]"
-          required
-        ></v-text-field>
+      <v-text-field v-model="draft.name" label="Name" data-test="name-field" />
 
-        <v-text-field
-          v-model.number="connection.port"
-          label="Port"
-          type="number"
-          :rules="[rules.required, rules.port]"
-          required
-        ></v-text-field>
+      <template v-if="engine?.usesHost">
+        <div class="d-flex ga-2">
+          <v-text-field
+            v-model="draft.host"
+            label="Host"
+            class="flex-grow-1"
+            data-test="host-field"
+          />
+          <v-text-field
+            v-model.number="draft.port"
+            label="Port"
+            type="number"
+            style="max-width: 130px"
+            data-test="port-field"
+          />
+        </div>
+      </template>
 
-        <v-text-field
-          v-model="connection.database"
-          label="Database"
-        ></v-text-field>
+      <v-text-field
+        v-if="engine?.usesFile"
+        v-model="draft.options.filePath"
+        label="Database file"
+        data-test="file-field"
+      >
+        <template #append-inner>
+          <v-btn
+            icon="mdi-folder-open-outline"
+            size="x-small"
+            aria-label="Choose a file"
+            data-test="choose-file"
+            @click="chooseFile"
+          />
+        </template>
+      </v-text-field>
 
+      <template v-if="engine?.usesCredentials">
+        <v-text-field v-model="draft.user" label="User" data-test="user-field" />
         <v-text-field
-          v-model="connection.user"
-          label="User"
-          :rules="[rules.required]"
-          required
-        ></v-text-field>
-
-        <v-text-field
-          v-model="connection.password"
+          v-model="password"
           label="Password"
-          type="password"
-        ></v-text-field>
-      </v-form>
+          :type="showPassword ? 'text' : 'password'"
+          :append-inner-icon="showPassword ? 'mdi-eye-off' : 'mdi-eye'"
+          :hint="passwordHint"
+          persistent-hint
+          data-test="password-field"
+          @click:append-inner="showPassword = !showPassword"
+        />
+      </template>
+
+      <v-text-field
+        v-if="engine?.usesDatabase"
+        v-model="draft.database"
+        :label="engine.dbType === 'athena' ? 'Database (Glue)' : 'Database'"
+        data-test="database-field"
+      />
+
+      <template v-if="engine?.usesAws">
+        <v-text-field
+          v-model="draft.options.awsRegion"
+          label="AWS region"
+          placeholder="us-east-1"
+          data-test="aws-region-field"
+        />
+        <v-text-field
+          v-model="draft.options.awsProfile"
+          label="AWS profile"
+          placeholder="default"
+          data-test="aws-profile-field"
+        />
+        <v-text-field
+          v-model="draft.options.athenaWorkgroup"
+          label="Workgroup"
+          placeholder="primary"
+          data-test="athena-workgroup-field"
+        />
+        <v-text-field
+          v-model="draft.options.athenaOutputLocation"
+          label="Output location"
+          placeholder="s3://bucket/prefix/"
+          data-test="athena-output-field"
+        />
+        <v-text-field
+          v-model="draft.options.athenaCatalog"
+          label="Data catalog"
+          placeholder="AwsDataCatalog"
+        />
+      </template>
+
+      <v-expansion-panels variant="accordion" class="mt-2">
+        <v-expansion-panel title="Advanced" data-test="advanced-panel">
+          <v-expansion-panel-text>
+            <div class="d-flex flex-column ga-3">
+              <template v-if="engine?.usesTls">
+                <v-select
+                  v-model="draft.options.tlsMode"
+                  :items="tlsItems"
+                  item-title="title"
+                  item-value="value"
+                  label="Transport"
+                  :hint="tlsHint"
+                  persistent-hint
+                  data-test="tls-select"
+                />
+                <v-text-field
+                  v-if="draft.options.tlsMode === 'verifyFull'"
+                  v-model="draft.options.caCertPath"
+                  label="Certificate authority file"
+                  hint="Leave this empty to use the trusted roots of the system."
+                  persistent-hint
+                />
+              </template>
+
+              <v-text-field
+                v-if="engine?.supportsIntegratedSecurity"
+                v-model="draft.options.instanceName"
+                label="Named instance"
+                hint="The SQL Browser service resolves the port of a named instance."
+                persistent-hint
+                data-test="instance-field"
+              />
+
+              <v-switch
+                v-if="engine?.supportsIntegratedSecurity"
+                v-model="draft.options.integratedSecurity"
+                label="Use Windows Integrated Security"
+                data-test="integrated-switch"
+              />
+
+              <div class="d-flex ga-2">
+                <v-text-field
+                  v-model.number="draft.options.connectTimeoutSecs"
+                  label="Connect timeout (s)"
+                  type="number"
+                />
+                <v-text-field
+                  v-model.number="draft.options.queryTimeoutSecs"
+                  label="Statement timeout (s)"
+                  type="number"
+                />
+                <v-text-field
+                  v-model.number="draft.options.maxRows"
+                  label="Row limit"
+                  type="number"
+                />
+              </div>
+
+              <v-switch v-model="draft.options.readOnly" label="Open a read-only session" />
+
+              <v-text-field
+                v-model="draft.options.applicationName"
+                label="Application name"
+                hint="The name the server records for this client."
+                persistent-hint
+              />
+
+              <v-textarea
+                v-model="draft.options.connectionUrl"
+                label="Connection string"
+                rows="2"
+                hint="When this holds a value it replaces the fields above."
+                persistent-hint
+                data-test="connection-url-field"
+              />
+
+              <div class="d-flex ga-2">
+                <v-text-field v-model="draft.group" label="Folder" placeholder="Connections" />
+                <v-select
+                  v-model="draft.color"
+                  :items="colorItems"
+                  item-title="title"
+                  item-value="value"
+                  label="Colour"
+                  clearable
+                />
+              </div>
+            </div>
+          </v-expansion-panel-text>
+        </v-expansion-panel>
+      </v-expansion-panels>
+
+      <v-alert
+        v-if="problems.length > 0"
+        type="warning"
+        variant="tonal"
+        density="compact"
+        class="mt-3"
+        data-test="form-problems"
+      >
+        <div v-for="problem in problems" :key="problem">{{ problem }}</div>
+      </v-alert>
     </v-card-text>
+
     <v-card-actions>
-      <v-spacer></v-spacer>
-      <v-btn color="error" @click="cancelConnectionForm" data-test="cancel-button">Cancel</v-btn>
-      <v-btn color="success" @click.stop="save" data-test="save-button">Save</v-btn>
+      <v-btn
+        :loading="connections.testing"
+        prepend-icon="mdi-check-network-outline"
+        text="Test"
+        data-test="test-button"
+        @click="test"
+      />
+      <v-spacer />
+      <v-btn text="Cancel" data-test="cancel-button" @click="emit('close')" />
+      <v-btn
+        color="primary"
+        variant="flat"
+        text="Save"
+        data-test="save-button"
+        @click="saveConnection"
+      />
     </v-card-actions>
   </v-card>
 </template>
 
 <script setup lang="ts">
-import { ref, watch, computed } from 'vue'
-import { useConnectionManagerStore, type SavedConnection } from '@/stores/connectionManager'
-import { storeToRefs } from 'pinia'
+import { computed, ref, watch } from 'vue'
+import { open as openFileDialog } from '@tauri-apps/plugin-dialog'
+import { useConnectionsStore, defaultPortFor, validateConnection } from '@/stores/connections'
+import { useUiStore } from '@/stores/ui'
+import { DbType, TlsMode, type SavedConnection } from '@/types/api'
 
-const connectionManagerStore = useConnectionManagerStore()
-const { editingConnection } = storeToRefs(connectionManagerStore)
-const { saveConnection, cancelConnectionForm } = connectionManagerStore
+const props = defineProps<{ connection: SavedConnection; isNew: boolean }>()
+const emit = defineEmits<{ (event: 'close'): void; (event: 'saved', id: string): void }>()
 
-const valid = ref(true)
-const form = ref<HTMLFormElement | null>(null)
+const connections = useConnectionsStore()
+const ui = useUiStore()
 
-const dbTypes = ['mssql', 'mysql', 'postgres']
-const defaultPorts = {
-  mssql: 1433,
-  mysql: 3306,
-  postgres: 5432,
-}
+const draft = ref<SavedConnection>(clone(props.connection))
+const password = ref(props.connection.password ?? '')
+const showPassword = ref(false)
 
-const defaultConnection: SavedConnection = {
-  id: '',
-  name: '',
-  dbType: 'mssql',
-  host: '',
-  port: 1433,
-  user: '',
-  database: '',
-  password: '',
-}
+const engineItems = computed(() =>
+  connections.engines.map((engine) => ({ title: engine.label, value: engine.dbType })),
+)
 
-const connection = ref<SavedConnection>(JSON.parse(JSON.stringify(defaultConnection)))
+const engine = computed(() =>
+  connections.engines.find((item) => item.dbType === draft.value.dbType),
+)
 
-// Watch for changes in the selected database type to update the port
-watch(() => connection.value.dbType, (newDbType) => {
-  // Only update the port if we are creating a new connection
-  if (!editingConnection.value) {
-    connection.value.port = defaultPorts[newDbType]
+const tlsItems = [
+  { title: 'Verify the certificate (recommended)', value: TlsMode.VerifyFull },
+  { title: 'Encrypt, accept any certificate', value: TlsMode.Require },
+  { title: 'Encrypt when the server offers it', value: TlsMode.Prefer },
+  { title: 'No encryption', value: TlsMode.Disable },
+]
+
+const colorItems = [
+  { title: 'Blue', value: 'primary' },
+  { title: 'Green', value: 'success' },
+  { title: 'Amber', value: 'warning' },
+  { title: 'Red', value: 'error' },
+]
+
+const tlsHint = computed(() => {
+  switch (draft.value.options.tlsMode) {
+    case TlsMode.VerifyFull:
+      return 'The identity of the server is checked. Use this outside a trusted network.'
+    case TlsMode.Require:
+      return 'The traffic is encrypted, but a server that gives a false certificate is accepted.'
+    case TlsMode.Prefer:
+      return 'The connection continues without encryption when the server offers none.'
+    default:
+      return 'The credentials and the results cross the network in clear text.'
   }
 })
 
-// Watch for changes in editingConnection to populate the form
-watch(editingConnection, (newVal) => {
-  if (newVal) {
-    connection.value = JSON.parse(JSON.stringify(newVal))
-  } else {
-    connection.value = JSON.parse(JSON.stringify(defaultConnection))
-  }
-}, { immediate: true })
+const passwordHint = computed(() =>
+  props.isNew
+    ? 'The password goes into the keychain of the operating system.'
+    : 'Leave this empty to keep the password that is already stored.',
+)
 
-const rules = {
-  required: (value: any) => !!value || 'Required.',
-  port: (value: number) => (value > 0 && value < 65536) || 'Port must be between 1 and 65535.',
+const problems = computed(() => validateConnection(withPassword()))
+
+function clone(connection: SavedConnection): SavedConnection {
+  return { ...connection, options: { ...connection.options } }
 }
 
-async function save() {
-  const { valid: formValid } = await form.value!.validate()
-  if (formValid) {
-    await saveConnection(connection.value)
+function withPassword(): SavedConnection {
+  return { ...draft.value, options: { ...draft.value.options }, password: password.value }
+}
+
+function onEngineChange(value: DbType): void {
+  draft.value.port = defaultPortFor(value)
+  if (value === DbType.Sqlite || value === DbType.Athena) {
+    draft.value.host = null
+  } else if (!draft.value.host) {
+    draft.value.host = 'localhost'
   }
 }
+
+async function chooseFile(): Promise<void> {
+  try {
+    const path = await openFileDialog({
+      multiple: false,
+      filters: [{ name: 'SQLite database', extensions: ['db', 'sqlite', 'sqlite3'] }],
+    })
+    if (typeof path === 'string') {
+      draft.value.options.filePath = path
+    }
+  } catch (error) {
+    ui.reportError(error)
+  }
+}
+
+async function test(): Promise<void> {
+  await connections.test(withPassword())
+}
+
+async function saveConnection(): Promise<void> {
+  const record = withPassword()
+  if (!props.isNew && password.value === '') {
+    // An empty box means that the stored password stays as it is.
+    record.password = null
+  }
+  const saved = await connections.save(record)
+  if (saved) {
+    emit('saved', record.id)
+    emit('close')
+  }
+}
+
+watch(
+  () => props.connection,
+  (value) => {
+    draft.value = clone(value)
+    password.value = value.password ?? ''
+    showPassword.value = false
+  },
+)
 </script>
+
+<style scoped>
+.form-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+</style>

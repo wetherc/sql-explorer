@@ -1,0 +1,78 @@
+<template>
+  <div class="notice-host">
+    <v-snackbar
+      v-for="notice in ui.notices"
+      :key="notice.id"
+      :model-value="true"
+      :color="notice.level"
+      :timeout="notice.timeout"
+      location="bottom right"
+      data-test="notice"
+      @update:model-value="ui.dismiss(notice.id)"
+    >
+      <div class="d-flex align-center ga-2">
+        <v-icon size="small">{{ notice.icon }}</v-icon>
+        <span class="notice-text">{{ notice.message }}</span>
+      </div>
+      <template #actions>
+        <v-btn
+          v-if="notice.detail"
+          size="small"
+          text="Details"
+          data-test="notice-details"
+          @click="ui.openNotice(notice)"
+        />
+        <v-btn
+          icon="mdi-close"
+          size="x-small"
+          aria-label="Dismiss"
+          data-test="notice-close"
+          @click="ui.dismiss(notice.id)"
+        />
+      </template>
+    </v-snackbar>
+
+    <v-dialog
+      :model-value="ui.openedNotice !== null"
+      max-width="720"
+      @update:model-value="ui.closeNotice()"
+    >
+      <v-card v-if="ui.openedNotice">
+        <v-card-title class="text-subtitle-1 d-flex align-center ga-2">
+          <v-icon :color="ui.openedNotice.level">{{ ui.openedNotice.icon }}</v-icon>
+          {{ ui.openedNotice.message }}
+        </v-card-title>
+        <v-card-text>
+          <pre class="detail-body" data-test="notice-detail-body">{{ ui.openedNotice.detail }}</pre>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn text="Close" @click="ui.closeNotice()" />
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { useUiStore } from '@/stores/ui'
+
+const ui = useUiStore()
+</script>
+
+<style scoped>
+.notice-text {
+  max-width: 460px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.detail-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 50vh;
+  overflow: auto;
+  font-family: ui-monospace, monospace;
+  font-size: 0.8125rem;
+}
+</style>

@@ -41,3 +41,6 @@ __screenshots__/
 # Rust & Tauri
 /backend/target
 .tauri/
+
+# Tauri generates these permission schemas at build time
+/backend/gen/schemas
