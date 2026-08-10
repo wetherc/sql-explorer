@@ -408,6 +408,7 @@ describe('AppLayout keys', () => {
         connectionId: null,
         dirty: false,
         savedQueryId: null,
+        params: [],
       },
     ]
     tabs.activeTabId = 'key-tab'

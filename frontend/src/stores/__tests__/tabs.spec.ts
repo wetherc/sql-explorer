@@ -20,7 +20,14 @@ describe('parseWorkspace', () => {
   it('keeps the tabs that hold an identifier and a statement', () => {
     const workspace = parseWorkspace({
       tabs: [
-        { id: 'a', query: 'SELECT 1', title: 'One', connectionId: 'c1', savedQueryId: 'q1' },
+        {
+          id: 'a',
+          query: 'SELECT 1',
+          title: 'One',
+          connectionId: 'c1',
+          savedQueryId: 'q1',
+          params: [{ name: 'id', kind: 'number', text: '7' }],
+        },
         { id: 'b', query: 'SELECT 2' },
         { id: 'c' },
         'nonsense',
@@ -35,6 +42,7 @@ describe('parseWorkspace', () => {
       query: 'SELECT 1',
       connectionId: 'c1',
       savedQueryId: 'q1',
+      params: [{ name: 'id', kind: 'number', text: '7' }],
     })
     expect(workspace.tabs[1]).toEqual({
       id: 'b',
@@ -42,6 +50,7 @@ describe('parseWorkspace', () => {
       query: 'SELECT 2',
       connectionId: null,
       savedQueryId: null,
+      params: [],
     })
     expect(workspace.activeTabId).toBe('b')
   })
@@ -204,10 +213,24 @@ describe('tabs store', () => {
           query: 'SELECT 1',
           connectionId: 'c1',
           savedQueryId: null,
+          params: [],
         },
       ],
       activeTabId: tab.id,
     })
+  })
+
+  it('holds the values of the parameters of one tab', () => {
+    const tabs = useTabsStore()
+    const tab = tabs.add({ query: 'SELECT :id' })
+    const values = [{ name: 'id', kind: 'number' as const, text: '7' }]
+
+    tabs.setParams(tab.id, values)
+    expect(tabs.tabs[0]?.params).toEqual(values)
+
+    // A tab that is not there is left alone.
+    tabs.setParams('gone', [])
+    expect(tabs.tabs[0]?.params).toEqual(values)
   })
 
   it('keeps the tabs open when the workspace cannot be written', async () => {

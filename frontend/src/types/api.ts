@@ -166,6 +166,8 @@ export interface ExportRequest {
   format: 'csv' | 'json'
   /** The row limit of the export, which is higher than the one of the view. */
   maxRows: number
+  /** The values of the named parameters of the statement. */
+  queryParams?: Record<string, unknown>
 }
 
 /** What one export to a file wrote. */
@@ -273,6 +275,22 @@ export interface SchemaSnapshot {
   columnCount: number
   /** False when the bound on the columns stopped the read. */
   complete: boolean
+}
+
+/** The form of one value that the user gave for a parameter. */
+export const ParamKind = {
+  Text: 'text',
+  Number: 'number',
+  Boolean: 'boolean',
+  Null: 'null',
+} as const
+export type ParamKind = (typeof ParamKind)[keyof typeof ParamKind]
+
+/** One value that the user gave for a named parameter of a statement. */
+export interface ParamValue {
+  name: string
+  kind: ParamKind
+  text: string
 }
 
 /** Which plan of a statement the user asked for. */

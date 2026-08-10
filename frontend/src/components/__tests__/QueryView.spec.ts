@@ -89,6 +89,7 @@ async function mountView(query = 'SELECT 1') {
         connectionId: 'c1',
         dirty: false,
         savedQueryId: null,
+        params: [],
       },
     },
   })
@@ -109,6 +110,8 @@ describe('QueryView', () => {
     apiStub.listActiveConnections.mockResolvedValue([infoFixture()])
     apiStub.addHistoryEntry.mockResolvedValue([])
     apiStub.getSavedQueries.mockResolvedValue([])
+    // Most statements of these tests hold no parameter.
+    apiStub.queryParameters.mockResolvedValue([])
   })
 
   it('names a connection that is not open in place of its identifier', async () => {
@@ -122,6 +125,7 @@ describe('QueryView', () => {
           connectionId: 'gone',
           dirty: false,
           savedQueryId: null,
+          params: [],
         },
       },
     })
@@ -174,6 +178,170 @@ describe('QueryView', () => {
 
     expect(apiStub.executeQuery).toHaveBeenCalledWith(
       expect.objectContaining({ connectionId: 'c1', query: 'SELECT 1' }),
+    )
+  })
+
+  it('asks for a value before it runs a statement that holds a name', async () => {
+    apiStub.queryParameters.mockResolvedValue(['id'])
+    apiStub.executeQuery.mockResolvedValue(response)
+    const wrapper = await mountView('SELECT * FROM t WHERE a = :id')
+
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+    // The dialog stands open, so nothing reached the backend.
+    expect(apiStub.executeQuery).not.toHaveBeenCalled()
+
+    const field = document.querySelector(
+      '[data-test="parameter-value-id"] input',
+    ) as HTMLInputElement
+    field.value = '7'
+    field.dispatchEvent(new Event('input'))
+    await settle()
+    ;(document.querySelector('[data-test="parameters-confirm"]') as HTMLElement).click()
+    await settle()
+
+    expect(apiStub.executeQuery).toHaveBeenCalledWith(
+      expect.objectContaining({ queryParams: { id: '7' } }),
+    )
+  })
+
+  it('runs a second time without the dialog', async () => {
+    apiStub.queryParameters.mockResolvedValue(['id'])
+    apiStub.executeQuery.mockResolvedValue(response)
+    const wrapper = mountWithPlugins(QueryView, {
+      props: {
+        tab: {
+          id: 't1',
+          title: 'Query 1',
+          query: 'SELECT :id',
+          connectionId: 'c1',
+          dirty: false,
+          savedQueryId: null,
+          params: [{ name: 'id', kind: 'number', text: '7' }],
+        },
+      },
+    })
+    const connections = useConnectionsStore()
+    await connections.load()
+    await wrapper.vm.$nextTick()
+
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+    expect(apiStub.executeQuery).toHaveBeenCalledWith(
+      expect.objectContaining({ queryParams: { id: 7 } }),
+    )
+  })
+
+  it('runs nothing when the user closes the parameter dialog', async () => {
+    apiStub.queryParameters.mockResolvedValue(['id'])
+    const wrapper = await mountView('SELECT :id')
+
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+    ;(document.querySelector('[data-test="parameters-cancel"]') as HTMLElement).click()
+    await settle()
+    expect(apiStub.executeQuery).not.toHaveBeenCalled()
+  })
+
+  it('opens the parameter dialog on its own and keeps the values', async () => {
+    apiStub.queryParameters.mockResolvedValue(['id'])
+    const wrapper = await mountView('SELECT :id')
+
+    await wrapper.find('[data-test="parameters-button"]').trigger('click')
+    await settle()
+    const field = document.querySelector(
+      '[data-test="parameter-value-id"] input',
+    ) as HTMLInputElement
+    field.value = '9'
+    field.dispatchEvent(new Event('input'))
+    await settle()
+    ;(document.querySelector('[data-test="parameters-confirm"]') as HTMLElement).click()
+    await settle()
+
+    // The dialog closed on its own, so no statement ran.
+    expect(apiStub.executeQuery).not.toHaveBeenCalled()
+  })
+
+  it('sends an empty value when the user chooses that form', async () => {
+    apiStub.queryParameters.mockResolvedValue(['id'])
+    apiStub.executeQuery.mockResolvedValue(response)
+    const wrapper = await mountView('SELECT :id')
+
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+
+    const select = wrapper
+      .findAllComponents({ name: 'VSelect' })
+      .find((item) => String(item.attributes('data-test')).startsWith('parameter-kind'))!
+    await select.vm.$emit('update:modelValue', 'null')
+    await settle()
+    ;(document.querySelector('[data-test="parameters-confirm"]') as HTMLElement).click()
+    await settle()
+
+    expect(apiStub.executeQuery).toHaveBeenCalledWith(
+      expect.objectContaining({ queryParams: { id: null } }),
+    )
+  })
+
+  it('closes the parameter dialog when the overlay reports it', async () => {
+    apiStub.queryParameters.mockResolvedValue(['id'])
+    const wrapper = await mountView('SELECT :id')
+    await wrapper.find('[data-test="parameters-button"]').trigger('click')
+    await settle()
+
+    const dialog = wrapper
+      .findAllComponents({ name: 'VDialog' })
+      .find((item) => item.props('modelValue'))!
+    await dialog.vm.$emit('update:modelValue', false)
+    await settle()
+    expect(dialog.props('modelValue')).toBe(false)
+  })
+
+  it('reports a statement that holds no parameter', async () => {
+    apiStub.queryParameters.mockResolvedValue([])
+    const wrapper = await mountView()
+    await wrapper.find('[data-test="parameters-button"]').trigger('click')
+    await settle()
+    expect(useUiStore().notices[0]?.message).toBe('This statement holds no parameter.')
+  })
+
+  it('reports a failure to read the names of the parameters', async () => {
+    apiStub.queryParameters.mockRejectedValue(new Error('no reader'))
+    const wrapper = await mountView('SELECT :id')
+
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+    expect(apiStub.executeQuery).not.toHaveBeenCalled()
+
+    await wrapper.find('[data-test="parameters-button"]').trigger('click')
+    await settle()
+    expect(useUiStore().notices.length).toBe(2)
+  })
+
+  it('sends the values of the parameters with a plan', async () => {
+    apiStub.queryParameters.mockResolvedValue(['id'])
+    apiStub.explainQuery.mockResolvedValue(response)
+    const wrapper = mountWithPlugins(QueryView, {
+      props: {
+        tab: {
+          id: 't1',
+          title: 'Query 1',
+          query: 'SELECT :id',
+          connectionId: 'c1',
+          dirty: false,
+          savedQueryId: null,
+          params: [{ name: 'id', kind: 'text', text: 'a' }],
+        },
+      },
+    })
+    const connections = useConnectionsStore()
+    await connections.load()
+    await wrapper.vm.$nextTick()
+
+    wrapper.vm.readPlan('estimated')
+    await settle()
+    expect(apiStub.explainQuery).toHaveBeenCalledWith(
+      expect.objectContaining({ queryParams: { id: 'a' } }),
     )
   })
 
@@ -250,6 +418,7 @@ describe('QueryView', () => {
           connectionId: null,
           dirty: false,
           savedQueryId: null,
+          params: [],
         },
       },
     })
@@ -332,6 +501,7 @@ describe('QueryView', () => {
           connectionId: null,
           dirty: false,
           savedQueryId: null,
+          params: [],
         },
       },
     })
@@ -353,6 +523,7 @@ describe('QueryView', () => {
         connectionId: 'c1',
         dirty: false,
         savedQueryId: null,
+        params: [],
       },
     ]
     await wrapper.findComponent({ name: 'SqlEditor' }).vm.$emit('update:modelValue', 'SELECT 2')
@@ -370,6 +541,7 @@ describe('QueryView', () => {
         connectionId: 'c1',
         dirty: false,
         savedQueryId: null,
+        params: [],
       },
     ]
     await wrapper.findComponent({ name: 'VSelect' }).vm.$emit('update:modelValue', 'c2')
@@ -462,6 +634,7 @@ describe('QueryView', () => {
         connectionId: 'c1',
         dirty: true,
         savedQueryId: null,
+        params: [],
       },
     ]
 
@@ -597,6 +770,7 @@ describe('QueryView', () => {
           connectionId: null,
           dirty: false,
           savedQueryId: null,
+          params: [],
         },
       },
     })
@@ -619,6 +793,8 @@ describe('QueryView details', () => {
     apiStub.listActiveConnections.mockResolvedValue([infoFixture()])
     apiStub.addHistoryEntry.mockResolvedValue([])
     apiStub.getSavedQueries.mockResolvedValue([])
+    // Most statements of these tests hold no parameter.
+    apiStub.queryParameters.mockResolvedValue([])
   })
 
   it('closes the save dialog without saving', async () => {
@@ -662,6 +838,7 @@ describe('QueryView details', () => {
           connectionId: null,
           dirty: false,
           savedQueryId: null,
+          params: [],
         },
       },
     })
@@ -679,6 +856,7 @@ describe('QueryView details', () => {
           connectionId: 'ghost',
           dirty: false,
           savedQueryId: null,
+          params: [],
         },
       },
     })
@@ -721,6 +899,8 @@ describe('QueryView edge paths', () => {
     apiStub.listActiveConnections.mockResolvedValue([infoFixture()])
     apiStub.addHistoryEntry.mockResolvedValue([])
     apiStub.getSavedQueries.mockResolvedValue([])
+    // Most statements of these tests hold no parameter.
+    apiStub.queryParameters.mockResolvedValue([])
     apiStub.saveQuery.mockResolvedValue(undefined)
   })
 
@@ -948,6 +1128,7 @@ describe('QueryView edge paths', () => {
           connectionId: null,
           dirty: false,
           savedQueryId: null,
+          params: [],
         },
       },
     })

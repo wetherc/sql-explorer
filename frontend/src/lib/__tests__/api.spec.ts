@@ -8,6 +8,7 @@ vi.mock('@tauri-apps/api/event', () => ({ listen: (...args: unknown[]) => listen
 
 const { api, CONNECTION_STATUS_EVENT } = await import('@/lib/api')
 const { newConnection } = await import('@/stores/connections')
+const { Dialect } = await import('@/types/api')
 
 describe('api', () => {
   beforeEach(() => {
@@ -185,11 +186,14 @@ describe('api', () => {
       options: { maxRows: 10, timeoutSecs: 5 },
     })
     expect(invoke).toHaveBeenCalledWith('explain_query', {
-      connectionId: 'c1',
-      requestId: 'r1',
-      query: 'SELECT 1',
-      kind: 'actual',
-      options: { maxRows: 10, timeoutSecs: 5 },
+      request: {
+        connectionId: 'c1',
+        requestId: 'r1',
+        query: 'SELECT 1',
+        kind: 'actual',
+        queryParams: null,
+        options: { maxRows: 10, timeoutSecs: 5 },
+      },
     })
 
     await api.explainQuery({
@@ -198,7 +202,15 @@ describe('api', () => {
       query: 'SELECT 1',
       kind: 'estimated',
     })
-    expect(invoke).toHaveBeenCalledWith('explain_query', expect.objectContaining({ options: null }))
+    expect(invoke).toHaveBeenCalledWith('explain_query', {
+      request: expect.objectContaining({ options: null, queryParams: null }),
+    })
+
+    await api.queryParameters('SELECT :id', Dialect.MsSql)
+    expect(invoke).toHaveBeenCalledWith('query_parameters', {
+      query: 'SELECT :id',
+      dialect: Dialect.MsSql,
+    })
   })
 
   it('sends the preview request with and without a limit', async () => {

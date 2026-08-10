@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import type { Dialect } from '@/types/api'
 import type {
   ColumnRef,
   ConnectionInfo,
@@ -53,13 +54,14 @@ export const api = {
     connectionId: string
     requestId: string
     query: string
+    queryParams?: Record<string, unknown>
     options?: ExecOptions
   }): Promise<QueryResponse> {
     return invoke('execute_query', {
       connectionId: request.connectionId,
       requestId: request.requestId,
       query: request.query,
-      queryParams: null,
+      queryParams: request.queryParams ?? null,
       options: request.options ?? null,
     })
   },
@@ -69,15 +71,24 @@ export const api = {
     requestId: string
     query: string
     kind: PlanKind
+    queryParams?: Record<string, unknown>
     options?: ExecOptions
   }): Promise<QueryResponse> {
     return invoke('explain_query', {
-      connectionId: request.connectionId,
-      requestId: request.requestId,
-      query: request.query,
-      kind: request.kind,
-      options: request.options ?? null,
+      request: {
+        connectionId: request.connectionId,
+        requestId: request.requestId,
+        query: request.query,
+        kind: request.kind,
+        queryParams: request.queryParams ?? null,
+        options: request.options ?? null,
+      },
     })
+  },
+
+  /** Lists the names of the parameters that a statement holds. */
+  queryParameters(query: string, dialect: Dialect): Promise<string[]> {
+    return invoke('query_parameters', { query, dialect })
   },
 
   cancelQuery(connectionId: string, requestId: string): Promise<void> {

@@ -1,6 +1,8 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { api } from '@/lib/api'
+import { parseParamValues } from '@/lib/params'
+import type { ParamValue } from '@/types/api'
 import { useConnectionsStore } from './connections'
 import { createId } from './connections'
 
@@ -13,11 +15,13 @@ export interface QueryTab {
   dirty: boolean
   /** The saved statement this tab came from, when it came from one. */
   savedQueryId: string | null
+  /** The values the user gave for the named parameters of the statement. */
+  params: ParamValue[]
 }
 
 /** The shape the open tabs take in the workspace file. */
 export interface Workspace {
-  tabs: Array<Pick<QueryTab, 'id' | 'title' | 'query' | 'connectionId' | 'savedQueryId'>>
+  tabs: Array<Pick<QueryTab, 'id' | 'title' | 'query' | 'connectionId' | 'savedQueryId' | 'params'>>
   activeTabId: string | null
 }
 
@@ -40,6 +44,7 @@ export function parseWorkspace(value: unknown): Workspace {
       query: tab.query as string,
       connectionId: typeof tab.connectionId === 'string' ? tab.connectionId : null,
       savedQueryId: typeof tab.savedQueryId === 'string' ? tab.savedQueryId : null,
+      params: parseParamValues(tab.params),
     }))
   const activeTabId =
     typeof record.activeTabId === 'string' && tabs.some((tab) => tab.id === record.activeTabId)
@@ -73,6 +78,7 @@ export const useTabsStore = defineStore('tabs', () => {
       connectionId: options.connectionId ?? connections.selectedId,
       dirty: false,
       savedQueryId: null,
+      params: [],
     }
     tabs.value = [...tabs.value, tab]
     activeTabId.value = tab.id
@@ -122,6 +128,14 @@ export const useTabsStore = defineStore('tabs', () => {
     }
   }
 
+  /** Holds the values that the user gave for the parameters of one tab. */
+  function setParams(id: string, params: ParamValue[]): void {
+    const tab = tabs.value.find((item) => item.id === id)
+    if (tab) {
+      tab.params = params
+    }
+  }
+
   function rename(id: string, title: string): void {
     const tab = tabs.value.find((item) => item.id === id)
     if (tab && title.trim()) {
@@ -145,6 +159,7 @@ export const useTabsStore = defineStore('tabs', () => {
         query: tab.query,
         connectionId: tab.connectionId,
         savedQueryId: tab.savedQueryId,
+        params: tab.params,
       })),
       activeTabId: activeTabId.value,
     }
@@ -183,6 +198,7 @@ export const useTabsStore = defineStore('tabs', () => {
     activate,
     setQuery,
     setConnection,
+    setParams,
     rename,
     markClean,
     snapshot,

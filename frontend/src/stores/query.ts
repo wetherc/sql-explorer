@@ -214,9 +214,14 @@ export const useQueryStore = defineStore('query', () => {
   }
 
   /** Runs a statement for one tab. */
-  function execute(tabId: string, connectionId: string, query: string): Promise<boolean> {
+  function execute(
+    tabId: string,
+    connectionId: string,
+    query: string,
+    queryParams?: Record<string, unknown>,
+  ): Promise<boolean> {
     return runRequest(tabId, connectionId, query, (requestId, options) =>
-      api.executeQuery({ connectionId, requestId, query: query.trim(), options }),
+      api.executeQuery({ connectionId, requestId, query: query.trim(), queryParams, options }),
     )
   }
 
@@ -229,13 +234,21 @@ export const useQueryStore = defineStore('query', () => {
     connectionId: string,
     query: string,
     kind: PlanKind,
+    queryParams?: Record<string, unknown>,
   ): Promise<boolean> {
     return runRequest(
       tabId,
       connectionId,
       query,
       (requestId, options) =>
-        api.explainQuery({ connectionId, requestId, query: query.trim(), kind, options }),
+        api.explainQuery({
+          connectionId,
+          requestId,
+          query: query.trim(),
+          kind,
+          queryParams,
+          options,
+        }),
       kind === PlanKind.Actual ? 'Actual plan' : 'Estimated plan',
     )
   }

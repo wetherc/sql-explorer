@@ -57,6 +57,19 @@
         </template>
       </v-tooltip>
 
+      <v-tooltip location="bottom" text="Give the values of the named parameters">
+        <template #activator="{ props: tip }">
+          <v-btn
+            v-bind="tip"
+            size="small"
+            prepend-icon="mdi-variable"
+            text="Parameters"
+            data-test="parameters-button"
+            @click="editParams()"
+          />
+        </template>
+      </v-tooltip>
+
       <v-menu v-if="supportsExplain">
         <template #activator="{ props: menu }">
           <v-btn
@@ -239,6 +252,51 @@
       </v-card>
     </v-dialog>
 
+    <v-dialog v-model="askingParams" max-width="520">
+      <v-card>
+        <v-card-title class="text-subtitle-1">Give the values of the parameters</v-card-title>
+        <v-card-text class="d-flex flex-column ga-3">
+          <div
+            v-for="row of paramRows"
+            :key="row.name"
+            class="d-flex align-center ga-2"
+            data-test="parameter-row"
+          >
+            <div class="param-name text-medium-emphasis">:{{ row.name }}</div>
+            <v-select
+              v-model="row.kind"
+              :items="PARAM_KINDS"
+              item-title="title"
+              item-value="value"
+              label="Form"
+              density="compact"
+              hide-details
+              class="param-kind"
+              :data-test="`parameter-kind-${row.name}`"
+            />
+            <v-text-field
+              v-model="row.text"
+              :disabled="row.kind === ParamKind.Null"
+              label="Value"
+              density="compact"
+              hide-details
+              :data-test="`parameter-value-${row.name}`"
+            />
+          </div>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn text="Cancel" data-test="parameters-cancel" @click="cancelParams" />
+          <v-btn
+            color="primary"
+            text="Use these values"
+            data-test="parameters-confirm"
+            @click="confirmParams"
+          />
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
     <v-dialog v-model="askingPlan" max-width="460">
       <v-card>
         <v-card-title class="text-subtitle-1">Run the statement for its plan</v-card-title>
@@ -295,7 +353,8 @@ import { useQueryStore } from '@/stores/query'
 import { useSettingsStore } from '@/stores/settings'
 import { useTabsStore } from '@/stores/tabs'
 import { useUiStore } from '@/stores/ui'
-import { Dialect, PlanKind, type ResultSet } from '@/types/api'
+import { alignParams, needsAValue, paramsForRun } from '@/lib/params'
+import { Dialect, ParamKind, PlanKind, type ParamValue, type ResultSet } from '@/types/api'
 import type { ExportFormat } from './ResultsGrid.vue'
 import type { ResultPane } from '@/stores/query'
 import type { QueryTab } from '@/stores/tabs'
@@ -320,6 +379,11 @@ const saveName = ref('')
 const saveFolder = ref('')
 const askingTable = ref(false)
 const askingPlan = ref(false)
+const askingParams = ref(false)
+/** The rows of the parameter dialog, which the user edits before a run. */
+const paramRows = ref<ParamValue[]>([])
+/** The run that waits for the values of the parameters. */
+let pendingRun: ((values: Record<string, unknown>) => void) | null = null
 const insertTable = ref('')
 /** The rows that wait while the user names the table for the INSERT form. */
 let pendingInsert: ResultSet | null = null
@@ -369,6 +433,78 @@ function paneLabel(pane: ResultPane): string {
   return pane.pinned ? `${head} at ${formatClockTime(pane.ranAt)}` : head
 }
 
+/** The forms a value can take in the parameter dialog. */
+const PARAM_KINDS = [
+  { title: 'Text', value: ParamKind.Text },
+  { title: 'Number', value: ParamKind.Number },
+  { title: 'True or false', value: ParamKind.Boolean },
+  { title: 'Empty value', value: ParamKind.Null },
+]
+
+/**
+ * Reads the names of the parameters of a statement and hands the values to
+ * the caller. A name that has no value opens the dialog, and the caller runs
+ * once the user has given the values.
+ */
+async function withParams(
+  statement: string,
+  action: (values?: Record<string, unknown>) => void,
+): Promise<void> {
+  let names: string[] = []
+  try {
+    names = await api.queryParameters(statement, dialect.value)
+  } catch (error) {
+    ui.reportError(error)
+    return
+  }
+  if (names.length === 0) {
+    action(undefined)
+    return
+  }
+
+  const rows = alignParams(names, props.tab.params)
+  tabs.setParams(props.tab.id, rows)
+  if (rows.some(needsAValue)) {
+    paramRows.value = rows.map((row) => ({ ...row }))
+    pendingRun = (values) => action(values)
+    askingParams.value = true
+    return
+  }
+  action(paramsForRun(rows))
+}
+
+/** Opens the parameter dialog on its own, so a value can be changed. */
+async function editParams(): Promise<void> {
+  let names: string[] = []
+  try {
+    names = await api.queryParameters(props.tab.query, dialect.value)
+  } catch (error) {
+    ui.reportError(error)
+    return
+  }
+  if (names.length === 0) {
+    ui.warn('This statement holds no parameter.')
+    return
+  }
+  paramRows.value = alignParams(names, props.tab.params)
+  pendingRun = null
+  askingParams.value = true
+}
+
+function confirmParams(): void {
+  const rows = paramRows.value.map((row) => ({ ...row }))
+  tabs.setParams(props.tab.id, rows)
+  askingParams.value = false
+  const next = pendingRun
+  pendingRun = null
+  next?.(paramsForRun(rows))
+}
+
+function cancelParams(): void {
+  askingParams.value = false
+  pendingRun = null
+}
+
 function onResultTabChange(value: unknown): void {
   const id = String(value)
   queries.selectPane(props.tab.id, id === MESSAGES_TAB ? null : id)
@@ -398,7 +534,9 @@ async function run(statement: string): Promise<void> {
     ui.warn('Choose a connection before you run a statement.')
     return
   }
-  await queries.execute(props.tab.id, connectionId, statement)
+  await withParams(statement, (values) => {
+    void queries.execute(props.tab.id, connectionId, statement, values)
+  })
 }
 
 function runStatement(statement?: string): void {
@@ -418,7 +556,9 @@ function readPlan(kind: PlanKind): void {
     return
   }
   const text = editorRef.value?.currentStatement() ?? props.tab.query
-  void queries.explain(props.tab.id, connectionId, text, kind)
+  void withParams(text, (values) => {
+    void queries.explain(props.tab.id, connectionId, text, kind, values)
+  })
 }
 
 function askForActualPlan(): void {
@@ -498,6 +638,7 @@ async function onExportAll(format: 'csv' | 'json'): Promise<void> {
       path,
       format,
       maxRows: settings.settings.exportRowLimit,
+      queryParams: paramsForRun(props.tab.params),
     })
     if (summary.truncated) {
       ui.warn(
@@ -598,6 +739,15 @@ defineExpose({ runStatement, runAll, formatStatement, readPlan })
   flex: 0 0 auto;
   border-bottom: 1px solid rgb(var(--v-theme-surface-variant));
   background: rgb(var(--v-theme-surface));
+}
+
+.param-name {
+  min-width: 90px;
+  font-family: ui-monospace, monospace;
+}
+
+.param-kind {
+  max-width: 150px;
 }
 
 .connection-select {
