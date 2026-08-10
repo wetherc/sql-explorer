@@ -77,7 +77,12 @@ describe('toJson', () => {
 
 describe('toTabSeparated', () => {
   it('joins the cells with a tab and the rows with a break', () => {
-    expect(toTabSeparated([['a', 'b'], [1, null]])).toBe('a\tb\n1\t')
+    expect(
+      toTabSeparated([
+        ['a', 'b'],
+        [1, null],
+      ]),
+    ).toBe('a\tb\n1\t')
   })
 })
 

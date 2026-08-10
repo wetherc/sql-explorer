@@ -30,6 +30,12 @@ Object.defineProperty(window, 'visualViewport', {
   },
 })
 
+// An overlay of Vuetify looks for the element below the pointer to decide
+// how the page scrolls behind it.
+if (!document.elementsFromPoint) {
+  document.elementsFromPoint = () => []
+}
+
 // The grid and the overlays of Vuetify measure the elements they sit on.
 class StubResizeObserver {
   observe() {}

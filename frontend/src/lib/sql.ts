@@ -273,6 +273,6 @@ export function completionsFor(
 export function wordBefore(text: string, offset: number): string {
   const position = Math.max(0, Math.min(offset, text.length))
   const head = text.slice(0, position)
-  const match = /[A-Za-z0-9_]*$/.exec(head)
-  return match ? match[0] : ''
+  // The pattern matches an empty run, so the search always finds a start.
+  return head.slice(head.search(/[A-Za-z0-9_]*$/))
 }

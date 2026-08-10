@@ -95,7 +95,9 @@ export function connectionSubtitle(connection: SavedConnection): string {
     case DbType.Sqlite:
       return connection.options.filePath ?? 'No file'
     case DbType.Athena:
-      return [connection.options.awsRegion, connection.database].filter(Boolean).join(' · ') || 'AWS'
+      return (
+        [connection.options.awsRegion, connection.database].filter(Boolean).join(' · ') || 'AWS'
+      )
     default: {
       const host = connection.host ?? 'localhost'
       const port = connection.port
@@ -126,7 +128,9 @@ export const useConnectionsStore = defineStore('connections', () => {
   const selected = computed(() =>
     selectedId.value ? (saved.value.find((item) => item.id === selectedId.value) ?? null) : null,
   )
-  const selectedInfo = computed(() => (selectedId.value ? active.value[selectedId.value] : undefined))
+  const selectedInfo = computed(() =>
+    selectedId.value ? active.value[selectedId.value] : undefined,
+  )
 
   /** The folders the list groups the connections under. */
   const groups = computed(() => {

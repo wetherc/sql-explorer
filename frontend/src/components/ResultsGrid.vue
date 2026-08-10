@@ -180,7 +180,9 @@ const windowRows = computed(() =>
 )
 
 const topPad = computed(() => firstVisible.value * ROW_HEIGHT)
-const bottomPad = computed(() => Math.max(0, (sortedRows.value.length - lastVisible.value) * ROW_HEIGHT))
+const bottomPad = computed(() =>
+  Math.max(0, (sortedRows.value.length - lastVisible.value) * ROW_HEIGHT),
+)
 
 const countLabel = computed(() => {
   const shown = sortedRows.value.length

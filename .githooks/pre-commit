@@ -1,0 +1,40 @@
+#!/bin/sh
+# The hook that guards a commit.
+#
+# It runs the linters and the unit tests of both halves of the project. A
+# commit stops when one of them fails.
+#
+# Git points at this folder through `core.hooksPath`, which the `prepare`
+# script of the root package sets during `pnpm install`. To set it by hand:
+#
+#     git config core.hooksPath .githooks
+
+set -e
+
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+
+fail() {
+    printf '\n\033[31mThe commit stopped: %s\033[0m\n' "$1" >&2
+    printf 'Correct the fault, or use --no-verify when you know why.\n' >&2
+    exit 1
+}
+
+printf '\033[36m[1/5]\033[0m Formatting of the frontend\n'
+pnpm --filter frontend format:check || fail 'the frontend is not formatted'
+
+printf '\033[36m[2/5]\033[0m Linting and types of the frontend\n'
+pnpm --filter frontend lint || fail 'the frontend has a lint fault'
+pnpm --filter frontend typecheck || fail 'the frontend has a type fault'
+
+printf '\033[36m[3/5]\033[0m Unit tests of the frontend\n'
+pnpm --filter frontend test:unit || fail 'a frontend test failed'
+
+printf '\033[36m[4/5]\033[0m Formatting and linting of the backend\n'
+(cd backend && cargo fmt --check) || fail 'the backend is not formatted'
+(cd backend && cargo clippy --all-targets -- -D warnings) || fail 'the backend has a lint fault'
+
+printf '\033[36m[5/5]\033[0m Unit tests of the backend\n'
+(cd backend && cargo test) || fail 'a backend test failed'
+
+printf '\n\033[32mEvery check passed.\033[0m\n'

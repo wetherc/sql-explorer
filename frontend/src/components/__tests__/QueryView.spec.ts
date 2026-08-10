@@ -155,7 +155,14 @@ describe('QueryView', () => {
     const wrapper = await mountView()
     const tabs = useTabsStore()
     tabs.tabs = [
-      { id: 't1', title: 'Query 1', query: 'SELECT 1', connectionId: 'c1', dirty: false, savedQueryId: null },
+      {
+        id: 't1',
+        title: 'Query 1',
+        query: 'SELECT 1',
+        connectionId: 'c1',
+        dirty: false,
+        savedQueryId: null,
+      },
     ]
     await wrapper.findComponent({ name: 'SqlEditor' }).vm.$emit('update:modelValue', 'SELECT 2')
     expect(tabs.tabs[0]?.query).toBe('SELECT 2')
@@ -165,7 +172,14 @@ describe('QueryView', () => {
     const wrapper = await mountView()
     const tabs = useTabsStore()
     tabs.tabs = [
-      { id: 't1', title: 'Query 1', query: 'SELECT 1', connectionId: 'c1', dirty: false, savedQueryId: null },
+      {
+        id: 't1',
+        title: 'Query 1',
+        query: 'SELECT 1',
+        connectionId: 'c1',
+        dirty: false,
+        savedQueryId: null,
+      },
     ]
     await wrapper.findComponent({ name: 'VSelect' }).vm.$emit('update:modelValue', 'c2')
     expect(tabs.tabs[0]?.connectionId).toBe('c2')
@@ -200,7 +214,10 @@ describe('QueryView', () => {
 
     await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export', 'json')
     await settle()
-    expect(apiStub.writeTextFile).toHaveBeenCalledWith('/tmp/out.json', '[\n  {\n    "n": 1\n  }\n]')
+    expect(apiStub.writeTextFile).toHaveBeenCalledWith(
+      '/tmp/out.json',
+      '[\n  {\n    "n": 1\n  }\n]',
+    )
   })
 
   it('writes nothing when the user closed the file dialog', async () => {
@@ -247,7 +264,14 @@ describe('QueryView', () => {
     const wrapper = await mountView()
     const tabs = useTabsStore()
     tabs.tabs = [
-      { id: 't1', title: 'Query 1', query: 'SELECT 1', connectionId: 'c1', dirty: true, savedQueryId: null },
+      {
+        id: 't1',
+        title: 'Query 1',
+        query: 'SELECT 1',
+        connectionId: 'c1',
+        dirty: true,
+        savedQueryId: null,
+      },
     ]
 
     await wrapper.find('[data-test="save-query-button"]').trigger('click')

@@ -27,6 +27,8 @@ export default mergeConfig(
           'src/plugins/**',
           'src/env.d.ts',
           'src/**/*.d.ts',
+          // The test helpers are part of the suite, not of the application.
+          'src/**/__tests__/**',
         ],
         thresholds: {
           lines: 100,

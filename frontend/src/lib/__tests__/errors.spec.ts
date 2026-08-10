@@ -64,9 +64,7 @@ describe('isErrorPayload', () => {
 
 describe('fullErrorText', () => {
   it('joins the message and the detail', () => {
-    expect(
-      fullErrorText({ kind: ErrorKind.Database, message: 'a', detail: 'b' }),
-    ).toBe('a\nb')
+    expect(fullErrorText({ kind: ErrorKind.Database, message: 'a', detail: 'b' })).toBe('a\nb')
   })
 
   it('gives the message alone when there is no detail', () => {

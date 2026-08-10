@@ -92,7 +92,8 @@ export interface ColumnInfo {
   typeName: string
 }
 
-export type CellValue = string | number | boolean | null | CellValue[] | { [key: string]: CellValue }
+export type CellValue =
+  string | number | boolean | null | CellValue[] | { [key: string]: CellValue }
 
 export interface ResultSet {
   columns: ColumnInfo[]

@@ -2,10 +2,31 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import SqlEditor from '@/components/SqlEditor.vue'
 import { monaco } from '@/plugins/monaco'
+import type { editor as MonacoEditor, languages } from 'monaco-editor'
 import { emptySchemaIndex } from '@/lib/sql'
 import { Dialect } from '@/types/api'
 
 type Handler = () => void
+
+/** Hands the stub to the code under test, which only calls what it needs. */
+function asEditor(stub: unknown): MonacoEditor.IStandaloneCodeEditor {
+  return stub as MonacoEditor.IStandaloneCodeEditor
+}
+
+/** Reads the suggestions of the provider that the editor registered. */
+function suggestionsOf(
+  stub: ReturnType<typeof stubEditor>,
+  column: number,
+): languages.CompletionItem[] {
+  const provider = vi.mocked(monaco.languages.registerCompletionItemProvider).mock.calls[0]?.[1]
+  const result = provider?.provideCompletionItems(
+    stub.editor.getModel() as unknown as MonacoEditor.ITextModel,
+    { lineNumber: 1, column } as monaco.Position,
+    {} as languages.CompletionContext,
+    {} as never,
+  )
+  return (result as languages.CompletionList | undefined)?.suggestions ?? []
+}
 
 /** Builds a stand-in for the editor and records what it was asked to do. */
 function stubEditor(value = 'SELECT 1;\nSELECT 2') {
@@ -60,7 +81,7 @@ describe('SqlEditor', () => {
 
   it('builds the editor with the settings it was given', () => {
     const stub = stubEditor()
-    vi.mocked(monaco.editor.create).mockReturnValue(stub.editor)
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
     mount(SqlEditor, {
       props: {
         modelValue: 'SELECT 1',
@@ -85,7 +106,7 @@ describe('SqlEditor', () => {
 
   it('reports the text the user typed', async () => {
     const stub = stubEditor('SELECT 9')
-    vi.mocked(monaco.editor.create).mockReturnValue(stub.editor)
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
     const wrapper = mount(SqlEditor, { props: { modelValue: '' } })
     stub.fireContentChange()
     expect(wrapper.emitted('update:modelValue')).toEqual([['SELECT 9']])
@@ -93,7 +114,7 @@ describe('SqlEditor', () => {
 
   it('asks to run the statement under the cursor', () => {
     const stub = stubEditor('SELECT 1;\nSELECT 2')
-    vi.mocked(monaco.editor.create).mockReturnValue(stub.editor)
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
     const wrapper = mount(SqlEditor, { props: { modelValue: 'SELECT 1;\nSELECT 2' } })
     stub.commands[RUN_STATEMENT]?.()
     expect(wrapper.emitted('execute')).toEqual([['SELECT 1']])
@@ -101,8 +122,8 @@ describe('SqlEditor', () => {
 
   it('asks to run the selection when there is one', () => {
     const stub = stubEditor()
-    stub.editor.getSelection.mockReturnValue({ isEmpty: () => false })
-    vi.mocked(monaco.editor.create).mockReturnValue(stub.editor)
+    stub.editor.getSelection.mockReturnValue({ isEmpty: () => false } as never)
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
     const wrapper = mount(SqlEditor, { props: { modelValue: 'SELECT 1' } })
     stub.commands[RUN_STATEMENT]?.()
     expect(wrapper.emitted('execute')).toEqual([['SELECTED']])
@@ -110,7 +131,7 @@ describe('SqlEditor', () => {
 
   it('asks to run the whole script', () => {
     const stub = stubEditor()
-    vi.mocked(monaco.editor.create).mockReturnValue(stub.editor)
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
     const wrapper = mount(SqlEditor, { props: { modelValue: 'SELECT 1' } })
     stub.commands[RUN_ALL]?.()
     expect(wrapper.emitted('execute-all')).toHaveLength(1)
@@ -118,8 +139,8 @@ describe('SqlEditor', () => {
 
   it('gives the whole text when the editor holds no model', () => {
     const stub = stubEditor()
-    stub.editor.getModel.mockReturnValue(null)
-    vi.mocked(monaco.editor.create).mockReturnValue(stub.editor)
+    stub.editor.getModel.mockReturnValue(null as never)
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
     const wrapper = mount(SqlEditor, { props: { modelValue: 'SELECT 1' } })
     stub.commands[RUN_STATEMENT]?.()
     expect(wrapper.emitted('execute')).toEqual([['SELECT 1']])
@@ -127,8 +148,8 @@ describe('SqlEditor', () => {
 
   it('reads from the start when the cursor is nowhere', () => {
     const stub = stubEditor('SELECT 7')
-    stub.editor.getPosition.mockReturnValue(null)
-    vi.mocked(monaco.editor.create).mockReturnValue(stub.editor)
+    stub.editor.getPosition.mockReturnValue(null as never)
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
     const wrapper = mount(SqlEditor, { props: { modelValue: 'SELECT 7' } })
     stub.commands[RUN_STATEMENT]?.()
     expect(wrapper.emitted('execute')).toEqual([['SELECT 7']])
@@ -136,7 +157,7 @@ describe('SqlEditor', () => {
 
   it('writes a new text into the editor and reports nothing back', async () => {
     const stub = stubEditor('old')
-    vi.mocked(monaco.editor.create).mockReturnValue(stub.editor)
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
     const wrapper = mount(SqlEditor, { props: { modelValue: 'old' } })
 
     await wrapper.setProps({ modelValue: 'new' })
@@ -146,7 +167,7 @@ describe('SqlEditor', () => {
 
   it('leaves the editor alone when the text already matches', async () => {
     const stub = stubEditor('same')
-    vi.mocked(monaco.editor.create).mockReturnValue(stub.editor)
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
     const wrapper = mount(SqlEditor, { props: { modelValue: 'other' } })
     await wrapper.setProps({ modelValue: 'same' })
     expect(stub.editor.setValue).not.toHaveBeenCalled()
@@ -154,7 +175,7 @@ describe('SqlEditor', () => {
 
   it('changes the theme and the settings of the editor', async () => {
     const stub = stubEditor()
-    vi.mocked(monaco.editor.create).mockReturnValue(stub.editor)
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
     const wrapper = mount(SqlEditor, { props: { modelValue: '' } })
 
     await wrapper.setProps({ theme: 'sql-explorer-light' })
@@ -168,7 +189,7 @@ describe('SqlEditor', () => {
 
   it('gives the completions the index holds', () => {
     const stub = stubEditor('sel')
-    vi.mocked(monaco.editor.create).mockReturnValue(stub.editor)
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
     mount(SqlEditor, {
       props: {
         modelValue: 'sel',
@@ -180,30 +201,24 @@ describe('SqlEditor', () => {
       },
     })
 
-    const provider = vi.mocked(monaco.languages.registerCompletionItemProvider).mock.calls[0]?.[1]
-    const model = stub.editor.getModel()
-    const result = provider?.provideCompletionItems(model, { lineNumber: 1, column: 4 })
-    expect(result?.suggestions.map((item) => item.label)).toContain('sales')
-    expect(result?.suggestions[0]?.kind).toBe(monaco.languages.CompletionItemKind.Struct)
+    const suggestions = suggestionsOf(stub, 4)
+    expect(suggestions.map((item) => item.label)).toContain('sales')
+    expect(suggestions[0]?.kind).toBe(monaco.languages.CompletionItemKind.Struct)
   })
 
   it('offers only the keywords when no index is given', () => {
     const stub = stubEditor('sel')
-    vi.mocked(monaco.editor.create).mockReturnValue(stub.editor)
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
     mount(SqlEditor, { props: { modelValue: 'sel' } })
 
-    const provider = vi.mocked(monaco.languages.registerCompletionItemProvider).mock.calls[0]?.[1]
-    const result = provider?.provideCompletionItems(stub.editor.getModel(), {
-      lineNumber: 1,
-      column: 4,
-    })
-    expect(result?.suggestions.every((item) => item.detail === 'keyword')).toBe(true)
-    expect(result?.suggestions[0]?.kind).toBe(monaco.languages.CompletionItemKind.Keyword)
+    const suggestions = suggestionsOf(stub, 4)
+    expect(suggestions.every((item) => item.detail === 'keyword')).toBe(true)
+    expect(suggestions[0]?.kind).toBe(monaco.languages.CompletionItemKind.Keyword)
   })
 
   it('marks each kind of name with its own icon', () => {
     const stub = stubEditor('a')
-    vi.mocked(monaco.editor.create).mockReturnValue(stub.editor)
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
     mount(SqlEditor, {
       props: {
         modelValue: 'a',
@@ -215,10 +230,8 @@ describe('SqlEditor', () => {
         },
       },
     })
-    const provider = vi.mocked(monaco.languages.registerCompletionItemProvider).mock.calls[0]?.[1]
-    const kinds = provider
-      ?.provideCompletionItems(stub.editor.getModel(), { lineNumber: 1, column: 2 })
-      ?.suggestions.slice(0, 4)
+    const kinds = suggestionsOf(stub, 2)
+      .slice(0, 4)
       .map((item) => item.kind)
     expect(kinds).toEqual([
       monaco.languages.CompletionItemKind.Field,
@@ -230,7 +243,7 @@ describe('SqlEditor', () => {
 
   it('offers the actions a parent can call', () => {
     const stub = stubEditor()
-    vi.mocked(monaco.editor.create).mockReturnValue(stub.editor)
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
     const wrapper = mount(SqlEditor, { props: { modelValue: 'SELECT 1;\nSELECT 2' } })
     const exposed = wrapper.vm as unknown as {
       focus: () => void
@@ -248,8 +261,8 @@ describe('SqlEditor', () => {
 
   it('inserts nothing when the editor has no selection', () => {
     const stub = stubEditor()
-    stub.editor.getSelection.mockReturnValue(null)
-    vi.mocked(monaco.editor.create).mockReturnValue(stub.editor)
+    stub.editor.getSelection.mockReturnValue(null as never)
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
     const wrapper = mount(SqlEditor, { props: { modelValue: '' } })
     ;(wrapper.vm as unknown as { insert: (text: string) => void }).insert('x')
     expect(stub.editor.executeEdits).not.toHaveBeenCalled()
@@ -258,8 +271,9 @@ describe('SqlEditor', () => {
   it('closes the editor when the view goes away', () => {
     const stub = stubEditor()
     const dispose = vi.fn()
-    vi.mocked(monaco.editor.create).mockReturnValue(stub.editor)
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
     vi.mocked(monaco.languages.registerCompletionItemProvider).mockReturnValue({ dispose })
+    void dispose
     const wrapper = mount(SqlEditor, { props: { modelValue: '' } })
     wrapper.unmount()
     expect(stub.editor.dispose).toHaveBeenCalled()
@@ -268,11 +282,11 @@ describe('SqlEditor', () => {
 
   it('gives the text it was given when no editor was built', () => {
     const stub = stubEditor()
-    vi.mocked(monaco.editor.create).mockReturnValue(stub.editor)
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
     const wrapper = mount(SqlEditor, { props: { modelValue: 'SELECT 1' } })
     wrapper.unmount()
-    expect(
-      (wrapper.vm as unknown as { currentStatement: () => string }).currentStatement(),
-    ).toBe('SELECT 1')
+    expect((wrapper.vm as unknown as { currentStatement: () => string }).currentStatement()).toBe(
+      'SELECT 1',
+    )
   })
 })

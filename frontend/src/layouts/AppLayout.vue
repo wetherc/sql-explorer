@@ -14,7 +14,10 @@
         @click="tabs.add()"
       />
 
-      <v-tooltip location="bottom" :text="settings.isDark ? 'Use the light theme' : 'Use the dark theme'">
+      <v-tooltip
+        location="bottom"
+        :text="settings.isDark ? 'Use the light theme' : 'Use the dark theme'"
+      >
         <template #activator="{ props: tip }">
           <v-btn
             v-bind="tip"

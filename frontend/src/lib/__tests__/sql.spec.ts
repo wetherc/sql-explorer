@@ -151,9 +151,7 @@ describe('completionsFor', () => {
   })
 
   it('describes a column with its type and its table', () => {
-    expect(completionsFor('sale_', index, Dialect.MsSql)[0]?.detail).toBe(
-      'money in salesOrder',
-    )
+    expect(completionsFor('sale_', index, Dialect.MsSql)[0]?.detail).toBe('money in salesOrder')
   })
 })
 

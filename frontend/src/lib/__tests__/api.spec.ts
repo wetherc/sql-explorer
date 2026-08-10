@@ -134,10 +134,7 @@ describe('api', () => {
 
   it('leaves the limits out when none are given', async () => {
     await api.executeQuery({ connectionId: 'c1', requestId: 'r1', query: 'SELECT 1' })
-    expect(invoke).toHaveBeenCalledWith(
-      'execute_query',
-      expect.objectContaining({ options: null }),
-    )
+    expect(invoke).toHaveBeenCalledWith('execute_query', expect.objectContaining({ options: null }))
   })
 
   it('sends the preview request with and without a limit', async () => {

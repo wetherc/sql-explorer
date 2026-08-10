@@ -63,7 +63,9 @@ export const useTabsStore = defineStore('tabs', () => {
     return `Query ${counter}`
   }
 
-  function add(options: { connectionId?: string | null; query?: string; title?: string } = {}): QueryTab {
+  function add(
+    options: { connectionId?: string | null; query?: string; title?: string } = {},
+  ): QueryTab {
     const tab: QueryTab = {
       id: createId(),
       title: options.title ?? nextTitle(),

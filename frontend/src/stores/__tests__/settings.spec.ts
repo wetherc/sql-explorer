@@ -136,3 +136,14 @@ describe('safeStorage', () => {
     }
   })
 })
+
+describe('safeStorage without a store', () => {
+  it('gives nothing when the host offers no store', () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: undefined })
+    expect(safeStorage()).toBeNull()
+    if (descriptor) {
+      Object.defineProperty(globalThis, 'localStorage', descriptor)
+    }
+  })
+})

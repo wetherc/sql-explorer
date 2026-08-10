@@ -98,7 +98,9 @@ export function filterNodes(nodes: ExplorerNode[], filter: string): ExplorerNode
     return nodes
   }
   const keep = (node: ExplorerNode): ExplorerNode | null => {
-    const children = (node.children ?? []).map(keep).filter((child): child is ExplorerNode => child !== null)
+    const children = (node.children ?? [])
+      .map(keep)
+      .filter((child): child is ExplorerNode => child !== null)
     const matches = node.label.toLowerCase().includes(needle)
     if (!matches && children.length === 0) {
       return null
@@ -132,7 +134,11 @@ export const useExplorerStore = defineStore('explorer', () => {
   /** The names the editor offers as completions. */
   const schemaIndex = computed<SchemaIndex>(() => {
     const index = emptySchemaIndex()
-    const seen = { databases: new Set<string>(), schemas: new Set<string>(), tables: new Set<string>() }
+    const seen = {
+      databases: new Set<string>(),
+      schemas: new Set<string>(),
+      tables: new Set<string>(),
+    }
     walk(roots.value, (node) => {
       if (node.kind === 'database' && !seen.databases.has(node.label)) {
         seen.databases.add(node.label)

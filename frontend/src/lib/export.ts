@@ -45,7 +45,9 @@ export function toJson(result: ResultSet, indent = 2): string {
 
 /** Writes the selected cells as text that a spreadsheet accepts. */
 export function toTabSeparated(rows: CellValue[][]): string {
-  return rows.map((row) => row.map((value) => (isNullCell(value) ? '' : formatCell(value))).join('\t')).join('\n')
+  return rows
+    .map((row) => row.map((value) => (isNullCell(value) ? '' : formatCell(value))).join('\t'))
+    .join('\n')
 }
 
 /**

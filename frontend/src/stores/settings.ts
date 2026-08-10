@@ -47,7 +47,9 @@ export function parseSettings(raw: string | null): Settings {
           : defaults.showLineNumbers,
       maxRows: numberOr(parsed.maxRows, defaults.maxRows, 1, 1000000),
       autoRunPreview:
-        typeof parsed.autoRunPreview === 'boolean' ? parsed.autoRunPreview : defaults.autoRunPreview,
+        typeof parsed.autoRunPreview === 'boolean'
+          ? parsed.autoRunPreview
+          : defaults.autoRunPreview,
     }
   } catch {
     return defaults

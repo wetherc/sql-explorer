@@ -5,15 +5,8 @@ import { makeApiStub, connectionFixture, infoFixture } from './helpers'
 const apiStub = makeApiStub()
 vi.mock('@/lib/api', () => ({ api: apiStub, CONNECTION_STATUS_EVENT: 'connection-status' }))
 
-const {
-  columnNode,
-  filterNodes,
-  iconFor,
-  isExpandable,
-  tableNode,
-  useExplorerStore,
-  walk,
-} = await import('@/stores/explorer')
+const { columnNode, filterNodes, iconFor, isExpandable, tableNode, useExplorerStore, walk } =
+  await import('@/stores/explorer')
 type ExplorerNode = import('@/stores/explorer').ExplorerNode
 const { useConnectionsStore } = await import('@/stores/connections')
 const { useUiStore } = await import('@/stores/ui')
@@ -94,7 +87,11 @@ describe('filterNodes', () => {
       label: 'Server',
       kind: 'connection',
       children: [
-        node({ key: 'db', label: 'Sales', children: [node({ key: 't', label: 'orders', kind: 'table' })] }),
+        node({
+          key: 'db',
+          label: 'Sales',
+          children: [node({ key: 't', label: 'orders', kind: 'table' })],
+        }),
         node({ key: 'db2', label: 'Other', children: [] }),
       ],
     }),
@@ -129,9 +126,8 @@ describe('filterNodes', () => {
 describe('walk', () => {
   it('visits every node in the tree', () => {
     const seen: string[] = []
-    walk(
-      [node({ key: 'a', children: [node({ key: 'b', children: undefined })] })],
-      (visited) => seen.push(visited.key),
+    walk([node({ key: 'a', children: [node({ key: 'b', children: undefined })] })], (visited) =>
+      seen.push(visited.key),
     )
     expect(seen).toEqual(['a', 'b'])
   })
@@ -228,6 +224,13 @@ describe('explorer store', () => {
     const explorer = await readyStore()
     await explorer.expand(node({ kind: 'schema', schema: 'dbo', database: undefined }))
     expect(apiStub.listTables).toHaveBeenCalledWith('c1', '', 'dbo')
+  })
+
+  it('names no schema when a schema node carries none', async () => {
+    apiStub.listTables.mockResolvedValue([])
+    const explorer = await readyStore()
+    await explorer.expand(node({ kind: 'schema', database: 'Sales', schema: undefined }))
+    expect(apiStub.listTables).toHaveBeenCalledWith('c1', 'Sales', null)
   })
 
   it('reads the columns below a table', async () => {
@@ -346,7 +349,9 @@ describe('explorer store', () => {
   it('keeps the reading flag while another branch still reads', async () => {
     const explorer = await readyStore()
     const root = explorer.addRoot('c1')
-    root.children = [node({ key: 'busy', loading: true, children: undefined })]
+    // A second connection is still reading its own branch.
+    const other = explorer.addRoot('c2')
+    other.children = [node({ key: 'busy', loading: true, children: undefined })]
     apiStub.listDatabases.mockResolvedValue([])
     await explorer.expand(root)
     expect(explorer.loading).toBe(true)

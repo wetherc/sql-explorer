@@ -132,9 +132,9 @@ describe('connectionSubtitle', () => {
     expect(connectionSubtitle(athena)).toBe('logs')
     athena.options.awsRegion = 'us-east-1'
     expect(connectionSubtitle(athena)).toBe('us-east-1 · logs')
-    expect(
-      connectionSubtitle(connectionFixture({ dbType: DbType.Athena, database: null })),
-    ).toBe('AWS')
+    expect(connectionSubtitle(connectionFixture({ dbType: DbType.Athena, database: null }))).toBe(
+      'AWS',
+    )
   })
 })
 
@@ -394,6 +394,8 @@ describe('connections store', () => {
     await connections.load()
     expect(connections.selected).toBeNull()
     expect(connections.selectedInfo).toBeUndefined()
+    connections.select('ghost')
+    expect(connections.selected).toBeNull()
     connections.select('c1')
     expect(connections.selected?.id).toBe('c1')
     expect(connections.selectedInfo?.connectionId).toBe('c1')

@@ -58,7 +58,9 @@
 
               <template #append>
                 <v-btn
-                  :icon="connections.isActive(connection.id) ? 'mdi-lan-disconnect' : 'mdi-lan-connect'"
+                  :icon="
+                    connections.isActive(connection.id) ? 'mdi-lan-disconnect' : 'mdi-lan-connect'
+                  "
                   :color="connections.isActive(connection.id) ? 'error' : 'success'"
                   :loading="connections.connecting[connection.id] === true"
                   size="x-small"
@@ -152,11 +154,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import ConnectionForm from './ConnectionForm.vue'
-import {
-  connectionSubtitle,
-  newConnection,
-  useConnectionsStore,
-} from '@/stores/connections'
+import { connectionSubtitle, newConnection, useConnectionsStore } from '@/stores/connections'
 import { useExplorerStore } from '@/stores/explorer'
 import { ConnectionHealth, DbType, type SavedConnection } from '@/types/api'
 
