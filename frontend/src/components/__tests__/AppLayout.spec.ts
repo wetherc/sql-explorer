@@ -310,6 +310,46 @@ describe('AppLayout', () => {
     wrapper.unmount()
   })
 
+  it('asks before it puts every setting back to its default', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const settings = useSettingsStore()
+    settings.update({ maxRows: 25 })
+
+    await wrapper.find('[data-test="open-settings"]').trigger('click')
+    await settle()
+    const reset = document.querySelector('[data-test="settings-reset"]') as HTMLElement
+    reset.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+    expect(settings.settings.maxRows).toBe(25)
+
+    const confirm = document.querySelector('[data-test="confirm-accept"]') as HTMLElement
+    confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+
+    expect(settings.settings).toEqual(defaultSettings())
+    wrapper.unmount()
+  })
+
+  it('keeps the settings when the question about resetting them is refused', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const settings = useSettingsStore()
+    settings.update({ maxRows: 25 })
+
+    await wrapper.find('[data-test="open-settings"]').trigger('click')
+    await settle()
+    const reset = document.querySelector('[data-test="settings-reset"]') as HTMLElement
+    reset.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+    const cancel = document.querySelector('[data-test="confirm-cancel"]') as HTMLElement
+    cancel.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+
+    expect(settings.settings.maxRows).toBe(25)
+    wrapper.unmount()
+  })
+
   it('takes a theme from the settings dialog', async () => {
     const wrapper = mountWithPlugins(AppLayout)
     await settle()

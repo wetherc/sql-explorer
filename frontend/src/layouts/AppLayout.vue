@@ -137,10 +137,13 @@
       </v-card>
     </AppDialog>
 
-    <AppDialog v-model="settingsOpen" max-width="520">
+    <AppDialog v-model="settingsOpen" max-width="560" scrollable>
       <v-card>
         <v-card-title class="text-subtitle-1">Settings</v-card-title>
         <v-card-text class="d-flex flex-column ga-4">
+          <!-- The settings stand in groups, because a list of twelve controls
+               in no order gives the reader nothing to hold on to. -->
+          <div class="settings-group">Appearance</div>
           <v-select
             :model-value="settings.settings.theme"
             :items="THEME_CHOICES"
@@ -171,6 +174,9 @@
             hide-details
             @update:model-value="(value) => settings.update({ showLineNumbers: Boolean(value) })"
           />
+
+          <v-divider />
+          <div class="settings-group">Results</div>
           <v-switch
             :model-value="settings.settings.autoRunPreview"
             label="Run a preview at once"
@@ -181,7 +187,7 @@
             :model-value="settings.settings.maxRows"
             label="Row limit"
             type="number"
-            hint="The largest number of rows one result set holds."
+            hint="The largest number of rows one result set holds. Between 1 and 1000000."
             persistent-hint
             data-test="setting-max-rows"
             @update:model-value="(value) => settings.update({ maxRows: Number(value) })"
@@ -190,7 +196,7 @@
             :model-value="settings.settings.maxPinnedResults"
             label="Results a tab keeps"
             type="number"
-            hint="The largest number of results one tab keeps against the next run."
+            hint="The largest number of results one tab keeps against the next run. Between 1 and 20."
             persistent-hint
             data-test="setting-max-pinned"
             @update:model-value="(value) => settings.update({ maxPinnedResults: Number(value) })"
@@ -199,11 +205,14 @@
             :model-value="settings.settings.exportRowLimit"
             label="Export row limit"
             type="number"
-            hint="The row limit of an export that writes straight to a file."
+            hint="The row limit of an export that writes straight to a file. Between 1000 and 100000000."
             persistent-hint
             data-test="setting-export-limit"
             @update:model-value="(value) => settings.update({ exportRowLimit: Number(value) })"
           />
+
+          <v-divider />
+          <div class="settings-group">Athena</div>
           <v-text-field
             :model-value="settings.settings.athenaPricePerTerabyte"
             label="Athena price for each terabyte"
@@ -221,16 +230,19 @@
             :model-value="settings.settings.athenaScanWarningGb"
             label="Warn above this scan in gigabytes"
             type="number"
-            hint="A statement that scans more than this raises a warning."
+            hint="A statement that scans more than this raises a warning. Between 1 and 1000000."
             persistent-hint
             data-test="setting-athena-warning"
             @update:model-value="(value) => settings.update({ athenaScanWarningGb: Number(value) })"
           />
+
+          <v-divider />
+          <div class="settings-group">The schema the editor reads</div>
           <v-text-field
             :model-value="settings.settings.schemaSnapshotColumns"
             label="Columns the editor learns"
             type="number"
-            hint="The largest number of columns one read of a schema keeps."
+            hint="The largest number of columns one read of a schema keeps. Between 100 and 200000."
             persistent-hint
             data-test="setting-snapshot-columns"
             @update:model-value="
@@ -250,16 +262,32 @@
           />
         </v-card-text>
         <v-card-actions>
+          <v-btn
+            text="Reset to the defaults"
+            data-test="settings-reset"
+            @click="resettingSettings = true"
+          />
           <v-spacer />
           <v-btn text="Close" @click="settingsOpen = false" />
         </v-card-actions>
       </v-card>
     </AppDialog>
+
+    <ConfirmDialog
+      :open="resettingSettings"
+      title="Reset every setting?"
+      message="Every setting goes back to the value a new installation starts with."
+      confirm-text="Reset them"
+      danger
+      @confirm="resetSettings"
+      @cancel="resettingSettings = false"
+    />
   </v-app>
 </template>
 
 <script setup lang="ts">
 import AppDialog from '@/components/AppDialog.vue'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useTheme } from 'vuetify'
 import CommandPalette from '@/components/CommandPalette.vue'
@@ -308,6 +336,13 @@ const RAIL_WIDTH = 56
 const apple = /mac|iphone|ipad/i.test(navigator.userAgent)
 
 const settingsOpen = ref(false)
+/** True while the question about resetting the settings stands open. */
+const resettingSettings = ref(false)
+
+function resetSettings(): void {
+  resettingSettings.value = false
+  settings.reset()
+}
 let unlisten: UnlistenFn | null = null
 
 const railItems: Array<{ value: Panel; icon: string; label: string }> = [
@@ -600,6 +635,15 @@ onBeforeUnmount(() => {
    that gap is wider than the row. Centring the two together pushed the icon
    out of the highlight behind it and against the edge of the window. The gap
    goes, and the icon sits in the middle of its row. */
+/* The name of one group of settings, above the controls that belong to it. */
+.settings-group {
+  font-size: var(--app-text-sm);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: rgb(var(--v-theme-on-surface-variant));
+}
+
 .rail :deep(.v-list-item) {
   --v-list-prepend-gap: 0px;
 

@@ -242,3 +242,62 @@ describe('safeStorage without a store', () => {
     }
   })
 })
+
+describe('settings store holding a change inside its bounds', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  it('keeps the value it had when a field gives nothing that can be read', () => {
+    const settings = useSettingsStore()
+    settings.update({ maxRows: 5000 })
+
+    // An empty field and a field of letters both reach the store this way.
+    settings.update({ maxRows: Number.NaN })
+
+    expect(settings.settings.maxRows).toBe(5000)
+  })
+
+  it('brings a figure outside its bounds inside them', () => {
+    const settings = useSettingsStore()
+
+    settings.update({ maxRows: 90000000 })
+    expect(settings.settings.maxRows).toBe(1000000)
+
+    settings.update({ maxPinnedResults: 0 })
+    expect(settings.settings.maxPinnedResults).toBe(1)
+
+    settings.update({ fontSize: 200 })
+    expect(settings.settings.fontSize).toBe(32)
+  })
+
+  it('refuses a price below nothing and keeps the fraction of a good one', () => {
+    const settings = useSettingsStore()
+
+    settings.update({ athenaPricePerTerabyte: 6.25 })
+    expect(settings.settings.athenaPricePerTerabyte).toBe(6.25)
+
+    settings.update({ athenaPricePerTerabyte: -1 })
+    expect(settings.settings.athenaPricePerTerabyte).toBe(6.25)
+  })
+
+  it('writes back only what it kept, and not the figure it refused', () => {
+    const settings = useSettingsStore()
+    settings.update({ maxRows: 4000 })
+
+    settings.update({ maxRows: Number.NaN })
+
+    const stored = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? '{}') as { maxRows: number }
+    expect(stored.maxRows).toBe(4000)
+  })
+
+  it('puts every setting back to the value a new installation starts with', () => {
+    const settings = useSettingsStore()
+    settings.update({ maxRows: 25, theme: 'sqlExplorerDark', wordWrap: true })
+
+    settings.reset()
+
+    expect(settings.settings).toEqual(defaultSettings())
+    expect(JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? '{}')).toEqual(defaultSettings())
+  })
+})

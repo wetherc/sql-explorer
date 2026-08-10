@@ -75,6 +75,58 @@ export function defaultSettings(): Settings {
 /** The key under which the settings live in the browser store. */
 export const SETTINGS_KEY = 'sql-explorer.settings'
 
+/**
+ * Holds every value of the settings inside the bounds that belong to it, and
+ * falls back on the value it is given for anything it cannot read.
+ *
+ * The read of a stored record and the change of one setting both come through
+ * here, so a figure typed into the dialog meets the same bounds as a figure
+ * read from the browser store. A field left empty or filled with letters
+ * reaches this as `NaN`, and the fallback then keeps the value that stood
+ * before it.
+ */
+export function normaliseSettings(candidate: Partial<Settings>, fallback: Settings): Settings {
+  return {
+    theme: THEME_CHOICES.some((choice) => choice.value === candidate.theme)
+      ? (candidate.theme as ThemeChoice)
+      : fallback.theme,
+    fontSize: numberOr(candidate.fontSize, fallback.fontSize, 8, 32),
+    wordWrap: typeof candidate.wordWrap === 'boolean' ? candidate.wordWrap : fallback.wordWrap,
+    showLineNumbers:
+      typeof candidate.showLineNumbers === 'boolean'
+        ? candidate.showLineNumbers
+        : fallback.showLineNumbers,
+    maxRows: numberOr(candidate.maxRows, fallback.maxRows, 1, 1000000),
+    autoRunPreview:
+      typeof candidate.autoRunPreview === 'boolean'
+        ? candidate.autoRunPreview
+        : fallback.autoRunPreview,
+    maxPinnedResults: numberOr(candidate.maxPinnedResults, fallback.maxPinnedResults, 1, 20),
+    exportRowLimit: numberOr(candidate.exportRowLimit, fallback.exportRowLimit, 1000, 100000000),
+    // The price keeps its fraction, so it does not go through `numberOr`.
+    athenaPricePerTerabyte: priceOr(
+      candidate.athenaPricePerTerabyte,
+      fallback.athenaPricePerTerabyte,
+    ),
+    athenaScanWarningGb: numberOr(
+      candidate.athenaScanWarningGb,
+      fallback.athenaScanWarningGb,
+      1,
+      1000000,
+    ),
+    schemaSnapshotColumns: numberOr(
+      candidate.schemaSnapshotColumns,
+      fallback.schemaSnapshotColumns,
+      100,
+      200000,
+    ),
+    schemaSnapshotOwnConnection:
+      typeof candidate.schemaSnapshotOwnConnection === 'boolean'
+        ? candidate.schemaSnapshotOwnConnection
+        : fallback.schemaSnapshotOwnConnection,
+  }
+}
+
 /** Reads the settings and falls back on the defaults for a bad record. */
 export function parseSettings(raw: string | null): Settings {
   const defaults = defaultSettings()
@@ -82,46 +134,7 @@ export function parseSettings(raw: string | null): Settings {
     return defaults
   }
   try {
-    const parsed = JSON.parse(raw) as Partial<Settings>
-    return {
-      theme: THEME_CHOICES.some((choice) => choice.value === parsed.theme)
-        ? (parsed.theme as ThemeChoice)
-        : defaults.theme,
-      fontSize: numberOr(parsed.fontSize, defaults.fontSize, 8, 32),
-      wordWrap: typeof parsed.wordWrap === 'boolean' ? parsed.wordWrap : defaults.wordWrap,
-      showLineNumbers:
-        typeof parsed.showLineNumbers === 'boolean'
-          ? parsed.showLineNumbers
-          : defaults.showLineNumbers,
-      maxRows: numberOr(parsed.maxRows, defaults.maxRows, 1, 1000000),
-      autoRunPreview:
-        typeof parsed.autoRunPreview === 'boolean'
-          ? parsed.autoRunPreview
-          : defaults.autoRunPreview,
-      maxPinnedResults: numberOr(parsed.maxPinnedResults, defaults.maxPinnedResults, 1, 20),
-      exportRowLimit: numberOr(parsed.exportRowLimit, defaults.exportRowLimit, 1000, 100000000),
-      // The price keeps its fraction, so it does not go through `numberOr`.
-      athenaPricePerTerabyte: priceOr(
-        parsed.athenaPricePerTerabyte,
-        defaults.athenaPricePerTerabyte,
-      ),
-      athenaScanWarningGb: numberOr(
-        parsed.athenaScanWarningGb,
-        defaults.athenaScanWarningGb,
-        1,
-        1000000,
-      ),
-      schemaSnapshotColumns: numberOr(
-        parsed.schemaSnapshotColumns,
-        defaults.schemaSnapshotColumns,
-        100,
-        200000,
-      ),
-      schemaSnapshotOwnConnection:
-        typeof parsed.schemaSnapshotOwnConnection === 'boolean'
-          ? parsed.schemaSnapshotOwnConnection
-          : defaults.schemaSnapshotOwnConnection,
-    }
+    return normaliseSettings(JSON.parse(raw) as Partial<Settings>, defaults)
   } catch {
     return defaults
   }
@@ -171,8 +184,18 @@ export const useSettingsStore = defineStore('settings', () => {
     storage?.setItem(SETTINGS_KEY, JSON.stringify(settings.value))
   }
 
+  /**
+   * Changes part of the settings. A value outside its bounds is brought inside
+   * them, and a value that cannot be read at all leaves the setting as it was.
+   */
   function update(patch: Partial<Settings>): void {
-    settings.value = { ...settings.value, ...patch }
+    settings.value = normaliseSettings({ ...settings.value, ...patch }, settings.value)
+    persist()
+  }
+
+  /** Puts every setting back to the value a new installation starts with. */
+  function reset(): void {
+    settings.value = defaultSettings()
     persist()
   }
 
@@ -210,6 +233,7 @@ export const useSettingsStore = defineStore('settings', () => {
     load,
     persist,
     update,
+    reset,
     toggleTheme,
     watchSystemTheme,
   }

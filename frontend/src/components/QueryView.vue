@@ -32,9 +32,12 @@
         </template>
       </v-tooltip>
 
+      <!-- Stop stands beside Run, so it carries a weight of its own. It is
+           quieter than Run, because Run is the button of the work. -->
       <v-btn
         v-if="state.running"
         color="error"
+        variant="tonal"
         size="small"
         prepend-icon="mdi-stop"
         text="Stop"
