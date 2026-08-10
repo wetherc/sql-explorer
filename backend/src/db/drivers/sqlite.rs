@@ -5,8 +5,8 @@
 //! closure takes for the length of one call.
 
 use crate::db::drivers::{
-    bytes_to_json, f64_to_json, number_out_of_range, number_value, rows_affected_message,
-    rows_returned_message, DatabaseDriver, NumberValue,
+    add_index_column, bytes_to_json, f64_to_json, number_out_of_range, number_value,
+    rows_affected_message, rows_returned_message, DatabaseDriver, NumberValue,
 };
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, ConstraintKind, CreateQuery, Database, DriverCapabilities,
@@ -318,33 +318,6 @@ const INDEX_QUERY: &str = "SELECT list.name, list.\"unique\", list.origin, info.
      FROM pragma_index_list(?1) AS list \
      LEFT JOIN pragma_index_info(list.name) AS info \
      ORDER BY list.name, info.seqno";
-
-/// Adds one column to the record of its index, and starts a record when the
-/// index is new. A row without a column name gives an index with no column,
-/// which SQLite reports for an index on an expression.
-fn add_index_column(
-    indexes: &mut Vec<IndexInfo>,
-    name: String,
-    unique: bool,
-    primary: bool,
-    column: Option<String>,
-) {
-    let entry = match indexes.iter_mut().find(|index| index.name == name) {
-        Some(entry) => entry,
-        None => {
-            indexes.push(IndexInfo {
-                name,
-                columns: Vec::new(),
-                unique,
-                primary,
-            });
-            indexes.last_mut().expect("the record was just added")
-        }
-    };
-    if let Some(column) = column {
-        entry.columns.push(column);
-    }
-}
 
 /// Builds the statement that reads the CREATE text of one object. SQLite
 /// keeps the text of every object in `sqlite_master`, so a table and a view

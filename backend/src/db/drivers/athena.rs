@@ -6,8 +6,8 @@
 
 use crate::db::drivers::{f64_to_json, rows_returned_message, CancelHandle, DatabaseDriver};
 use crate::db::{
-    AppColumn, ColumnInfo, CreateQuery, Database, DriverCapabilities, ExecOptions, QueryParams,
-    QueryResponse, QueryStats, ResultSet, Schema, Table, TableKind,
+    AppColumn, ColumnInfo, CreateQuery, Database, DriverCapabilities, ExecOptions, Partition,
+    QueryParams, QueryResponse, QueryStats, ResultSet, Schema, Table, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
@@ -59,6 +59,13 @@ fn create_query_text(database: Option<&str>, table: &str, kind: TableKind) -> Cr
         TableKind::View => "VIEW",
     };
     CreateQuery::new(format!("SHOW CREATE {word} {name}"), 0)
+}
+
+/// True when the service refused `SHOW PARTITIONS` because the relation
+/// holds no partition. Such an answer is not a fault of the connection.
+fn names_an_unpartitioned_table(error: &Error) -> bool {
+    let text = error.to_string().to_lowercase();
+    text.contains("not partitioned") || text.contains("is not a partitioned table")
 }
 
 /// True when the answer of the service could not be read. A catalog of Glue
@@ -477,7 +484,7 @@ impl DatabaseDriver for AthenaDriver {
             supports_routines: false,
             supports_indexes: false,
             supports_constraints: false,
-            supports_partitions: false,
+            supports_partitions: true,
         }
     }
 
@@ -637,6 +644,27 @@ impl DatabaseDriver for AthenaDriver {
         Ok(columns)
     }
 
+    /// Reads the partitions with `SHOW PARTITIONS`. A relation that holds no
+    /// partition, and a view, make the service refuse the statement, and the
+    /// answer is then an empty list and not a fault of the connection.
+    async fn list_partitions(
+        &mut self,
+        database: &str,
+        _schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<Partition>> {
+        let name = Dialect::Athena.qualified_name(Some(database), None, table);
+        match self.catalog_rows(&format!("SHOW PARTITIONS {name}")).await {
+            Ok(rows) => Ok(rows
+                .iter()
+                .filter_map(|row| cell_text(row, 0))
+                .map(|values| Partition { values })
+                .collect()),
+            Err(error) if names_an_unpartitioned_table(&error) => Ok(Vec::new()),
+            Err(error) => Err(error),
+        }
+    }
+
     fn cancel_handle(&self) -> Option<Arc<dyn CancelHandle>> {
         Some(Arc::new(AthenaCancel {
             client: self.client.clone(),
@@ -749,6 +777,16 @@ pub fn typed_value(text: &str, type_name: &str) -> JsonValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_relation_without_partitions_is_recognised() {
+        assert!(names_an_unpartitioned_table(&Error::Athena(
+            "SYNTAX_ERROR: Table orders is not partitioned".to_string()
+        )));
+        assert!(!names_an_unpartitioned_table(&Error::Athena(
+            "The workgroup was not found".to_string()
+        )));
+    }
 
     #[test]
     fn the_create_statement_names_the_kind_of_the_object() {

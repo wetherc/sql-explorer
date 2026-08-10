@@ -6,12 +6,13 @@
 //! loses any password that holds a semicolon or a brace.
 
 use crate::db::drivers::{
-    bytes_to_json, f64_to_json, number_out_of_range, number_value, parameter_type_refused,
-    rows_affected_message, rows_returned_message, DatabaseDriver, NumberValue,
+    add_constraint_column, add_index_column, bytes_to_json, constraint_kind, f64_to_json,
+    number_out_of_range, number_value, parameter_type_refused, routine_kind, rows_affected_message,
+    rows_returned_message, DatabaseDriver, NumberValue,
 };
 use crate::db::{
-    AppColumn, ColumnInfo, CreateQuery, Database, DriverCapabilities, ExecOptions, QueryParams,
-    QueryResponse, ResultSet, Schema, Table, TableKind,
+    AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
+    IndexInfo, QueryParams, QueryResponse, ResultSet, Routine, Schema, Table, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
@@ -385,9 +386,9 @@ impl DatabaseDriver for MssqlDriver {
             supports_multiple_databases: true,
             supports_cancel: true,
             supports_transactions: true,
-            supports_routines: false,
-            supports_indexes: false,
-            supports_constraints: false,
+            supports_routines: true,
+            supports_indexes: true,
+            supports_constraints: true,
             supports_partitions: false,
         }
     }
@@ -609,6 +610,126 @@ impl DatabaseDriver for MssqlDriver {
         }
         Ok(columns)
     }
+
+    async fn list_routines(
+        &mut self,
+        database: &str,
+        schema: Option<&str>,
+    ) -> Result<Vec<Routine>> {
+        let schema = schema.unwrap_or("dbo");
+        let query = routine_query(&Dialect::MsSql.quote_identifier(database));
+        let mut stream = self.client.query(query, &[&schema]).await?;
+        let mut routines = Vec::new();
+        while let Some(item) = stream.try_next().await? {
+            if let QueryItem::Row(row) = item {
+                routines.push(Routine {
+                    name: row.try_get::<&str, _>(0)?.unwrap_or_default().to_string(),
+                    kind: routine_kind(row.try_get::<&str, _>(1)?.unwrap_or_default()),
+                });
+            }
+        }
+        Ok(routines)
+    }
+
+    async fn list_indexes(
+        &mut self,
+        database: &str,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<IndexInfo>> {
+        let name =
+            Dialect::MsSql.qualified_name(Some(database), Some(schema.unwrap_or("dbo")), table);
+        let query = index_query(&Dialect::MsSql.quote_identifier(database));
+        let mut stream = self.client.query(query, &[&name.as_str()]).await?;
+        let mut indexes = Vec::new();
+        while let Some(item) = stream.try_next().await? {
+            if let QueryItem::Row(row) = item {
+                add_index_column(
+                    &mut indexes,
+                    row.try_get::<&str, _>(0)?.unwrap_or_default().to_string(),
+                    row.try_get::<bool, _>(2)?.unwrap_or(false),
+                    row.try_get::<bool, _>(3)?.unwrap_or(false),
+                    row.try_get::<&str, _>(1)?.map(str::to_string),
+                );
+            }
+        }
+        Ok(indexes)
+    }
+
+    async fn list_constraints(
+        &mut self,
+        database: &str,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<Constraint>> {
+        let schema = schema.unwrap_or("dbo");
+        let query = constraint_query(&Dialect::MsSql.quote_identifier(database));
+        let mut stream = self.client.query(query, &[&schema, &table]).await?;
+        let mut constraints = Vec::new();
+        while let Some(item) = stream.try_next().await? {
+            if let QueryItem::Row(row) = item {
+                let target = row.try_get::<&str, _>(3)?.map(str::to_string);
+                let check = row.try_get::<&str, _>(4)?.map(str::to_string);
+                add_constraint_column(
+                    &mut constraints,
+                    row.try_get::<&str, _>(0)?.unwrap_or_default().to_string(),
+                    constraint_kind(row.try_get::<&str, _>(1)?.unwrap_or_default()),
+                    row.try_get::<&str, _>(2)?.map(str::to_string),
+                    target.or(check),
+                );
+            }
+        }
+        Ok(constraints)
+    }
+}
+
+/// Reads the procedures and the functions of one schema. The name of the
+/// database is quoted into the statement, because a name of a database cannot
+/// be bound as a parameter.
+fn routine_query(catalog: &str) -> String {
+    format!(
+        "SELECT ROUTINE_NAME, ROUTINE_TYPE \
+         FROM {catalog}.INFORMATION_SCHEMA.ROUTINES \
+         WHERE ROUTINE_SCHEMA = @P1 \
+         ORDER BY ROUTINE_TYPE, ROUTINE_NAME"
+    )
+}
+
+/// Reads one column of one index for each row. The name of the relation
+/// reaches `OBJECT_ID` as a parameter.
+fn index_query(catalog: &str) -> String {
+    format!(
+        "SELECT i.name, c.name, i.is_unique, i.is_primary_key \
+         FROM {catalog}.sys.indexes AS i \
+         JOIN {catalog}.sys.index_columns AS ic \
+           ON ic.object_id = i.object_id AND ic.index_id = i.index_id \
+         JOIN {catalog}.sys.columns AS c \
+           ON c.object_id = ic.object_id AND c.column_id = ic.column_id \
+         WHERE i.object_id = OBJECT_ID(@P1) AND i.name IS NOT NULL \
+         ORDER BY i.name, ic.key_ordinal"
+    )
+}
+
+/// Reads one column of one constraint for each row. A foreign key carries the
+/// relation it points at, and a check carries its rule.
+fn constraint_query(catalog: &str) -> String {
+    format!(
+        "SELECT tc.CONSTRAINT_NAME, \
+                tc.CONSTRAINT_TYPE, \
+                ku.COLUMN_NAME, \
+                OBJECT_NAME(fk.referenced_object_id), \
+                cc.CHECK_CLAUSE \
+         FROM {catalog}.INFORMATION_SCHEMA.TABLE_CONSTRAINTS AS tc \
+         LEFT JOIN {catalog}.INFORMATION_SCHEMA.KEY_COLUMN_USAGE AS ku \
+                ON ku.CONSTRAINT_NAME = tc.CONSTRAINT_NAME \
+               AND ku.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA \
+         LEFT JOIN {catalog}.INFORMATION_SCHEMA.CHECK_CONSTRAINTS AS cc \
+                ON cc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME \
+               AND cc.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA \
+         LEFT JOIN {catalog}.sys.foreign_keys AS fk ON fk.name = tc.CONSTRAINT_NAME \
+         WHERE tc.TABLE_SCHEMA = @P1 AND tc.TABLE_NAME = @P2 \
+         ORDER BY tc.CONSTRAINT_NAME, ku.ORDINAL_POSITION"
+    )
 }
 
 /// Joins the base type with the length or the precision, so that the
@@ -792,6 +913,23 @@ fn read<T>(result: tiberius::Result<Option<T>>) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_catalog_statements_name_the_database_of_the_connection() {
+        let routines = routine_query("[Sales]");
+        assert!(routines.contains("FROM [Sales].INFORMATION_SCHEMA.ROUTINES"));
+        assert!(routines.contains("WHERE ROUTINE_SCHEMA = @P1"));
+
+        let indexes = index_query("[Sales]");
+        assert!(indexes.contains("FROM [Sales].sys.indexes AS i"));
+        assert!(indexes.contains("OBJECT_ID(@P1)"));
+        assert!(indexes.contains("ORDER BY i.name, ic.key_ordinal"));
+
+        let constraints = constraint_query("[Sales]");
+        assert!(constraints.contains("FROM [Sales].INFORMATION_SCHEMA.TABLE_CONSTRAINTS AS tc"));
+        assert!(constraints.contains("cc.CHECK_CLAUSE"));
+        assert!(constraints.contains("WHERE tc.TABLE_SCHEMA = @P1 AND tc.TABLE_NAME = @P2"));
+    }
 
     #[test]
     fn the_create_statement_covers_a_view_alone() {

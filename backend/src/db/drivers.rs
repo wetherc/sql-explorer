@@ -8,8 +8,9 @@ pub mod postgres;
 pub mod sqlite;
 
 use crate::db::{
-    AppColumn, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions, IndexInfo,
-    Partition, QueryParams, QueryResponse, Routine, Schema, Table, TableKind,
+    AppColumn, Constraint, ConstraintKind, CreateQuery, Database, DriverCapabilities, ExecOptions,
+    IndexInfo, Partition, QueryParams, QueryResponse, Routine, RoutineKind, Schema, Table,
+    TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::Dialect;
@@ -177,6 +178,89 @@ pub fn f64_to_json(value: f64) -> JsonValue {
     }
 }
 
+/// Adds one column to the record of its index, and starts a record when the
+/// index is new. Every engine reports one column of one index in each row of
+/// the answer, so every driver folds the rows this way.
+///
+/// A row without a column name gives an index with no column, which an
+/// engine reports for an index on an expression.
+pub fn add_index_column(
+    indexes: &mut Vec<IndexInfo>,
+    name: String,
+    unique: bool,
+    primary: bool,
+    column: Option<String>,
+) {
+    let entry = match indexes.iter_mut().find(|index| index.name == name) {
+        Some(entry) => entry,
+        None => {
+            indexes.push(IndexInfo {
+                name,
+                columns: Vec::new(),
+                unique,
+                primary,
+            });
+            indexes.last_mut().expect("the record was just added")
+        }
+    };
+    if let Some(column) = column {
+        entry.columns.push(column);
+    }
+}
+
+/// Adds one column to the record of its constraint, and starts a record when
+/// the constraint is new. A check constraint covers no column, so a row
+/// without a column name still gives a record.
+pub fn add_constraint_column(
+    constraints: &mut Vec<Constraint>,
+    name: String,
+    kind: ConstraintKind,
+    column: Option<String>,
+    detail: Option<String>,
+) {
+    let entry = match constraints
+        .iter_mut()
+        .find(|constraint| constraint.name == name)
+    {
+        Some(entry) => entry,
+        None => {
+            constraints.push(Constraint {
+                name,
+                kind,
+                columns: Vec::new(),
+                detail,
+            });
+            constraints.last_mut().expect("the record was just added")
+        }
+    };
+    if let Some(column) = column {
+        entry.columns.push(column);
+    }
+}
+
+/// Reads the kind of a constraint from the word the engine reports. The
+/// engines answer with the words of `INFORMATION_SCHEMA` or with the one
+/// letter of PostgreSQL.
+pub fn constraint_kind(word: &str) -> ConstraintKind {
+    match word.trim().to_uppercase().as_str() {
+        "PRIMARY KEY" | "P" => ConstraintKind::PrimaryKey,
+        "FOREIGN KEY" | "F" => ConstraintKind::ForeignKey,
+        "UNIQUE" | "U" => ConstraintKind::Unique,
+        _ => ConstraintKind::Check,
+    }
+}
+
+/// Reads the kind of a routine from the word the engine reports. A word that
+/// is not `PROCEDURE` names a function, because an engine has other kinds of
+/// function and no other kind of procedure.
+pub fn routine_kind(word: &str) -> RoutineKind {
+    if word.trim().eq_ignore_ascii_case("PROCEDURE") {
+        RoutineKind::Procedure
+    } else {
+        RoutineKind::Function
+    }
+}
+
 /// Adds a message that reports how many rows a statement changed.
 pub fn rows_affected_message(count: u64) -> String {
     if count == 1 {
@@ -199,6 +283,76 @@ pub fn rows_returned_message(count: usize, truncated: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_rows_of_an_index_fold_into_one_record() {
+        let mut indexes: Vec<IndexInfo> = Vec::new();
+        add_index_column(
+            &mut indexes,
+            "by_name".into(),
+            true,
+            false,
+            Some("a".into()),
+        );
+        add_index_column(
+            &mut indexes,
+            "by_name".into(),
+            true,
+            false,
+            Some("b".into()),
+        );
+        add_index_column(&mut indexes, "on_lower".into(), false, false, None);
+        assert_eq!(indexes.len(), 2);
+        assert_eq!(indexes[0].columns, vec!["a".to_string(), "b".to_string()]);
+        assert!(indexes[0].unique);
+        assert!(indexes[1].columns.is_empty());
+    }
+
+    #[test]
+    fn the_rows_of_a_constraint_fold_into_one_record() {
+        let mut constraints: Vec<Constraint> = Vec::new();
+        add_constraint_column(
+            &mut constraints,
+            "pk_orders".into(),
+            ConstraintKind::PrimaryKey,
+            Some("id".into()),
+            None,
+        );
+        add_constraint_column(
+            &mut constraints,
+            "pk_orders".into(),
+            ConstraintKind::PrimaryKey,
+            Some("region".into()),
+            None,
+        );
+        add_constraint_column(
+            &mut constraints,
+            "total_positive".into(),
+            ConstraintKind::Check,
+            None,
+            Some("total > 0".into()),
+        );
+        assert_eq!(constraints.len(), 2);
+        assert_eq!(
+            constraints[0].columns,
+            vec!["id".to_string(), "region".to_string()]
+        );
+        assert!(constraints[1].columns.is_empty());
+        assert_eq!(constraints[1].detail.as_deref(), Some("total > 0"));
+    }
+
+    #[test]
+    fn the_word_of_the_engine_names_the_kind() {
+        assert_eq!(constraint_kind("PRIMARY KEY"), ConstraintKind::PrimaryKey);
+        assert_eq!(constraint_kind("p"), ConstraintKind::PrimaryKey);
+        assert_eq!(constraint_kind("FOREIGN KEY"), ConstraintKind::ForeignKey);
+        assert_eq!(constraint_kind("f"), ConstraintKind::ForeignKey);
+        assert_eq!(constraint_kind("UNIQUE"), ConstraintKind::Unique);
+        assert_eq!(constraint_kind("u"), ConstraintKind::Unique);
+        assert_eq!(constraint_kind("c"), ConstraintKind::Check);
+        assert_eq!(routine_kind("PROCEDURE"), RoutineKind::Procedure);
+        assert_eq!(routine_kind("FUNCTION"), RoutineKind::Function);
+    }
 
     #[test]
     fn a_whole_number_binds_as_an_integer() {

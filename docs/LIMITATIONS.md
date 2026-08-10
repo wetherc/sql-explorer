@@ -81,6 +81,22 @@ The driver reads the catalog with statements against `information_schema` for
 the rest of the session once it meets that answer. Such a statement scans no
 data in storage, so it adds no cost, but it is slower than the API call.
 
+## The catalog statements of four engines have no test against a server
+
+The lists of the routines, the indexes and the constraints are read with a
+statement against the catalog of the engine. Only SQLite runs against a real
+database in the unit tests. For MS SQL Server, MySQL, PostgreSQL and Athena
+the tests check the text of the statement alone, so a statement that the
+engine refuses shows itself the first time a user opens the folder.
+
+## The partitions of Athena come from a statement
+
+Athena keeps the partitions in the catalog of Glue, and the driver reads them
+with `SHOW PARTITIONS`. The service refuses that statement for a relation
+that holds no partition and for a view, and the driver answers with an empty
+list when the refusal names that cause. Another refusal reaches the user as
+an error.
+
 ## Athena takes no bound parameters
 
 The driver refuses a statement that carries a parameter, because the client

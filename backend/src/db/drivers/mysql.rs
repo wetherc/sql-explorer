@@ -1,12 +1,13 @@
 //! The MySQL and MariaDB driver.
 
 use crate::db::drivers::{
-    bytes_to_json, f64_to_json, number_out_of_range, number_value, parameter_type_refused,
-    rows_affected_message, rows_returned_message, CancelHandle, DatabaseDriver, NumberValue,
+    add_constraint_column, add_index_column, bytes_to_json, constraint_kind, f64_to_json,
+    number_out_of_range, number_value, parameter_type_refused, routine_kind, rows_affected_message,
+    rows_returned_message, CancelHandle, DatabaseDriver, NumberValue,
 };
 use crate::db::{
-    AppColumn, ColumnInfo, CreateQuery, Database, DriverCapabilities, ExecOptions, QueryParams,
-    QueryResponse, ResultSet, Schema, Table, TableKind,
+    AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
+    IndexInfo, QueryParams, QueryResponse, ResultSet, Routine, Schema, Table, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
@@ -206,9 +207,9 @@ impl DatabaseDriver for MysqlDriver {
             supports_multiple_databases: true,
             supports_cancel: true,
             supports_transactions: true,
-            supports_routines: false,
-            supports_indexes: false,
-            supports_constraints: false,
+            supports_routines: true,
+            supports_indexes: true,
+            supports_constraints: true,
             supports_partitions: false,
         }
     }
@@ -321,6 +322,100 @@ impl DatabaseDriver for MysqlDriver {
                 is_primary_key: key.eq_ignore_ascii_case("PRI"),
             })
             .collect())
+    }
+
+    async fn list_routines(
+        &mut self,
+        database: &str,
+        _schema: Option<&str>,
+    ) -> Result<Vec<Routine>> {
+        let rows: Vec<(String, String)> = self
+            .conn()?
+            .exec(
+                "SELECT ROUTINE_NAME, ROUTINE_TYPE FROM information_schema.ROUTINES \
+                 WHERE ROUTINE_SCHEMA = ? ORDER BY ROUTINE_TYPE, ROUTINE_NAME",
+                (database,),
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(name, kind)| Routine {
+                name,
+                kind: routine_kind(&kind),
+            })
+            .collect())
+    }
+
+    /// Reads the indexes from `STATISTICS`, which holds one column of one
+    /// index in each row. MySQL names the index of the primary key `PRIMARY`.
+    async fn list_indexes(
+        &mut self,
+        database: &str,
+        _schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<IndexInfo>> {
+        let rows: Vec<(String, Option<String>, i64)> = self
+            .conn()?
+            .exec(
+                "SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE FROM information_schema.STATISTICS \
+                 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
+                 ORDER BY INDEX_NAME, SEQ_IN_INDEX",
+                (database, table),
+            )
+            .await?;
+        let mut indexes = Vec::new();
+        for (name, column, not_unique) in rows {
+            let primary = name == "PRIMARY";
+            add_index_column(&mut indexes, name, not_unique == 0, primary, column);
+        }
+        Ok(indexes)
+    }
+
+    async fn list_constraints(
+        &mut self,
+        database: &str,
+        _schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<Constraint>> {
+        let rows: Vec<(
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )> = self
+            .conn()?
+            .exec(
+                "SELECT tc.CONSTRAINT_NAME, \
+                        tc.CONSTRAINT_TYPE, \
+                        ku.COLUMN_NAME, \
+                        ku.REFERENCED_TABLE_NAME, \
+                        ku.REFERENCED_COLUMN_NAME \
+                 FROM information_schema.TABLE_CONSTRAINTS AS tc \
+                 LEFT JOIN information_schema.KEY_COLUMN_USAGE AS ku \
+                        ON ku.CONSTRAINT_NAME = tc.CONSTRAINT_NAME \
+                       AND ku.TABLE_SCHEMA = tc.TABLE_SCHEMA \
+                       AND ku.TABLE_NAME = tc.TABLE_NAME \
+                 WHERE tc.TABLE_SCHEMA = ? AND tc.TABLE_NAME = ? \
+                 ORDER BY tc.CONSTRAINT_NAME, ku.ORDINAL_POSITION",
+                (database, table),
+            )
+            .await?;
+        let mut constraints = Vec::new();
+        for (name, kind, column, target, target_column) in rows {
+            let detail = target.map(|target| match target_column {
+                Some(column) => format!("{target}({column})"),
+                None => target,
+            });
+            add_constraint_column(
+                &mut constraints,
+                name,
+                constraint_kind(&kind),
+                column,
+                detail,
+            );
+        }
+        Ok(constraints)
     }
 
     fn cancel_handle(&self) -> Option<Arc<dyn CancelHandle>> {

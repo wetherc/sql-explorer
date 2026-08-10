@@ -6,12 +6,13 @@
 //! type mapping can fail.
 
 use crate::db::drivers::{
-    bytes_to_json, f64_to_json, number_out_of_range, number_value, rows_affected_message,
-    rows_returned_message, CancelHandle, DatabaseDriver, NumberValue,
+    add_constraint_column, add_index_column, bytes_to_json, constraint_kind, f64_to_json,
+    number_out_of_range, number_value, routine_kind, rows_affected_message, rows_returned_message,
+    CancelHandle, DatabaseDriver, NumberValue,
 };
 use crate::db::{
-    AppColumn, ColumnInfo, CreateQuery, Database, DriverCapabilities, ExecOptions, QueryParams,
-    QueryResponse, ResultSet, Schema, Table, TableKind,
+    AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
+    IndexInfo, QueryParams, QueryResponse, ResultSet, Routine, Schema, Table, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::Dialect;
@@ -232,9 +233,9 @@ impl DatabaseDriver for PostgresDriver {
             supports_multiple_databases: false,
             supports_cancel: true,
             supports_transactions: true,
-            supports_routines: false,
-            supports_indexes: false,
-            supports_constraints: false,
+            supports_routines: true,
+            supports_indexes: true,
+            supports_constraints: true,
             supports_partitions: false,
         }
     }
@@ -367,6 +368,100 @@ impl DatabaseDriver for PostgresDriver {
                 is_primary_key: row.get(3),
             })
             .collect())
+    }
+
+    async fn list_routines(
+        &mut self,
+        _database: &str,
+        schema: Option<&str>,
+    ) -> Result<Vec<Routine>> {
+        let schema = schema.unwrap_or("public");
+        let rows = self
+            .client
+            .query(
+                "SELECT routine_name, routine_type FROM information_schema.routines \
+                 WHERE specific_schema = $1 ORDER BY routine_type, routine_name",
+                &[&schema],
+            )
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|row| Routine {
+                name: row.get(0),
+                kind: routine_kind(row.get(1)),
+            })
+            .collect())
+    }
+
+    /// Reads the indexes from the catalog. The list of columns of an index is
+    /// an array, so the array is opened with its order kept, which gives one
+    /// column of one index in each row.
+    async fn list_indexes(
+        &mut self,
+        _database: &str,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<IndexInfo>> {
+        let schema = schema.unwrap_or("public");
+        let rows = self
+            .client
+            .query(
+                "SELECT i.relname, idx.indisunique, idx.indisprimary, a.attname \
+                 FROM pg_catalog.pg_index AS idx \
+                 JOIN pg_catalog.pg_class AS i ON i.oid = idx.indexrelid \
+                 JOIN pg_catalog.pg_class AS t ON t.oid = idx.indrelid \
+                 JOIN pg_catalog.pg_namespace AS n ON n.oid = t.relnamespace \
+                 JOIN LATERAL unnest(idx.indkey) WITH ORDINALITY AS k(attnum, ord) ON true \
+                 LEFT JOIN pg_catalog.pg_attribute AS a \
+                        ON a.attrelid = t.oid AND a.attnum = k.attnum \
+                 WHERE n.nspname = $1 AND t.relname = $2 \
+                 ORDER BY i.relname, k.ord",
+                &[&schema, &table],
+            )
+            .await?;
+        let mut indexes = Vec::new();
+        for row in &rows {
+            add_index_column(&mut indexes, row.get(0), row.get(1), row.get(2), row.get(3));
+        }
+        Ok(indexes)
+    }
+
+    async fn list_constraints(
+        &mut self,
+        _database: &str,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<Constraint>> {
+        let schema = schema.unwrap_or("public");
+        let rows = self
+            .client
+            .query(
+                "SELECT c.conname, \
+                        c.contype::text, \
+                        a.attname, \
+                        pg_catalog.pg_get_constraintdef(c.oid) \
+                 FROM pg_catalog.pg_constraint AS c \
+                 JOIN pg_catalog.pg_class AS t ON t.oid = c.conrelid \
+                 JOIN pg_catalog.pg_namespace AS n ON n.oid = t.relnamespace \
+                 LEFT JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) ON true \
+                 LEFT JOIN pg_catalog.pg_attribute AS a \
+                        ON a.attrelid = t.oid AND a.attnum = k.attnum \
+                 WHERE n.nspname = $1 AND t.relname = $2 \
+                 ORDER BY c.conname, k.ord",
+                &[&schema, &table],
+            )
+            .await?;
+        let mut constraints = Vec::new();
+        for row in &rows {
+            add_constraint_column(
+                &mut constraints,
+                row.get(0),
+                constraint_kind(row.get(1)),
+                row.get(2),
+                row.get(3),
+            );
+        }
+        Ok(constraints)
     }
 
     fn cancel_handle(&self) -> Option<Arc<dyn CancelHandle>> {
