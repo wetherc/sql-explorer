@@ -967,14 +967,14 @@ pub async fn export_query<R: Runtime>(
         query_params,
     } = request;
 
-    if !crate::sql::only_reads(&query) {
+    let open = ensure_healthy(&app, &state, &connection_id).await?;
+    if !crate::sql::only_reads(&query, open.dialect) {
         return Err(Error::Unsupported(
             "An export to a file runs the statement again, so it accepts a statement that only reads."
                 .to_string(),
         ));
     }
 
-    let open = ensure_healthy(&app, &state, &connection_id).await?;
     let options = ExecOptions {
         max_rows,
         timeout_secs: open.descriptor.exec_options().timeout_secs,
@@ -1057,9 +1057,15 @@ fn write_result_file(
 }
 
 /// Writes one field of a comma separated file.
+///
+/// A text value that starts with a formula mark gets an apostrophe in front,
+/// because a spreadsheet would otherwise run the value as a formula. The
+/// apostrophe changes the exported text, and the safety of the reader weighs
+/// more than the exact form of such a value.
 fn csv_field(value: &serde_json::Value) -> String {
     let text = match value {
         serde_json::Value::Null => return String::new(),
+        serde_json::Value::String(text) if starts_a_formula(text) => format!("'{text}"),
         serde_json::Value::String(text) => text.clone(),
         other => other.to_string(),
     };
@@ -1068,6 +1074,14 @@ fn csv_field(value: &serde_json::Value) -> String {
     } else {
         text
     }
+}
+
+/// True when a spreadsheet would read the text as a formula.
+fn starts_a_formula(text: &str) -> bool {
+    matches!(
+        text.chars().next(),
+        Some('=') | Some('+') | Some('-') | Some('@') | Some('\t')
+    )
 }
 
 // --- Files ---
@@ -1427,8 +1441,23 @@ mod tests {
 
     #[tokio::test]
     async fn an_export_refuses_a_statement_that_changes_data() {
-        // The refusal happens before any connection is needed.
-        assert!(!crate::sql::only_reads("DELETE FROM t"));
-        assert!(crate::sql::only_reads("  /* note */ SELECT 1"));
+        assert!(!crate::sql::only_reads("DELETE FROM t", Dialect::Postgres));
+        assert!(crate::sql::only_reads(
+            "  /* note */ SELECT 1",
+            Dialect::Postgres
+        ));
+    }
+
+    #[test]
+    fn a_field_that_starts_a_formula_gets_an_apostrophe() {
+        use serde_json::json;
+        assert_eq!(csv_field(&json!("=SUM(A1:A9)")), "'=SUM(A1:A9)");
+        assert_eq!(csv_field(&json!("+1")), "'+1");
+        assert_eq!(csv_field(&json!("-cmd")), "'-cmd");
+        assert_eq!(csv_field(&json!("@name")), "'@name");
+        // A number keeps its sign, because a spreadsheet reads it as a
+        // number and not as a formula.
+        assert_eq!(csv_field(&json!(-5)), "-5");
+        assert_eq!(csv_field(&json!("a=b")), "a=b");
     }
 }

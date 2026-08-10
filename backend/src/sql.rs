@@ -159,13 +159,103 @@ pub fn leading_keyword(statement: &str) -> String {
     word
 }
 
-/// True when a statement only reads. The export to a file runs the statement
-/// a second time, so it must refuse a statement that changes data.
-pub fn only_reads(statement: &str) -> bool {
-    matches!(
-        leading_keyword(statement).as_str(),
-        "select" | "with" | "show"
-    )
+/// The words that change data. A statement that carries one of these words
+/// outside a quoted region or a comment is refused for an export, because a
+/// common table expression can hold an INSERT, an UPDATE or a DELETE behind
+/// a leading WITH, and a SELECT can write through an INTO clause.
+const WRITE_WORDS: [&str; 15] = [
+    "insert", "update", "delete", "merge", "create", "drop", "alter", "truncate", "grant",
+    "revoke", "deny", "exec", "execute", "call", "into",
+];
+
+/// True when a script only reads. The export to a file runs the script a
+/// second time, so it must refuse a script that changes data.
+///
+/// Each statement must start with a reading keyword, and no statement may
+/// hold a writing word outside a quoted region or a comment. The check reads
+/// the text alone, so a function of the server that writes can still pass.
+pub fn only_reads(script: &str, dialect: Dialect) -> bool {
+    let statements = split_statements(script, dialect);
+    if statements.is_empty() {
+        return false;
+    }
+    statements.iter().all(|statement| {
+        matches!(
+            leading_keyword(statement).as_str(),
+            "select" | "with" | "show"
+        ) && !holds_a_write_word(statement, dialect)
+    })
+}
+
+/// True when the statement holds a writing word outside a quoted region or
+/// a comment.
+fn holds_a_write_word(statement: &str, dialect: Dialect) -> bool {
+    let mut found = false;
+    scan_words(statement, dialect, |word| {
+        if WRITE_WORDS.contains(&word) {
+            found = true;
+        }
+    });
+    found
+}
+
+/// Walks a statement and gives each bare word to `visit`, in small letters.
+/// A word inside a quoted region or a comment is text and is not given.
+fn scan_words(sql: &str, dialect: Dialect, mut visit: impl FnMut(&str)) {
+    let chars: Vec<char> = sql.chars().collect();
+    let mut skipped = String::new();
+    let mut index = 0usize;
+
+    while index < chars.len() {
+        let c = chars[index];
+        // The copy helpers write the region they step over into a buffer.
+        // The words do not need that text, so the buffer is emptied here.
+        skipped.clear();
+
+        if c == '-' && chars.get(index + 1) == Some(&'-') {
+            index = copy_to_end_of_line(&chars, index, &mut skipped);
+            continue;
+        }
+        if dialect.hash_comments() && c == '#' {
+            index = copy_to_end_of_line(&chars, index, &mut skipped);
+            continue;
+        }
+        if c == '/' && chars.get(index + 1) == Some(&'*') {
+            index =
+                copy_block_comment(&chars, index, &mut skipped, dialect.nested_block_comments());
+            continue;
+        }
+        if c == '\'' || c == '"' {
+            index = copy_quoted(&chars, index, c, dialect.backslash_escapes(), &mut skipped);
+            continue;
+        }
+        if c == '`' && dialect == Dialect::MySql {
+            index = copy_quoted(&chars, index, '`', false, &mut skipped);
+            continue;
+        }
+        if c == '[' && dialect.bracket_quotes() {
+            index = copy_bracket(&chars, index, &mut skipped);
+            continue;
+        }
+        if c == '$' && dialect.dollar_quotes() {
+            if let Some(next) = copy_dollar_quoted(&chars, index, &mut skipped) {
+                index = next;
+                continue;
+            }
+        }
+
+        if c.is_alphanumeric() || c == '_' {
+            let mut word = String::new();
+            while index < chars.len() && (chars[index].is_alphanumeric() || chars[index] == '_') {
+                word.push(chars[index].to_ascii_lowercase());
+                index += 1;
+            }
+            visit(&word);
+            continue;
+        }
+
+        index += 1;
+    }
 }
 
 /// Splits a script into single statements. The splitter keeps a semicolon
@@ -1025,10 +1115,56 @@ mod tests {
 
     #[test]
     fn only_a_statement_that_reads_may_be_exported() {
-        assert!(only_reads("SELECT * FROM t"));
-        assert!(only_reads("with x as (select 1) select * from x"));
-        assert!(only_reads("SHOW TABLES"));
-        assert!(!only_reads("DELETE FROM t"));
-        assert!(!only_reads("EXEC do_work"));
+        assert!(only_reads("SELECT * FROM t", Dialect::Postgres));
+        assert!(only_reads(
+            "with x as (select 1) select * from x",
+            Dialect::Postgres
+        ));
+        assert!(only_reads("SHOW TABLES", Dialect::MySql));
+        assert!(!only_reads("DELETE FROM t", Dialect::Postgres));
+        assert!(!only_reads("EXEC do_work", Dialect::MsSql));
+        assert!(!only_reads("   ", Dialect::Postgres));
+    }
+
+    #[test]
+    fn a_writing_word_behind_a_reading_keyword_is_refused() {
+        // PostgreSQL runs data changes inside a common table expression.
+        assert!(!only_reads(
+            "WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d",
+            Dialect::Postgres
+        ));
+        // MS SQL Server puts data changes after the WITH clause.
+        assert!(!only_reads(
+            "WITH x AS (SELECT 1 AS a) UPDATE t SET a = 1",
+            Dialect::MsSql
+        ));
+        assert!(!only_reads(
+            "WITH x AS (SELECT 1 AS a) MERGE INTO t USING x ON 1 = 1",
+            Dialect::MsSql
+        ));
+        // SELECT INTO writes a new relation.
+        assert!(!only_reads("SELECT * INTO t2 FROM t", Dialect::MsSql));
+        // A script refuses when one of its statements writes.
+        assert!(!only_reads("SELECT 1; DELETE FROM t", Dialect::Postgres));
+    }
+
+    #[test]
+    fn a_writing_word_inside_text_or_a_comment_still_reads() {
+        assert!(only_reads(
+            "SELECT * FROM t WHERE action = 'delete'",
+            Dialect::Postgres
+        ));
+        assert!(only_reads("SELECT \"delete\" FROM t", Dialect::Postgres));
+        assert!(only_reads("SELECT [delete] FROM t", Dialect::MsSql));
+        assert!(only_reads("SELECT `delete` FROM t", Dialect::MySql));
+        assert!(only_reads("SELECT 1 -- delete\n", Dialect::Postgres));
+        assert!(only_reads("SELECT 1 # delete\n", Dialect::MySql));
+        assert!(only_reads("SELECT /* delete */ 1", Dialect::Postgres));
+        assert!(only_reads("SELECT $tag$ delete $tag$", Dialect::Postgres));
+        // A longer word that contains a writing word is its own word.
+        assert!(only_reads(
+            "SELECT created_at, updates, deleted FROM t",
+            Dialect::Postgres
+        ));
     }
 }
