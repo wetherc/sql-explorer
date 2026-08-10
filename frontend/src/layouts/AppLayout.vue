@@ -443,15 +443,31 @@ watch(
   (name) => theme.change(name),
 )
 
-// The open tabs are written back whenever they change, so a restart finds
-// the same workspace.
+// The open tabs are written back when they change, so a restart finds the
+// same workspace. The write waits for a short pause, because a keystroke in
+// the editor changes the tabs and one write for each keystroke would put a
+// file write behind every letter.
+const PERSIST_DELAY_MS = 250
+let persistTimer: ReturnType<typeof setTimeout> | null = null
 watch(
-  () => tabs.snapshot(),
+  () => JSON.stringify(tabs.snapshot()),
   () => {
-    void tabs.persist()
+    if (persistTimer !== null) {
+      clearTimeout(persistTimer)
+    }
+    persistTimer = setTimeout(() => {
+      persistTimer = null
+      void tabs.persist()
+    }, PERSIST_DELAY_MS)
   },
-  { deep: true },
 )
+onBeforeUnmount(() => {
+  if (persistTimer !== null) {
+    clearTimeout(persistTimer)
+    persistTimer = null
+    void tabs.persist()
+  }
+})
 </script>
 
 <style scoped>

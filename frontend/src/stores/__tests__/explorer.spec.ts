@@ -245,6 +245,20 @@ describe('explorer store', () => {
     expect(explorer.loading).toBe(false)
   })
 
+  it('expands the node of the tree itself when the filter hands out a copy', async () => {
+    apiStub.listDatabases.mockResolvedValue([{ name: 'Sales' }])
+    const explorer = await readyStore()
+    const root = explorer.addRoot('c1')
+
+    // The filter builds copies of the nodes, as the view sees them.
+    explorer.filter = 'c1'
+    const copy = { ...root, children: [] }
+    await explorer.expand(copy)
+
+    expect(root.children?.map((child) => child.label)).toEqual(['Sales'])
+    expect(root.loaded).toBe(true)
+  })
+
   it('reads the schemas below a database when the engine has them', async () => {
     apiStub.listSchemas.mockResolvedValue([{ name: 'dbo' }])
     const explorer = await readyStore(true)

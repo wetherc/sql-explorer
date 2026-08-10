@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { reactive, ref } from 'vue'
+import { markRaw, reactive, ref } from 'vue'
 import { api } from '@/lib/api'
 import { createId } from './connections'
 import { useConnectionsStore } from './connections'
@@ -169,7 +169,10 @@ export const useQueryStore = defineStore('query', () => {
         ...state.panes,
         ...response.results.map((result, index) => ({
           id: createId(),
-          result,
+          // The rows never change after the run, so the grid does not need
+          // a proxy around every row and every cell. The raw form keeps a
+          // large result at its own size.
+          result: markRaw(result),
           number: index + 1,
           ranAt,
           pinned: false,

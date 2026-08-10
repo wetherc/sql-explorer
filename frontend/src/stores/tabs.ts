@@ -5,6 +5,7 @@ import { parseParamValues } from '@/lib/params'
 import type { ParamValue } from '@/types/api'
 import { useConnectionsStore } from './connections'
 import { createId } from './connections'
+import { useQueryStore } from './query'
 
 export interface QueryTab {
   id: string
@@ -95,14 +96,27 @@ export const useTabsStore = defineStore('tabs', () => {
       const next = tabs.value[Math.max(0, index - 1)]
       activeTabId.value = next ? next.id : null
     }
+    // The results of the tab go with the tab, so a closed tab frees its
+    // memory.
+    useQueryStore().clear(id)
   }
 
   function closeOthers(id: string): void {
+    const queries = useQueryStore()
+    for (const tab of tabs.value) {
+      if (tab.id !== id) {
+        queries.clear(tab.id)
+      }
+    }
     tabs.value = tabs.value.filter((tab) => tab.id === id)
     activeTabId.value = tabs.value[0]?.id ?? null
   }
 
   function closeAll(): void {
+    const queries = useQueryStore()
+    for (const tab of tabs.value) {
+      queries.clear(tab.id)
+    }
     tabs.value = []
     activeTabId.value = null
   }

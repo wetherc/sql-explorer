@@ -152,13 +152,16 @@ describe('AppLayout', () => {
     wrapper.unmount()
   })
 
-  it('writes the open tabs back when they change', async () => {
+  it('writes the open tabs back after a short pause', async () => {
     const wrapper = mountWithPlugins(AppLayout)
     await settle()
     apiStub.saveWorkspace.mockClear()
 
     useTabsStore().add({ query: 'SELECT 1' })
     await settle()
+    // The write waits for a pause, so it has not happened yet.
+    expect(apiStub.saveWorkspace).not.toHaveBeenCalled()
+    await new Promise((resolve) => setTimeout(resolve, 300))
     expect(apiStub.saveWorkspace).toHaveBeenCalled()
     wrapper.unmount()
   })

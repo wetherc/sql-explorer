@@ -190,6 +190,29 @@ describe('tabs store', () => {
     tabs.setConnection('missing', 'c3')
   })
 
+  it('lets the results of a closed tab go', async () => {
+    const { useQueryStore } = await import('@/stores/query')
+    const tabs = useTabsStore()
+    const queries = useQueryStore()
+    const one = tabs.add()
+    const two = tabs.add()
+    const three = tabs.add()
+    queries.stateFor(one.id)
+    queries.stateFor(two.id)
+    queries.stateFor(three.id)
+
+    tabs.close(one.id)
+    expect(queries.states[one.id]).toBeUndefined()
+    expect(queries.states[two.id]).toBeDefined()
+
+    tabs.closeOthers(two.id)
+    expect(queries.states[three.id]).toBeUndefined()
+    expect(queries.states[two.id]).toBeDefined()
+
+    tabs.closeAll()
+    expect(queries.states[two.id]).toBeUndefined()
+  })
+
   it('renames a tab but keeps a name that is only blank space', () => {
     const tabs = useTabsStore()
     const tab = tabs.add()

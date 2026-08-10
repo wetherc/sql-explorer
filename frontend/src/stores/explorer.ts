@@ -416,8 +416,26 @@ export const useExplorerStore = defineStore('explorer', () => {
     snapshots.value = {}
   }
 
-  /** Reads the children of a node from the server. */
-  async function expand(node: ExplorerNode): Promise<void> {
+  /** Finds the node with the given key in the tree itself. */
+  function nodeByKey(key: string): ExplorerNode | null {
+    let found: ExplorerNode | null = null
+    walk(roots.value, (candidate) => {
+      if (candidate.key === key) {
+        found = candidate
+      }
+    })
+    return found
+  }
+
+  /**
+   * Reads the children of a node from the server.
+   *
+   * The filter of the tree hands out copies, so the work runs on the node
+   * with the same key inside the tree itself. A write into a copy would
+   * never reach the view.
+   */
+  async function expand(given: ExplorerNode): Promise<void> {
+    const node = nodeByKey(given.key) ?? given
     if (!isExpandable(node) || node.loading) {
       return
     }
@@ -446,7 +464,8 @@ export const useExplorerStore = defineStore('explorer', () => {
   }
 
   /** Reads the children of a node again. */
-  async function refresh(node: ExplorerNode): Promise<void> {
+  async function refresh(given: ExplorerNode): Promise<void> {
+    const node = nodeByKey(given.key) ?? given
     node.loaded = false
     node.children = []
     await expand(node)
