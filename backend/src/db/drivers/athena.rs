@@ -540,6 +540,18 @@ impl DatabaseDriver for AthenaDriver {
         Dialect::Athena
     }
 
+    /// Athena holds no session, so there is nothing to check while the
+    /// driver stands idle.
+    fn needs_ping(&self) -> bool {
+        false
+    }
+
+    /// Every statement runs inside the service, so a stop harms no local
+    /// state.
+    fn keeps_connection_after_stop(&self) -> bool {
+        true
+    }
+
     fn create_query(
         &self,
         database: Option<&str>,
@@ -894,6 +906,27 @@ pub fn typed_value(text: &str, type_name: &str) -> JsonValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_driver_needs_no_check_and_keeps_its_connection() {
+        let config = aws_config::SdkConfig::builder()
+            .behavior_version(aws_config::BehaviorVersion::latest())
+            .build();
+        let driver = AthenaDriver {
+            client: Client::new(&config),
+            catalog: DEFAULT_CATALOG.to_string(),
+            database: None,
+            workgroup: None,
+            output_location: None,
+            result_reuse: false,
+            result_reuse_max_age_minutes: 60,
+            running: Arc::new(Mutex::new(None)),
+            metadata_api_works: Arc::new(AtomicBool::new(true)),
+        };
+        assert!(!driver.needs_ping());
+        assert!(driver.keeps_connection_after_stop());
+        assert!(driver.capabilities().supports_cancel);
+    }
 
     #[test]
     fn the_analysed_plan_of_athena_scans_data() {

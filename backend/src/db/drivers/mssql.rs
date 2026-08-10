@@ -473,7 +473,9 @@ impl DatabaseDriver for MssqlDriver {
         DriverCapabilities {
             supports_schemas: true,
             supports_multiple_databases: true,
-            supports_cancel: true,
+            // The driver sends no attention signal, so a stop closes the
+            // connection instead of the statement alone.
+            supports_cancel: false,
             supports_transactions: true,
             supports_routines: true,
             supports_indexes: true,

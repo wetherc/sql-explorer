@@ -32,6 +32,24 @@ pub trait DatabaseDriver: Send + Sync {
     /// this before it lends the connection out.
     async fn ping(&mut self) -> Result<()>;
 
+    /// True when a connection that stood idle must be checked before it is
+    /// used again. A driver that holds no session, such as Athena, answers
+    /// false, and the command layer then skips the check.
+    fn needs_ping(&self) -> bool {
+        true
+    }
+
+    /// True when the connection stays fit for use after a limit stopped a
+    /// statement in the middle of its run.
+    ///
+    /// A driver that speaks a wire protocol answers false, because the stop
+    /// leaves the connection in the middle of a message. A driver whose work
+    /// runs outside the connection, such as Athena, and a driver whose engine
+    /// aborts a statement cleanly, such as SQLite, answer true.
+    fn keeps_connection_after_stop(&self) -> bool {
+        false
+    }
+
     /// Runs a script and returns every result set it produced.
     async fn execute_query(
         &mut self,
@@ -776,6 +794,13 @@ mod tests {
         assert_eq!(driver.dialect(), Dialect::Sqlite);
         assert!(!driver.capabilities().supports_cancel);
         assert!(!driver.capabilities().supports_transactions);
+    }
+
+    #[test]
+    fn a_driver_needs_a_check_and_loses_its_connection_by_default() {
+        let driver = BareDriver;
+        assert!(driver.needs_ping());
+        assert!(!driver.keeps_connection_after_stop());
     }
 
     #[test]

@@ -6,7 +6,7 @@
 
 use crate::db::drivers::{
     add_index_column, bytes_to_json, f64_to_json, number_out_of_range, number_value, prefixed_plan,
-    rows_affected_message, rows_returned_message, DatabaseDriver, NumberValue,
+    rows_affected_message, rows_returned_message, CancelHandle, DatabaseDriver, NumberValue,
 };
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, ConstraintKind, CreateQuery, Database, DriverCapabilities,
@@ -26,6 +26,20 @@ use std::time::Instant;
 pub struct SqliteDriver {
     connection: Arc<Mutex<Connection>>,
     path: String,
+    /// Stops the statement that runs, from outside the lock.
+    interrupt: Arc<rusqlite::InterruptHandle>,
+}
+
+/// Asks SQLite to stop the statement that runs. The engine then returns an
+/// error to the caller of the statement, and the connection stays usable.
+struct SqliteCancel(Arc<rusqlite::InterruptHandle>);
+
+#[async_trait]
+impl CancelHandle for SqliteCancel {
+    async fn cancel(&self) -> Result<()> {
+        self.0.interrupt();
+        Ok(())
+    }
 }
 
 impl SqliteDriver {
@@ -55,9 +69,11 @@ impl SqliteDriver {
                 .await
                 .map_err(|error| Error::Connection(error.to_string()))??;
 
+        let interrupt = Arc::new(handle.get_interrupt_handle());
         Ok(Box::new(SqliteDriver {
             connection: Arc::new(Mutex::new(handle)),
             path,
+            interrupt,
         }))
     }
 
@@ -85,7 +101,7 @@ impl DatabaseDriver for SqliteDriver {
         DriverCapabilities {
             supports_schemas: false,
             supports_multiple_databases: false,
-            supports_cancel: false,
+            supports_cancel: true,
             supports_transactions: true,
             supports_routines: false,
             supports_indexes: true,
@@ -97,6 +113,16 @@ impl DatabaseDriver for SqliteDriver {
 
     fn dialect(&self) -> Dialect {
         Dialect::Sqlite
+    }
+
+    /// An interrupt aborts the statement alone and the engine rolls back
+    /// its transaction, so the connection stays fit for use.
+    fn keeps_connection_after_stop(&self) -> bool {
+        true
+    }
+
+    fn cancel_handle(&self) -> Option<Arc<dyn CancelHandle>> {
+        Some(Arc::new(SqliteCancel(self.interrupt.clone())))
     }
 
     fn create_query(
@@ -515,6 +541,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_cancel_stops_a_statement_and_the_connection_stays_usable() {
+        let mut driver = open_memory().await;
+        assert!(driver.capabilities().supports_cancel);
+        assert!(driver.keeps_connection_after_stop());
+        let handle = driver.cancel_handle().expect("the driver can cancel");
+
+        // A recursive query that counts to a thousand million runs long
+        // enough for the interrupt to land.
+        let long_query = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c \
+                          WHERE x < 1000000000) SELECT COUNT(*) FROM c";
+        let options = ExecOptions::default();
+        let work = driver.execute_query(long_query, None, &options);
+        let stopper = async {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            handle.cancel().await
+        };
+        let (outcome, stopped) = tokio::join!(work, stopper);
+        assert!(stopped.is_ok());
+        assert!(outcome.is_err());
+
+        // The same connection answers the next statement.
+        let after = driver
+            .execute_query("SELECT 1", None, &ExecOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(after.results.len(), 1);
+    }
+
+    #[tokio::test]
     async fn a_connection_needs_a_file_path() {
         let mut input = connection_for("  ");
         assert_eq!(
@@ -635,7 +690,8 @@ mod tests {
         assert!(!capabilities.supports_schemas);
         assert!(!capabilities.supports_multiple_databases);
         assert!(capabilities.supports_transactions);
-        assert!(driver.cancel_handle().is_none());
+        assert!(capabilities.supports_cancel);
+        assert!(driver.cancel_handle().is_some());
     }
 
     #[tokio::test]

@@ -53,6 +53,11 @@ pub struct OpenConnection {
     pub cancel_handle: Option<Arc<dyn CancelHandle>>,
     pub capabilities: DriverCapabilities,
     pub dialect: Dialect,
+    /// True when an idle connection must be checked before it is used.
+    pub needs_ping: bool,
+    /// True when the connection stays fit for use after a limit stopped a
+    /// statement.
+    pub keeps_connection_after_stop: bool,
     /// The moment the connection last answered.
     pub last_ok: Arc<Mutex<Instant>>,
 }
@@ -62,12 +67,16 @@ impl OpenConnection {
         let capabilities = driver.capabilities();
         let dialect = driver.dialect();
         let cancel_handle = driver.cancel_handle();
+        let needs_ping = driver.needs_ping();
+        let keeps_connection_after_stop = driver.keeps_connection_after_stop();
         Self {
             descriptor: descriptor.without_password(),
             driver: Arc::new(Mutex::new(driver)),
             cancel_handle,
             capabilities,
             dialect,
+            needs_ping,
+            keeps_connection_after_stop,
             last_ok: Arc::new(Mutex::new(Instant::now())),
         }
     }
@@ -285,6 +294,8 @@ mod tests {
         assert_eq!(open.descriptor.password, None);
         assert_eq!(open.dialect, Dialect::MsSql);
         assert!(open.capabilities.supports_schemas);
+        assert!(open.needs_ping);
+        assert!(!open.keeps_connection_after_stop);
     }
 
     #[tokio::test]

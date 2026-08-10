@@ -137,7 +137,7 @@ async fn ensure_healthy<R: Runtime>(
     connection_id: &str,
 ) -> Result<OpenConnection> {
     let open = state.connection(connection_id).await?;
-    if !open.needs_check().await {
+    if !open.needs_ping || !open.needs_check().await {
         return Ok(open);
     }
 
@@ -353,8 +353,9 @@ pub async fn explain_query<R: Runtime>(
     finish_run(&app, &state, &connection_id, &open, outcome).await
 }
 
-/// Closes the accounts of one exchange. A limit that ended the exchange left
-/// the connection in the middle of a message, so that connection goes.
+/// Closes the accounts of one exchange. A limit that ended the exchange asks
+/// the server to stop the statement, and the connection then goes unless the
+/// driver reports that it stays fit for use.
 async fn finish_run<R: Runtime, T>(
     app: &AppHandle<R>,
     state: &AppState,
@@ -369,6 +370,17 @@ async fn finish_run<R: Runtime, T>(
         }
         Bounded::Answered(Err(error)) => Err(error),
         Bounded::Stopped(error) => {
+            // The wait ended, but the server may still run the statement.
+            // The handle asks the server to stop it. A second request for a
+            // statement that already stopped does no harm.
+            if let Some(handle) = open.cancel_handle.clone() {
+                if let Err(stop_error) = handle.cancel().await {
+                    log::warn!("The server did not stop the statement: {stop_error}");
+                }
+            }
+            if open.keeps_connection_after_stop {
+                return Err(error);
+            }
             state.remove(connection_id).await;
             announce(
                 app,
