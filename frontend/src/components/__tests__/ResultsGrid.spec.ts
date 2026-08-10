@@ -353,6 +353,13 @@ describe('ResultsGrid as a grid a reader can follow', () => {
     return null
   }
 
+  /** Gives one cell a width it shows and a width its whole value would need. */
+  function setCellWidth(cell: { element: Element }, client: number, scroll: number) {
+    const text = cell.element.querySelector('.cell-text') as HTMLElement
+    Object.defineProperty(text, 'clientWidth', { configurable: true, value: client })
+    Object.defineProperty(text, 'scrollWidth', { configurable: true, value: scroll })
+  }
+
   function grid(wrapper: ReturnType<typeof mountWithPlugins>) {
     return wrapper.find('[role="grid"]')
   }
@@ -542,14 +549,52 @@ describe('ResultsGrid as a grid a reader can follow', () => {
     expect(wrapper.find('[data-test="grid-busy"]').exists()).toBe(false)
   })
 
-  it('holds the whole value of a cell under the pointer only when it is cut short', () => {
+  it('holds the whole value under the pointer only when the cell cuts it short', async () => {
     const long = 'x'.repeat(200)
     const wrapper = mountWithPlugins(ResultsGrid, {
       props: { result: result({ rows: [[1, long]] }) },
     })
     const cells = wrapper.findAll('[data-test="grid-cell"]')
 
-    expect(cells[0]!.attributes('title')).toBeUndefined()
+    // The width a cell shows is known to the browser alone, so the two sizes
+    // stand for a cell that cuts its value short and one that does not.
+    setCellWidth(cells[1]!, 420, 900)
+    setCellWidth(cells[0]!, 420, 100)
+
+    await cells[1]!.trigger('mouseenter')
     expect(cells[1]!.attributes('title')).toBe(long)
+
+    await cells[0]!.trigger('mouseenter')
+    expect(cells[0]!.attributes('title')).toBeUndefined()
+  })
+
+  it('takes the tooltip away again when the cell grows to hold its value', async () => {
+    const long = 'x'.repeat(200)
+    const wrapper = mountWithPlugins(ResultsGrid, {
+      props: { result: result({ rows: [[1, long]] }) },
+    })
+    const cell = wrapper.findAll('[data-test="grid-cell"]')[1]!
+
+    setCellWidth(cell, 420, 900)
+    await cell.trigger('mouseenter')
+    expect(cell.attributes('title')).toBe(long)
+
+    setCellWidth(cell, 900, 900)
+    await cell.trigger('mouseenter')
+    expect(cell.attributes('title')).toBeUndefined()
+  })
+
+  it('holds the whole value under the focus that a key brings to a cell', async () => {
+    const long = 'x'.repeat(200)
+    const wrapper = mountWithPlugins(ResultsGrid, {
+      props: { result: result({ rows: [[1, long]] }) },
+    })
+    const cell = wrapper.findAll('[data-test="grid-cell"]')[1]!
+
+    setCellWidth(cell, 420, 900)
+    await cell.trigger('focus')
+
+    expect(cell.attributes('title')).toBe(long)
+    expect(tabStop(wrapper)).toEqual([0, 1])
   })
 })

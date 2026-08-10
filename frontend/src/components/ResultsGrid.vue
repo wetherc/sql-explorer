@@ -157,12 +157,17 @@
                 role="gridcell"
                 :aria-colindex="cellIndex + 2"
                 :tabindex="isFocused(entry, cellIndex) ? 0 : -1"
-                :title="cellTitle(entry.texts[cellIndex])"
                 data-test="grid-cell"
-                @focus="focusCellAt(entry.position, cellIndex, false)"
+                @focus="onCellFocus($event, entry.position, cellIndex)"
+                @mouseenter="revealFullValue($event, entry.position, cellIndex)"
                 @dblclick="inspect(cell, columnName(cellIndex))"
               >
-                {{ truncate(entry.texts[cellIndex] ?? '', CELL_LIMIT) }}
+                <!-- The width of a cell is capped on this element and not on
+                     the cell itself, because a table of automatic width pays
+                     no attention to a cap on one of its cells. -->
+                <span class="cell-text">
+                  {{ truncate(entry.texts[cellIndex] ?? '', CELL_LIMIT) }}
+                </span>
               </td>
             </tr>
             <tr v-if="bottomPad > 0" :style="{ height: `${bottomPad}px` }" aria-hidden="true">
@@ -561,11 +566,25 @@ function toggleFocusedRow(event: KeyboardEvent): void {
 }
 
 /**
- * The whole value of a cell, for the tooltip. A value that the cell holds
- * completely needs no tooltip, because the cell already shows all of it.
+ * Puts the whole value of a cell under the pointer, and only when the cell is
+ * too narrow to show all of it. How much a cell shows is known to the browser
+ * alone, so the question is asked when the pointer or the focus arrives, and
+ * not while the row is drawn.
  */
-function cellTitle(text: string | undefined): string | undefined {
-  return text !== undefined && text.length > CELL_LIMIT ? text : undefined
+function revealFullValue(event: Event, row: number, column: number): void {
+  const cell = event.currentTarget as HTMLElement
+  const text = cell.querySelector('.cell-text')
+  if (!text || text.scrollWidth <= text.clientWidth) {
+    cell.removeAttribute('title')
+    return
+  }
+  const entry = sortedRows.value[row]
+  cell.title = entry ? formatCell(entry.row[column] ?? null) : ''
+}
+
+function onCellFocus(event: Event, row: number, column: number): void {
+  focusCellAt(row, column, false)
+  revealFullValue(event, row, column)
 }
 
 /**
@@ -772,12 +791,19 @@ watch(
 .grid-table td {
   padding: 4px 10px;
   height: var(--grid-row-height);
+  border-bottom: var(--app-divider-soft);
+  cursor: default;
+}
+
+/* One wide column would push every column after it off the screen, so a cell
+   shows this much of its value and no more. The whole value waits under the
+   pointer and in the window that the Enter key opens. */
+.cell-text {
+  display: block;
   max-width: 420px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  border-bottom: var(--app-divider-soft);
-  cursor: default;
 }
 
 /* The three rules below give a cell its background, and they carry the same
