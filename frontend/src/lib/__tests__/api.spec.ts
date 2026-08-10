@@ -56,6 +56,27 @@ describe('api', () => {
       tableName: 't',
     })
 
+    await api.listRoutines('c1', 'db', 'dbo')
+    expect(invoke).toHaveBeenCalledWith('list_routines', {
+      connectionId: 'c1',
+      database: 'db',
+      schemaName: 'dbo',
+    })
+
+    for (const [method, command] of [
+      ['listIndexes', 'list_indexes'],
+      ['listConstraints', 'list_constraints'],
+      ['listPartitions', 'list_partitions'],
+    ] as const) {
+      await api[method]('c1', 'db', 'dbo', 't')
+      expect(invoke).toHaveBeenCalledWith(command, {
+        connectionId: 'c1',
+        database: 'db',
+        schemaName: 'dbo',
+        tableName: 't',
+      })
+    }
+
     await api.quoteIdentifier('c1', 'a b')
     expect(invoke).toHaveBeenCalledWith('quote_identifier', { connectionId: 'c1', name: 'a b' })
 

@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import type {
   ColumnRef,
   ConnectionInfo,
+  ConstraintRef,
   ConnectionStatusEvent,
   DatabaseRef,
   EngineInfo,
@@ -10,7 +11,10 @@ import type {
   ExportRequest,
   ExportSummary,
   HistoryEntry,
+  IndexRef,
+  PartitionRef,
   QueryResponse,
+  RoutineRef,
   SavedConnection,
   SavedQuery,
   SchemaRef,
@@ -84,6 +88,41 @@ export const api = {
     tableName: string,
   ): Promise<ColumnRef[]> {
     return invoke('list_columns', { connectionId, database, schemaName, tableName })
+  },
+
+  listRoutines(
+    connectionId: string,
+    database: string,
+    schemaName: string | null,
+  ): Promise<RoutineRef[]> {
+    return invoke('list_routines', { connectionId, database, schemaName })
+  },
+
+  listIndexes(
+    connectionId: string,
+    database: string,
+    schemaName: string | null,
+    tableName: string,
+  ): Promise<IndexRef[]> {
+    return invoke('list_indexes', { connectionId, database, schemaName, tableName })
+  },
+
+  listConstraints(
+    connectionId: string,
+    database: string,
+    schemaName: string | null,
+    tableName: string,
+  ): Promise<ConstraintRef[]> {
+    return invoke('list_constraints', { connectionId, database, schemaName, tableName })
+  },
+
+  listPartitions(
+    connectionId: string,
+    database: string,
+    schemaName: string | null,
+    tableName: string,
+  ): Promise<PartitionRef[]> {
+    return invoke('list_partitions', { connectionId, database, schemaName, tableName })
   },
 
   /**

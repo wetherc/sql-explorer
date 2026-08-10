@@ -78,7 +78,9 @@ describe('DbExplorer', () => {
     explorer.addRoot('c1')
     await wrapper.vm.$nextTick()
 
-    for (let level = 0; level < 4; level += 1) {
+    // The levels are the connection, the database, the schema, the folder of
+    // the tables, the table itself and the folder of its columns.
+    for (let level = 0; level < 6; level += 1) {
       await wrapper.findAll('[data-test="tree-row"]')[level]!.trigger('click')
       await settle()
       await wrapper.vm.$nextTick()
@@ -128,10 +130,12 @@ describe('DbExplorer', () => {
     await explorer.expand(database)
     const schema = database.children![0]!
     await explorer.expand(schema)
+    const tables = schema.children![0]!
+    await explorer.expand(tables)
     explorer.roots = [root]
     await wrapper.vm.$nextTick()
 
-    const table = schema.children![0]!
+    const table = tables.children![0]!
     await wrapper.findComponent({ name: 'ExplorerTree' }).vm.$emit('context', {
       event: new MouseEvent('contextmenu', { clientX: 5, clientY: 5 }),
       node: table,

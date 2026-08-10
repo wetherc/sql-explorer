@@ -81,6 +81,10 @@ export interface DriverCapabilities {
   supportsMultipleDatabases: boolean
   supportsCancel: boolean
   supportsTransactions: boolean
+  supportsRoutines: boolean
+  supportsIndexes: boolean
+  supportsConstraints: boolean
+  supportsPartitions: boolean
 }
 
 export interface ConnectionInfo {
@@ -176,6 +180,43 @@ export type TableKind = (typeof TableKind)[keyof typeof TableKind]
 export interface TableRef {
   name: string
   kind: TableKind
+}
+
+export const RoutineKind = {
+  Procedure: 'procedure',
+  Function: 'function',
+} as const
+export type RoutineKind = (typeof RoutineKind)[keyof typeof RoutineKind]
+
+export interface RoutineRef {
+  name: string
+  kind: RoutineKind
+}
+
+export interface IndexRef {
+  name: string
+  columns: string[]
+  unique: boolean
+  primary: boolean
+}
+
+export const ConstraintKind = {
+  PrimaryKey: 'primaryKey',
+  ForeignKey: 'foreignKey',
+  Unique: 'unique',
+  Check: 'check',
+} as const
+export type ConstraintKind = (typeof ConstraintKind)[keyof typeof ConstraintKind]
+
+export interface ConstraintRef {
+  name: string
+  kind: ConstraintKind
+  columns: string[]
+  detail: string | null
+}
+
+export interface PartitionRef {
+  values: string
 }
 
 /** The statement that the explorer builds for one object. */

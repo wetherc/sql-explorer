@@ -5,8 +5,18 @@ import { makeApiStub, connectionFixture, infoFixture } from './helpers'
 const apiStub = makeApiStub()
 vi.mock('@/lib/api', () => ({ api: apiStub, CONNECTION_STATUS_EVENT: 'connection-status' }))
 
-const { columnNode, filterNodes, iconFor, isExpandable, tableNode, useExplorerStore, walk } =
-  await import('@/stores/explorer')
+const {
+  columnNode,
+  constraintHint,
+  filterNodes,
+  folderNode,
+  iconFor,
+  isExpandable,
+  leafNode,
+  tableNode,
+  useExplorerStore,
+  walk,
+} = await import('@/stores/explorer')
 type ExplorerNode = import('@/stores/explorer').ExplorerNode
 const { useConnectionsStore } = await import('@/stores/connections')
 const { useUiStore } = await import('@/stores/ui')
@@ -35,13 +45,63 @@ describe('iconFor', () => {
     expect(iconFor('view')).toBe('mdi-table-eye')
     expect(iconFor('column')).toBe('mdi-table-column')
     expect(iconFor('column', true)).toBe('mdi-key-variant')
+    expect(iconFor('folder')).toBe('mdi-folder-outline')
+    expect(iconFor('routine')).toBe('mdi-function-variant')
+    expect(iconFor('index')).toBe('mdi-sort-alphabetical-variant')
+    expect(iconFor('constraint')).toBe('mdi-key-chain')
+    expect(iconFor('partition')).toBe('mdi-file-tree-outline')
   })
 })
 
 describe('isExpandable', () => {
-  it('holds for everything but a column', () => {
+  it('holds for a node that can hold children', () => {
     expect(isExpandable(node({ kind: 'table' }))).toBe(true)
-    expect(isExpandable(node({ kind: 'column' }))).toBe(false)
+    expect(isExpandable(node({ kind: 'folder' }))).toBe(true)
+    for (const kind of ['column', 'routine', 'index', 'constraint', 'partition'] as const) {
+      expect(isExpandable(node({ kind }))).toBe(false)
+    }
+  })
+})
+
+describe('folderNode and leafNode', () => {
+  it('carries the place of the parent down to the child', () => {
+    const table = node({
+      kind: 'table',
+      key: 'c1/Sales/dbo/table/orders',
+      database: 'Sales',
+      schema: 'dbo',
+      table: 'orders',
+    })
+    const folder = folderNode('Indexes', 'indexes', table)
+    expect(folder.key).toBe('c1/Sales/dbo/table/orders/indexes')
+    expect(folder.folder).toBe('indexes')
+    expect(folder.table).toBe('orders')
+
+    const leaf = leafNode('by_total', 'index', folder, 'total')
+    expect(leaf.key).toBe('c1/Sales/dbo/table/orders/indexes/by_total')
+    expect(leaf.children).toBeUndefined()
+    expect(leaf.hint).toBe('total')
+    expect(leaf.schema).toBe('dbo')
+  })
+})
+
+describe('constraintHint', () => {
+  it('names the kind, the columns and the detail', () => {
+    expect(constraintHint({ name: 'pk', kind: 'primaryKey', columns: ['id'], detail: null })).toBe(
+      'primary key \u00b7 id',
+    )
+    expect(
+      constraintHint({
+        name: 'fk',
+        kind: 'foreignKey',
+        columns: ['customer'],
+        detail: 'customers(id)',
+      }),
+    ).toBe('foreign key \u00b7 customer \u00b7 customers(id)')
+    expect(constraintHint({ name: 'u', kind: 'unique', columns: [], detail: null })).toBe('unique')
+    expect(constraintHint({ name: 'c', kind: 'check', columns: [], detail: 'total > 0' })).toBe(
+      'check \u00b7 total > 0',
+    )
   })
 })
 
@@ -49,13 +109,13 @@ describe('tableNode', () => {
   it('builds a node for a table and one for a view', () => {
     const table = tableNode({ name: 'orders', kind: TableKind.Table }, 'c1', 'Sales', 'dbo')
     expect(table.kind).toBe('table')
-    expect(table.key).toBe('c1/Sales/dbo/orders')
+    expect(table.key).toBe('c1/Sales/dbo/table/orders')
     expect(table.children).toEqual([])
     expect(table.loaded).toBe(false)
 
     const view = tableNode({ name: 'big', kind: TableKind.View }, 'c1', 'Sales', undefined)
     expect(view.kind).toBe('view')
-    expect(view.key).toBe('c1/Sales//big')
+    expect(view.key).toBe('c1/Sales//view/big')
   })
 })
 
@@ -194,67 +254,197 @@ describe('explorer store', () => {
     expect(database.children?.[0]?.kind).toBe('schema')
   })
 
-  it('reads the tables below a database when the engine has no schemas', async () => {
-    apiStub.listTables.mockResolvedValue([{ name: 'orders', kind: TableKind.Table }])
+  it('puts folders below a database when the engine has no schemas', async () => {
     const explorer = await readyStore(false)
     const database = node({ kind: 'database', database: 'shop', label: 'shop' })
     await explorer.expand(database)
-    expect(apiStub.listTables).toHaveBeenCalledWith('c1', 'shop', null)
-    expect(database.children?.[0]?.kind).toBe('table')
+    expect(database.children?.map((child) => child.label)).toEqual([
+      'Tables',
+      'Views',
+      'Procedures',
+      'Functions',
+    ])
+    expect(apiStub.listTables).not.toHaveBeenCalled()
   })
 
-  it('takes the name of a database from its label when the field is absent', async () => {
-    apiStub.listTables.mockResolvedValue([])
-    const explorer = await readyStore(false)
-    await explorer.expand(node({ kind: 'database', label: 'shop', database: undefined }))
-    expect(apiStub.listTables).toHaveBeenCalledWith('c1', 'shop', null)
-  })
-
-  it('names the database when it reads the tables of a schema', async () => {
-    apiStub.listTables.mockResolvedValue([{ name: 'orders', kind: TableKind.View }])
+  it('puts folders below a schema', async () => {
     const explorer = await readyStore()
     const schema = node({ kind: 'schema', database: 'Sales', schema: 'dbo', label: 'dbo' })
     await explorer.expand(schema)
+    expect(schema.children?.map((child) => child.folder)).toEqual([
+      'tables',
+      'views',
+      'procedures',
+      'functions',
+    ])
+  })
+
+  it('leaves out the folders of an engine that holds no routine', async () => {
+    apiStub.listActiveConnections.mockResolvedValue([
+      {
+        ...infoFixture('c1'),
+        capabilities: { ...infoFixture('c1').capabilities, supportsRoutines: false },
+      },
+    ])
+    const connections = useConnectionsStore()
+    await connections.load()
+    const explorer = useExplorerStore()
+    const schema = node({ kind: 'schema', database: 'Sales', schema: 'dbo' })
+    await explorer.expand(schema)
+    expect(schema.children?.map((child) => child.folder)).toEqual(['tables', 'views'])
+  })
+
+  it('reads the tables and the views of their own folders', async () => {
+    apiStub.listTables.mockResolvedValue([
+      { name: 'orders', kind: TableKind.Table },
+      { name: 'big_orders', kind: TableKind.View },
+    ])
+    const explorer = await readyStore()
+    const schema = node({ kind: 'schema', database: 'Sales', schema: 'dbo' })
+
+    const tables = folderNode('Tables', 'tables', schema)
+    await explorer.expand(tables)
     expect(apiStub.listTables).toHaveBeenCalledWith('c1', 'Sales', 'dbo')
-    expect(schema.children?.[0]?.kind).toBe('view')
+    expect(tables.children?.map((child) => child.label)).toEqual(['orders'])
+
+    const views = folderNode('Views', 'views', schema)
+    await explorer.expand(views)
+    expect(views.children?.map((child) => child.label)).toEqual(['big_orders'])
+    expect(views.children?.[0]?.kind).toBe('view')
   })
 
-  it('uses an empty database name when a schema carries none', async () => {
+  it('uses an empty database name and no schema when the node carries none', async () => {
     apiStub.listTables.mockResolvedValue([])
     const explorer = await readyStore()
-    await explorer.expand(node({ kind: 'schema', schema: 'dbo', database: undefined }))
-    expect(apiStub.listTables).toHaveBeenCalledWith('c1', '', 'dbo')
+    const bare = node({ kind: 'schema', database: undefined, schema: undefined })
+    await explorer.expand(folderNode('Tables', 'tables', bare))
+    expect(apiStub.listTables).toHaveBeenCalledWith('c1', '', null)
   })
 
-  it('names no schema when a schema node carries none', async () => {
-    apiStub.listTables.mockResolvedValue([])
+  it('reads the procedures and the functions of their own folders', async () => {
+    apiStub.listRoutines.mockResolvedValue([
+      { name: 'add_order', kind: 'procedure' },
+      { name: 'order_total', kind: 'function' },
+    ])
     const explorer = await readyStore()
-    await explorer.expand(node({ kind: 'schema', database: 'Sales', schema: undefined }))
-    expect(apiStub.listTables).toHaveBeenCalledWith('c1', 'Sales', null)
+    const schema = node({ kind: 'schema', database: 'Sales', schema: 'dbo' })
+
+    const procedures = folderNode('Procedures', 'procedures', schema)
+    await explorer.expand(procedures)
+    expect(apiStub.listRoutines).toHaveBeenCalledWith('c1', 'Sales', 'dbo')
+    expect(procedures.children?.map((child) => child.label)).toEqual(['add_order'])
+    expect(procedures.children?.[0]?.kind).toBe('routine')
+
+    const functions = folderNode('Functions', 'functions', schema)
+    await explorer.expand(functions)
+    expect(functions.children?.map((child) => child.label)).toEqual(['order_total'])
   })
 
-  it('reads the columns below a table', async () => {
+  it('puts folders below a table and columns alone below a view', async () => {
+    const explorer = await readyStore()
+    const table = node({ kind: 'table', database: 'Sales', schema: 'dbo', table: 'orders' })
+    await explorer.expand(table)
+    expect(table.children?.map((child) => child.folder)).toEqual([
+      'columns',
+      'indexes',
+      'constraints',
+    ])
+
+    const view = node({ kind: 'view', database: 'Sales', schema: 'dbo', table: 'big_orders' })
+    await explorer.expand(view)
+    expect(view.children?.map((child) => child.folder)).toEqual(['columns'])
+  })
+
+  it('adds a folder for the partitions when the engine holds them', async () => {
+    apiStub.listActiveConnections.mockResolvedValue([
+      {
+        ...infoFixture('c1'),
+        capabilities: { ...infoFixture('c1').capabilities, supportsPartitions: true },
+      },
+    ])
+    const connections = useConnectionsStore()
+    await connections.load()
+    const explorer = useExplorerStore()
+    const table = node({ kind: 'table', database: 'logs', table: 'events' })
+    await explorer.expand(table)
+    expect(table.children?.map((child) => child.folder)).toEqual([
+      'columns',
+      'indexes',
+      'constraints',
+      'partitions',
+    ])
+  })
+
+  it('reads the columns of the folder of a table', async () => {
     apiStub.listColumns.mockResolvedValue([
       { name: 'id', dataType: 'int', nullable: false, isPrimaryKey: true },
     ])
     const explorer = await readyStore()
-    const table = node({
-      kind: 'table',
-      database: 'Sales',
-      schema: 'dbo',
-      table: 'orders',
-      label: 'orders',
-    })
-    await explorer.expand(table)
+    const table = node({ kind: 'table', database: 'Sales', schema: 'dbo', table: 'orders' })
+    const columns = folderNode('Columns', 'columns', table)
+    await explorer.expand(columns)
     expect(apiStub.listColumns).toHaveBeenCalledWith('c1', 'Sales', 'dbo', 'orders')
-    expect(table.children?.[0]?.kind).toBe('column')
+    expect(columns.children?.[0]?.kind).toBe('column')
   })
 
-  it('takes the name of a table from its label when the field is absent', async () => {
-    apiStub.listColumns.mockResolvedValue([])
+  it('names the columns and the rule of each index and each constraint', async () => {
+    apiStub.listIndexes.mockResolvedValue([
+      { name: 'pk_orders', columns: ['id'], unique: true, primary: true },
+      { name: 'by_region', columns: ['region'], unique: true, primary: false },
+      { name: 'by_total', columns: ['total'], unique: false, primary: false },
+    ])
+    apiStub.listConstraints.mockResolvedValue([
+      { name: 'pk_orders', kind: 'primaryKey', columns: ['id'], detail: null },
+    ])
+    apiStub.listPartitions.mockResolvedValue([{ values: 'day=2026-08-10' }])
+
     const explorer = await readyStore()
-    await explorer.expand(node({ kind: 'table', label: 'orders', table: undefined }))
-    expect(apiStub.listColumns).toHaveBeenCalledWith('c1', '', null, 'orders')
+    const table = node({ kind: 'table', database: 'Sales', schema: 'dbo', table: 'orders' })
+
+    const indexes = folderNode('Indexes', 'indexes', table)
+    await explorer.expand(indexes)
+    expect(apiStub.listIndexes).toHaveBeenCalledWith('c1', 'Sales', 'dbo', 'orders')
+    expect(indexes.children?.map((child) => child.hint)).toEqual([
+      'id \u00b7 primary key',
+      'region \u00b7 unique',
+      'total',
+    ])
+
+    const keys = folderNode('Keys', 'constraints', table)
+    await explorer.expand(keys)
+    expect(keys.children?.[0]?.hint).toBe('primary key \u00b7 id')
+    expect(keys.children?.[0]?.kind).toBe('constraint')
+
+    const partitions = folderNode('Partitions', 'partitions', table)
+    await explorer.expand(partitions)
+    expect(apiStub.listPartitions).toHaveBeenCalledWith('c1', 'Sales', 'dbo', 'orders')
+    expect(partitions.children?.[0]?.label).toBe('day=2026-08-10')
+  })
+
+  it('takes the name of a database from its label when it reads the schemas', async () => {
+    apiStub.listSchemas.mockResolvedValue([{ name: 'dbo' }])
+    const explorer = await readyStore(true)
+    await explorer.expand(node({ kind: 'database', label: 'Sales', database: undefined }))
+    expect(apiStub.listSchemas).toHaveBeenCalledWith('c1', 'Sales')
+  })
+
+  it('leaves out the folders of a table that the engine cannot describe', async () => {
+    apiStub.listActiveConnections.mockResolvedValue([
+      {
+        ...infoFixture('c1'),
+        capabilities: {
+          ...infoFixture('c1').capabilities,
+          supportsIndexes: false,
+          supportsConstraints: false,
+        },
+      },
+    ])
+    const connections = useConnectionsStore()
+    await connections.load()
+    const explorer = useExplorerStore()
+    const table = node({ kind: 'table', database: 'Sales', schema: 'dbo', table: 'orders' })
+    await explorer.expand(table)
+    expect(table.children?.map((child) => child.folder)).toEqual(['columns'])
   })
 
   it('reads a branch once and no more', async () => {
@@ -273,7 +463,7 @@ describe('explorer store', () => {
     expect(apiStub.listDatabases).not.toHaveBeenCalled()
   })
 
-  it('does not read a column, which holds nothing below it', async () => {
+  it('does not read a leaf, which holds nothing below it', async () => {
     const explorer = await readyStore()
     await explorer.expand(node({ kind: 'column' }))
     expect(apiStub.listColumns).not.toHaveBeenCalled()
@@ -304,10 +494,13 @@ describe('explorer store', () => {
   })
 
   it('treats a connection the store does not know as one without schemas', async () => {
-    apiStub.listTables.mockResolvedValue([])
     const explorer = useExplorerStore()
-    await explorer.expand(node({ kind: 'database', database: 'shop', connectionId: 'other' }))
-    expect(apiStub.listTables).toHaveBeenCalledWith('other', 'shop', null)
+    const database = node({ kind: 'database', database: 'shop', connectionId: 'other' })
+    await explorer.expand(database)
+    // The record of the connection is missing, so no folder of a capability
+    // is added and no schema is read.
+    expect(apiStub.listSchemas).not.toHaveBeenCalled()
+    expect(database.children?.map((child) => child.folder)).toEqual(['tables', 'views'])
   })
 
   it('builds the names the editor offers, without repeating one', async () => {
@@ -325,8 +518,12 @@ describe('explorer store', () => {
     await explorer.expand(database)
     const schema = database.children![0]!
     await explorer.expand(schema)
-    const table = schema.children![0]!
+    const tables = schema.children![0]!
+    await explorer.expand(tables)
+    const table = tables.children![0]!
     await explorer.expand(table)
+    const columns = table.children![0]!
+    await explorer.expand(columns)
 
     expect(explorer.schemaIndex).toEqual({
       databases: ['Sales'],

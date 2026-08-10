@@ -4,9 +4,40 @@ import { api } from '@/lib/api'
 import { useConnectionsStore } from './connections'
 import { useUiStore } from './ui'
 import { emptySchemaIndex, type SchemaIndex } from '@/lib/sql'
-import { TableKind, type ColumnRef, type TableRef } from '@/types/api'
+import {
+  TableKind,
+  type ColumnRef,
+  type ConstraintRef,
+  type DriverCapabilities,
+  type TableRef,
+} from '@/types/api'
 
-export type NodeKind = 'connection' | 'database' | 'schema' | 'table' | 'view' | 'column'
+export type NodeKind =
+  | 'connection'
+  | 'database'
+  | 'schema'
+  | 'folder'
+  | 'table'
+  | 'view'
+  | 'column'
+  | 'routine'
+  | 'index'
+  | 'constraint'
+  | 'partition'
+
+/** What a folder node holds, which decides the call that fills it. */
+export type FolderKind =
+  | 'tables'
+  | 'views'
+  | 'procedures'
+  | 'functions'
+  | 'columns'
+  | 'indexes'
+  | 'constraints'
+  | 'partitions'
+
+/** The kinds that hold no children of their own. */
+const LEAF_KINDS: NodeKind[] = ['column', 'routine', 'index', 'constraint', 'partition']
 
 export interface ExplorerNode {
   key: string
@@ -23,6 +54,8 @@ export interface ExplorerNode {
   database?: string
   schema?: string
   table?: string
+  /** Set on a folder node, and it names the list the folder holds. */
+  folder?: FolderKind
 }
 
 /** Selects the icon of a node. */
@@ -33,11 +66,20 @@ export function iconFor(kind: NodeKind, isKey = false): string {
     case 'database':
       return 'mdi-database'
     case 'schema':
+    case 'folder':
       return 'mdi-folder-outline'
     case 'table':
       return 'mdi-table'
     case 'view':
       return 'mdi-table-eye'
+    case 'routine':
+      return 'mdi-function-variant'
+    case 'index':
+      return 'mdi-sort-alphabetical-variant'
+    case 'constraint':
+      return 'mdi-key-chain'
+    case 'partition':
+      return 'mdi-file-tree-outline'
     default:
       return isKey ? 'mdi-key-variant' : 'mdi-table-column'
   }
@@ -45,7 +87,7 @@ export function iconFor(kind: NodeKind, isKey = false): string {
 
 /** True when the node can hold children. */
 export function isExpandable(node: ExplorerNode): boolean {
-  return node.kind !== 'column'
+  return !LEAF_KINDS.includes(node.kind)
 }
 
 /** Builds the node of one relation. */
@@ -57,7 +99,9 @@ export function tableNode(
 ): ExplorerNode {
   const kind: NodeKind = table.kind === TableKind.View ? 'view' : 'table'
   return {
-    key: `${connectionId}/${database}/${schema ?? ''}/${table.name}`,
+    // The kind is part of the key, because a table and a view of one schema
+    // can carry the same name.
+    key: `${connectionId}/${database}/${schema ?? ''}/${kind}/${table.name}`,
     label: table.name,
     kind,
     icon: iconFor(kind),
@@ -86,6 +130,64 @@ export function columnNode(column: ColumnRef, parent: ExplorerNode): ExplorerNod
     schema: parent.schema,
     table: parent.table,
   }
+}
+
+/** Builds a folder node below a schema, a database or a relation. */
+export function folderNode(label: string, folder: FolderKind, parent: ExplorerNode): ExplorerNode {
+  return {
+    key: `${parent.key}/${folder}`,
+    label,
+    kind: 'folder',
+    icon: iconFor('folder'),
+    children: [],
+    loading: false,
+    loaded: false,
+    connectionId: parent.connectionId,
+    database: parent.database,
+    schema: parent.schema,
+    table: parent.table,
+    folder,
+  }
+}
+
+/** Builds a node that holds no children, below a folder. */
+export function leafNode(
+  label: string,
+  kind: NodeKind,
+  parent: ExplorerNode,
+  hint?: string,
+): ExplorerNode {
+  return {
+    key: `${parent.key}/${label}`,
+    label,
+    kind,
+    icon: iconFor(kind),
+    hint,
+    loading: false,
+    loaded: true,
+    connectionId: parent.connectionId,
+    database: parent.database,
+    schema: parent.schema,
+    table: parent.table,
+  }
+}
+
+/** Names one constraint for the tree: its kind, and its columns. */
+export function constraintHint(constraint: ConstraintRef): string {
+  const words: Record<ConstraintRef['kind'], string> = {
+    primaryKey: 'primary key',
+    foreignKey: 'foreign key',
+    unique: 'unique',
+    check: 'check',
+  }
+  const parts = [words[constraint.kind]]
+  if (constraint.columns.length > 0) {
+    parts.push(constraint.columns.join(', '))
+  }
+  if (constraint.detail) {
+    parts.push(constraint.detail)
+  }
+  return parts.join(' · ')
 }
 
 /**
@@ -255,41 +357,124 @@ export const useExplorerStore = defineStore('explorer', () => {
       }))
     }
 
-    if (node.kind === 'database') {
+    if (node.kind === 'database' && supportsSchemas) {
       const database = node.database ?? node.label
-      if (supportsSchemas) {
-        const schemas = await api.listSchemas(node.connectionId, database)
-        return schemas.map((schema) => ({
-          key: `${node.connectionId}/${database}/${schema.name}`,
-          label: schema.name,
-          kind: 'schema' as const,
-          icon: iconFor('schema'),
-          children: [],
-          loading: false,
-          loaded: false,
-          connectionId: node.connectionId,
-          database,
-          schema: schema.name,
-        }))
+      const schemas = await api.listSchemas(node.connectionId, database)
+      return schemas.map((schema) => ({
+        key: `${node.connectionId}/${database}/${schema.name}`,
+        label: schema.name,
+        kind: 'schema' as const,
+        icon: iconFor('schema'),
+        children: [],
+        loading: false,
+        loaded: false,
+        connectionId: node.connectionId,
+        database,
+        schema: schema.name,
+      }))
+    }
+
+    // A schema, and a database of an engine without schemas, hold folders.
+    if (node.kind === 'database' || node.kind === 'schema') {
+      return schemaFolders(node, info?.capabilities)
+    }
+
+    if (node.kind === 'table' || node.kind === 'view') {
+      return relationFolders(node, info?.capabilities)
+    }
+
+    return folderChildren(node)
+  }
+
+  /** The folders below a schema, or below a database without schemas. */
+  function schemaFolders(
+    node: ExplorerNode,
+    capabilities: DriverCapabilities | undefined,
+  ): ExplorerNode[] {
+    const folders = [folderNode('Tables', 'tables', node), folderNode('Views', 'views', node)]
+    if (capabilities?.supportsRoutines) {
+      folders.push(folderNode('Procedures', 'procedures', node))
+      folders.push(folderNode('Functions', 'functions', node))
+    }
+    return folders
+  }
+
+  /**
+   * The folders below a relation. A view holds columns alone, because an
+   * index and a constraint belong to a table.
+   */
+  function relationFolders(
+    node: ExplorerNode,
+    capabilities: DriverCapabilities | undefined,
+  ): ExplorerNode[] {
+    const folders = [folderNode('Columns', 'columns', node)]
+    if (node.kind === 'view') {
+      return folders
+    }
+    if (capabilities?.supportsIndexes) {
+      folders.push(folderNode('Indexes', 'indexes', node))
+    }
+    if (capabilities?.supportsConstraints) {
+      folders.push(folderNode('Keys', 'constraints', node))
+    }
+    if (capabilities?.supportsPartitions) {
+      folders.push(folderNode('Partitions', 'partitions', node))
+    }
+    return folders
+  }
+
+  /** Reads the list that one folder holds. */
+  async function folderChildren(node: ExplorerNode): Promise<ExplorerNode[]> {
+    const connectionId = node.connectionId
+    const database = node.database ?? ''
+    const schema = node.schema ?? null
+    const table = node.table ?? ''
+
+    switch (node.folder) {
+      case 'tables':
+      case 'views': {
+        const wanted = node.folder === 'views' ? TableKind.View : TableKind.Table
+        const tables = await api.listTables(connectionId, database, schema)
+        return tables
+          .filter((entry) => entry.kind === wanted)
+          .map((entry) => tableNode(entry, connectionId, database, node.schema))
       }
-      const tables = await api.listTables(node.connectionId, database, null)
-      return tables.map((table) => tableNode(table, node.connectionId, database, undefined))
+      case 'procedures':
+      case 'functions': {
+        const wanted = node.folder === 'procedures' ? 'procedure' : 'function'
+        const routines = await api.listRoutines(connectionId, database, schema)
+        return routines
+          .filter((routine) => routine.kind === wanted)
+          .map((routine) => leafNode(routine.name, 'routine', node))
+      }
+      case 'indexes': {
+        const indexes = await api.listIndexes(connectionId, database, schema, table)
+        return indexes.map((index) =>
+          leafNode(
+            index.name,
+            'index',
+            node,
+            [index.columns.join(', '), index.primary ? 'primary key' : index.unique ? 'unique' : '']
+              .filter(Boolean)
+              .join(' · '),
+          ),
+        )
+      }
+      case 'constraints': {
+        const constraints = await api.listConstraints(connectionId, database, schema, table)
+        return constraints.map((constraint) =>
+          leafNode(constraint.name, 'constraint', node, constraintHint(constraint)),
+        )
+      }
+      case 'partitions': {
+        const partitions = await api.listPartitions(connectionId, database, schema, table)
+        return partitions.map((partition) => leafNode(partition.values, 'partition', node))
+      }
+      default: {
+        const columns = await api.listColumns(connectionId, database, schema, table)
+        return columns.map((column) => columnNode(column, node))
+      }
     }
-
-    if (node.kind === 'schema') {
-      const database = node.database ?? ''
-      const tables = await api.listTables(node.connectionId, database, node.schema ?? null)
-      return tables.map((table) => tableNode(table, node.connectionId, database, node.schema))
-    }
-
-    // A table or a view holds its columns.
-    const columns = await api.listColumns(
-      node.connectionId,
-      node.database ?? '',
-      node.schema ?? null,
-      node.table ?? node.label,
-    )
-    return columns.map((column) => columnNode(column, node))
   }
 
   return {
