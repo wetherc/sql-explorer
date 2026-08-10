@@ -143,10 +143,13 @@ the interface.
 pnpm build
 ```
 
-On macOS this command makes the macOS application bundle and the `.dmg` image,
-and then it cross-compiles the Windows NSIS installer. The macOS installers
-appear under `backend/target/release/bundle/`. The Windows installer appears
-under `backend/target/x86_64-pc-windows-msvc/release/bundle/nsis/`.
+This command makes the macOS application bundle and the `.dmg` image, and
+then it cross-compiles the Windows NSIS installer. The `app` and `dmg` bundle
+formats build on macOS only, so the command stops on an other operating
+system. The macOS installers appear under `backend/target/release/bundle/`.
+The Windows installer appears under
+`backend/target/x86_64-pc-windows-msvc/release/bundle/nsis/`. To build only
+one operating system, run `pnpm build:macos` or `pnpm build:windows`.
 
 The Windows cross-compilation needs these tools on the macOS machine:
 
@@ -157,9 +160,8 @@ brew install nsis llvm
 ```
 
 `cargo-xwin` downloads the Windows SDK and the MSVC headers on the first
-build. To build only the Windows installer, run `pnpm build:windows`. The MSI
-format needs the WiX toolset, which runs on Windows only, so a build on macOS
-makes the NSIS installer and not the MSI installer.
+build. The MSI format needs the WiX toolset, which runs on Windows only, so a
+build on macOS makes the NSIS installer and not the MSI installer.
 
 ## Tests and linters
 
