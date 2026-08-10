@@ -152,11 +152,12 @@ impl DatabaseDriver for SqliteDriver {
     async fn explain(
         &mut self,
         query: &str,
+        params: Option<&QueryParams>,
         kind: PlanKind,
         options: &ExecOptions,
     ) -> Result<QueryResponse> {
         let statement = prefixed_plan(query, Dialect::Sqlite, "EXPLAIN QUERY PLAN")?;
-        let mut response = self.execute_query(&statement, None, options).await?;
+        let mut response = self.execute_query(&statement, params, options).await?;
         if kind.runs_the_statement() {
             response.messages.push(Message::info(
                 "SQLite reports one plan, so this is the plan it builds before the run.",
@@ -543,6 +544,7 @@ mod tests {
         let estimated = driver
             .explain(
                 "SELECT * FROM person WHERE id = 1;",
+                None,
                 PlanKind::Estimated,
                 &ExecOptions::default(),
             )
@@ -561,6 +563,7 @@ mod tests {
         let actual = driver
             .explain(
                 "SELECT * FROM person",
+                None,
                 PlanKind::Actual,
                 &ExecOptions::default(),
             )
@@ -582,6 +585,7 @@ mod tests {
         let error = driver
             .explain(
                 "SELECT 1; SELECT 2",
+                None,
                 PlanKind::Estimated,
                 &ExecOptions::default(),
             )

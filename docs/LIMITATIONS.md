@@ -129,5 +129,16 @@ because the driver sends no attention packet.
 
 ## Athena takes no bound parameters
 
-The driver refuses a statement that carries a parameter, because the client
-gives no way to bind one. Put the values into the statement.
+The client gives no way to bind a value, so the values of the named parameters
+of a statement of Athena go into the text of the statement as literals. A text
+value keeps its quotes doubled. Every other engine binds the values, so a value
+never becomes part of the statement there.
+
+## A statement with a parameter behaves differently on MS SQL Server
+
+`tiberius` sends a parameterised batch inside `sp_executesql`. Inside that
+wrapper a `USE` and a `SET` hold for that batch alone, so they do not reach the
+statements that follow. A script that carries a parameter is also sent whole
+and not one statement at a time, because the numbers of the placeholders belong
+to the whole text. The same script without a parameter is split and each part
+holds its own effect.

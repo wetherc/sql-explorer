@@ -276,6 +276,178 @@ fn push_statement(statements: &mut Vec<String>, current: &mut String) {
     current.clear();
 }
 
+/// The values that the user gave for the named parameters of a statement.
+/// The keys are the names without the colon.
+pub type ParamValues = serde_json::Map<String, serde_json::Value>;
+
+/// A statement whose named parameters carry the placeholders of the dialect,
+/// with the names in the order the values must be sent.
+#[derive(Debug, PartialEq)]
+pub struct Prepared {
+    pub sql: String,
+    pub order: Vec<String>,
+}
+
+/// True when a character can stand inside the name of a parameter.
+fn holds_a_name(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Walks a statement and gives each named parameter to `emit`, which returns
+/// the text that takes its place.
+///
+/// A name inside a quoted region or a comment is text of the statement and it
+/// stays as it is. Two colons together are the cast of PostgreSQL, so they
+/// carry no name either.
+fn scan_parameters(sql: &str, dialect: Dialect, mut emit: impl FnMut(&str) -> String) -> String {
+    let chars: Vec<char> = sql.chars().collect();
+    let mut out = String::with_capacity(sql.len());
+    let mut index = 0usize;
+
+    while index < chars.len() {
+        let c = chars[index];
+
+        if c == '-' && chars.get(index + 1) == Some(&'-') {
+            index = copy_to_end_of_line(&chars, index, &mut out);
+            continue;
+        }
+        if dialect.hash_comments() && c == '#' {
+            index = copy_to_end_of_line(&chars, index, &mut out);
+            continue;
+        }
+        if c == '/' && chars.get(index + 1) == Some(&'*') {
+            index = copy_block_comment(&chars, index, &mut out, dialect.nested_block_comments());
+            continue;
+        }
+        if c == '\'' || c == '"' {
+            index = copy_quoted(&chars, index, c, dialect.backslash_escapes(), &mut out);
+            continue;
+        }
+        if c == '`' && dialect == Dialect::MySql {
+            index = copy_quoted(&chars, index, '`', false, &mut out);
+            continue;
+        }
+        if c == '[' && dialect.bracket_quotes() {
+            index = copy_bracket(&chars, index, &mut out);
+            continue;
+        }
+        if c == '$' && dialect.dollar_quotes() {
+            if let Some(next) = copy_dollar_quoted(&chars, index, &mut out) {
+                index = next;
+                continue;
+            }
+        }
+
+        if c == ':' {
+            // The cast of PostgreSQL holds two colons.
+            if chars.get(index + 1) == Some(&':') {
+                out.push(':');
+                out.push(':');
+                index += 2;
+                continue;
+            }
+            let mut end = index + 1;
+            while chars.get(end).is_some_and(|&c| holds_a_name(c)) {
+                end += 1;
+            }
+            if end > index + 1 {
+                let name: String = chars[index + 1..end].iter().collect();
+                out.push_str(&emit(&name));
+                index = end;
+                continue;
+            }
+        }
+
+        out.push(c);
+        index += 1;
+    }
+
+    out
+}
+
+/// Turns each `:name` of a statement into the placeholder of the dialect.
+///
+/// MS SQL Server and PostgreSQL number their placeholders, so a name that
+/// stands twice keeps one number and its value travels once. Every other
+/// engine marks a place with a question mark, so the value of a repeated name
+/// travels once for each place.
+pub fn rewrite_parameters(sql: &str, dialect: Dialect) -> Prepared {
+    let numbered = matches!(dialect, Dialect::MsSql | Dialect::Postgres);
+    let mut order: Vec<String> = Vec::new();
+    let mut numbers: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    let sql = scan_parameters(sql, dialect, |name| {
+        if !numbered {
+            order.push(name.to_string());
+            return "?".to_string();
+        }
+        let number = match numbers.get(name) {
+            Some(number) => *number,
+            None => {
+                order.push(name.to_string());
+                let number = order.len();
+                numbers.insert(name.to_string(), number);
+                number
+            }
+        };
+        match dialect {
+            Dialect::MsSql => format!("@P{number}"),
+            _ => format!("${number}"),
+        }
+    });
+
+    Prepared { sql, order }
+}
+
+/// Lists the names of the parameters of a statement, each name once, in the
+/// order they stand in the text.
+pub fn find_parameters(sql: &str, dialect: Dialect) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    scan_parameters(sql, dialect, |name| {
+        if !names.iter().any(|held| held == name) {
+            names.push(name.to_string());
+        }
+        String::new()
+    });
+    names
+}
+
+/// Puts the values of the parameters into the text of the statement.
+///
+/// Athena binds no value, so its parameters reach the service as literals.
+/// Returns the name of the first parameter that has no value.
+pub fn inline_parameters(
+    sql: &str,
+    dialect: Dialect,
+    values: &ParamValues,
+) -> std::result::Result<String, String> {
+    let mut missing: Option<String> = None;
+    let text = scan_parameters(sql, dialect, |name| match values.get(name) {
+        Some(value) => json_literal(value, dialect),
+        None => {
+            if missing.is_none() {
+                missing = Some(name.to_string());
+            }
+            String::new()
+        }
+    });
+    match missing {
+        Some(name) => Err(name),
+        None => Ok(text),
+    }
+}
+
+/// Writes one JSON value as a literal of SQL.
+fn json_literal(value: &serde_json::Value, dialect: Dialect) -> String {
+    match value {
+        serde_json::Value::Null => "NULL".to_string(),
+        serde_json::Value::Bool(flag) => if *flag { "true" } else { "false" }.to_string(),
+        serde_json::Value::Number(number) => number.to_string(),
+        serde_json::Value::String(text) => dialect.quote_literal(text),
+        other => dialect.quote_literal(&other.to_string()),
+    }
+}
+
 /// True when the characters at the given position start with the needle.
 fn starts_with(chars: &[char], index: usize, needle: &str) -> bool {
     let needle: Vec<char> = needle.chars().collect();
@@ -465,6 +637,94 @@ fn copy_dollar_quoted(chars: &[char], index: usize, out: &mut String) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_name_becomes_the_placeholder_of_the_dialect() {
+        let numbered = rewrite_parameters("SELECT * FROM t WHERE a = :id", Dialect::MsSql);
+        assert_eq!(numbered.sql, "SELECT * FROM t WHERE a = @P1");
+        assert_eq!(numbered.order, vec!["id".to_string()]);
+
+        let postgres = rewrite_parameters("SELECT :a, :b", Dialect::Postgres);
+        assert_eq!(postgres.sql, "SELECT $1, $2");
+        assert_eq!(postgres.order, vec!["a".to_string(), "b".to_string()]);
+
+        let marks = rewrite_parameters("SELECT :a, :b", Dialect::MySql);
+        assert_eq!(marks.sql, "SELECT ?, ?");
+        assert_eq!(marks.order, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn a_repeated_name_keeps_one_number_and_needs_one_value() {
+        let numbered = rewrite_parameters("SELECT :id, :id", Dialect::Postgres);
+        assert_eq!(numbered.sql, "SELECT $1, $1");
+        assert_eq!(numbered.order, vec!["id".to_string()]);
+
+        // A question mark holds no name, so the value travels twice.
+        let marks = rewrite_parameters("SELECT :id, :id", Dialect::Sqlite);
+        assert_eq!(marks.sql, "SELECT ?, ?");
+        assert_eq!(marks.order, vec!["id".to_string(), "id".to_string()]);
+    }
+
+    #[test]
+    fn a_name_inside_text_or_a_comment_stays_as_it_is() {
+        let cases = [
+            ("SELECT ':id'", Dialect::MsSql),
+            ("SELECT \"a:id\" FROM t", Dialect::Postgres),
+            ("SELECT `a:id` FROM t", Dialect::MySql),
+            ("SELECT [a:id] FROM t", Dialect::MsSql),
+            ("SELECT 1 -- :id\n", Dialect::Postgres),
+            ("SELECT 1 # :id\n", Dialect::MySql),
+            ("SELECT /* :id */ 1", Dialect::Postgres),
+            ("SELECT $body$ :id $body$", Dialect::Postgres),
+            ("SELECT 1::text", Dialect::Postgres),
+        ];
+        for (text, dialect) in cases {
+            let prepared = rewrite_parameters(text, dialect);
+            assert_eq!(prepared.sql, text, "{text}");
+            assert!(prepared.order.is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_colon_that_holds_no_name_is_left_alone() {
+        let prepared = rewrite_parameters("SELECT a : b", Dialect::MsSql);
+        assert_eq!(prepared.sql, "SELECT a : b");
+        assert!(prepared.order.is_empty());
+    }
+
+    #[test]
+    fn the_names_of_a_statement_are_listed_once_and_in_order() {
+        let names = find_parameters("SELECT :b, :a, :b FROM t", Dialect::MsSql);
+        assert_eq!(names, vec!["b".to_string(), "a".to_string()]);
+        assert!(find_parameters("SELECT 1", Dialect::MsSql).is_empty());
+    }
+
+    #[test]
+    fn the_values_of_athena_reach_the_statement_as_literals() {
+        let mut values = ParamValues::new();
+        values.insert("name".to_string(), serde_json::json!("O'Hara"));
+        values.insert("count".to_string(), serde_json::json!(12));
+        values.insert("flag".to_string(), serde_json::json!(true));
+        values.insert("empty".to_string(), serde_json::Value::Null);
+        values.insert("list".to_string(), serde_json::json!([1, 2]));
+
+        let text = inline_parameters(
+            "SELECT :name, :count, :flag, :empty, :list",
+            Dialect::Athena,
+            &values,
+        )
+        .unwrap();
+        assert_eq!(text, "SELECT 'O''Hara', 12, true, NULL, '[1,2]'");
+    }
+
+    #[test]
+    fn a_value_that_is_missing_names_itself() {
+        let values = ParamValues::new();
+        assert_eq!(
+            inline_parameters("SELECT :id", Dialect::Athena, &values),
+            Err("id".to_string())
+        );
+    }
 
     #[test]
     fn identifiers_use_the_quotes_of_the_dialect() {

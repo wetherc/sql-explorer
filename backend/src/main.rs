@@ -40,6 +40,7 @@ fn main() {
             commands::list_active_connections,
             commands::execute_query,
             commands::explain_query,
+            commands::query_parameters,
             commands::cancel_query,
             commands::list_databases,
             commands::list_schemas,

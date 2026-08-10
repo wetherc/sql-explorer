@@ -548,11 +548,12 @@ impl DatabaseDriver for AthenaDriver {
     async fn explain(
         &mut self,
         query: &str,
+        params: Option<&QueryParams>,
         kind: PlanKind,
         options: &ExecOptions,
     ) -> Result<QueryResponse> {
         let statement = prefixed_plan(query, Dialect::Athena, plan_prefix(kind))?;
-        self.execute_query(&statement, None, options).await
+        self.execute_query(&statement, params, options).await
     }
 
     async fn list_databases(&mut self) -> Result<Vec<Database>> {

@@ -170,6 +170,7 @@ pub trait DatabaseDriver: Send + Sync {
     async fn explain(
         &mut self,
         _query: &str,
+        _params: Option<&QueryParams>,
         _kind: PlanKind,
         _options: &ExecOptions,
     ) -> Result<QueryResponse> {

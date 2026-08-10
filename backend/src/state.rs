@@ -293,6 +293,7 @@ mod tests {
         let error = driver
             .explain(
                 "SELECT 1",
+                None,
                 crate::db::PlanKind::Estimated,
                 &ExecOptions::default(),
             )

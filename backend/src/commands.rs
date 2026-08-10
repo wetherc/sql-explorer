@@ -12,6 +12,7 @@ use crate::db::{
 use crate::error::{Error, Result};
 use crate::history::{HistoryEntry, SavedQuery};
 use crate::script::{self, ScriptKind};
+use crate::sql::ParamValues;
 use crate::state::{
     AppState, ConnectionHealth, ConnectionInfo, ConnectionStatusEvent, OpenConnection,
     CONNECTION_STATUS_EVENT,
@@ -218,25 +219,79 @@ fn limit_reason(error: &Error) -> String {
     }
 }
 
+/// Puts the values of the named parameters into one statement.
+///
+/// The text keeps the placeholders of the dialect and the values travel bound,
+/// so a value never becomes part of the statement. Athena binds no value, so
+/// its parameters reach the service as literals of SQL.
+///
+/// A statement that holds no name is left as it stands and carries no
+/// parameter, which keeps a script of more than one statement working.
+pub fn prepare_parameters(
+    query: &str,
+    dialect: crate::sql::Dialect,
+    values: Option<&ParamValues>,
+) -> Result<(String, Option<QueryParams>)> {
+    let empty = ParamValues::new();
+    let values = values.unwrap_or(&empty);
+
+    if dialect == crate::sql::Dialect::Athena {
+        let names = crate::sql::find_parameters(query, dialect);
+        if names.is_empty() {
+            return Ok((query.to_string(), None));
+        }
+        let text = crate::sql::inline_parameters(query, dialect, values)
+            .map_err(|name| missing_parameter(&name))?;
+        return Ok((text, None));
+    }
+
+    let prepared = crate::sql::rewrite_parameters(query, dialect);
+    if prepared.order.is_empty() {
+        return Ok((query.to_string(), None));
+    }
+    let mut bound: QueryParams = Vec::new();
+    for name in &prepared.order {
+        let value = values.get(name).ok_or_else(|| missing_parameter(name))?;
+        bound.push(db::QueryParam {
+            value: value.clone(),
+        });
+    }
+    Ok((prepared.sql, Some(bound)))
+}
+
+/// The message for a parameter that the statement names and the request left
+/// out.
+fn missing_parameter(name: &str) -> Error {
+    Error::Configuration(format!("The parameter ':{name}' has no value."))
+}
+
+/// Lists the names of the parameters of a statement. The interface asks for a
+/// value for each name before it runs the statement.
+#[tauri::command]
+pub fn query_parameters(query: String, dialect: crate::sql::Dialect) -> Vec<String> {
+    crate::sql::find_parameters(&query, dialect)
+}
+
 #[tauri::command]
 pub async fn execute_query<R: Runtime>(
     app: AppHandle<R>,
     connection_id: String,
     request_id: String,
     query: String,
-    query_params: Option<QueryParams>,
+    query_params: Option<ParamValues>,
     options: Option<ExecOptions>,
     state: tauri::State<'_, AppState>,
 ) -> Result<QueryResponse> {
     let open = ensure_healthy(&app, &state, &connection_id).await?;
     let options = options.unwrap_or_else(|| open.descriptor.exec_options());
+    let (query, bound) = prepare_parameters(&query, open.dialect, query_params.as_ref())?;
     let token = state.start_request(&request_id).await;
 
     let outcome = {
         let driver = open.driver.clone();
         let mut guard = driver.lock().await;
         run_bounded(
-            guard.execute_query(&query, query_params.as_ref(), &options),
+            guard.execute_query(&query, bound.as_ref(), &options),
             &token,
             options.timeout_secs,
         )
@@ -247,26 +302,47 @@ pub async fn execute_query<R: Runtime>(
     finish_run(&app, &state, &connection_id, &open, outcome).await
 }
 
+/// What one request for a plan carries.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanRequest {
+    pub connection_id: String,
+    pub request_id: String,
+    pub query: String,
+    pub kind: PlanKind,
+    #[serde(default)]
+    pub query_params: Option<ParamValues>,
+    #[serde(default)]
+    pub options: Option<ExecOptions>,
+}
+
 /// Reads the plan of one statement and gives it back as a result set.
 #[tauri::command]
 pub async fn explain_query<R: Runtime>(
     app: AppHandle<R>,
-    connection_id: String,
-    request_id: String,
-    query: String,
-    kind: PlanKind,
-    options: Option<ExecOptions>,
+    request: PlanRequest,
     state: tauri::State<'_, AppState>,
 ) -> Result<QueryResponse> {
+    let PlanRequest {
+        connection_id,
+        request_id,
+        query,
+        kind,
+        query_params,
+        options,
+    } = request;
     let open = ensure_healthy(&app, &state, &connection_id).await?;
     let options = options.unwrap_or_else(|| open.descriptor.exec_options());
+    // A plan needs the values of the parameters, because the plan of a
+    // statement depends on the values it holds.
+    let (query, bound) = prepare_parameters(&query, open.dialect, query_params.as_ref())?;
     let token = state.start_request(&request_id).await;
 
     let outcome = {
         let driver = open.driver.clone();
         let mut guard = driver.lock().await;
         run_bounded(
-            guard.explain(&query, kind, &options),
+            guard.explain(&query, bound.as_ref(), kind, &options),
             &token,
             options.timeout_secs,
         )
@@ -842,6 +918,9 @@ pub struct ExportRequest {
     pub format: ExportFormat,
     /// The row limit of the export, which is higher than the one of the view.
     pub max_rows: usize,
+    /// The values of the named parameters of the statement.
+    #[serde(default)]
+    pub query_params: Option<ParamValues>,
 }
 
 /// What one export wrote.
@@ -873,6 +952,7 @@ pub async fn export_query<R: Runtime>(
         path,
         format,
         max_rows,
+        query_params,
     } = request;
 
     if !crate::sql::only_reads(&query) {
@@ -887,19 +967,21 @@ pub async fn export_query<R: Runtime>(
         max_rows,
         timeout_secs: open.descriptor.exec_options().timeout_secs,
     };
+    let (query, bound) = prepare_parameters(&query, open.dialect, query_params.as_ref())?;
     let token = state.start_request(&request_id).await;
 
     let outcome = {
         let driver = open.driver.clone();
         let mut guard = driver.lock().await;
-        tokio::select! {
-            result = guard.execute_query(&query, None, &options) => result,
-            () = token.cancelled() => Err(Error::Cancelled),
-        }
+        run_bounded(
+            guard.execute_query(&query, bound.as_ref(), &options),
+            &token,
+            options.timeout_secs,
+        )
+        .await
     };
     state.end_request(&request_id).await;
-    let response = outcome?;
-    open.mark_ok().await;
+    let response = finish_run(&app, &state, &connection_id, &open, outcome).await?;
 
     let result =
         response.results.into_iter().next().ok_or_else(|| {
@@ -1021,6 +1103,61 @@ mod tests {
     use crate::secrets::MemoryStore;
     use crate::sql::Dialect;
     use crate::storage::ConnectionOptions;
+
+    #[test]
+    fn a_statement_without_a_name_keeps_its_text_and_carries_no_parameter() {
+        let (text, bound) = prepare_parameters("SELECT 1; SELECT 2", Dialect::MsSql, None).unwrap();
+        assert_eq!(text, "SELECT 1; SELECT 2");
+        assert!(bound.is_none());
+    }
+
+    #[test]
+    fn the_values_travel_bound_and_in_the_order_of_the_placeholders() {
+        let mut values = ParamValues::new();
+        values.insert("second".to_string(), serde_json::json!(2));
+        values.insert("first".to_string(), serde_json::json!("a"));
+
+        let (text, bound) =
+            prepare_parameters("SELECT :first, :second", Dialect::Postgres, Some(&values)).unwrap();
+        assert_eq!(text, "SELECT $1, $2");
+        let bound = bound.unwrap();
+        assert_eq!(bound.len(), 2);
+        assert_eq!(bound[0].value, serde_json::json!("a"));
+        assert_eq!(bound[1].value, serde_json::json!(2));
+    }
+
+    #[test]
+    fn a_parameter_without_a_value_stops_the_run() {
+        let error = prepare_parameters("SELECT :id", Dialect::MsSql, None).unwrap_err();
+        assert_eq!(error.kind(), crate::error::ErrorKind::Configuration);
+        assert!(error.to_string().contains("':id'"));
+
+        let athena = prepare_parameters("SELECT :id", Dialect::Athena, None).unwrap_err();
+        assert_eq!(athena.kind(), crate::error::ErrorKind::Configuration);
+    }
+
+    #[test]
+    fn athena_takes_its_values_in_the_text_and_binds_none() {
+        let mut values = ParamValues::new();
+        values.insert("name".to_string(), serde_json::json!("a"));
+        let (text, bound) =
+            prepare_parameters("SELECT :name", Dialect::Athena, Some(&values)).unwrap();
+        assert_eq!(text, "SELECT 'a'");
+        assert!(bound.is_none());
+
+        // A statement of Athena that names nothing keeps its text.
+        let (plain, none) = prepare_parameters("SELECT 1", Dialect::Athena, Some(&values)).unwrap();
+        assert_eq!(plain, "SELECT 1");
+        assert!(none.is_none());
+    }
+
+    #[test]
+    fn the_names_of_a_statement_reach_the_interface() {
+        assert_eq!(
+            query_parameters("SELECT :a, :b".to_string(), Dialect::MsSql),
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
 
     #[tokio::test]
     async fn a_bounded_run_gives_the_answer_of_the_work() {

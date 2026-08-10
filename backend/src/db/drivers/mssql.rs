@@ -559,15 +559,21 @@ impl DatabaseDriver for MssqlDriver {
     async fn explain(
         &mut self,
         query: &str,
+        params: Option<&QueryParams>,
         kind: PlanKind,
         options: &ExecOptions,
     ) -> Result<QueryResponse> {
         let statement = single_statement(query, Dialect::MsSql)?;
+        let bound = bind_params(params)?;
+        let borrowed: Vec<&dyn tiberius::ToSql> =
+            bound.iter().map(|value| value.as_ref()).collect();
         let switch = plan_switch(kind);
         let started = Instant::now();
 
         self.run_switch(&format!("SET {switch} ON")).await?;
-        let outcome = self.collect_sets(&statement, &[], options).await;
+        let outcome = self
+            .collect_sets(&statement, borrowed.as_slice(), options)
+            .await;
         if let Err(error) = self.run_switch(&format!("SET {switch} OFF")).await {
             // The switch holds for the session, so a session that keeps it on
             // answers every later statement with a plan. The connection is
