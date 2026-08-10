@@ -162,7 +162,8 @@ export interface ExportRequest {
   connectionId: string
   requestId: string
   query: string
-  path: string
+  /** The file name that the save dialog of the backend suggests. */
+  defaultName: string
   format: 'csv' | 'json'
   /** The row limit of the export, which is higher than the one of the view. */
   maxRows: number
@@ -175,6 +176,21 @@ export interface ExportSummary {
   rows: number
   /** True when even the higher row limit of the export stopped the read. */
   truncated: boolean
+  /** The file the export wrote. */
+  path: string
+}
+
+/** What a request to save one file carries. The backend asks the user for
+ *  the path itself. */
+export interface SaveFileRequest {
+  /** The file name that the save dialog suggests. */
+  defaultName: string
+  /** The label of the file kind in the dialog. */
+  filterLabel: string
+  /** The extension of the file kind, without the period. */
+  extension: string
+  /** The content: text, or base64 text for a binary file. */
+  contents: string
 }
 
 export interface ExecOptions {

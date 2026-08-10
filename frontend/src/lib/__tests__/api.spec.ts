@@ -108,32 +108,37 @@ describe('api', () => {
     await api.saveWorkspace({ tabs: [] })
     expect(invoke).toHaveBeenCalledWith('save_workspace', { workspace: { tabs: [] } })
 
-    await api.writeTextFile('/tmp/a.csv', 'a,b')
-    expect(invoke).toHaveBeenCalledWith('write_text_file', {
-      path: '/tmp/a.csv',
+    await api.saveTextFile({
+      defaultName: 'a.csv',
+      filterLabel: 'CSV',
+      extension: 'csv',
       contents: 'a,b',
+    })
+    expect(invoke).toHaveBeenCalledWith('save_text_file', {
+      request: expect.objectContaining({ defaultName: 'a.csv', contents: 'a,b' }),
     })
 
     await api.exportQuery({
       connectionId: 'c1',
       requestId: 'r1',
       query: 'SELECT 1',
-      path: '/tmp/all.csv',
+      defaultName: 'all.csv',
       format: 'csv',
       maxRows: 1000,
     })
     expect(invoke).toHaveBeenCalledWith('export_query', {
-      request: expect.objectContaining({ path: '/tmp/all.csv' }),
+      request: expect.objectContaining({ defaultName: 'all.csv' }),
     })
 
-    await api.writeBinaryFile('/tmp/a.xlsx', 'UEs=')
-    expect(invoke).toHaveBeenCalledWith('write_binary_file', {
-      path: '/tmp/a.xlsx',
-      contentsBase64: 'UEs=',
+    await api.saveBinaryFile({
+      defaultName: 'a.xlsx',
+      filterLabel: 'Excel',
+      extension: 'xlsx',
+      contents: 'UEs=',
     })
-
-    await api.readTextFile('/tmp/a.csv')
-    expect(invoke).toHaveBeenCalledWith('read_text_file', { path: '/tmp/a.csv' })
+    expect(invoke).toHaveBeenCalledWith('save_binary_file', {
+      request: expect.objectContaining({ defaultName: 'a.xlsx', contents: 'UEs=' }),
+    })
 
     await api.supportedEngines()
     expect(invoke).toHaveBeenCalledWith('supported_engines')

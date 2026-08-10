@@ -66,10 +66,9 @@ fn main() {
             commands::delete_saved_query,
             commands::get_workspace,
             commands::save_workspace,
-            commands::write_text_file,
-            commands::write_binary_file,
+            commands::save_text_file,
+            commands::save_binary_file,
             commands::export_query,
-            commands::read_text_file,
             commands::supported_engines,
         ])
         .run(tauri::generate_context!())

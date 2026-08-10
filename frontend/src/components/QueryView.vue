@@ -338,7 +338,6 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Splitpanes, Pane } from 'splitpanes'
 import 'splitpanes/dist/splitpanes.css'
-import { save as saveFileDialog } from '@tauri-apps/plugin-dialog'
 import SqlEditor from './SqlEditor.vue'
 import ResultsGrid from './ResultsGrid.vue'
 import { api } from '@/lib/api'
@@ -624,29 +623,25 @@ async function onExportAll(format: 'csv' | 'json'): Promise<void> {
     return
   }
   try {
-    const path = await saveFileDialog({
-      defaultPath: exportFileName(props.tab.title, format),
-      filters: [{ name: format.toUpperCase(), extensions: [format] }],
-    })
-    if (!path) {
-      return
-    }
     const summary = await api.exportQuery({
       connectionId,
       requestId: `export-${props.tab.id}-${Date.now()}`,
       query: props.tab.query.trim(),
-      path,
+      defaultName: exportFileName(props.tab.title, format),
       format,
       maxRows: settings.settings.exportRowLimit,
       queryParams: paramsForRun(props.tab.params),
     })
+    if (!summary) {
+      return
+    }
     if (summary.truncated) {
       ui.warn(
         `The export limit stopped the read at ${summary.rows.toLocaleString()} rows.`,
         'Raise the export limit in the settings.',
       )
     } else {
-      ui.success(`${summary.rows.toLocaleString()} rows are written to ${path}.`)
+      ui.success(`${summary.rows.toLocaleString()} rows are written to ${summary.path}.`)
     }
   } catch (error) {
     ui.reportError(error)
@@ -656,17 +651,20 @@ async function onExportAll(format: 'csv' | 'json'): Promise<void> {
 async function exportResult(result: ResultSet, format: ExportFormat): Promise<void> {
   const file = EXPORT_FILES[format]
   try {
-    const path = await saveFileDialog({
-      defaultPath: exportFileName(props.tab.title, file.extension),
-      filters: [{ name: file.label, extensions: [file.extension] }],
-    })
+    const request = {
+      defaultName: exportFileName(props.tab.title, file.extension),
+      filterLabel: file.label,
+      extension: file.extension,
+    }
+    const path =
+      format === 'xlsx'
+        ? await api.saveBinaryFile({
+            ...request,
+            contents: bytesToBase64(toXlsx(result, props.tab.title)),
+          })
+        : await api.saveTextFile({ ...request, contents: textFor(result, format) })
     if (!path) {
       return
-    }
-    if (format === 'xlsx') {
-      await api.writeBinaryFile(path, bytesToBase64(toXlsx(result, props.tab.title)))
-    } else {
-      await api.writeTextFile(path, textFor(result, format))
     }
     ui.success(`The result is written to ${path}.`)
   } catch (error) {

@@ -4,12 +4,6 @@ import { makeApiStub, connectionFixture, infoFixture } from '../../stores/__test
 const apiStub = makeApiStub()
 vi.mock('@/lib/api', () => ({ api: apiStub, CONNECTION_STATUS_EVENT: 'connection-status' }))
 
-const saveDialog = vi.fn()
-vi.mock('@tauri-apps/plugin-dialog', () => ({
-  save: (...args: unknown[]) => saveDialog(...args),
-  open: vi.fn(),
-}))
-
 const { monaco } = await import('@/plugins/monaco')
 const { tabActions } = await import('@/lib/commands')
 const QueryView = (await import('@/components/QueryView.vue')).default
@@ -102,7 +96,6 @@ async function mountView(query = 'SELECT 1') {
 describe('QueryView', () => {
   beforeEach(() => {
     Object.values(apiStub).forEach((fn) => fn.mockReset())
-    saveDialog.mockReset()
     // Gives back the editor stub of the test setup, so that a test which
     // puts its own editor in place does not reach the next one.
     vi.mocked(monaco.editor.create).mockReset()
@@ -550,8 +543,7 @@ describe('QueryView', () => {
 
   it('writes a result to the file the user chose', async () => {
     apiStub.executeQuery.mockResolvedValue(response)
-    apiStub.writeTextFile.mockResolvedValue(undefined)
-    saveDialog.mockResolvedValue('/tmp/out.csv')
+    apiStub.saveTextFile.mockResolvedValue('/tmp/out.csv')
 
     const wrapper = await mountView()
     await wrapper.find('[data-test="run-button"]').trigger('click')
@@ -561,14 +553,15 @@ describe('QueryView', () => {
     await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export', 'csv', exported())
     await settle()
 
-    expect(apiStub.writeTextFile).toHaveBeenCalledWith('/tmp/out.csv', 'n\n1')
+    expect(apiStub.saveTextFile).toHaveBeenCalledWith(
+      expect.objectContaining({ extension: 'csv', contents: 'n\n1' }),
+    )
     expect(useUiStore().notices.some((notice) => notice.level === 'success')).toBe(true)
   })
 
   it('writes a result as JSON', async () => {
     apiStub.executeQuery.mockResolvedValue(response)
-    apiStub.writeTextFile.mockResolvedValue(undefined)
-    saveDialog.mockResolvedValue('/tmp/out.json')
+    apiStub.saveTextFile.mockResolvedValue('/tmp/out.json')
 
     const wrapper = await mountView()
     await wrapper.find('[data-test="run-button"]').trigger('click')
@@ -577,15 +570,14 @@ describe('QueryView', () => {
 
     await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export', 'json', exported())
     await settle()
-    expect(apiStub.writeTextFile).toHaveBeenCalledWith(
-      '/tmp/out.json',
-      '[\n  {\n    "n": 1\n  }\n]',
+    expect(apiStub.saveTextFile).toHaveBeenCalledWith(
+      expect.objectContaining({ extension: 'json', contents: '[\n  {\n    "n": 1\n  }\n]' }),
     )
   })
 
   it('writes nothing when the user closed the file dialog', async () => {
     apiStub.executeQuery.mockResolvedValue(response)
-    saveDialog.mockResolvedValue(null)
+    apiStub.saveTextFile.mockResolvedValue(null)
 
     const wrapper = await mountView()
     await wrapper.find('[data-test="run-button"]').trigger('click')
@@ -594,12 +586,12 @@ describe('QueryView', () => {
 
     await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export', 'csv', exported())
     await settle()
-    expect(apiStub.writeTextFile).not.toHaveBeenCalled()
+    expect(useUiStore().notices.some((notice) => notice.level === 'success')).toBe(false)
   })
 
   it('reports a failure to write a file', async () => {
     apiStub.executeQuery.mockResolvedValue(response)
-    saveDialog.mockRejectedValue({ kind: 'io', message: 'read only', detail: null })
+    apiStub.saveTextFile.mockRejectedValue({ kind: 'io', message: 'read only', detail: null })
 
     const wrapper = await mountView()
     await wrapper.find('[data-test="run-button"]').trigger('click')
@@ -785,7 +777,6 @@ describe('QueryView', () => {
 describe('QueryView details', () => {
   beforeEach(() => {
     Object.values(apiStub).forEach((fn) => fn.mockReset())
-    saveDialog.mockReset()
     // Gives back the editor stub of the test setup, so that a test which
     // puts its own editor in place does not reach the next one.
     vi.mocked(monaco.editor.create).mockReset()
@@ -891,7 +882,6 @@ describe('QueryView details', () => {
 describe('QueryView edge paths', () => {
   beforeEach(() => {
     Object.values(apiStub).forEach((fn) => fn.mockReset())
-    saveDialog.mockReset()
     // Gives back the editor stub of the test setup, so that a test which
     // puts its own editor in place does not reach the next one.
     vi.mocked(monaco.editor.create).mockReset()
@@ -1034,23 +1024,23 @@ describe('QueryView edge paths', () => {
   })
 
   it('writes a result as a table of Markdown', async () => {
-    apiStub.writeTextFile.mockResolvedValue(undefined)
-    saveDialog.mockResolvedValue('/tmp/out.md')
+    apiStub.saveTextFile.mockResolvedValue('/tmp/out.md')
     const wrapper = await mountedWithResult()
 
     await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export', 'markdown', exported())
     await settle()
-    expect(apiStub.writeTextFile).toHaveBeenCalledWith('/tmp/out.md', '| n |\n| --- |\n| 1 |')
+    expect(apiStub.saveTextFile).toHaveBeenCalledWith(
+      expect.objectContaining({ extension: 'md', contents: '| n |\n| --- |\n| 1 |' }),
+    )
   })
 
   it('asks for the table before it writes INSERT statements', async () => {
-    apiStub.writeTextFile.mockResolvedValue(undefined)
-    saveDialog.mockResolvedValue('/tmp/out.sql')
+    apiStub.saveTextFile.mockResolvedValue('/tmp/out.sql')
     const wrapper = await mountedWithResult()
 
     await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export', 'insert', exported())
     await settle()
-    expect(apiStub.writeTextFile).not.toHaveBeenCalled()
+    expect(apiStub.saveTextFile).not.toHaveBeenCalled()
 
     const field = document.querySelector(
       '[data-test="insert-table-name"] input',
@@ -1061,15 +1051,16 @@ describe('QueryView edge paths', () => {
     ;(document.querySelector('[data-test="insert-table-confirm"]') as HTMLElement).click()
     await settle()
 
-    expect(apiStub.writeTextFile).toHaveBeenCalledWith(
-      '/tmp/out.sql',
-      'INSERT INTO [dbo].[orders] ([n]) VALUES (1);',
+    expect(apiStub.saveTextFile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extension: 'sql',
+        contents: 'INSERT INTO [dbo].[orders] ([n]) VALUES (1);',
+      }),
     )
   })
 
   it('asks the backend to write every row of a result that was cut', async () => {
-    saveDialog.mockResolvedValue('/tmp/all.csv')
-    apiStub.exportQuery.mockResolvedValue({ rows: 40000, truncated: false })
+    apiStub.exportQuery.mockResolvedValue({ rows: 40000, truncated: false, path: '/tmp/all.csv' })
     const wrapper = await mountedWithResult()
 
     await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export-all', 'csv')
@@ -1079,7 +1070,7 @@ describe('QueryView edge paths', () => {
       expect.objectContaining({
         connectionId: 'c1',
         query: 'SELECT 1',
-        path: '/tmp/all.csv',
+        defaultName: expect.stringContaining('.csv'),
         format: 'csv',
         maxRows: 1000000,
       }),
@@ -1088,8 +1079,7 @@ describe('QueryView edge paths', () => {
   })
 
   it('warns when the export limit stopped the read as well', async () => {
-    saveDialog.mockResolvedValue('/tmp/all.json')
-    apiStub.exportQuery.mockResolvedValue({ rows: 1000000, truncated: true })
+    apiStub.exportQuery.mockResolvedValue({ rows: 1000000, truncated: true, path: '/tmp/all.json' })
     const wrapper = await mountedWithResult()
 
     await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export-all', 'json')
@@ -1098,15 +1088,14 @@ describe('QueryView edge paths', () => {
   })
 
   it('writes no whole export when the user closes the save dialog', async () => {
-    saveDialog.mockResolvedValue(null)
+    apiStub.exportQuery.mockResolvedValue(null)
     const wrapper = await mountedWithResult()
     await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export-all', 'csv')
     await settle()
-    expect(apiStub.exportQuery).not.toHaveBeenCalled()
+    expect(useUiStore().notices.some((notice) => notice.level === 'success')).toBe(false)
   })
 
   it('reports a whole export that failed', async () => {
-    saveDialog.mockResolvedValue('/tmp/all.csv')
     apiStub.exportQuery.mockRejectedValue({
       kind: 'unsupported',
       message: 'only a read',
@@ -1134,7 +1123,7 @@ describe('QueryView edge paths', () => {
     })
     await settle()
     await (wrapper.vm as unknown as { onExportAll: (f: 'csv') => Promise<void> }).onExportAll('csv')
-    expect(saveDialog).not.toHaveBeenCalled()
+    expect(apiStub.exportQuery).not.toHaveBeenCalled()
   })
 
   it('closes the table dialog when the overlay reports it', async () => {
@@ -1160,28 +1149,26 @@ describe('QueryView edge paths', () => {
       ) as HTMLElement
     ).click()
     await settle()
-    expect(saveDialog).not.toHaveBeenCalled()
+    expect(apiStub.saveTextFile).not.toHaveBeenCalled()
   })
 
   it('writes a result as an Excel file', async () => {
-    apiStub.writeBinaryFile.mockResolvedValue(undefined)
-    saveDialog.mockResolvedValue('/tmp/out.xlsx')
+    apiStub.saveBinaryFile.mockResolvedValue('/tmp/out.xlsx')
     const wrapper = await mountedWithResult()
 
     await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export', 'xlsx', exported())
     await settle()
-    const [path, base64] = apiStub.writeBinaryFile.mock.calls[0] as [string, string]
-    expect(path).toBe('/tmp/out.xlsx')
+    const [request] = apiStub.saveBinaryFile.mock.calls[0] as [{ contents: string }]
     // A ZIP container starts with the two letters PK.
-    expect(atob(base64).startsWith('PK')).toBe(true)
+    expect(atob(request.contents).startsWith('PK')).toBe(true)
   })
 
   it('writes nothing when the user closes the save dialog', async () => {
-    saveDialog.mockResolvedValue(null)
+    apiStub.saveTextFile.mockResolvedValue(null)
     const wrapper = await mountedWithResult()
     await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export', 'csv', exported())
     await settle()
-    expect(apiStub.writeTextFile).not.toHaveBeenCalled()
+    expect(useUiStore().notices.some((notice) => notice.level === 'success')).toBe(false)
   })
 
   it('closes the save dialog when the overlay reports it', async () => {

@@ -11,6 +11,7 @@ import type {
   ExecOptions,
   ExportRequest,
   ExportSummary,
+  SaveFileRequest,
   HistoryEntry,
   IndexRef,
   PartitionRef,
@@ -265,20 +266,22 @@ export const api = {
     return invoke('save_workspace', { workspace })
   },
 
-  writeTextFile(path: string, contents: string): Promise<void> {
-    return invoke('write_text_file', { path, contents })
+  /** Asks the user for a path and writes text there. Gives back the path,
+   *  or null when the user closed the dialog. */
+  saveTextFile(request: SaveFileRequest): Promise<string | null> {
+    return invoke('save_text_file', { request })
   },
 
-  exportQuery(request: ExportRequest): Promise<ExportSummary> {
+  /** Runs the statement again and writes the rows to a file the user
+   *  chooses. Gives back null when the user closed the dialog. */
+  exportQuery(request: ExportRequest): Promise<ExportSummary | null> {
     return invoke('export_query', { request })
   },
 
-  writeBinaryFile(path: string, contentsBase64: string): Promise<void> {
-    return invoke('write_binary_file', { path, contentsBase64 })
-  },
-
-  readTextFile(path: string): Promise<string> {
-    return invoke('read_text_file', { path })
+  /** Asks the user for a path and writes bytes there. The content travels
+   *  as base64 text. Gives back null when the user closed the dialog. */
+  saveBinaryFile(request: SaveFileRequest): Promise<string | null> {
+    return invoke('save_binary_file', { request })
   },
 
   supportedEngines(): Promise<EngineInfo[]> {

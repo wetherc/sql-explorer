@@ -893,14 +893,16 @@ pub enum ExportFormat {
     Json,
 }
 
-/// What an export to a file needs to know.
+/// What an export to a file needs to know. The backend asks the user for
+/// the path itself, so the interface names only the file to suggest.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportRequest {
     pub connection_id: String,
     pub request_id: String,
     pub query: String,
-    pub path: String,
+    /// The file name that the save dialog suggests.
+    pub default_name: String,
     pub format: ExportFormat,
     /// The row limit of the export, which is higher than the one of the view.
     pub max_rows: usize,
@@ -916,6 +918,103 @@ pub struct ExportSummary {
     pub rows: usize,
     /// True when even the higher row limit of the export stopped the read.
     pub truncated: bool,
+    /// The file the export wrote.
+    pub path: String,
+}
+
+/// Asks the user for the path of a new file. Returns `None` when the user
+/// closed the dialog without a choice. The backend opens the dialog itself,
+/// so a command never writes to a path that the user did not accept.
+async fn ask_save_path<R: Runtime>(
+    app: &AppHandle<R>,
+    default_name: &str,
+    filter_label: &str,
+    extension: &str,
+) -> Option<std::path::PathBuf> {
+    use tauri_plugin_dialog::DialogExt;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_file_name(default_name)
+        .add_filter(filter_label, &[extension])
+        .save_file(move |path| {
+            let _ = sender.send(path);
+        });
+    receiver
+        .await
+        .ok()
+        .flatten()
+        .and_then(|path| path.into_path().ok())
+}
+
+/// What a request to save one file carries. The content is text, or base64
+/// text when the file is binary.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveFileRequest {
+    /// The file name that the save dialog suggests.
+    pub default_name: String,
+    /// The label of the file kind in the dialog.
+    pub filter_label: String,
+    /// The extension of the file kind, without the period.
+    pub extension: String,
+    pub contents: String,
+}
+
+/// Asks the user for a path and writes text there. Returns the path, or
+/// `None` when the user closed the dialog.
+#[tauri::command]
+pub async fn save_text_file<R: Runtime>(
+    app: AppHandle<R>,
+    request: SaveFileRequest,
+) -> Result<Option<String>> {
+    let Some(path) = ask_save_path(
+        &app,
+        &request.default_name,
+        &request.filter_label,
+        &request.extension,
+    )
+    .await
+    else {
+        return Ok(None);
+    };
+    std::fs::write(&path, request.contents)?;
+    let written = path.to_string_lossy().to_string();
+    log::info!("Wrote the file '{written}'.");
+    Ok(Some(written))
+}
+
+/// Asks the user for a path and writes bytes there. The bytes arrive as
+/// base64 text, because the bridge carries no binary body beside the other
+/// fields. Returns the path, or `None` when the user closed the dialog.
+#[tauri::command]
+pub async fn save_binary_file<R: Runtime>(
+    app: AppHandle<R>,
+    request: SaveFileRequest,
+) -> Result<Option<String>> {
+    let bytes = decode_base64(&request.contents)?;
+    let Some(path) = ask_save_path(
+        &app,
+        &request.default_name,
+        &request.filter_label,
+        &request.extension,
+    )
+    .await
+    else {
+        return Ok(None);
+    };
+    std::fs::write(&path, bytes)?;
+    let written = path.to_string_lossy().to_string();
+    log::info!("Wrote the file '{written}'.");
+    Ok(Some(written))
+}
+
+/// Reads the bytes out of base64 text.
+fn decode_base64(text: &str) -> Result<Vec<u8>> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(text.as_bytes())
+        .map_err(|error| Error::Configuration(format!("The file content is damaged: {error}")))
 }
 
 /// Runs a statement again with a higher row limit and writes the rows
@@ -930,16 +1029,24 @@ pub async fn export_query<R: Runtime>(
     app: AppHandle<R>,
     request: ExportRequest,
     state: tauri::State<'_, AppState>,
-) -> Result<ExportSummary> {
+) -> Result<Option<ExportSummary>> {
     let ExportRequest {
         connection_id,
         request_id,
         query,
-        path,
+        default_name,
         format,
         max_rows,
         query_params,
     } = request;
+
+    let (label, extension) = match format {
+        ExportFormat::Csv => ("CSV", "csv"),
+        ExportFormat::Json => ("JSON", "json"),
+    };
+    let Some(path) = ask_save_path(&app, &default_name, label, extension).await else {
+        return Ok(None);
+    };
 
     let open = ensure_healthy(&app, &state, &connection_id).await?;
     if !crate::sql::only_reads(&query, open.dialect) {
@@ -977,13 +1084,18 @@ pub async fn export_query<R: Runtime>(
     let rows = result.rows.len();
     let truncated = result.truncated;
     write_result_file(&path, &result, format)?;
+    let path = path.to_string_lossy().to_string();
     log::info!("Wrote {rows} rows to the file '{path}'.");
-    Ok(ExportSummary { rows, truncated })
+    Ok(Some(ExportSummary {
+        rows,
+        truncated,
+        path,
+    }))
 }
 
 /// Writes one result set to a file, one row at a time.
 fn write_result_file(
-    path: &str,
+    path: &std::path::Path,
     result: &crate::db::ResultSet,
     format: ExportFormat,
 ) -> Result<()> {
@@ -1056,37 +1168,6 @@ fn starts_a_formula(text: &str) -> bool {
         text.chars().next(),
         Some('=') | Some('+') | Some('-') | Some('@') | Some('\t')
     )
-}
-
-// --- Files ---
-
-/// Writes text to a file the user chose. The dialog runs in the user
-/// interface, so this command receives a path the user already accepted.
-#[tauri::command]
-pub async fn write_text_file(path: String, contents: String) -> Result<()> {
-    std::fs::write(&path, contents)?;
-    log::info!("Wrote the file '{path}'.");
-    Ok(())
-}
-
-/// Writes bytes to a file the user chose. The bytes arrive as base64 text,
-/// because the raw form of the bridge carries one body and cannot carry the
-/// path beside it.
-#[tauri::command]
-pub async fn write_binary_file(path: String, contents_base64: String) -> Result<()> {
-    use base64::Engine;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(contents_base64.as_bytes())
-        .map_err(|error| Error::Configuration(format!("The file content is damaged: {error}")))?;
-    std::fs::write(&path, bytes)?;
-    log::info!("Wrote the file '{path}'.");
-    Ok(())
-}
-
-/// Reads a text file the user chose.
-#[tauri::command]
-pub async fn read_text_file(path: String) -> Result<String> {
-    Ok(std::fs::read_to_string(&path)?)
 }
 
 /// Reports the engines this build supports, so the connection form can
@@ -1355,22 +1436,11 @@ mod tests {
         let filled = with_password(&state, sqlite_connection("/tmp/a.db")).unwrap();
         assert_eq!(filled.password, None);
     }
-    #[tokio::test]
-    async fn bytes_reach_a_file_and_damaged_content_is_refused() {
-        let folder = tempfile::tempdir().unwrap();
-        let path = folder.path().join("book.xlsx");
-        let target = path.to_string_lossy().to_string();
-
+    #[test]
+    fn base64_gives_bytes_and_damaged_content_is_refused() {
         // "PK" is the mark that a ZIP container starts with.
-        write_binary_file(target.clone(), "UEs=".to_string())
-            .await
-            .unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), b"PK");
-
-        let error = write_binary_file(target, "not base64!".to_string())
-            .await
-            .err()
-            .unwrap();
+        assert_eq!(decode_base64("UEs=").unwrap(), b"PK");
+        let error = decode_base64("not base64!").err().unwrap();
         assert_eq!(error.kind(), crate::error::ErrorKind::Configuration);
     }
     #[test]
@@ -1399,14 +1469,14 @@ mod tests {
 
         let folder = tempfile::tempdir().unwrap();
         let csv = folder.path().join("out.csv");
-        write_result_file(csv.to_str().unwrap(), &result, ExportFormat::Csv).unwrap();
+        write_result_file(&csv, &result, ExportFormat::Csv).unwrap();
         assert_eq!(
             std::fs::read_to_string(&csv).unwrap(),
             "id,name\n1,Ada\n2,\n"
         );
 
         let json = folder.path().join("out.json");
-        write_result_file(json.to_str().unwrap(), &result, ExportFormat::Json).unwrap();
+        write_result_file(&json, &result, ExportFormat::Json).unwrap();
         let text = std::fs::read_to_string(&json).unwrap();
         assert!(text.starts_with("[\n"));
         assert!(text.contains("{\"id\":1,\"name\":\"Ada\"},"));
