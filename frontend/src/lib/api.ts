@@ -7,6 +7,8 @@ import type {
   DatabaseRef,
   EngineInfo,
   ExecOptions,
+  ExportRequest,
+  ExportSummary,
   HistoryEntry,
   QueryResponse,
   SavedConnection,
@@ -149,6 +151,10 @@ export const api = {
 
   writeTextFile(path: string, contents: string): Promise<void> {
     return invoke('write_text_file', { path, contents })
+  },
+
+  exportQuery(request: ExportRequest): Promise<ExportSummary> {
+    return invoke('export_query', { request })
   },
 
   writeBinaryFile(path: string, contentsBase64: string): Promise<void> {

@@ -145,6 +145,7 @@
                 v-if="state.activePaneId === pane.id"
                 :result="pane.result"
                 @export="onExport"
+                @export-all="onExportAll"
                 @copied="onCopied"
               />
             </template>
@@ -383,6 +384,45 @@ function confirmInsertExport(): void {
   pendingInsert = null
   if (rows) {
     void exportResult(rows, 'insert')
+  }
+}
+
+/**
+ * Writes every row of the statement to a file. The backend runs the
+ * statement again with a higher row limit and writes the file itself, so a
+ * large result never passes through the interface.
+ */
+async function onExportAll(format: 'csv' | 'json'): Promise<void> {
+  const connectionId = props.tab.connectionId
+  if (!connectionId) {
+    return
+  }
+  try {
+    const path = await saveFileDialog({
+      defaultPath: exportFileName(props.tab.title, format),
+      filters: [{ name: format.toUpperCase(), extensions: [format] }],
+    })
+    if (!path) {
+      return
+    }
+    const summary = await api.exportQuery({
+      connectionId,
+      requestId: `export-${props.tab.id}-${Date.now()}`,
+      query: props.tab.query.trim(),
+      path,
+      format,
+      maxRows: settings.settings.exportRowLimit,
+    })
+    if (summary.truncated) {
+      ui.warn(
+        `The export limit stopped the read at ${summary.rows.toLocaleString()} rows.`,
+        'Raise the export limit in the settings.',
+      )
+    } else {
+      ui.success(`${summary.rows.toLocaleString()} rows are written to ${path}.`)
+    }
+  } catch (error) {
+    ui.reportError(error)
   }
 }
 

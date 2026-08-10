@@ -169,6 +169,26 @@ describe('ResultsGrid', () => {
     expect(asked[0]![1].rows).toHaveLength(3)
   })
 
+  it('offers a whole export only for a result that the row limit stopped', async () => {
+    const plain = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    await plain.find('[data-test="grid-export"]').trigger('click')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(document.querySelector('[data-test="grid-export-all-csv"]')).toBeNull()
+
+    const cut = mountWithPlugins(ResultsGrid, {
+      props: { result: result({ truncated: true }) },
+    })
+    await cut.find('[data-test="grid-export"]').trigger('click')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    document
+      .querySelector('[data-test="grid-export-all-csv"]')
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    document
+      .querySelector('[data-test="grid-export-all-json"]')
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    expect(cut.emitted('export-all')).toEqual([['csv'], ['json']])
+  })
+
   it('names the export after the selection once rows are selected', async () => {
     const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
     await wrapper.findAll('[data-test="grid-row"]')[0]!.trigger('click')

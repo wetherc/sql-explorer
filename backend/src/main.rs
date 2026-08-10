@@ -58,6 +58,7 @@ fn main() {
             commands::save_workspace,
             commands::write_text_file,
             commands::write_binary_file,
+            commands::export_query,
             commands::read_text_file,
             commands::supported_engines,
         ])

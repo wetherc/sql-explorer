@@ -748,6 +748,75 @@ describe('QueryView edge paths', () => {
     )
   })
 
+  it('asks the backend to write every row of a result that was cut', async () => {
+    saveDialog.mockResolvedValue('/tmp/all.csv')
+    apiStub.exportQuery.mockResolvedValue({ rows: 40000, truncated: false })
+    const wrapper = await mountedWithResult()
+
+    await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export-all', 'csv')
+    await settle()
+
+    expect(apiStub.exportQuery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connectionId: 'c1',
+        query: 'SELECT 1',
+        path: '/tmp/all.csv',
+        format: 'csv',
+        maxRows: 1000000,
+      }),
+    )
+    expect(useUiStore().notices.some((notice) => notice.level === 'success')).toBe(true)
+  })
+
+  it('warns when the export limit stopped the read as well', async () => {
+    saveDialog.mockResolvedValue('/tmp/all.json')
+    apiStub.exportQuery.mockResolvedValue({ rows: 1000000, truncated: true })
+    const wrapper = await mountedWithResult()
+
+    await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export-all', 'json')
+    await settle()
+    expect(useUiStore().notices.some((notice) => notice.level === 'warning')).toBe(true)
+  })
+
+  it('writes no whole export when the user closes the save dialog', async () => {
+    saveDialog.mockResolvedValue(null)
+    const wrapper = await mountedWithResult()
+    await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export-all', 'csv')
+    await settle()
+    expect(apiStub.exportQuery).not.toHaveBeenCalled()
+  })
+
+  it('reports a whole export that failed', async () => {
+    saveDialog.mockResolvedValue('/tmp/all.csv')
+    apiStub.exportQuery.mockRejectedValue({
+      kind: 'unsupported',
+      message: 'only a read',
+      detail: null,
+    })
+    const wrapper = await mountedWithResult()
+    await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export-all', 'csv')
+    await settle()
+    expect(useUiStore().notices.some((notice) => notice.level === 'error')).toBe(true)
+  })
+
+  it('writes no whole export for a tab without a connection', async () => {
+    const wrapper = mountWithPlugins(QueryView, {
+      props: {
+        tab: {
+          id: 't9',
+          title: 'Query 9',
+          query: 'SELECT 1',
+          connectionId: null,
+          dirty: false,
+          savedQueryId: null,
+        },
+      },
+    })
+    await settle()
+    await (wrapper.vm as unknown as { onExportAll: (f: 'csv') => Promise<void> }).onExportAll('csv')
+    expect(saveDialog).not.toHaveBeenCalled()
+  })
+
   it('closes the table dialog when the overlay reports it', async () => {
     const wrapper = await mountedWithResult()
     await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export', 'insert', exported())

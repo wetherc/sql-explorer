@@ -159,6 +159,15 @@
             data-test="setting-max-pinned"
             @update:model-value="(value) => settings.update({ maxPinnedResults: Number(value) })"
           />
+          <v-text-field
+            :model-value="settings.settings.exportRowLimit"
+            label="Export row limit"
+            type="number"
+            hint="The row limit of an export that writes straight to a file."
+            persistent-hint
+            data-test="setting-export-limit"
+            @update:model-value="(value) => settings.update({ exportRowLimit: Number(value) })"
+          />
         </v-card-text>
         <v-card-actions>
           <v-spacer />

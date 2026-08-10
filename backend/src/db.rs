@@ -62,6 +62,28 @@ pub struct QueryResponse {
     pub elapsed_ms: u64,
 }
 
+/// Makes every column name different from the others, so that a JSON object
+/// keeps one field for each column. A repeated name gets a number.
+pub fn unique_column_names(columns: &[ColumnInfo]) -> Vec<String> {
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut names = Vec::with_capacity(columns.len());
+    for column in columns {
+        let base = if column.name.is_empty() {
+            "column".to_string()
+        } else {
+            column.name.clone()
+        };
+        let count = seen.entry(base.clone()).or_insert(0);
+        *count += 1;
+        if *count == 1 {
+            names.push(base);
+        } else {
+            names.push(format!("{base}_{count}"));
+        }
+    }
+    names
+}
+
 /// The limits that apply to one execution.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -388,6 +410,18 @@ mod tests {
             )
             .unwrap(),
             capabilities
+        );
+    }
+    #[test]
+    fn a_repeated_column_name_gets_a_number() {
+        let columns = vec![
+            ColumnInfo::new("id", "int"),
+            ColumnInfo::new("id", "int"),
+            ColumnInfo::new("", "int"),
+        ];
+        assert_eq!(
+            unique_column_names(&columns),
+            vec!["id".to_string(), "id_2".to_string(), "column".to_string()]
         );
     }
 }

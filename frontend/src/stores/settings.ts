@@ -14,6 +14,8 @@ export interface Settings {
   autoRunPreview: boolean
   /** The largest number of results one tab keeps against the next run. */
   maxPinnedResults: number
+  /** The row limit of an export that writes straight to a file. */
+  exportRowLimit: number
 }
 
 /** The settings a new installation starts with. */
@@ -26,6 +28,7 @@ export function defaultSettings(): Settings {
     maxRows: 10000,
     autoRunPreview: true,
     maxPinnedResults: 5,
+    exportRowLimit: 1000000,
   }
 }
 
@@ -54,6 +57,7 @@ export function parseSettings(raw: string | null): Settings {
           ? parsed.autoRunPreview
           : defaults.autoRunPreview,
       maxPinnedResults: numberOr(parsed.maxPinnedResults, defaults.maxPinnedResults, 1, 20),
+      exportRowLimit: numberOr(parsed.exportRowLimit, defaults.exportRowLimit, 1000, 100000000),
     }
   } catch {
     return defaults

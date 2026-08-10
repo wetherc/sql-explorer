@@ -104,6 +104,53 @@ impl Dialect {
     }
 }
 
+/// Reads the first word of a statement, in small letters. The reader steps
+/// over the comments and the opening brackets that can stand in front of the
+/// word, so `/* note */ (SELECT 1)` gives `select`.
+pub fn leading_keyword(statement: &str) -> String {
+    let bytes: Vec<char> = statement.chars().collect();
+    let mut index = 0;
+    while index < bytes.len() {
+        let current = bytes[index];
+        if current.is_whitespace() || current == '(' {
+            index += 1;
+            continue;
+        }
+        if current == '-' && bytes.get(index + 1) == Some(&'-') {
+            while index < bytes.len() && bytes[index] != '\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if current == '/' && bytes.get(index + 1) == Some(&'*') {
+            index += 2;
+            while index < bytes.len()
+                && !(bytes[index] == '*' && bytes.get(index + 1) == Some(&'/'))
+            {
+                index += 1;
+            }
+            index += 2;
+            continue;
+        }
+        break;
+    }
+    let mut word = String::new();
+    while index < bytes.len() && (bytes[index].is_alphanumeric() || bytes[index] == '_') {
+        word.push(bytes[index].to_ascii_lowercase());
+        index += 1;
+    }
+    word
+}
+
+/// True when a statement only reads. The export to a file runs the statement
+/// a second time, so it must refuse a statement that changes data.
+pub fn only_reads(statement: &str) -> bool {
+    matches!(
+        leading_keyword(statement).as_str(),
+        "select" | "with" | "show"
+    )
+}
+
 /// Splits a script into single statements. The splitter keeps a semicolon
 /// that is inside a string, an identifier or a comment, so a statement that
 /// holds one of these stays whole.
@@ -666,5 +713,23 @@ mod tests {
             serde_json::from_str::<Dialect>(&text).unwrap(),
             Dialect::MsSql
         );
+    }
+    #[test]
+    fn the_first_word_of_a_statement_is_read_over_the_comments() {
+        assert_eq!(leading_keyword("SELECT 1"), "select");
+        assert_eq!(leading_keyword("  \n(select 1)"), "select");
+        assert_eq!(leading_keyword("-- a note\nUPDATE t SET a = 1"), "update");
+        assert_eq!(leading_keyword("/* a note */ WITH x AS ()"), "with");
+        assert_eq!(leading_keyword("/* never closed"), "");
+        assert_eq!(leading_keyword("   "), "");
+    }
+
+    #[test]
+    fn only_a_statement_that_reads_may_be_exported() {
+        assert!(only_reads("SELECT * FROM t"));
+        assert!(only_reads("with x as (select 1) select * from x"));
+        assert!(only_reads("SHOW TABLES"));
+        assert!(!only_reads("DELETE FROM t"));
+        assert!(!only_reads("EXEC do_work"));
     }
 }

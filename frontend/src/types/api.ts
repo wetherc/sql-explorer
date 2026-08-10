@@ -108,6 +108,24 @@ export interface QueryResponse {
   elapsedMs: number
 }
 
+/** What an export to a file needs to know. */
+export interface ExportRequest {
+  connectionId: string
+  requestId: string
+  query: string
+  path: string
+  format: 'csv' | 'json'
+  /** The row limit of the export, which is higher than the one of the view. */
+  maxRows: number
+}
+
+/** What one export to a file wrote. */
+export interface ExportSummary {
+  rows: number
+  /** True when even the higher row limit of the export stopped the read. */
+  truncated: boolean
+}
+
 export interface ExecOptions {
   maxRows: number
   timeoutSecs: number

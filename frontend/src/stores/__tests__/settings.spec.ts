@@ -26,6 +26,7 @@ describe('parseSettings', () => {
       maxRows: 500,
       autoRunPreview: false,
       maxPinnedResults: 8,
+      exportRowLimit: 2000,
     })
     expect(parseSettings(stored)).toEqual({
       theme: 'sqlExplorerLight',
@@ -35,6 +36,7 @@ describe('parseSettings', () => {
       maxRows: 500,
       autoRunPreview: false,
       maxPinnedResults: 8,
+      exportRowLimit: 2000,
     })
   })
 

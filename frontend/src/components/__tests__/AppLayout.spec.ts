@@ -237,6 +237,12 @@ describe('AppLayout dialog state', () => {
       .find((item) => item.attributes('data-test') === 'setting-max-pinned')
     await field!.vm.$emit('update:modelValue', '3')
     expect(useSettingsStore().settings.maxPinnedResults).toBe(3)
+
+    const limit = wrapper
+      .findAllComponents({ name: 'VTextField' })
+      .find((item) => item.attributes('data-test') === 'setting-export-limit')
+    await limit!.vm.$emit('update:modelValue', '5000')
+    expect(useSettingsStore().settings.exportRowLimit).toBe(5000)
     wrapper.unmount()
   })
 

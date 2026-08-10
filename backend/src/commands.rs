@@ -426,6 +426,159 @@ pub async fn save_workspace<R: Runtime>(
     store::write_workspace(&app, workspace)
 }
 
+/// The form a file export takes.
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExportFormat {
+    Csv,
+    Json,
+}
+
+/// What an export to a file needs to know.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportRequest {
+    pub connection_id: String,
+    pub request_id: String,
+    pub query: String,
+    pub path: String,
+    pub format: ExportFormat,
+    /// The row limit of the export, which is higher than the one of the view.
+    pub max_rows: usize,
+}
+
+/// What one export wrote.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportSummary {
+    pub rows: usize,
+    /// True when even the higher row limit of the export stopped the read.
+    pub truncated: bool,
+}
+
+/// Runs a statement again with a higher row limit and writes the rows
+/// straight to a file. A large result therefore never passes through the
+/// user interface.
+///
+/// The statement must only read, because an export runs it a second time.
+/// The rows still gather in the memory of the backend, because a driver
+/// gives the whole result set at once.
+#[tauri::command]
+pub async fn export_query<R: Runtime>(
+    app: AppHandle<R>,
+    request: ExportRequest,
+    state: tauri::State<'_, AppState>,
+) -> Result<ExportSummary> {
+    let ExportRequest {
+        connection_id,
+        request_id,
+        query,
+        path,
+        format,
+        max_rows,
+    } = request;
+
+    if !crate::sql::only_reads(&query) {
+        return Err(Error::Unsupported(
+            "An export to a file runs the statement again, so it accepts a statement that only reads."
+                .to_string(),
+        ));
+    }
+
+    let open = ensure_healthy(&app, &state, &connection_id).await?;
+    let options = ExecOptions {
+        max_rows,
+        timeout_secs: open.descriptor.exec_options().timeout_secs,
+    };
+    let token = state.start_request(&request_id).await;
+
+    let outcome = {
+        let driver = open.driver.clone();
+        let mut guard = driver.lock().await;
+        tokio::select! {
+            result = guard.execute_query(&query, None, &options) => result,
+            () = token.cancelled() => Err(Error::Cancelled),
+        }
+    };
+    state.end_request(&request_id).await;
+    let response = outcome?;
+    open.mark_ok().await;
+
+    let result =
+        response.results.into_iter().next().ok_or_else(|| {
+            Error::Unsupported("The statement returned no result set.".to_string())
+        })?;
+
+    let rows = result.rows.len();
+    let truncated = result.truncated;
+    write_result_file(&path, &result, format)?;
+    log::info!("Wrote {rows} rows to the file '{path}'.");
+    Ok(ExportSummary { rows, truncated })
+}
+
+/// Writes one result set to a file, one row at a time.
+fn write_result_file(
+    path: &str,
+    result: &crate::db::ResultSet,
+    format: ExportFormat,
+) -> Result<()> {
+    use std::io::Write;
+    let file = std::fs::File::create(path)?;
+    let mut out = std::io::BufWriter::new(file);
+
+    match format {
+        ExportFormat::Csv => {
+            let names: Vec<String> = result
+                .columns
+                .iter()
+                .map(|column| csv_field(&serde_json::Value::String(column.name.clone())))
+                .collect();
+            writeln!(out, "{}", names.join(","))?;
+            for row in &result.rows {
+                let fields: Vec<String> = row.iter().map(csv_field).collect();
+                writeln!(out, "{}", fields.join(","))?;
+            }
+        }
+        ExportFormat::Json => {
+            let names = crate::db::unique_column_names(&result.columns);
+            writeln!(out, "[")?;
+            for (index, row) in result.rows.iter().enumerate() {
+                let mut object = serde_json::Map::new();
+                for (position, name) in names.iter().enumerate() {
+                    let value = row
+                        .get(position)
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    object.insert(name.clone(), value);
+                }
+                let comma = if index + 1 == result.rows.len() {
+                    ""
+                } else {
+                    ","
+                };
+                writeln!(out, "  {}{comma}", serde_json::Value::Object(object))?;
+            }
+            writeln!(out, "]")?;
+        }
+    }
+    out.flush()?;
+    Ok(())
+}
+
+/// Writes one field of a comma separated file.
+fn csv_field(value: &serde_json::Value) -> String {
+    let text = match value {
+        serde_json::Value::Null => return String::new(),
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    if text.contains([',', '"', '\n', '\r']) || text.trim() != text {
+        format!("\"{}\"", text.replace('"', "\"\""))
+    } else {
+        text
+    }
+}
+
 // --- Files ---
 
 /// Writes text to a file the user chose. The dialog runs in the user
@@ -548,5 +701,51 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(error.kind(), crate::error::ErrorKind::Configuration);
+    }
+    #[test]
+    fn a_field_of_a_comma_separated_file_is_quoted_when_it_needs_it() {
+        use serde_json::json;
+        assert_eq!(csv_field(&json!(null)), "");
+        assert_eq!(csv_field(&json!(7)), "7");
+        assert_eq!(csv_field(&json!("plain")), "plain");
+        assert_eq!(csv_field(&json!("a,b")), "\"a,b\"");
+        assert_eq!(csv_field(&json!("say \"no\"")), "\"say \"\"no\"\"\"");
+        assert_eq!(csv_field(&json!(" pad ")), "\" pad \"");
+        assert_eq!(csv_field(&json!("two\nlines")), "\"two\nlines\"");
+    }
+
+    #[test]
+    fn a_result_reaches_a_file_in_both_forms() {
+        use crate::db::{ColumnInfo, ResultSet};
+        let mut result = ResultSet::new(vec![
+            ColumnInfo::new("id", "int"),
+            ColumnInfo::new("name", "text"),
+        ]);
+        result.rows = vec![
+            vec![serde_json::json!(1), serde_json::json!("Ada")],
+            vec![serde_json::json!(2), serde_json::json!(null)],
+        ];
+
+        let folder = tempfile::tempdir().unwrap();
+        let csv = folder.path().join("out.csv");
+        write_result_file(csv.to_str().unwrap(), &result, ExportFormat::Csv).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&csv).unwrap(),
+            "id,name\n1,Ada\n2,\n"
+        );
+
+        let json = folder.path().join("out.json");
+        write_result_file(json.to_str().unwrap(), &result, ExportFormat::Json).unwrap();
+        let text = std::fs::read_to_string(&json).unwrap();
+        assert!(text.starts_with("[\n"));
+        assert!(text.contains("{\"id\":1,\"name\":\"Ada\"},"));
+        assert!(text.trim_end().ends_with("]"));
+    }
+
+    #[tokio::test]
+    async fn an_export_refuses_a_statement_that_changes_data() {
+        // The refusal happens before any connection is needed.
+        assert!(!crate::sql::only_reads("DELETE FROM t"));
+        assert!(crate::sql::only_reads("  /* note */ SELECT 1"));
     }
 }

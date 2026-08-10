@@ -92,6 +92,18 @@ describe('api', () => {
       contents: 'a,b',
     })
 
+    await api.exportQuery({
+      connectionId: 'c1',
+      requestId: 'r1',
+      query: 'SELECT 1',
+      path: '/tmp/all.csv',
+      format: 'csv',
+      maxRows: 1000,
+    })
+    expect(invoke).toHaveBeenCalledWith('export_query', {
+      request: expect.objectContaining({ path: '/tmp/all.csv' }),
+    })
+
     await api.writeBinaryFile('/tmp/a.xlsx', 'UEs=')
     expect(invoke).toHaveBeenCalledWith('write_binary_file', {
       path: '/tmp/a.xlsx',

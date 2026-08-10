@@ -45,6 +45,21 @@
             data-test="grid-export-item"
             @click="askExport(entry.format)"
           />
+          <template v-if="result.truncated">
+            <v-divider />
+            <v-list-item
+              title="Write every row to a CSV file"
+              subtitle="Runs the statement again and writes from the server"
+              data-test="grid-export-all-csv"
+              @click="emit('export-all', 'csv')"
+            />
+            <v-list-item
+              title="Write every row to a JSON file"
+              subtitle="Runs the statement again and writes from the server"
+              data-test="grid-export-all-json"
+              @click="emit('export-all', 'json')"
+            />
+          </template>
           <v-divider v-if="hasSelection" />
           <v-list-item
             v-if="hasSelection"
@@ -147,6 +162,7 @@ export type ExportFormat = 'csv' | 'json' | 'markdown' | 'insert' | 'xlsx'
 const props = defineProps<{ result: ResultSet }>()
 const emit = defineEmits<{
   (event: 'export', format: ExportFormat, rows: ResultSet): void
+  (event: 'export-all', format: 'csv' | 'json'): void
   (event: 'copied', text: string): void
 }>()
 
