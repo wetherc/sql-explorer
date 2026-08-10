@@ -533,7 +533,7 @@ watch(
   margin-left: 6px;
   font-weight: 400;
   font-size: var(--app-text-xs);
-  color: rgb(var(--v-theme-on-surface-variant));
+  color: rgb(var(--v-theme-on-grid-header));
 }
 
 .grid-table td {
@@ -567,7 +567,7 @@ watch(
 }
 
 .row-number {
-  color: rgb(var(--v-theme-on-surface-variant));
+  color: rgb(var(--v-theme-on-grid-header));
   text-align: right;
   width: 1%;
   position: sticky;

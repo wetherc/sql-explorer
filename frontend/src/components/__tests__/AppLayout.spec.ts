@@ -18,7 +18,7 @@ const {
   useLayoutStore,
 } = await import('@/stores/layout')
 const { useExplorerStore } = await import('@/stores/explorer')
-const { useSettingsStore } = await import('@/stores/settings')
+const { SETTINGS_KEY, defaultSettings, useSettingsStore } = await import('@/stores/settings')
 const { useTabsStore } = await import('@/stores/tabs')
 const { useUiStore } = await import('@/stores/ui')
 const { forgetTabActions, registerTabActions } = await import('@/lib/commands')
@@ -301,10 +301,41 @@ describe('AppLayout', () => {
     await settle()
 
     const settings = useSettingsStore()
-    expect(settings.isDark).toBe(true)
+    // The host of the tests reports a light theme, which a new installation
+    // follows.
+    expect(settings.isDark).toBe(false)
     await wrapper.find('[data-test="theme-toggle"]').trigger('click')
     await wrapper.vm.$nextTick()
-    expect(settings.settings.theme).toBe('sqlExplorerLight')
+    expect(settings.settings.theme).toBe('sqlExplorerDark')
+    wrapper.unmount()
+  })
+
+  it('takes a theme from the settings dialog', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const settings = useSettingsStore()
+
+    await wrapper.find('[data-test="open-settings"]').trigger('click')
+    await settle()
+    wrapper
+      .findComponent({ name: 'VSelect' })
+      .vm.$emit('update:modelValue', 'sqlExplorerDark' as const)
+    await wrapper.vm.$nextTick()
+
+    expect(settings.settings.theme).toBe('sqlExplorerDark')
+    wrapper.unmount()
+  })
+
+  it('draws the theme of a record it read before the first frame', () => {
+    localStorage.setItem(
+      SETTINGS_KEY,
+      JSON.stringify({ ...defaultSettings(), theme: 'sqlExplorerDark' }),
+    )
+    const wrapper = mountWithPlugins(AppLayout)
+
+    // The theme is read in the body of the setup and not once the shell is
+    // mounted, so the first frame already holds it.
+    expect(useSettingsStore().resolvedTheme).toBe('sqlExplorerDark')
     wrapper.unmount()
   })
 

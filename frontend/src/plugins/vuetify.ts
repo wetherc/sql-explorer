@@ -27,6 +27,10 @@ export const sqlExplorerDark = {
     'editor-background': '#171b21',
     'grid-header': '#242932',
     'grid-stripe': '#1f242c',
+    // The theme builds no `on-` colour for a token of its own, so the two
+    // surfaces of the grid name the text that stands on them.
+    'on-grid-header': '#c9d1de',
+    'on-grid-stripe': '#c9d1de',
     'null-value': '#7f8a9b',
   },
 } as const
@@ -51,6 +55,8 @@ export const sqlExplorerLight = {
     'editor-background': '#ffffff',
     'grid-header': '#eef1f6',
     'grid-stripe': '#f7f9fc',
+    'on-grid-header': '#3d4756',
+    'on-grid-stripe': '#3d4756',
     'null-value': '#8892a0',
   },
 } as const

@@ -1,10 +1,27 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
+/** The two themes the application draws itself with. */
 export type ThemeName = 'sqlExplorerDark' | 'sqlExplorerLight'
 
+/**
+ * What the user asked for. The `system` choice takes the theme from the host,
+ * and follows it when the user changes it there.
+ */
+export type ThemeChoice = ThemeName | 'system'
+
+/** The choices the settings offer, in the order the dialog shows them. */
+export const THEME_CHOICES: Array<{ title: string; value: ThemeChoice }> = [
+  { title: 'Follow the system', value: 'system' },
+  { title: 'Dark', value: 'sqlExplorerDark' },
+  { title: 'Light', value: 'sqlExplorerLight' },
+]
+
+/** The media rule that asks the host for a dark theme. */
+export const DARK_MEDIA_QUERY = '(prefers-color-scheme: dark)'
+
 export interface Settings {
-  theme: ThemeName
+  theme: ThemeChoice
   fontSize: number
   wordWrap: boolean
   showLineNumbers: boolean
@@ -40,7 +57,7 @@ export interface Settings {
 /** The settings a new installation starts with. */
 export function defaultSettings(): Settings {
   return {
-    theme: 'sqlExplorerDark',
+    theme: 'system',
     fontSize: 13,
     wordWrap: false,
     showLineNumbers: true,
@@ -67,7 +84,9 @@ export function parseSettings(raw: string | null): Settings {
   try {
     const parsed = JSON.parse(raw) as Partial<Settings>
     return {
-      theme: parsed.theme === 'sqlExplorerLight' ? 'sqlExplorerLight' : defaults.theme,
+      theme: THEME_CHOICES.some((choice) => choice.value === parsed.theme)
+        ? (parsed.theme as ThemeChoice)
+        : defaults.theme,
       fontSize: numberOr(parsed.fontSize, defaults.fontSize, 8, 32),
       wordWrap: typeof parsed.wordWrap === 'boolean' ? parsed.wordWrap : defaults.wordWrap,
       showLineNumbers:
@@ -126,8 +145,21 @@ function numberOr(value: unknown, fallback: number, low: number, high: number): 
 
 export const useSettingsStore = defineStore('settings', () => {
   const settings = ref<Settings>(defaultSettings())
+  /** True while the host asks for a dark theme. */
+  const systemPrefersDark = ref(false)
 
-  const isDark = computed(() => settings.value.theme === 'sqlExplorerDark')
+  /**
+   * The theme the application draws itself with. It is the choice of the user,
+   * or the theme of the host when the user asked to follow it.
+   */
+  const resolvedTheme = computed<ThemeName>(() => {
+    if (settings.value.theme === 'system') {
+      return systemPrefersDark.value ? 'sqlExplorerDark' : 'sqlExplorerLight'
+    }
+    return settings.value.theme
+  })
+
+  const isDark = computed(() => resolvedTheme.value === 'sqlExplorerDark')
   /** The theme the editor uses, which follows the theme of the application. */
   const editorTheme = computed(() => (isDark.value ? 'sql-explorer-dark' : 'sql-explorer-light'))
 
@@ -144,12 +176,56 @@ export const useSettingsStore = defineStore('settings', () => {
     persist()
   }
 
+  /**
+   * Moves to the theme opposite the one on screen. A user who followed the
+   * host and then asks for the other theme names a theme of their own, because
+   * following the host is what they left behind.
+   */
   function toggleTheme(): void {
     update({ theme: isDark.value ? 'sqlExplorerLight' : 'sqlExplorerDark' })
   }
 
-  return { settings, isDark, editorTheme, load, persist, update, toggleTheme }
+  /**
+   * Follows the theme of the host and reports each change of it. The caller
+   * gets back a function that stops the watch.
+   */
+  function watchSystemTheme(query: MediaQueryList | null = darkMediaQuery()): () => void {
+    if (!query) {
+      return () => {}
+    }
+    systemPrefersDark.value = query.matches
+    const onChange = (event: MediaQueryListEvent): void => {
+      systemPrefersDark.value = event.matches
+    }
+    query.addEventListener('change', onChange)
+    return () => query.removeEventListener('change', onChange)
+  }
+
+  return {
+    settings,
+    systemPrefersDark,
+    resolvedTheme,
+    isDark,
+    editorTheme,
+    load,
+    persist,
+    update,
+    toggleTheme,
+    watchSystemTheme,
+  }
 })
+
+/** Asks the host whether it wants a dark theme, or nothing when it cannot say. */
+export function darkMediaQuery(): MediaQueryList | null {
+  try {
+    if (typeof globalThis.matchMedia !== 'function') {
+      return null
+    }
+    return globalThis.matchMedia(DARK_MEDIA_QUERY)
+  } catch {
+    return null
+  }
+}
 
 /** Returns the browser store, or nothing when the host forbids it. */
 export function safeStorage(): Storage | null {

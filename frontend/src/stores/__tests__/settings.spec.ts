@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import {
+  DARK_MEDIA_QUERY,
   SETTINGS_KEY,
+  darkMediaQuery,
   defaultSettings,
   parseSettings,
   safeStorage,
@@ -96,14 +98,95 @@ describe('settings store', () => {
     expect(settings.settings.maxRows).toBe(defaultSettings().maxRows)
   })
 
-  it('moves between the two themes', () => {
+  it('moves to the theme opposite the one on screen', () => {
     const settings = useSettingsStore()
-    expect(settings.isDark).toBe(true)
-    expect(settings.editorTheme).toBe('sql-explorer-dark')
-    settings.toggleTheme()
-    expect(settings.settings.theme).toBe('sqlExplorerLight')
+    // A new installation follows the host, which reports a light theme here.
+    expect(settings.settings.theme).toBe('system')
+    expect(settings.isDark).toBe(false)
+    expect(settings.editorTheme).toBe('sql-explorer-light')
+
     settings.toggleTheme()
     expect(settings.settings.theme).toBe('sqlExplorerDark')
+    expect(settings.editorTheme).toBe('sql-explorer-dark')
+
+    settings.toggleTheme()
+    expect(settings.settings.theme).toBe('sqlExplorerLight')
+  })
+
+  it('takes the theme of the host while the choice is to follow it', () => {
+    const settings = useSettingsStore()
+
+    settings.systemPrefersDark = true
+    expect(settings.resolvedTheme).toBe('sqlExplorerDark')
+    expect(settings.isDark).toBe(true)
+
+    settings.systemPrefersDark = false
+    expect(settings.resolvedTheme).toBe('sqlExplorerLight')
+  })
+
+  it('holds to the theme the user named, whatever the host reports', () => {
+    const settings = useSettingsStore()
+    settings.update({ theme: 'sqlExplorerLight' })
+
+    settings.systemPrefersDark = true
+
+    expect(settings.resolvedTheme).toBe('sqlExplorerLight')
+    expect(settings.isDark).toBe(false)
+  })
+
+  it('follows the host and reports each change of its theme', () => {
+    const settings = useSettingsStore()
+    const listeners: Array<(event: MediaQueryListEvent) => void> = []
+    const query = {
+      matches: true,
+      addEventListener: vi.fn((_name: string, handler: (event: MediaQueryListEvent) => void) => {
+        listeners.push(handler)
+      }),
+      removeEventListener: vi.fn(),
+    } as unknown as MediaQueryList
+
+    const stop = settings.watchSystemTheme(query)
+    expect(settings.systemPrefersDark).toBe(true)
+
+    listeners[0]!({ matches: false } as MediaQueryListEvent)
+    expect(settings.systemPrefersDark).toBe(false)
+
+    stop()
+    expect(query.removeEventListener).toHaveBeenCalled()
+  })
+
+  it('leaves the theme of the host alone when it cannot be asked', () => {
+    const settings = useSettingsStore()
+
+    const stop = settings.watchSystemTheme(null)
+
+    expect(settings.systemPrefersDark).toBe(false)
+    expect(() => stop()).not.toThrow()
+  })
+})
+
+describe('darkMediaQuery', () => {
+  it('gives the media rule of the host', () => {
+    expect(darkMediaQuery()).not.toBeNull()
+    expect(window.matchMedia).toHaveBeenCalledWith(DARK_MEDIA_QUERY)
+  })
+
+  it('gives nothing when the host cannot answer questions about its media', () => {
+    const original = window.matchMedia
+    Object.defineProperty(window, 'matchMedia', { writable: true, value: undefined })
+
+    expect(darkMediaQuery()).toBeNull()
+
+    Object.defineProperty(window, 'matchMedia', { writable: true, value: original })
+  })
+
+  it('gives nothing when the host refuses the question', () => {
+    const matchMedia = vi.spyOn(window, 'matchMedia').mockImplementation(() => {
+      throw new Error('no')
+    })
+
+    expect(darkMediaQuery()).toBeNull()
+    matchMedia.mockRestore()
   })
 })
 

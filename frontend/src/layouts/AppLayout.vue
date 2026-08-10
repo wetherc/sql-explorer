@@ -141,6 +141,13 @@
       <v-card>
         <v-card-title class="text-subtitle-1">Settings</v-card-title>
         <v-card-text class="d-flex flex-column ga-4">
+          <v-select
+            :model-value="settings.settings.theme"
+            :items="THEME_CHOICES"
+            label="Theme"
+            data-test="setting-theme"
+            @update:model-value="(value) => settings.update({ theme: value })"
+          />
           <v-slider
             :model-value="settings.settings.fontSize"
             label="Editor text size"
@@ -279,7 +286,7 @@ import {
   useLayoutStore,
   type Panel,
 } from '@/stores/layout'
-import { useSettingsStore } from '@/stores/settings'
+import { THEME_CHOICES, useSettingsStore } from '@/stores/settings'
 import { useTabsStore } from '@/stores/tabs'
 import { useUiStore } from '@/stores/ui'
 import type { UnlistenFn } from '@tauri-apps/api/event'
@@ -524,10 +531,16 @@ function onKeyDown(event: KeyboardEvent): void {
   command.run()
 }
 
+// The settings, the shape of the work area and the theme of the host are read
+// here and not when the shell is mounted. All three decide what the first
+// frame looks like, so a read after the mount would draw the shell once in the
+// dark theme at the starting width and then draw it again.
+settings.load()
+layout.load()
+const unwatchSystemTheme = settings.watchSystemTheme()
+theme.change(settings.resolvedTheme)
+
 onMounted(async () => {
-  settings.load()
-  layout.load()
-  theme.change(settings.settings.theme)
   await connections.loadEngines()
   await connections.load()
   await history.load()
@@ -544,12 +557,15 @@ onBeforeUnmount(() => {
   // A drag that is still under way would otherwise leave its listeners and the
   // class it put on the body behind.
   endPanelDrag()
+  unwatchSystemTheme()
   unlisten?.()
   unlisten = null
 })
 
+// The theme follows the choice of the user, and the theme of the host as well
+// while the choice is to follow the host.
 watch(
-  () => settings.settings.theme,
+  () => settings.resolvedTheme,
   (name) => theme.change(name),
 )
 
