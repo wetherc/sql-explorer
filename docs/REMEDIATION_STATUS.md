@@ -31,7 +31,7 @@ now holds. Read it beside `REMEDIATION_PLAN.md`.
 | --- | --- | --- |
 | S6 The reason was discarded | Done | A structured payload with a kind, a message and the causes. |
 | S1, S7 The port was lost | Done | The configuration is built with the builder, not from a string. |
-| S2 TLS was not compiled in | Done | The `rustls` feature is on. |
+| S2 TLS was not compiled in | Done | The TLS of the library of the system is on. |
 | S4 The manual encryption block | Done | Removed. The transport setting drives it. |
 | S3 Named instances | Done | `TcpStream::connect_named` resolves the port. |
 | S5 No timeouts | Done | A connect timeout and a statement timeout, both settings. |

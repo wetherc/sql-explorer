@@ -30,10 +30,15 @@ tauri = { version = "2", features = [] }
 tauri-plugin-store = "2"
 tauri-plugin-dialog = "2"
 
+# The TLS of `tiberius` runs on the library of the operating system, not on
+# `rustls`. A SQL Server that offers only the older block ciphers, such as
+# ECDHE_RSA_WITH_AES_256_CBC_SHA384, cannot speak to `rustls`, because `rustls`
+# holds no such cipher and will not add one. The library of the system holds
+# them, and so does every other client of MS SQL Server.
 tiberius = { version = "0.12.3", default-features = false, features = [
     "chrono",
     "tds73",
-    "rustls",
+    "native-tls",
     "sql-browser-tokio",
     "tokio",
     "tokio-util",
@@ -111,3 +116,10 @@ lto = true
 opt-level = "s"
 panic = "abort"
 strip = true
+
+# `libgssapi` 0.4.6 builds a slice from the address of an empty GSSAPI buffer,
+# which is undefined behaviour and aborts a build that checks it. The release
+# 0.11 carries the guard, but `tiberius` asks for 0.4, so the fix lives in a
+# copy of the crate under `vendor/`.
+[patch.crates-io]
+libgssapi = { path = "vendor/libgssapi" }
