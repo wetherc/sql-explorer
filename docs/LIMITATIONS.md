@@ -131,13 +131,25 @@ the connection. `EXPLAIN ANALYZE` of MySQL needs version 8.0.18, and of MariaDB
 version 10.1. SQLite reports one plan, which it builds without running the
 statement, so a request for the actual plan gives that plan with a message.
 
-## The time limit closes the connection
+## A stop opens a new session on some engines
 
-The time limit of a connection now applies to every engine. A statement that
-passes the limit is dropped in the middle of the exchange with the server, so
-the connection is no longer in a known state and the application closes it.
-Stop does the same. MS SQL Server keeps its statement running after that,
-because the driver sends no attention packet.
+Stop asks the server to end the statement on a channel of its own, and the
+application then waits up to five seconds for the driver to report the failure
+that the server sends back through the connection. A driver that reports in
+that time leaves the connection in a known state, and the connection stays
+open. PostgreSQL and MySQL work this way, and SQLite and Athena end a statement
+without touching the connection at all.
+
+MS SQL Server has no such channel, because `tiberius` sends no attention
+packet. Stop and the time limit both drop the exchange in the middle of a
+message, which leaves the connection in no known state. The application then
+opens a new connection in its place at once, so the tab can run again without
+the user opening the connection by hand. The new session is empty: a temporary
+table, an open transaction and any `SET` of the old session are gone with it.
+The statement itself keeps running on the server until it ends by itself.
+
+The time limit works the same way on every engine, because a statement that
+passes the limit is dropped in the middle of the exchange whatever the engine.
 
 ## Athena takes no bound parameters
 

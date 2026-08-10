@@ -128,6 +128,22 @@ pub enum Error {
     Anyhow(#[from] anyhow::Error),
 }
 
+/// The number MySQL reports when `KILL QUERY` ended a statement.
+const MYSQL_QUERY_INTERRUPTED: u16 = 1317;
+
+/// True when the failure is the one Postgres sends after a stop.
+fn is_postgres_stop(error: &tokio_postgres::Error) -> bool {
+    error.code() == Some(&tokio_postgres::error::SqlState::QUERY_CANCELED)
+}
+
+/// True when the failure is the one MySQL sends after a stop.
+fn is_mysql_stop(error: &mysql_async::Error) -> bool {
+    matches!(
+        error,
+        mysql_async::Error::Server(server) if server.code == MYSQL_QUERY_INTERRUPTED
+    )
+}
+
 impl Error {
     /// Returns the category of the error.
     pub fn kind(&self) -> ErrorKind {
@@ -139,6 +155,12 @@ impl Error {
             Error::Configuration(_) | Error::MySqlUrl(_) => ErrorKind::Configuration,
             Error::Authentication(_) => ErrorKind::Authentication,
             Error::Unsupported(_) => ErrorKind::Unsupported,
+            // A stop reaches the server on a channel of its own, and the
+            // server then ends the statement and reports that through the
+            // connection. That report is the answer to the Stop button of the
+            // user, not a fault of the database.
+            Error::Postgres(error) if is_postgres_stop(error) => ErrorKind::Cancelled,
+            Error::MySql(error) if is_mysql_stop(error) => ErrorKind::Cancelled,
             Error::Tiberius(_)
             | Error::MySql(_)
             | Error::Postgres(_)
@@ -381,5 +403,28 @@ mod tests {
         let error = "host=".parse::<tokio_postgres::Config>().unwrap_err();
         let mapped: Error = error.into();
         assert_eq!(mapped.kind(), ErrorKind::Database);
+    }
+
+    #[test]
+    fn a_failure_that_mysql_sends_after_a_stop_is_a_stop() {
+        let stopped = mysql_async::Error::Server(mysql_async::ServerError {
+            code: MYSQL_QUERY_INTERRUPTED,
+            state: "70100".to_string(),
+            message: "Query execution was interrupted".to_string(),
+        });
+        assert_eq!(Error::MySql(stopped).kind(), ErrorKind::Cancelled);
+    }
+
+    #[test]
+    fn another_failure_of_mysql_stays_a_fault_of_the_database() {
+        let other = mysql_async::Error::Server(mysql_async::ServerError {
+            code: 1064,
+            state: "42000".to_string(),
+            message: "You have an error in your SQL syntax".to_string(),
+        });
+        assert_eq!(Error::MySql(other).kind(), ErrorKind::Database);
+
+        let outside: Error = mysql_async::Error::Other("boom".into()).into();
+        assert_eq!(outside.kind(), ErrorKind::Database);
     }
 }

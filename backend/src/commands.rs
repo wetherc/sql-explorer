@@ -216,6 +216,36 @@ pub enum Bounded<T> {
     Stopped(Error),
 }
 
+/// How long the Stop button waits for the driver to report the error that the
+/// server sends it. A stop reaches the server on a channel of its own, and the
+/// statement then fails through the connection in the time of one round trip.
+pub const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The time the Stop button gives one connection to report the failure that
+/// the server sends it. A connection with no way to ask the server to stop
+/// gets none, because no such failure is coming.
+fn stop_grace(open: &OpenConnection) -> std::time::Duration {
+    if open.cancel_handle.is_some() {
+        STOP_GRACE
+    } else {
+        std::time::Duration::ZERO
+    }
+}
+
+/// Waits for the Stop button, and then for the driver to answer.
+///
+/// The stop already reached the server on a channel of its own, so the server
+/// ends the statement and the driver reports that failure through the
+/// connection. Waiting for it leaves the connection in a known place, and the
+/// connection stays open. A driver that says nothing in this time is dropped
+/// in the middle of a message, and the connection then goes.
+async fn stopped_by_the_user(token: &CancellationToken, grace: std::time::Duration) {
+    token.cancelled().await;
+    if !grace.is_zero() {
+        tokio::time::sleep(grace).await;
+    }
+}
+
 /// Runs one exchange with a server under the two limits that apply to it: the
 /// Stop button of the user, and the time limit of the connection.
 ///
@@ -223,13 +253,22 @@ pub enum Bounded<T> {
 /// answer says which of the two ended it and the caller then closes the
 /// connection. An error that the driver itself reports leaves the connection
 /// open.
-pub async fn run_bounded<T, F>(work: F, token: &CancellationToken, timeout_secs: u64) -> Bounded<T>
+///
+/// `grace` is the time the Stop button gives the driver to report the failure
+/// that the server sends it. It is zero for a connection that has no way to
+/// ask the server to stop, because no such failure is coming.
+pub async fn run_bounded<T, F>(
+    work: F,
+    token: &CancellationToken,
+    timeout_secs: u64,
+    grace: std::time::Duration,
+) -> Bounded<T>
 where
     F: std::future::Future<Output = Result<T>>,
 {
     tokio::select! {
         result = work => Bounded::Answered(result),
-        () = token.cancelled() => Bounded::Stopped(Error::Cancelled),
+        () = stopped_by_the_user(token, grace) => Bounded::Stopped(Error::Cancelled),
         () = until_the_limit(timeout_secs) => Bounded::Stopped(Error::Timeout(timeout_secs)),
     }
 }
@@ -319,6 +358,7 @@ pub async fn execute_query<R: Runtime>(
             guard.execute_query(&query, bound.as_ref(), &options),
             &token,
             options.timeout_secs,
+            stop_grace(&open),
         )
         .await
     };
@@ -370,6 +410,7 @@ pub async fn explain_query<R: Runtime>(
             guard.explain(&query, bound.as_ref(), kind, &options),
             &token,
             options.timeout_secs,
+            stop_grace(&open),
         )
         .await
     };
@@ -406,14 +447,65 @@ async fn finish_run<R: Runtime, T>(
             if open.keeps_connection_after_stop {
                 return Err(error);
             }
+            // The exchange was dropped in the middle of a message, so nothing
+            // can be sent on this connection again. A new one goes in its
+            // place at once, so the user is not left with a tab that cannot
+            // run anything.
+            reopen_after_stop(app, state, connection_id, open, &error).await;
+            Err(error)
+        }
+    }
+}
+
+/// Puts a new connection in the place of one that a limit left unusable.
+///
+/// The session is a new one. Whatever the old session held, such as a
+/// temporary table, an open transaction or a `SET` of its own, is gone with
+/// it. The alternative is a tab that can run nothing until the user opens the
+/// connection by hand.
+async fn reopen_after_stop<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    connection_id: &str,
+    open: &OpenConnection,
+    error: &Error,
+) {
+    announce(app, connection_id, ConnectionHealth::Reconnecting, None);
+
+    let full = match with_password(state, open.descriptor.clone()) {
+        Ok(full) => full,
+        Err(secret_error) => {
+            log::warn!("The password of '{connection_id}' could not be read: {secret_error}");
             state.remove(connection_id).await;
             announce(
                 app,
                 connection_id,
                 ConnectionHealth::Disconnected,
-                Some(limit_reason(&error)),
+                Some(limit_reason(error)),
             );
-            Err(error)
+            return;
+        }
+    };
+
+    match open_driver(&full).await {
+        Ok(driver) => {
+            state
+                .insert(connection_id, OpenConnection::new(full, driver))
+                .await;
+            // The background driver shared the session that has gone, so the
+            // next metadata read opens one of its own.
+            state.clear_background(connection_id).await;
+            announce(app, connection_id, ConnectionHealth::Connected, None);
+            log::info!("The connection '{connection_id}' was opened again after a stop.");
+        }
+        Err(open_error) => {
+            state.remove(connection_id).await;
+            announce(
+                app,
+                connection_id,
+                ConnectionHealth::Disconnected,
+                Some(open_error.to_string()),
+            );
         }
     }
 }
@@ -1070,6 +1162,7 @@ pub async fn export_query<R: Runtime>(
             guard.execute_query(&query, bound.as_ref(), &options),
             &token,
             options.timeout_secs,
+            stop_grace(&open),
         )
         .await
     };
@@ -1243,19 +1336,58 @@ mod tests {
     #[tokio::test]
     async fn a_bounded_run_gives_the_answer_of_the_work() {
         let token = CancellationToken::new();
-        let outcome = run_bounded(async { Ok(7_u8) }, &token, 30).await;
+        let outcome = run_bounded(async { Ok(7_u8) }, &token, 30, STOP_GRACE).await;
         assert!(matches!(outcome, Bounded::Answered(Ok(7))));
 
         // An error of the driver is an answer, so the connection stays open.
-        let failed: Bounded<u8> = run_bounded(async { Err(Error::Cancelled) }, &token, 30).await;
+        let failed: Bounded<u8> =
+            run_bounded(async { Err(Error::Cancelled) }, &token, 30, STOP_GRACE).await;
         assert!(matches!(failed, Bounded::Answered(Err(Error::Cancelled))));
     }
 
     #[tokio::test]
-    async fn a_bounded_run_stops_when_the_user_asks() {
+    async fn a_stop_takes_the_answer_of_the_driver_when_one_arrives_in_time() {
+        tokio::time::pause();
         let token = CancellationToken::new();
         token.cancel();
-        let outcome: Bounded<u8> = run_bounded(std::future::pending(), &token, 30).await;
+
+        // The server ended the statement and the driver reports that failure
+        // through the connection. The failure is an answer, so the caller
+        // keeps the connection.
+        let outcome: Bounded<u8> = run_bounded(
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                Err(Error::Cancelled)
+            },
+            &token,
+            30,
+            STOP_GRACE,
+        )
+        .await;
+
+        assert!(matches!(outcome, Bounded::Answered(Err(Error::Cancelled))));
+    }
+
+    #[tokio::test]
+    async fn a_stop_gives_up_on_a_driver_that_says_nothing() {
+        tokio::time::pause();
+        let token = CancellationToken::new();
+        token.cancel();
+        let outcome: Bounded<u8> = run_bounded(std::future::pending(), &token, 0, STOP_GRACE).await;
+        assert!(matches!(outcome, Bounded::Stopped(Error::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn a_stop_waits_for_nothing_when_the_server_cannot_be_asked() {
+        let token = CancellationToken::new();
+        token.cancel();
+        let outcome: Bounded<u8> = run_bounded(
+            std::future::pending(),
+            &token,
+            30,
+            std::time::Duration::ZERO,
+        )
+        .await;
         assert!(matches!(outcome, Bounded::Stopped(Error::Cancelled)));
     }
 
@@ -1263,7 +1395,7 @@ mod tests {
     async fn a_bounded_run_stops_at_the_time_limit() {
         tokio::time::pause();
         let token = CancellationToken::new();
-        let outcome: Bounded<u8> = run_bounded(std::future::pending(), &token, 5).await;
+        let outcome: Bounded<u8> = run_bounded(std::future::pending(), &token, 5, STOP_GRACE).await;
         assert!(matches!(outcome, Bounded::Stopped(Error::Timeout(5))));
     }
 
