@@ -205,6 +205,7 @@
               <ResultsGrid
                 v-show="state.activePaneId === pane.id"
                 :result="pane.result"
+                :busy="state.running"
                 @export="onExport"
                 @export-all="onExportAll"
                 @copied="onCopied"

@@ -337,3 +337,219 @@ describe('ResultsGrid dialog state', () => {
     expect(dialog.props('modelValue')).toBe(false)
   })
 })
+
+describe('ResultsGrid as a grid a reader can follow', () => {
+  /** The place of the cell that carries the one tab stop, as row and column. */
+  function tabStop(wrapper: ReturnType<typeof mountWithPlugins>): [number, number] | null {
+    const rows = wrapper.findAll('[data-test="grid-row"]')
+    for (const [rowIndex, row] of rows.entries()) {
+      const column = row
+        .findAll('[data-test="grid-cell"]')
+        .findIndex((cell) => cell.attributes('tabindex') === '0')
+      if (column >= 0) {
+        return [rowIndex, column]
+      }
+    }
+    return null
+  }
+
+  function grid(wrapper: ReturnType<typeof mountWithPlugins>) {
+    return wrapper.find('[role="grid"]')
+  }
+
+  it('names itself a grid and gives the count of all of its rows', () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    const table = grid(wrapper)
+
+    expect(table.attributes('aria-label')).toBe('The rows of the result')
+    // The count holds the row of the headers as well as the three rows.
+    expect(table.attributes('aria-rowcount')).toBe('4')
+    expect(table.attributes('aria-colcount')).toBe('3')
+  })
+
+  it('gives each row and each cell its place in the whole result', () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    const rows = wrapper.findAll('[data-test="grid-row"]')
+
+    expect(rows[0]!.attributes('aria-rowindex')).toBe('2')
+    expect(rows[2]!.attributes('aria-rowindex')).toBe('4')
+    const cells = rows[0]!.findAll('[data-test="grid-cell"]')
+    expect(cells[0]!.attributes('aria-colindex')).toBe('2')
+    expect(cells[1]!.attributes('aria-colindex')).toBe('3')
+  })
+
+  it('names the parts of a row and of a column for a reader', () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+
+    expect(wrapper.find('[data-test="grid-header-cell"]').attributes('role')).toBe('columnheader')
+    expect(wrapper.find('[data-test="grid-cell"]').attributes('role')).toBe('gridcell')
+    expect(wrapper.find('td.row-number').attributes('role')).toBe('rowheader')
+  })
+
+  it('holds one tab stop, whatever the number of its cells', () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    const stops = wrapper
+      .findAll('[data-test="grid-cell"]')
+      .filter((cell) => cell.attributes('tabindex') === '0')
+
+    expect(stops).toHaveLength(1)
+    expect(tabStop(wrapper)).toEqual([0, 0])
+  })
+
+  it('moves the tab stop between the cells with the arrow keys', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+
+    await grid(wrapper).trigger('keydown', { key: 'ArrowRight' })
+    expect(tabStop(wrapper)).toEqual([0, 1])
+
+    await grid(wrapper).trigger('keydown', { key: 'ArrowDown' })
+    expect(tabStop(wrapper)).toEqual([1, 1])
+
+    await grid(wrapper).trigger('keydown', { key: 'ArrowLeft' })
+    expect(tabStop(wrapper)).toEqual([1, 0])
+
+    await grid(wrapper).trigger('keydown', { key: 'ArrowUp' })
+    expect(tabStop(wrapper)).toEqual([0, 0])
+  })
+
+  it('stays inside the grid at each of its edges', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+
+    await grid(wrapper).trigger('keydown', { key: 'ArrowUp' })
+    await grid(wrapper).trigger('keydown', { key: 'ArrowLeft' })
+    expect(tabStop(wrapper)).toEqual([0, 0])
+
+    await grid(wrapper).trigger('keydown', { key: 'End', ctrlKey: true })
+    await grid(wrapper).trigger('keydown', { key: 'ArrowDown' })
+    await grid(wrapper).trigger('keydown', { key: 'ArrowRight' })
+    expect(tabStop(wrapper)).toEqual([2, 1])
+  })
+
+  it('reaches the ends of a row and the ends of the grid', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+
+    await grid(wrapper).trigger('keydown', { key: 'End' })
+    expect(tabStop(wrapper)).toEqual([0, 1])
+
+    await grid(wrapper).trigger('keydown', { key: 'Home' })
+    expect(tabStop(wrapper)).toEqual([0, 0])
+
+    await grid(wrapper).trigger('keydown', { key: 'End', ctrlKey: true })
+    expect(tabStop(wrapper)).toEqual([2, 1])
+
+    await grid(wrapper).trigger('keydown', { key: 'Home', ctrlKey: true })
+    expect(tabStop(wrapper)).toEqual([0, 0])
+  })
+
+  it('moves by a page of rows', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+
+    await grid(wrapper).trigger('keydown', { key: 'PageDown' })
+    expect(tabStop(wrapper)).toEqual([2, 0])
+
+    await grid(wrapper).trigger('keydown', { key: 'PageUp' })
+    expect(tabStop(wrapper)).toEqual([0, 0])
+  })
+
+  it('opens the whole value of a cell with the enter key', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+
+    await grid(wrapper).trigger('keydown', { key: 'ArrowRight' })
+    await grid(wrapper).trigger('keydown', { key: 'Enter' })
+
+    expect(document.body.textContent).toContain('Grace')
+  })
+
+  it('takes a row with the space bar', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+
+    await grid(wrapper).trigger('keydown', { key: ' ' })
+    expect(wrapper.findAll('[data-test="grid-row"]')[0]!.classes()).toContain('selected')
+
+    await grid(wrapper).trigger('keydown', { key: 'ArrowDown' })
+    await grid(wrapper).trigger('keydown', { key: ' ' })
+    const rows = wrapper.findAll('[data-test="grid-row"]')
+    expect(rows[0]!.classes()).not.toContain('selected')
+    expect(rows[1]!.classes()).toContain('selected')
+  })
+
+  it('adds a row to the rows already taken with control and the space bar', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+
+    await grid(wrapper).trigger('keydown', { key: ' ' })
+    await grid(wrapper).trigger('keydown', { key: 'ArrowDown' })
+    await grid(wrapper).trigger('keydown', { key: ' ', ctrlKey: true })
+
+    const rows = wrapper.findAll('[data-test="grid-row"]')
+    expect(rows[0]!.classes()).toContain('selected')
+    expect(rows[1]!.classes()).toContain('selected')
+
+    await grid(wrapper).trigger('keydown', { key: ' ', ctrlKey: true })
+    expect(wrapper.findAll('[data-test="grid-row"]')[1]!.classes()).not.toContain('selected')
+  })
+
+  it('leaves a key it does not use to the application', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+
+    const event = await grid(wrapper).trigger('keydown', { key: 'a' })
+
+    expect(tabStop(wrapper)).toEqual([0, 0])
+    expect(event).toBeUndefined()
+  })
+
+  it('answers no key while it holds no rows', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result({ rows: [] }) } })
+
+    await grid(wrapper).trigger('keydown', { key: 'ArrowDown' })
+
+    expect(tabStop(wrapper)).toBeNull()
+  })
+
+  it('follows the focus that a pointer puts on a cell', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    const cells = wrapper.findAll('[data-test="grid-row"]')[1]!.findAll('[data-test="grid-cell"]')
+
+    await cells[1]!.trigger('focus')
+
+    expect(tabStop(wrapper)).toEqual([1, 1])
+  })
+
+  it('keeps the empty space above and below the drawn rows out of the reading', () => {
+    const rows = Array.from({ length: 400 }, (_, index) => [index, `Name ${index}`])
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result({ rows }) } })
+
+    const hidden = wrapper.findAll('tbody tr[aria-hidden="true"]')
+    expect(hidden.length).toBeGreaterThan(0)
+  })
+
+  it('returns the tab stop to the first cell when a new result arrives', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    await grid(wrapper).trigger('keydown', { key: 'End', ctrlKey: true })
+    expect(tabStop(wrapper)).toEqual([2, 1])
+
+    await wrapper.setProps({ result: result({ rows: [[9, 'New']] }) })
+
+    expect(tabStop(wrapper)).toEqual([0, 0])
+  })
+
+  it('says that it is busy while a new statement runs', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result(), busy: true } })
+
+    expect(wrapper.find('[data-test="grid-busy"]').exists()).toBe(true)
+    expect(grid(wrapper).attributes('aria-busy')).toBe('true')
+
+    await wrapper.setProps({ busy: false })
+    expect(wrapper.find('[data-test="grid-busy"]').exists()).toBe(false)
+  })
+
+  it('holds the whole value of a cell under the pointer only when it is cut short', () => {
+    const long = 'x'.repeat(200)
+    const wrapper = mountWithPlugins(ResultsGrid, {
+      props: { result: result({ rows: [[1, long]] }) },
+    })
+    const cells = wrapper.findAll('[data-test="grid-cell"]')
+
+    expect(cells[0]!.attributes('title')).toBeUndefined()
+    expect(cells[1]!.attributes('title')).toBe(long)
+  })
+})
