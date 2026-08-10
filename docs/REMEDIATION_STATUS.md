@@ -9,7 +9,7 @@ now holds. Read it beside `REMEDIATION_PLAN.md`.
 | --- | --- | --- |
 | B1, B2 MySQL compile errors | Done | The driver was rewritten. |
 | B3 Type errors of the frontend | Done | `vue-tsc` passes. |
-| B4 Failing unit tests | Done | 397 frontend tests and 153 backend tests pass. |
+| B4 Failing unit tests | Done | 637 frontend tests and 249 backend tests pass. |
 | B5 Tauri 1 on current Linux | Done | The project moved to Tauri 2. |
 | npm scripts, ESLint, Prettier | Done | Also rustfmt and clippy. |
 | `Cargo.lock` in the repository | Done | The ignore rule was removed. |
@@ -93,6 +93,30 @@ now holds. Read it beside `REMEDIATION_PLAN.md`.
 | Quoting helpers per dialect | Done | In `sql.rs`, used by every metadata query. |
 | Signing and release automation | Open | Needs certificates and a release pipeline. |
 
+## Features
+
+The work after the remediation added these features. `docs/LIMITATIONS.md`
+records what each one cannot do.
+
+| Item | State | Note |
+| --- | --- | --- |
+| Script an object as DDL and as DML | Done | The backend builds the text and quotes every name. A built CREATE holds no index, no default and no constraint, so the interface names it a draft. |
+| The messages that the server sends | Done | Severity, code, line and procedure. MS SQL Server gives no `PRINT` text, because `tiberius` drops the info tokens. |
+| The schema in the background | Done | One command reads every relation of a database. The read holds the lock of the connection, so a statement of the user waits for it. |
+| Completion of the columns of an alias | Done | The index is keyed by the qualified name, and one provider serves the whole application. |
+| The plan of a statement | Done | Estimated and actual, in a result tab. The request covers one statement. |
+| Transaction control | Open | Needs one session for each tab, a session generation that the reconnection path checks, and an attention packet for MS SQL Server. |
+| Athena cost control | Done | The scan, the price at a rate the user sets, and the reuse of an earlier result with an age. |
+| More object types in the tree | Done | Routines, indexes, constraints and partitions, under folders. |
+| Format the statement | Done | A provider for the language, so the keys and the menu of the editor reach it. |
+| More export formats and a partial export | Done | Markdown, INSERT statements and Excel. A whole result goes to a file from the backend. |
+| Keyboard commands and a command palette | Done | One registry holds every key, and the palette lists them. |
+| Edit the rows in the grid | Open | Needs transaction control first. |
+| Query parameters | Done | Named parameters, bound by every engine but Athena, which takes literals. |
+| Microsoft Entra ID authentication | Done | A token from the Azure CLI or from the user. The token stays out of the settings file. |
+| Table properties | Done | One command collects the facts, the columns, the indexes and the constraints. |
+| Keep a result | Done | A pinned tab holds its rows and the time of its run against the next statement. |
+
 ## Decisions that the plan asked for
 
 1. **Tauri 2 first.** Done before the feature work, so nothing was built twice.
@@ -113,7 +137,11 @@ now holds. Read it beside `REMEDIATION_PLAN.md`.
   splitting, and SQLite is covered end to end.
 - A full accessibility pass over every view.
 - Transaction control in the interface. The drivers report whether the engine
-  has transactions, but no button uses it yet.
+  has transactions, but no button uses it yet. Three parts come first: one
+  session for each tab, a session generation that the reconnection path
+  checks, and an attention packet for MS SQL Server, which today keeps a
+  stopped statement and its locks.
+- The edit of a row in the grid, which needs transaction control.
 
 ## Test coverage
 
@@ -121,23 +149,26 @@ The frontend suite covers every statement, every function and every line of
 `src/`, and every branch of the modules that carry logic:
 
 ```
-Statements   : 100%   (1471/1471)
-Functions    : 100%   (546/546)
-Lines        : 100%   (1393/1393)
-Branches     : 97.94% (954/974)
+Statements   : 100%   (2300/2300)
+Functions    : 100%   (835/835)
+Lines        : 100%   (2186/2186)
+Branches     : 97.7%  (1532/1568)
 ```
 
-The twenty branches that remain are one artifact, and no test can remove
+The thirty-six branches that remain are one artifact, and no test can remove
 them. Vue compiles a `v-if` that has no `v-else` into a conditional whose
 second arm is a cached comment node. The tool that measures coverage never
 records that arm as run, even when one test renders the block and another
-test leaves it out. Each of the twenty sits on such a `v-if`. The threshold
+test leaves it out. Every one of the thirty-six sits in a template, on such a
+`v-if`, and each module of `src/lib`, `src/stores` and `src/types` holds every
+branch. The threshold
 in `vitest.config.ts` therefore holds `src/lib`, `src/stores` and
 `src/types` at 100% on all four measures, and holds the views at 100% on
 statements, functions and lines with a floor of 96% on branches.
 
-The backend suite holds 153 tests. Every module has tests for its own
+The backend suite holds 249 tests. Every module has tests for its own
 behaviour: the error kinds, the dialect rules, the statement splitter, the
-connection records, the history, the settings files, the state of the open
-connections, and each driver's configuration and type conversion. SQLite is
+parameter rewrite, the connection records, the history, the settings files,
+the state of the open connections, the time limit of a statement, and each
+driver's configuration, catalog statements and type conversion. SQLite is
 covered end to end, because it needs no server.

@@ -17,7 +17,13 @@ The application is built with Vue 3, Vuetify and [Tauri 2](https://tauri.app/).
 - Transport settings: verify the certificate, encrypt without a check, encrypt
   when the server offers it, or send in clear text. The first is the default.
 - A named MS SQL Server instance resolves its port through the SQL Browser
-  service. Windows Integrated Security works on Windows.
+  service.
+- Four ways to authenticate against MS SQL Server: a SQL login, the account of
+  the user, Microsoft Entra ID through the Azure CLI, and an access token that
+  the user gives. The account of the user reaches the server through SSPI on
+  Windows and through Kerberos on macOS and Linux.
+- An Athena connection can reuse the result of an earlier run up to an age that
+  the user gives, which costs nothing because the engine scans no data.
 - Timeouts for the connection and for a statement, a row limit, a read-only
   session, an application name, folders and colours.
 - Passwords go into the keychain of the operating system. The settings file
@@ -28,25 +34,53 @@ The application is built with Vue 3, Vuetify and [Tauri 2](https://tauri.app/).
 **Statements**
 
 - One editor for each tab, with syntax colours and completion that draws on the
-  objects the explorer has read.
+  objects of the database. Completion after a full stop offers the columns of
+  the table that the alias in front of the stop names.
 - `Ctrl` or `Cmd` with `Enter` runs the statement under the cursor. The same
   keys with `Shift` run the whole script. A selection runs in place of the
   statement.
+- One registry holds every key of the application, and a palette lists the
+  commands with the keys that reach them.
 - A script runs statement by statement. The splitter respects quotes, comments,
   dollar tags and the MySQL `DELIMITER` command.
-- A statement that runs can be stopped.
+- The formatter of the dialect lays out the statement, through the format
+  command of the editor or a button.
+- A statement that carries a name such as `:id` opens a dialog for the values.
+  Each value holds the form the user chose, so a value stays text when it looks
+  like a number. Every engine but Athena binds the values.
+- A plan tab shows the plan of one statement. The estimated plan needs no run.
+  The actual plan runs the statement, and the interface asks first.
+- The Messages tab holds what the server sent, with the severity, the code, the
+  line and the procedure of each message.
+- A statement that runs can be stopped, and the time limit of the connection
+  stops one that runs too long.
 - The result grid draws only the rows in view, so a large result stays quick. It
   sorts, filters, marks a value that is absent, and opens a wide value.
-- Results go to a CSV file, to a JSON file, or to the clipboard.
-- The history and the saved statements persist, and so do the open tabs.
+- Results go to a CSV, JSON, Markdown, INSERT or Excel file, or to the
+  clipboard. A whole result goes to a file from the backend, so the rows do not
+  pass through the interface.
+- A result tab can be pinned. It then holds its rows and the time of its run
+  against the next statement, so two results stand beside each other.
+- The status bar reports the rows, the time, and for Athena the data scanned
+  with the cost at a rate the settings hold.
+- The history and the saved statements persist, and so do the open tabs with
+  their parameter values.
 
 **Objects**
 
 - Databases, schemas, tables, views and columns. A key column carries its own
   icon, and each column shows its type.
+- Folders hold the tables, the views, the routines, the indexes, the constraints
+  and the partitions of a schema or a relation.
 - A filter box keeps the path down to each match.
 - The context menu builds a preview statement in the backend, so every name is
-  quoted for the engine.
+  quoted for the engine. It also builds the statements of an object: a CREATE
+  draft, a SELECT, an INSERT, an UPDATE and a DELETE. The CREATE of a table is a
+  draft, because it holds no index, no default and no constraint.
+- A Properties dialog holds the facts of a relation, its columns, its indexes
+  and its constraints, in one call to the backend.
+- One command reads every relation of a database, and the completion of the
+  editor then knows a name that the tree has not opened.
 
 ## Prerequisites
 
@@ -142,7 +176,7 @@ backend/          The Rust half
     db/drivers/   One file for each engine
     error.rs      The error type and the payload the interface receives
     secrets.rs    The keychain of the operating system
-    sql.rs        Quoting rules and the statement splitter
+    sql.rs        Quoting rules, the statement splitter and the parameters
     state.rs      The open connections and the statements that run
     storage.rs    The connection record and its options
     store.rs      The settings, the history and the saved statements
@@ -153,8 +187,20 @@ frontend/         The Vue half
     lib/          The calls to the backend and the pure helpers
     stores/       The state of the interface
     types/        The shapes the backend sends
-docs/             The state evaluation and the remediation plan
+docs/             The state of the work and the limits of the application
 ```
+
+## What it does not do
+
+- The interface holds no transaction control and no edit of a row in the grid.
+  Three parts come first: one session for each tab, a session generation that
+  the reconnection path checks, and an attention packet for MS SQL Server, which
+  today keeps a stopped statement and its locks.
+- `docs/LIMITATIONS.md` records every other limit, with its cause. Read it
+  before you report a defect. It covers the copy of `tiberius` that the build
+  holds, the `PRINT` text of MS SQL Server, the ciphers that `rustls` refuses,
+  the catalog of Athena, and the way a parameter changes a batch on MS SQL
+  Server.
 
 ## Notes on the design
 
