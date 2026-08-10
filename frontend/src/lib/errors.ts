@@ -63,6 +63,7 @@ export function errorIcon(kind: ErrorKind): string {
       return 'mdi-cancel'
     case ErrorKind.Configuration:
       return 'mdi-tune'
+    case ErrorKind.Authentication:
     case ErrorKind.Secret:
       return 'mdi-key-alert-outline'
     case ErrorKind.Unsupported:
@@ -89,6 +90,8 @@ export function errorAdvice(payload: ErrorPayload): string {
       return 'Raise the time limit in the connection options, or make the statement smaller.'
     case ErrorKind.Configuration:
       return 'Correct the connection details and try again.'
+    case ErrorKind.Authentication:
+      return 'Check the authentication method of the connection and the credentials it needs.'
     case ErrorKind.Secret:
       return 'The keychain of the system refused the password. Type it again and save.'
     default:

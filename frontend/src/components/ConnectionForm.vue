@@ -52,7 +52,19 @@
         </template>
       </v-text-field>
 
-      <template v-if="engine?.usesCredentials">
+      <v-select
+        v-if="engine?.supportsIntegratedSecurity"
+        v-model="draft.options.mssqlAuth"
+        :items="authItems"
+        item-title="title"
+        item-value="value"
+        label="Authentication"
+        :hint="authHint"
+        persistent-hint
+        data-test="auth-select"
+      />
+
+      <template v-if="engine?.usesCredentials && needsLogin">
         <v-text-field v-model="draft.user" label="User" data-test="user-field" />
         <v-text-field
           v-model="password"
@@ -65,6 +77,28 @@
           @click:append-inner="showPassword = !showPassword"
         />
       </template>
+
+      <v-text-field
+        v-if="needsAccessToken"
+        v-model="password"
+        label="Access token"
+        :type="showPassword ? 'text' : 'password'"
+        :append-inner-icon="showPassword ? 'mdi-eye-off' : 'mdi-eye'"
+        hint="The token is a credential. It goes to the keychain, never to a settings file."
+        persistent-hint
+        data-test="access-token-field"
+        @click:append-inner="showPassword = !showPassword"
+      />
+
+      <v-text-field
+        v-if="draft.options.mssqlAuth === MssqlAuth.EntraAzureCli"
+        v-model="draft.options.azureCliPath"
+        label="Path of the Azure CLI"
+        placeholder="az"
+        hint="Give the path when the application cannot find `az` by itself."
+        persistent-hint
+        data-test="azure-cli-path-field"
+      />
 
       <v-text-field
         v-if="engine?.usesDatabase"
@@ -253,7 +287,7 @@ import { computed, ref, watch } from 'vue'
 import { open as openFileDialog } from '@tauri-apps/plugin-dialog'
 import { useConnectionsStore, defaultPortFor, validateConnection } from '@/stores/connections'
 import { useUiStore } from '@/stores/ui'
-import { DbType, TlsMode, type SavedConnection } from '@/types/api'
+import { DbType, MssqlAuth, TlsMode, type SavedConnection } from '@/types/api'
 
 const props = defineProps<{ connection: SavedConnection; isNew: boolean }>()
 const emit = defineEmits<{ (event: 'close'): void; (event: 'saved', id: string): void }>()
@@ -297,6 +331,36 @@ const tlsHint = computed(() => {
       return 'The connection continues without encryption when the server offers none.'
     default:
       return 'The credentials and the results cross the network in clear text.'
+  }
+})
+
+const authItems = [
+  { title: 'SQL login', value: MssqlAuth.SqlLogin },
+  { title: 'Windows Authentication', value: MssqlAuth.Integrated },
+  { title: 'Microsoft Entra ID with the Azure CLI', value: MssqlAuth.EntraAzureCli },
+  { title: 'Microsoft Entra ID with an access token', value: MssqlAuth.EntraAccessToken },
+]
+
+/** True while the chosen method needs a login and a password. */
+const needsLogin = computed(
+  () => draft.value.dbType !== DbType.Mssql || draft.value.options.mssqlAuth === MssqlAuth.SqlLogin,
+)
+
+/** True while the chosen method needs a token that the user supplies. */
+const needsAccessToken = computed(
+  () => draft.value.options.mssqlAuth === MssqlAuth.EntraAccessToken,
+)
+
+const authHint = computed(() => {
+  switch (draft.value.options.mssqlAuth) {
+    case MssqlAuth.Integrated:
+      return 'The server takes the account of the user who runs the application. This works on Windows only.'
+    case MssqlAuth.EntraAzureCli:
+      return 'The application asks the Azure CLI for a token. Run `az login` first.'
+    case MssqlAuth.EntraAccessToken:
+      return 'Paste a token for https://database.windows.net/. A token lives for about one hour.'
+    default:
+      return 'The server holds the login and the password.'
   }
 })
 

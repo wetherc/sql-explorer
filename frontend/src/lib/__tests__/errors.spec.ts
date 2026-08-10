@@ -113,3 +113,15 @@ describe('errorAdvice', () => {
     expect(advise(ErrorKind.Database)).toBe('')
   })
 })
+
+describe('the authentication kind', () => {
+  it('gets an icon and advice of its own', () => {
+    const payload = {
+      kind: ErrorKind.Authentication,
+      message: 'The Azure CLI was not found.',
+      detail: null,
+    }
+    expect(errorIcon(payload.kind)).toBe('mdi-key-alert-outline')
+    expect(errorAdvice(payload)).toContain('authentication method')
+  })
+})

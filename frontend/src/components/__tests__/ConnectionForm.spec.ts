@@ -14,7 +14,7 @@ const ConnectionForm = (await import('@/components/ConnectionForm.vue')).default
 const { mountWithPlugins, settle } = await import('./mount')
 const { useConnectionsStore } = await import('@/stores/connections')
 const { useUiStore } = await import('@/stores/ui')
-const { DbType, TlsMode } = await import('@/types/api')
+const { DbType, MssqlAuth, TlsMode } = await import('@/types/api')
 type EngineInfo = import('@/types/api').EngineInfo
 
 const engines: EngineInfo[] = [
@@ -453,6 +453,87 @@ describe('ConnectionForm with every field filled', () => {
         }),
       }),
     )
+  })
+
+  it('offers the authentication methods of MS SQL Server', async () => {
+    const wrapper = await mountForm()
+    const select = wrapper
+      .findAllComponents({ name: 'VSelect' })
+      .find((item) => item.attributes('data-test') === 'auth-select')
+    expect((select!.props('items') as Array<{ title: string }>).map((item) => item.title)).toEqual([
+      'SQL login',
+      'Windows Authentication',
+      'Microsoft Entra ID with the Azure CLI',
+      'Microsoft Entra ID with an access token',
+    ])
+  })
+
+  it('hides the login for Windows Authentication and keeps the choice', async () => {
+    const wrapper = await mountForm()
+    expect(wrapper.find('[data-test="user-field"]').exists()).toBe(true)
+
+    const select = wrapper
+      .findAllComponents({ name: 'VSelect' })
+      .find((item) => item.attributes('data-test') === 'auth-select')
+    await select!.vm.$emit('update:modelValue', MssqlAuth.Integrated)
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('[data-test="user-field"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="password-field"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('This works on Windows only')
+
+    await wrapper.find('[data-test="save-button"]').trigger('click')
+    await settle()
+    expect(apiStub.saveConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        options: expect.objectContaining({ mssqlAuth: MssqlAuth.Integrated }),
+      }),
+    )
+  })
+
+  it('asks for a token, and for the path of the Azure CLI', async () => {
+    const wrapper = await mountForm()
+    const select = wrapper
+      .findAllComponents({ name: 'VSelect' })
+      .find((item) => item.attributes('data-test') === 'auth-select')
+
+    await select!.vm.$emit('update:modelValue', MssqlAuth.EntraAccessToken)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-test="access-token-field"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="azure-cli-path-field"]').exists()).toBe(false)
+
+    // The token reaches the record that the save sends.
+    await wrapper.find('[data-test="access-token-field"] input').setValue('a-token')
+    const reveal = wrapper
+      .findAllComponents({ name: 'VTextField' })
+      .find((item) => item.attributes('data-test') === 'access-token-field')
+    await reveal!.vm.$emit('click:append-inner')
+    await wrapper.vm.$nextTick()
+    expect(reveal!.props('type')).toBe('text')
+
+    await select!.vm.$emit('update:modelValue', MssqlAuth.EntraAzureCli)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-test="access-token-field"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="azure-cli-path-field"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('az login')
+
+    await wrapper.find('[data-test="azure-cli-path-field"] input').setValue('/opt/az')
+    await wrapper.find('[data-test="save-button"]').trigger('click')
+    await settle()
+    expect(apiStub.saveConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        password: 'a-token',
+        options: expect.objectContaining({
+          mssqlAuth: MssqlAuth.EntraAzureCli,
+          azureCliPath: '/opt/az',
+        }),
+      }),
+    )
+  })
+
+  it('shows no authentication list for an engine that has one method', async () => {
+    const wrapper = await mountForm(connectionFixture({ dbType: DbType.Sqlite }))
+    expect(wrapper.find('[data-test="auth-select"]').exists()).toBe(false)
   })
 
   it('keeps the reuse of results with its age', async () => {

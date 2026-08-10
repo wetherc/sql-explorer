@@ -25,6 +25,8 @@ pub enum ErrorKind {
     Database,
     /// The connection details or the options are not valid.
     Configuration,
+    /// The credentials were refused, or none could be read.
+    Authentication,
     /// A local file or socket operation failed.
     Io,
     /// The stored data could not be read or written.
@@ -47,6 +49,7 @@ impl ErrorKind {
             ErrorKind::Cancelled => "cancelled",
             ErrorKind::Database => "database",
             ErrorKind::Configuration => "configuration",
+            ErrorKind::Authentication => "authentication",
             ErrorKind::Io => "io",
             ErrorKind::Storage => "storage",
             ErrorKind::Secret => "secret",
@@ -81,6 +84,9 @@ pub enum Error {
 
     #[error("{0}")]
     Configuration(String),
+
+    #[error("{0}")]
+    Authentication(String),
 
     #[error("{0}")]
     Unsupported(String),
@@ -131,6 +137,7 @@ impl Error {
             Error::Timeout(_) => ErrorKind::Timeout,
             Error::Cancelled => ErrorKind::Cancelled,
             Error::Configuration(_) | Error::MySqlUrl(_) => ErrorKind::Configuration,
+            Error::Authentication(_) => ErrorKind::Authentication,
             Error::Unsupported(_) => ErrorKind::Unsupported,
             Error::Tiberius(_)
             | Error::MySql(_)

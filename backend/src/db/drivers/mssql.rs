@@ -15,7 +15,7 @@ use crate::db::{
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
-use crate::storage::{SavedConnection, TlsMode};
+use crate::storage::{MssqlAuth, SavedConnection, TlsMode};
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use futures_util::TryStreamExt;
@@ -33,7 +33,7 @@ pub struct MssqlDriver {
 }
 
 /// Builds the `tiberius` configuration from a saved connection.
-pub fn build_config(connection: &SavedConnection) -> Result<Config> {
+pub async fn build_config(connection: &SavedConnection) -> Result<Config> {
     let mut config = if let Some(url) = connection.options.connection_url.as_deref() {
         let trimmed = url.trim();
         if trimmed.starts_with("jdbc:") {
@@ -59,7 +59,7 @@ pub fn build_config(connection: &SavedConnection) -> Result<Config> {
         if let Some(name) = non_empty(connection.options.application_name.as_deref()) {
             config.application_name(name);
         }
-        config.authentication(auth_method(connection)?);
+        config.authentication(auth_method(connection).await?);
         config.encryption(encryption_level(connection.options.tls_mode));
         if !connection.options.tls_mode.verifies_certificate() {
             config.trust_cert();
@@ -78,26 +78,117 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|text| !text.is_empty())
 }
 
-/// Selects the authentication method. Windows Integrated Security needs the
-/// `winauth` feature, which builds on Windows only.
-fn auth_method(connection: &SavedConnection) -> Result<AuthMethod> {
-    if connection.options.integrated_security {
-        #[cfg(windows)]
-        {
-            return Ok(AuthMethod::Integrated);
-        }
-        #[cfg(not(windows))]
-        {
-            return Err(Error::Unsupported(
-                "Windows Integrated Security works on Windows only. Give a user name and a password."
-                    .to_string(),
-            ));
+/// The resource that a token for a SQL database names.
+pub const DATABASE_RESOURCE: &str = "https://database.windows.net/";
+
+/// The places a desktop application looks for the Azure CLI. An application
+/// that a desktop starts holds a short `PATH` that often misses these.
+const AZURE_CLI_PLACES: [&str; 4] = [
+    "az",
+    "/opt/homebrew/bin/az",
+    "/usr/local/bin/az",
+    "/usr/bin/az",
+];
+
+/// Reads the access token out of the JSON that the Azure CLI writes.
+pub fn token_from_cli_output(output: &str) -> Result<String> {
+    let value: serde_json::Value = serde_json::from_str(output).map_err(|error| {
+        Error::Authentication(format!("The Azure CLI gave no readable answer: {error}"))
+    })?;
+    value
+        .get("accessToken")
+        .and_then(|token| token.as_str())
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| Error::Authentication("The Azure CLI gave no access token.".to_string()))
+}
+
+/// Asks the Azure CLI for a token for the SQL database resource.
+///
+/// The token lives for about one hour. The reconnection path builds the
+/// configuration again, so a connection that is opened again asks the CLI
+/// for a new token.
+async fn azure_cli_token(configured_path: Option<&str>) -> Result<String> {
+    let places: Vec<String> = match non_empty(configured_path) {
+        Some(path) => vec![path.to_string()],
+        None => AZURE_CLI_PLACES
+            .iter()
+            .map(|path| path.to_string())
+            .collect(),
+    };
+
+    let mut last: Option<String> = None;
+    for path in &places {
+        let outcome = tokio::process::Command::new(path)
+            .arg("account")
+            .arg("get-access-token")
+            .arg("--resource")
+            .arg(DATABASE_RESOURCE)
+            .arg("--output")
+            .arg("json")
+            .output()
+            .await;
+
+        match outcome {
+            Ok(output) if output.status.success() => {
+                let text = String::from_utf8_lossy(&output.stdout);
+                return token_from_cli_output(&text);
+            }
+            Ok(output) => {
+                // The CLI ran and refused. A further place would give the
+                // same answer, so the reason is reported at once.
+                let reason = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                return Err(Error::Authentication(format!(
+                    "The Azure CLI could not give a token. Run `az login` first. {reason}"
+                )));
+            }
+            Err(error) => last = Some(error.to_string()),
         }
     }
-    Ok(AuthMethod::sql_server(
-        connection.user.as_deref().unwrap_or_default(),
-        connection.password.as_deref().unwrap_or_default(),
-    ))
+
+    Err(Error::Authentication(format!(
+        "The Azure CLI was not found. Give its path in the connection. {}",
+        last.unwrap_or_default()
+    )))
+}
+
+/// Selects the authentication method. Windows Integrated Security needs the
+/// `winauth` feature, which builds on Windows only.
+async fn auth_method(connection: &SavedConnection) -> Result<AuthMethod> {
+    match connection.effective_auth() {
+        MssqlAuth::Integrated => {
+            #[cfg(windows)]
+            {
+                Ok(AuthMethod::Integrated)
+            }
+            #[cfg(not(windows))]
+            {
+                Err(Error::Unsupported(
+                    "Windows Integrated Security works on Windows only. Give a user name and a password."
+                        .to_string(),
+                ))
+            }
+        }
+        MssqlAuth::EntraAzureCli => {
+            let token = azure_cli_token(connection.options.azure_cli_path.as_deref()).await?;
+            Ok(AuthMethod::aad_token(token))
+        }
+        MssqlAuth::EntraAccessToken => {
+            // The token is a credential, so it travels in the field that the
+            // secret store holds and never reaches the settings file.
+            let token = non_empty(connection.password.as_deref()).ok_or_else(|| {
+                Error::Authentication(
+                    "This connection needs an access token. Paste one, or read one from the Azure CLI."
+                        .to_string(),
+                )
+            })?;
+            Ok(AuthMethod::aad_token(token))
+        }
+        MssqlAuth::SqlLogin => Ok(AuthMethod::sql_server(
+            connection.user.as_deref().unwrap_or_default(),
+            connection.password.as_deref().unwrap_or_default(),
+        )),
+    }
 }
 
 /// Maps the transport setting of the application onto the encryption level
@@ -114,7 +205,7 @@ pub fn encryption_level(mode: TlsMode) -> EncryptionLevel {
 
 impl MssqlDriver {
     pub async fn connect(connection: &SavedConnection) -> Result<Box<dyn DatabaseDriver>> {
-        let config = build_config(connection)?;
+        let config = build_config(connection).await?;
         let limit = Duration::from_secs(connection.options.connect_timeout_secs.max(1));
 
         // A named instance listens on a port that the SQL Browser service
@@ -650,61 +741,61 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_configuration_keeps_the_port() {
-        let config = build_config(&connection()).unwrap();
+    #[tokio::test]
+    async fn the_configuration_keeps_the_port() {
+        let config = build_config(&connection()).await.unwrap();
         assert_eq!(config.get_addr(), "sql.example.com:14330");
     }
 
-    #[test]
-    fn the_configuration_uses_the_default_port_when_none_is_given() {
+    #[tokio::test]
+    async fn the_configuration_uses_the_default_port_when_none_is_given() {
         let mut input = connection();
         input.port = None;
-        let config = build_config(&input).unwrap();
+        let config = build_config(&input).await.unwrap();
         assert_eq!(config.get_addr(), "sql.example.com:1433");
     }
 
-    #[test]
-    fn the_configuration_accepts_an_empty_host() {
+    #[tokio::test]
+    async fn the_configuration_accepts_an_empty_host() {
         let mut input = connection();
         input.host = None;
-        let config = build_config(&input).unwrap();
+        let config = build_config(&input).await.unwrap();
         assert_eq!(config.get_addr(), "localhost:14330");
     }
 
-    #[test]
-    fn a_connection_string_replaces_the_fields() {
+    #[tokio::test]
+    async fn a_connection_string_replaces_the_fields() {
         let mut input = connection();
         input.options.connection_url = Some("server=tcp:other.example.com,4200".into());
-        let config = build_config(&input).unwrap();
+        let config = build_config(&input).await.unwrap();
         assert_eq!(config.get_addr(), "other.example.com:4200");
     }
 
-    #[test]
-    fn a_jdbc_connection_string_is_accepted() {
+    #[tokio::test]
+    async fn a_jdbc_connection_string_is_accepted() {
         let mut input = connection();
         input.options.connection_url =
             Some("jdbc:sqlserver://other.example.com:4300;database=Sales".into());
-        let config = build_config(&input).unwrap();
+        let config = build_config(&input).await.unwrap();
         assert_eq!(config.get_addr(), "other.example.com:4300");
     }
 
-    #[test]
-    fn a_connection_string_that_is_not_valid_gives_an_error() {
+    #[tokio::test]
+    async fn a_connection_string_that_is_not_valid_gives_an_error() {
         let mut input = connection();
         input.options.connection_url = Some("server=a,b,c".into());
-        assert!(build_config(&input).is_err());
+        assert!(build_config(&input).await.is_err());
     }
 
-    #[test]
-    fn the_optional_fields_are_accepted() {
+    #[tokio::test]
+    async fn the_optional_fields_are_accepted() {
         let mut input = connection();
         input.options.instance_name = Some("SQLEXPRESS".into());
         input.options.ca_cert_path = Some("/etc/ca.pem".into());
         input.options.read_only = true;
         input.database = Some(String::new());
         input.options.application_name = Some("  ".into());
-        assert!(build_config(&input).is_ok());
+        assert!(build_config(&input).await.is_ok());
     }
 
     #[test]
@@ -724,11 +815,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn integrated_security_is_refused_where_it_cannot_work() {
+    #[tokio::test]
+    async fn integrated_security_is_refused_where_it_cannot_work() {
         let mut input = connection();
         input.options.integrated_security = true;
-        let result = auth_method(&input);
+        let result = auth_method(&input).await;
         if cfg!(windows) {
             assert!(result.is_ok());
         } else {
@@ -739,12 +830,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_missing_user_gives_an_empty_credential() {
+    #[tokio::test]
+    async fn a_missing_user_gives_an_empty_credential() {
         let mut input = connection();
         input.user = None;
         input.password = None;
-        assert!(auth_method(&input).is_ok());
+        assert!(auth_method(&input).await.is_ok());
     }
 
     #[test]
@@ -949,5 +1040,57 @@ mod tests {
         let failed: tiberius::Result<Option<i32>> =
             Err(tiberius::error::Error::Conversion("no".into()));
         assert_eq!(read(failed), None);
+    }
+    #[test]
+    fn the_token_is_read_from_the_answer_of_the_cli() {
+        let good = r#"{"accessToken":"abc","expiresOn":"2026-01-01"}"#;
+        assert_eq!(token_from_cli_output(good).unwrap(), "abc");
+
+        for bad in [r#"{"accessToken":""}"#, r#"{"other":1}"#, "not json"] {
+            assert_eq!(
+                token_from_cli_output(bad).err().unwrap().kind(),
+                crate::error::ErrorKind::Authentication
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_token_that_the_user_gives_becomes_the_credential() {
+        let mut input = connection();
+        input.options.mssql_auth = MssqlAuth::EntraAccessToken;
+        input.password = Some("a-token".into());
+        assert!(auth_method(&input).await.is_ok());
+
+        input.password = None;
+        assert_eq!(
+            auth_method(&input).await.err().unwrap().kind(),
+            crate::error::ErrorKind::Authentication
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_azure_cli_is_reported() {
+        let mut input = connection();
+        input.options.mssql_auth = MssqlAuth::EntraAzureCli;
+        input.options.azure_cli_path = Some("/nowhere/az".into());
+        let error = auth_method(&input).await.err().unwrap();
+        assert_eq!(error.kind(), crate::error::ErrorKind::Authentication);
+        assert!(error.to_string().contains("was not found"));
+    }
+
+    #[tokio::test]
+    async fn the_windows_method_comes_from_the_older_flag_as_well() {
+        let mut input = connection();
+        input.options.integrated_security = true;
+        assert_eq!(input.effective_auth(), MssqlAuth::Integrated);
+
+        input.options.mssql_auth = MssqlAuth::EntraAccessToken;
+        // The new field wins once it holds something other than its default.
+        assert_eq!(input.effective_auth(), MssqlAuth::EntraAccessToken);
+    }
+
+    #[test]
+    fn the_resource_of_the_token_names_the_database_service() {
+        assert_eq!(DATABASE_RESOURCE, "https://database.windows.net/");
     }
 }

@@ -26,6 +26,15 @@ export const TlsMode = {
 } as const
 export type TlsMode = (typeof TlsMode)[keyof typeof TlsMode]
 
+/** How a MS SQL Server connection proves who the user is. */
+export const MssqlAuth = {
+  SqlLogin: 'sqlLogin',
+  Integrated: 'integrated',
+  EntraAzureCli: 'entraAzureCli',
+  EntraAccessToken: 'entraAccessToken',
+} as const
+export type MssqlAuth = (typeof MssqlAuth)[keyof typeof MssqlAuth]
+
 export interface ConnectionOptions {
   tlsMode: TlsMode
   caCertPath: string | null
@@ -36,6 +45,10 @@ export interface ConnectionOptions {
   applicationName: string | null
   instanceName: string | null
   integratedSecurity: boolean
+  /** How a MS SQL Server connection proves who the user is. */
+  mssqlAuth: MssqlAuth
+  /** The path of the Azure CLI, when the application cannot find it. */
+  azureCliPath: string | null
   filePath: string | null
   awsRegion: string | null
   awsProfile: string | null
@@ -213,6 +226,7 @@ export const ErrorKind = {
   Cancelled: 'cancelled',
   Database: 'database',
   Configuration: 'configuration',
+  Authentication: 'authentication',
   Io: 'io',
   Storage: 'storage',
   Secret: 'secret',
@@ -240,6 +254,8 @@ export function defaultConnectionOptions(): ConnectionOptions {
     applicationName: 'SQL Explorer',
     instanceName: null,
     integratedSecurity: false,
+    mssqlAuth: MssqlAuth.SqlLogin,
+    azureCliPath: null,
     filePath: null,
     awsRegion: null,
     awsProfile: null,

@@ -69,6 +69,28 @@ impl TlsMode {
     }
 }
 
+/// How a MS SQL Server connection proves who the user is.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum MssqlAuth {
+    /// A login and a password that the server holds.
+    #[default]
+    SqlLogin,
+    /// The credentials of the user who runs the application, on Windows.
+    Integrated,
+    /// Microsoft Entra ID, with a token from the Azure CLI.
+    EntraAzureCli,
+    /// Microsoft Entra ID, with a token that the user supplies.
+    EntraAccessToken,
+}
+
+impl MssqlAuth {
+    /// True when the method reaches Microsoft Entra ID.
+    pub fn is_entra(&self) -> bool {
+        matches!(self, MssqlAuth::EntraAzureCli | MssqlAuth::EntraAccessToken)
+    }
+}
+
 /// The options that apply to one connection.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
@@ -90,7 +112,15 @@ pub struct ConnectionOptions {
     /// resolves the port of a named instance.
     pub instance_name: Option<String>,
     /// True when MS SQL Server uses the credentials of the current user.
+    /// A record that a former release wrote holds this flag alone, so the
+    /// driver reads it when `mssql_auth` stands at its default.
     pub integrated_security: bool,
+    /// How a MS SQL Server connection proves who the user is.
+    pub mssql_auth: MssqlAuth,
+    /// The path of the Azure CLI. An application that a desktop starts holds
+    /// a short `PATH` that often misses the folder of the CLI, so the path
+    /// can be given here.
+    pub azure_cli_path: Option<String>,
 
     /// The file that holds a SQLite database.
     pub file_path: Option<String>,
@@ -125,6 +155,8 @@ impl Default for ConnectionOptions {
             application_name: Some("SQL Explorer".to_string()),
             instance_name: None,
             integrated_security: false,
+            mssql_auth: MssqlAuth::default(),
+            azure_cli_path: None,
             file_path: None,
             aws_region: None,
             aws_profile: None,
@@ -203,6 +235,17 @@ impl SavedConnection {
 
     /// Reports the fields that the engine needs but the record does not
     /// hold.
+    /// The authentication method of a MS SQL Server connection. A record
+    /// that a former release wrote holds `integrated_security` alone, so
+    /// that flag decides while the new field stands at its default.
+    pub fn effective_auth(&self) -> MssqlAuth {
+        if self.options.mssql_auth == MssqlAuth::SqlLogin && self.options.integrated_security {
+            MssqlAuth::Integrated
+        } else {
+            self.options.mssql_auth
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.id.trim().is_empty() {
             return Err("The connection needs an identifier.".to_string());
@@ -234,6 +277,18 @@ impl SavedConnection {
                     return Err(
                         "An Athena connection needs a workgroup or an output location.".to_string(),
                     );
+                }
+            }
+            DbType::Mssql => {
+                if self.options.connection_url.is_some() && self.effective_auth().is_entra() {
+                    return Err(
+                        "A connection string carries its own authentication. Remove the string, \
+                         or choose the SQL login."
+                            .to_string(),
+                    );
+                }
+                if self.options.connection_url.is_none() && self.effective_port().is_none() {
+                    return Err("The connection needs a port.".to_string());
                 }
             }
             _ => {
@@ -438,5 +493,28 @@ mod tests {
         assert!(!parsed.options.athena_result_reuse);
         assert_eq!(parsed.options.athena_result_reuse_max_age_minutes, 60);
         assert_eq!(parsed.options.max_rows, 10_000);
+    }
+    #[test]
+    fn a_connection_string_and_entra_id_together_are_refused() {
+        let mut input = base(DbType::Mssql);
+        input.port = Some(1433);
+        input.options.mssql_auth = MssqlAuth::EntraAzureCli;
+        input.options.connection_url = Some("Server=tcp:host,1433".into());
+        let message = input.validate().err().unwrap();
+        assert!(message.contains("carries its own authentication"));
+
+        // The SQL login goes through, because the string holds its own login.
+        input.options.mssql_auth = MssqlAuth::SqlLogin;
+        assert!(input.validate().is_ok());
+    }
+
+    #[test]
+    fn the_authentication_of_an_older_record_is_read_from_the_flag() {
+        let mut input = base(DbType::Mssql);
+        assert_eq!(input.effective_auth(), MssqlAuth::SqlLogin);
+        input.options.integrated_security = true;
+        assert_eq!(input.effective_auth(), MssqlAuth::Integrated);
+        assert!(MssqlAuth::EntraAzureCli.is_entra());
+        assert!(!MssqlAuth::Integrated.is_entra());
     }
 }
