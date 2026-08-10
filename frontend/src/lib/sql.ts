@@ -189,12 +189,29 @@ export interface CompletionItem {
   kind: 'keyword' | 'database' | 'schema' | 'table' | 'column'
 }
 
+/** One relation the completion list knows about. */
+export interface IndexedTable {
+  name: string
+  /** The database and the schema of the relation, joined by a full stop. */
+  qualifier: string
+}
+
+/** One column the completion list knows about. */
+export interface IndexedColumn {
+  name: string
+  /** The relation the column belongs to. */
+  table: string
+  /** The qualifier of that relation, which tells two relations apart. */
+  qualifier: string
+  dataType: string
+}
+
 /** The names the completion list draws from. */
 export interface SchemaIndex {
   databases: string[]
   schemas: string[]
-  tables: Array<{ name: string; qualifier: string }>
-  columns: Array<{ name: string; table: string; dataType: string }>
+  tables: IndexedTable[]
+  columns: IndexedColumn[]
 }
 
 /** Builds an empty index. */

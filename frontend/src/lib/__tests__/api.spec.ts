@@ -201,6 +201,21 @@ describe('api', () => {
     expect(invoke).toHaveBeenCalledWith('preview_query', expect.objectContaining({ limit: null }))
   })
 
+  it('sends the bounds of a read of a schema', async () => {
+    await api.schemaSnapshot({
+      connectionId: 'c1',
+      database: 'db',
+      maxColumns: 100,
+      ownConnection: false,
+    })
+    expect(invoke).toHaveBeenCalledWith('schema_snapshot', {
+      connectionId: 'c1',
+      database: 'db',
+      maxColumns: 100,
+      ownConnection: false,
+    })
+  })
+
   it('sends the request of a statement as one record', async () => {
     const request = {
       connectionId: 'c1',

@@ -190,6 +190,28 @@
             data-test="setting-athena-warning"
             @update:model-value="(value) => settings.update({ athenaScanWarningGb: Number(value) })"
           />
+          <v-text-field
+            :model-value="settings.settings.schemaSnapshotColumns"
+            label="Columns the editor learns"
+            type="number"
+            hint="The largest number of columns one read of a schema keeps."
+            persistent-hint
+            data-test="setting-snapshot-columns"
+            @update:model-value="
+              (value) => settings.update({ schemaSnapshotColumns: Number(value) })
+            "
+          />
+          <v-switch
+            :model-value="settings.settings.schemaSnapshotOwnConnection"
+            color="primary"
+            label="Read the schema on a second connection"
+            hint="One more session on the server, and no wait for a statement of the user."
+            persistent-hint
+            data-test="setting-snapshot-connection"
+            @update:model-value="
+              (value) => settings.update({ schemaSnapshotOwnConnection: value === true })
+            "
+          />
         </v-card-text>
         <v-card-actions>
           <v-spacer />

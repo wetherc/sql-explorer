@@ -447,6 +447,144 @@ describe('explorer store', () => {
     expect(table.children?.map((child) => child.folder)).toEqual(['columns'])
   })
 
+  function snapshotFixture(database = 'Sales') {
+    return {
+      database,
+      relations: [
+        {
+          name: 'orders',
+          schema: 'dbo',
+          kind: TableKind.Table,
+          columns: [{ name: 'id', dataType: 'int' }],
+        },
+        {
+          name: 'orders',
+          schema: 'staging',
+          kind: TableKind.View,
+          columns: [{ name: 'raw', dataType: 'text' }],
+        },
+      ],
+      columnCount: 2,
+      complete: true,
+    }
+  }
+
+  it('reads the schema of a database and keeps it', async () => {
+    apiStub.schemaSnapshot.mockResolvedValue(snapshotFixture())
+    const explorer = await readyStore()
+    const options = { maxColumns: 100, ownConnection: true }
+
+    await explorer.readSnapshot('c1', 'Sales', options)
+    expect(apiStub.schemaSnapshot).toHaveBeenCalledWith({
+      connectionId: 'c1',
+      database: 'Sales',
+      maxColumns: 100,
+      ownConnection: true,
+    })
+
+    // A second call reads nothing again.
+    await explorer.readSnapshot('c1', 'Sales', options)
+    expect(apiStub.schemaSnapshot).toHaveBeenCalledTimes(1)
+
+    // A call that asks for a fresh read makes one.
+    await explorer.readSnapshot('c1', 'Sales', options, true)
+    expect(apiStub.schemaSnapshot).toHaveBeenCalledTimes(2)
+  })
+
+  it('offers the names of a snapshot, and tells two schemas apart', async () => {
+    apiStub.schemaSnapshot.mockResolvedValue(snapshotFixture())
+    const explorer = await readyStore()
+    await explorer.readSnapshot('c1', 'Sales', { maxColumns: 100, ownConnection: true })
+
+    expect(explorer.schemaIndex.databases).toEqual(['Sales'])
+    expect(explorer.schemaIndex.schemas).toEqual(['dbo', 'staging'])
+    expect(explorer.schemaIndex.tables).toEqual([
+      { name: 'orders', qualifier: 'Sales.dbo' },
+      { name: 'orders', qualifier: 'Sales.staging' },
+    ])
+    expect(explorer.schemaIndex.columns).toEqual([
+      { name: 'id', table: 'orders', qualifier: 'Sales.dbo', dataType: 'int' },
+      { name: 'raw', table: 'orders', qualifier: 'Sales.staging', dataType: 'text' },
+    ])
+  })
+
+  it('warns when the bound stopped the read of a schema', async () => {
+    apiStub.schemaSnapshot.mockResolvedValue({ ...snapshotFixture(), complete: false })
+    const explorer = await readyStore()
+    await explorer.readSnapshot('c1', 'Sales', { maxColumns: 1, ownConnection: false })
+    expect(useUiStore().notices[0]?.level).toBe('warning')
+  })
+
+  it('reports a schema that cannot be read and keeps nothing', async () => {
+    apiStub.schemaSnapshot.mockRejectedValue({ kind: 'database', message: 'no', detail: null })
+    const explorer = await readyStore()
+    const answer = await explorer.readSnapshot('c1', 'Sales', {
+      maxColumns: 10,
+      ownConnection: true,
+    })
+    expect(answer).toBe(null)
+    expect(explorer.snapshots).toEqual({})
+    expect(useUiStore().notices[0]?.level).toBe('error')
+  })
+
+  it('leaves out an answer that is not a snapshot', async () => {
+    apiStub.schemaSnapshot.mockResolvedValue(undefined)
+    const explorer = await readyStore()
+    const answer = await explorer.readSnapshot('c1', 'Sales', {
+      maxColumns: 10,
+      ownConnection: true,
+    })
+    expect(answer).toBe(null)
+    expect(explorer.snapshots).toEqual({})
+  })
+
+  it('reads the schema when the user opens a database, and forgets it later', async () => {
+    apiStub.listSchemas.mockResolvedValue([{ name: 'dbo' }])
+    apiStub.schemaSnapshot.mockResolvedValue(snapshotFixture())
+    const explorer = await readyStore()
+    const root = explorer.addRoot('c1')
+    await explorer.expand(node({ kind: 'database', database: 'Sales', label: 'Sales' }))
+    expect(apiStub.schemaSnapshot).toHaveBeenCalledWith({
+      connectionId: 'c1',
+      database: 'Sales',
+      maxColumns: 20000,
+      ownConnection: true,
+    })
+
+    explorer.removeRoot(root.connectionId)
+    expect(explorer.snapshots).toEqual({})
+  })
+
+  it('keeps the snapshots of the other connections', async () => {
+    apiStub.schemaSnapshot.mockResolvedValue(snapshotFixture())
+    const explorer = await readyStore()
+    await explorer.readSnapshot('c1', 'Sales', { maxColumns: 10, ownConnection: true })
+    await explorer.readSnapshot('c2', 'Other', { maxColumns: 10, ownConnection: true })
+    explorer.forgetSnapshots('c1')
+    expect(Object.keys(explorer.snapshots)).toEqual(['c2/Other'])
+
+    explorer.clear()
+    expect(explorer.snapshots).toEqual({})
+  })
+
+  it('names the bounds the settings hold', async () => {
+    const explorer = await readyStore()
+    expect(explorer.snapshotOptions()).toEqual({ maxColumns: 20000, ownConnection: true })
+  })
+
+  it('holds one record for a relation that two reads both name', async () => {
+    const explorer = await readyStore()
+    apiStub.schemaSnapshot.mockResolvedValue(snapshotFixture())
+    await explorer.readSnapshot('c1', 'Sales', { maxColumns: 10, ownConnection: true })
+    // The same database read again under another key gives the same names.
+    apiStub.schemaSnapshot.mockResolvedValue(snapshotFixture())
+    await explorer.readSnapshot('c1', 'Sales2', { maxColumns: 10, ownConnection: true })
+    expect(explorer.schemaIndex.tables).toEqual([
+      { name: 'orders', qualifier: 'Sales.dbo' },
+      { name: 'orders', qualifier: 'Sales.staging' },
+    ])
+  })
+
   it('reads a branch once and no more', async () => {
     apiStub.listDatabases.mockResolvedValue([])
     const explorer = await readyStore()
@@ -529,7 +667,7 @@ describe('explorer store', () => {
       databases: ['Sales'],
       schemas: ['dbo'],
       tables: [{ name: 'orders', qualifier: 'Sales.dbo' }],
-      columns: [{ name: 'id', table: 'orders', dataType: 'int not null' }],
+      columns: [{ name: 'id', table: 'orders', qualifier: 'Sales.dbo', dataType: 'int not null' }],
     })
 
     // A second root over the same names adds nothing new.
@@ -540,7 +678,9 @@ describe('explorer store', () => {
   it('reports a column without a type as one without a hint', async () => {
     const explorer = useExplorerStore()
     explorer.roots = [node({ kind: 'column', label: 'id', hint: undefined, table: undefined })]
-    expect(explorer.schemaIndex.columns).toEqual([{ name: 'id', table: '', dataType: '' }])
+    expect(explorer.schemaIndex.columns).toEqual([
+      { name: 'id', table: '', qualifier: '', dataType: '' },
+    ])
   })
 
   it('keeps the reading flag while another branch still reads', async () => {

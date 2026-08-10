@@ -18,6 +18,7 @@ import type {
   SavedConnection,
   SavedQuery,
   SchemaRef,
+  SchemaSnapshot,
   ScriptKind,
   TableRef,
 } from '@/types/api'
@@ -123,6 +124,24 @@ export const api = {
     tableName: string,
   ): Promise<PartitionRef[]> {
     return invoke('list_partitions', { connectionId, database, schemaName, tableName })
+  },
+
+  /**
+   * Reads every relation and every column of one database, for the
+   * completions of the editor.
+   */
+  schemaSnapshot(request: {
+    connectionId: string
+    database: string
+    maxColumns: number
+    ownConnection: boolean
+  }): Promise<SchemaSnapshot> {
+    return invoke('schema_snapshot', {
+      connectionId: request.connectionId,
+      database: request.database,
+      maxColumns: request.maxColumns,
+      ownConnection: request.ownConnection,
+    })
   },
 
   /**

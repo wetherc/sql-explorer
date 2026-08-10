@@ -219,6 +219,31 @@ export interface PartitionRef {
   values: string
 }
 
+export interface SnapshotColumn {
+  name: string
+  dataType: string
+}
+
+export interface SnapshotRelation {
+  name: string
+  schema: string | null
+  kind: TableKind
+  columns: SnapshotColumn[]
+}
+
+/**
+ * Every relation and every column of one database. The editor offers these
+ * names as completions, so the names of a relation the user never opened in
+ * the tree are still there.
+ */
+export interface SchemaSnapshot {
+  database: string
+  relations: SnapshotRelation[]
+  columnCount: number
+  /** False when the bound on the columns stopped the read. */
+  complete: boolean
+}
+
 /** The statement that the explorer builds for one object. */
 export const ScriptKind = {
   Create: 'create',

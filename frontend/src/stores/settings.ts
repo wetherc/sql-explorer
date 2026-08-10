@@ -23,6 +23,18 @@ export interface Settings {
   athenaPricePerTerabyte: number
   /** A scan above this size in gigabytes raises a warning. */
   athenaScanWarningGb: number
+  /**
+   * The largest number of columns the read of a schema keeps. A catalog that
+   * holds more gives a part of itself, so the memory stays bounded.
+   */
+  schemaSnapshotColumns: number
+  /**
+   * True when the read of a schema opens a second connection of its own. The
+   * read then never waits behind a statement of the user, at the cost of one
+   * more session on the server. A false value puts the read on the one
+   * session, and a statement of the user then waits for it.
+   */
+  schemaSnapshotOwnConnection: boolean
 }
 
 /** The settings a new installation starts with. */
@@ -38,6 +50,8 @@ export function defaultSettings(): Settings {
     exportRowLimit: 1000000,
     athenaPricePerTerabyte: 5,
     athenaScanWarningGb: 100,
+    schemaSnapshotColumns: 20000,
+    schemaSnapshotOwnConnection: true,
   }
 }
 
@@ -78,6 +92,16 @@ export function parseSettings(raw: string | null): Settings {
         1,
         1000000,
       ),
+      schemaSnapshotColumns: numberOr(
+        parsed.schemaSnapshotColumns,
+        defaults.schemaSnapshotColumns,
+        100,
+        200000,
+      ),
+      schemaSnapshotOwnConnection:
+        typeof parsed.schemaSnapshotOwnConnection === 'boolean'
+          ? parsed.schemaSnapshotOwnConnection
+          : defaults.schemaSnapshotOwnConnection,
     }
   } catch {
     return defaults

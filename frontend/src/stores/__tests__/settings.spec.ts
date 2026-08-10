@@ -29,6 +29,8 @@ describe('parseSettings', () => {
       exportRowLimit: 2000,
       athenaPricePerTerabyte: 6.25,
       athenaScanWarningGb: 50,
+      schemaSnapshotColumns: 40000,
+      schemaSnapshotOwnConnection: false,
     })
     expect(parseSettings(stored)).toEqual({
       theme: 'sqlExplorerLight',
@@ -41,6 +43,8 @@ describe('parseSettings', () => {
       exportRowLimit: 2000,
       athenaPricePerTerabyte: 6.25,
       athenaScanWarningGb: 50,
+      schemaSnapshotColumns: 40000,
+      schemaSnapshotOwnConnection: false,
     })
   })
 

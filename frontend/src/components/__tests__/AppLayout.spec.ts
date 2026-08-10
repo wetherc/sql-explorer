@@ -244,6 +244,18 @@ describe('AppLayout dialog state', () => {
     await limit!.vm.$emit('update:modelValue', '5000')
     expect(useSettingsStore().settings.exportRowLimit).toBe(5000)
 
+    const columns = wrapper
+      .findAllComponents({ name: 'VTextField' })
+      .find((item) => item.attributes('data-test') === 'setting-snapshot-columns')
+    await columns!.vm.$emit('update:modelValue', '4000')
+    expect(useSettingsStore().settings.schemaSnapshotColumns).toBe(4000)
+
+    const ownConnection = wrapper
+      .findAllComponents({ name: 'VSwitch' })
+      .find((item) => item.attributes('data-test') === 'setting-snapshot-connection')
+    await ownConnection!.vm.$emit('update:modelValue', false)
+    expect(useSettingsStore().settings.schemaSnapshotOwnConnection).toBe(false)
+
     const price = wrapper
       .findAllComponents({ name: 'VTextField' })
       .find((item) => item.attributes('data-test') === 'setting-athena-price')

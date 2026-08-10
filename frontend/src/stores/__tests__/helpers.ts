@@ -20,6 +20,7 @@ export function makeApiStub() {
     listIndexes: vi.fn(),
     listConstraints: vi.fn(),
     listPartitions: vi.fn(),
+    schemaSnapshot: vi.fn(),
     scriptObject: vi.fn(),
     quoteIdentifier: vi.fn(),
     getConnections: vi.fn(),

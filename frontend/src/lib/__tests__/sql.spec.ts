@@ -150,7 +150,7 @@ describe('completionsFor', () => {
     databases: ['Sales'],
     schemas: ['sales_reports'],
     tables: [{ name: 'salesOrder', qualifier: 'Sales.dbo' }],
-    columns: [{ name: 'sale_total', table: 'salesOrder', dataType: 'money' }],
+    columns: [{ name: 'sale_total', table: 'salesOrder', qualifier: '', dataType: 'money' }],
   }
 
   it('offers the objects before the keywords', () => {
@@ -200,7 +200,7 @@ describe('completionsFor with a dialect that quotes differently', () => {
       ...emptySchemaIndex(),
       databases: ['my db'],
       schemas: ['my schema'],
-      columns: [{ name: 'my column', table: 't', dataType: 'text' }],
+      columns: [{ name: 'my column', table: 't', qualifier: '', dataType: 'text' }],
     }
     expect(completionsFor('my c', index, Dialect.MySql)[0]?.insertText).toBe('`my column`')
     expect(completionsFor('my s', index, Dialect.Postgres)[0]?.insertText).toBe('"my schema"')

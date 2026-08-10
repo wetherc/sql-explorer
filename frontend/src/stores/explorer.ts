@@ -2,11 +2,13 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { api } from '@/lib/api'
 import { useConnectionsStore } from './connections'
+import { useSettingsStore } from './settings'
 import { useUiStore } from './ui'
 import { emptySchemaIndex, type SchemaIndex } from '@/lib/sql'
 import {
   TableKind,
   type ColumnRef,
+  type SchemaSnapshot,
   type ConstraintRef,
   type DriverCapabilities,
   type TableRef,
@@ -224,6 +226,7 @@ export function walk(nodes: ExplorerNode[], visit: (node: ExplorerNode) => void)
 
 export const useExplorerStore = defineStore('explorer', () => {
   const connections = useConnectionsStore()
+  const settings = useSettingsStore()
   const ui = useUiStore()
 
   /** The roots of the tree, one for each open connection. */
@@ -233,6 +236,80 @@ export const useExplorerStore = defineStore('explorer', () => {
 
   const visibleNodes = computed(() => filterNodes(roots.value, filter.value))
 
+  /**
+   * The whole schema of one database of one connection, keyed by the two
+   * names. The editor reads these names, so a relation the user never opened
+   * in the tree is still offered.
+   */
+  const snapshots = ref<Record<string, SchemaSnapshot>>({})
+
+  /** The bounds the settings put on a read of a schema. */
+  function snapshotOptions(): { maxColumns: number; ownConnection: boolean } {
+    return {
+      maxColumns: settings.settings.schemaSnapshotColumns,
+      ownConnection: settings.settings.schemaSnapshotOwnConnection,
+    }
+  }
+
+  /** The key one snapshot lives under. */
+  function snapshotKey(connectionId: string, database: string): string {
+    return `${connectionId}/${database}`
+  }
+
+  /**
+   * Reads the schema of one database and keeps it. A read that is already
+   * held is not made again, so a change of the current database costs one
+   * read for each database and no more.
+   */
+  async function readSnapshot(
+    connectionId: string,
+    database: string,
+    options: { maxColumns: number; ownConnection: boolean },
+    force = false,
+  ): Promise<SchemaSnapshot | null> {
+    const key = snapshotKey(connectionId, database)
+    if (!force && snapshots.value[key]) {
+      return snapshots.value[key]
+    }
+    try {
+      const snapshot = await api.schemaSnapshot({
+        connectionId,
+        database,
+        maxColumns: options.maxColumns,
+        ownConnection: options.ownConnection,
+      })
+      if (!Array.isArray(snapshot?.relations)) {
+        // An answer of another shape is left out, so that the names of the
+        // editor stay a list this store can read.
+        return null
+      }
+      snapshots.value = { ...snapshots.value, [key]: snapshot }
+      if (!snapshot.complete) {
+        ui.warn(
+          `The schema of ${database} is larger than the limit of ${options.maxColumns} columns, ` +
+            'so the editor offers a part of it. Raise the limit in the settings.',
+        )
+      }
+      return snapshot
+    } catch (error) {
+      // A schema that cannot be read leaves the editor with the names of the
+      // tree, so the failure is reported and nothing else stops.
+      ui.reportError(error)
+      return null
+    }
+  }
+
+  /** Drops the snapshots of one connection. */
+  function forgetSnapshots(connectionId: string): void {
+    const kept: Record<string, SchemaSnapshot> = {}
+    for (const [key, snapshot] of Object.entries(snapshots.value)) {
+      if (!key.startsWith(`${connectionId}/`)) {
+        kept[key] = snapshot
+      }
+    }
+    snapshots.value = kept
+  }
+
   /** The names the editor offers as completions. */
   const schemaIndex = computed<SchemaIndex>(() => {
     const index = emptySchemaIndex()
@@ -241,23 +318,60 @@ export const useExplorerStore = defineStore('explorer', () => {
       schemas: new Set<string>(),
       tables: new Set<string>(),
     }
+
+    // The snapshots come first, because they hold the whole database.
+    for (const [key, snapshot] of Object.entries(snapshots.value)) {
+      const connectionId = key.slice(0, key.indexOf('/'))
+      if (!seen.databases.has(snapshot.database)) {
+        seen.databases.add(snapshot.database)
+        index.databases.push(snapshot.database)
+      }
+      for (const relation of snapshot.relations) {
+        if (relation.schema && !seen.schemas.has(relation.schema)) {
+          seen.schemas.add(relation.schema)
+          index.schemas.push(relation.schema)
+        }
+        const qualifier = [snapshot.database, relation.schema].filter(Boolean).join('.')
+        const identity = `${connectionId}/${qualifier}/${relation.name}`
+        if (seen.tables.has(identity)) {
+          continue
+        }
+        seen.tables.add(identity)
+        index.tables.push({ name: relation.name, qualifier })
+        for (const column of relation.columns) {
+          index.columns.push({
+            name: column.name,
+            table: relation.name,
+            qualifier,
+            dataType: column.dataType,
+          })
+        }
+      }
+    }
+
+    // The tree adds what the user has opened and the snapshots do not hold.
+    const fromSnapshot = new Set(seen.tables)
     walk(roots.value, (node) => {
+      const qualifier = [node.database, node.schema].filter(Boolean).join('.')
+      const identity = `${node.connectionId}/${qualifier}/${node.table ?? node.label}`
       if (node.kind === 'database' && !seen.databases.has(node.label)) {
         seen.databases.add(node.label)
         index.databases.push(node.label)
       } else if (node.kind === 'schema' && !seen.schemas.has(node.label)) {
         seen.schemas.add(node.label)
         index.schemas.push(node.label)
-      } else if ((node.kind === 'table' || node.kind === 'view') && !seen.tables.has(node.key)) {
-        seen.tables.add(node.key)
-        index.tables.push({
-          name: node.label,
-          qualifier: [node.database, node.schema].filter(Boolean).join('.'),
-        })
-      } else if (node.kind === 'column') {
+      } else if (node.kind === 'table' || node.kind === 'view') {
+        if (!seen.tables.has(identity)) {
+          seen.tables.add(identity)
+          index.tables.push({ name: node.label, qualifier })
+        }
+      } else if (node.kind === 'column' && !fromSnapshot.has(identity)) {
+        // A relation that a snapshot already holds keeps the columns of the
+        // snapshot, so no name appears twice.
         index.columns.push({
           name: node.label,
           table: node.table ?? '',
+          qualifier,
           dataType: node.hint ?? '',
         })
       }
@@ -293,11 +407,13 @@ export const useExplorerStore = defineStore('explorer', () => {
 
   function removeRoot(connectionId: string): void {
     roots.value = roots.value.filter((node) => node.key !== connectionId)
+    forgetSnapshots(connectionId)
   }
 
   function clear(): void {
     roots.value = []
     filter.value = ''
+    snapshots.value = {}
   }
 
   /** Reads the children of a node from the server. */
@@ -313,6 +429,12 @@ export const useExplorerStore = defineStore('explorer', () => {
     try {
       node.children = await childrenOf(node)
       node.loaded = true
+      if (node.kind === 'database') {
+        // The user has shown interest in this database, so the whole schema
+        // is read for the completions of the editor. The read runs on its own
+        // and the tree does not wait for it.
+        void readSnapshot(node.connectionId, node.database ?? node.label, snapshotOptions())
+      }
     } catch (error) {
       ui.reportError(error)
       node.children = []
@@ -483,6 +605,10 @@ export const useExplorerStore = defineStore('explorer', () => {
     loading,
     visibleNodes,
     schemaIndex,
+    snapshots,
+    snapshotOptions,
+    readSnapshot,
+    forgetSnapshots,
     addRoot,
     removeRoot,
     clear,

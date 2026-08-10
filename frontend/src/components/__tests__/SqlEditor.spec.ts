@@ -237,7 +237,7 @@ describe('SqlEditor', () => {
           databases: ['adb'],
           schemas: ['aschema'],
           tables: [{ name: 'atable', qualifier: 'q' }],
-          columns: [{ name: 'acolumn', table: 'atable', dataType: 'int' }],
+          columns: [{ name: 'acolumn', table: 'atable', qualifier: '', dataType: 'int' }],
         },
       },
     })
