@@ -87,16 +87,16 @@ pub fn read_history<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<HistoryEntry>>
     Ok(parse_list(store.get(HISTORY_KEY)))
 }
 
-pub fn add_history<R: Runtime>(
-    app: &AppHandle<R>,
-    entry: HistoryEntry,
-) -> Result<Vec<HistoryEntry>> {
+/// Writes one entry to the history file. The caller keeps its own copy of the
+/// list, so the function gives no list back. A large history then stays out of
+/// the answer of each execution.
+pub fn add_history<R: Runtime>(app: &AppHandle<R>, entry: HistoryEntry) -> Result<()> {
     let store = app.store(PathBuf::from(QUERIES_FILE))?;
     let mut history: Vec<HistoryEntry> = parse_list(store.get(HISTORY_KEY));
     push_entry(&mut history, entry);
     store.set(HISTORY_KEY, serde_json::to_value(&history)?);
     store.save()?;
-    Ok(history)
+    Ok(())
 }
 
 pub fn clear_history<R: Runtime>(app: &AppHandle<R>) -> Result<()> {

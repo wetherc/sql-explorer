@@ -5,7 +5,7 @@ import { makeApiStub } from './helpers'
 const apiStub = makeApiStub()
 vi.mock('@/lib/api', () => ({ api: apiStub, CONNECTION_STATUS_EVENT: 'connection-status' }))
 
-const { useHistoryStore } = await import('@/stores/history')
+const { useHistoryStore, HISTORY_LIMIT } = await import('@/stores/history')
 const { useUiStore } = await import('@/stores/ui')
 
 function entry(id: string, query: string, connectionName = 'Server') {
@@ -98,7 +98,7 @@ describe('history store', () => {
   })
 
   it('writes one execution to the history', async () => {
-    apiStub.addHistoryEntry.mockResolvedValue([entry('h1', 'SELECT 1')])
+    apiStub.addHistoryEntry.mockResolvedValue(undefined)
     const history = useHistoryStore()
     await history.record({
       connectionId: 'c1',
@@ -113,6 +113,65 @@ describe('history store', () => {
       expect.objectContaining({ query: 'SELECT 1', succeeded: true }),
     )
     expect(history.entries).toHaveLength(1)
+    expect(history.entries[0]?.query).toBe('SELECT 1')
+  })
+
+  it('replaces the entry at the front when the statement repeats', async () => {
+    apiStub.addHistoryEntry.mockResolvedValue(undefined)
+    apiStub.getHistory.mockResolvedValue([entry('h1', 'SELECT 1'), entry('h0', 'SELECT 0')])
+    const history = useHistoryStore()
+    await history.load()
+    await history.record({
+      connectionId: 'c1',
+      connectionName: 'Server',
+      query: 'SELECT 1',
+      elapsedMs: 9,
+      rowCount: 2,
+      succeeded: true,
+      error: null,
+    })
+    expect(history.entries.map((item) => item.query)).toEqual(['SELECT 1', 'SELECT 0'])
+    expect(history.entries[0]?.elapsedMs).toBe(9)
+  })
+
+  it('keeps a new entry when the statement at the front is from another connection', async () => {
+    apiStub.addHistoryEntry.mockResolvedValue(undefined)
+    apiStub.getHistory.mockResolvedValue([{ ...entry('h1', 'SELECT 1'), connectionId: 'c2' }])
+    const history = useHistoryStore()
+    await history.load()
+    await history.record({
+      connectionId: 'c1',
+      connectionName: 'Server',
+      query: 'SELECT 1',
+      elapsedMs: 5,
+      rowCount: 1,
+      succeeded: true,
+      error: null,
+    })
+    expect(history.entries).toHaveLength(2)
+  })
+
+  it('drops the entries above the limit', async () => {
+    apiStub.addHistoryEntry.mockResolvedValue(undefined)
+    apiStub.getHistory.mockResolvedValue(
+      Array.from({ length: HISTORY_LIMIT }, (_unused, index) =>
+        entry(`h${index}`, `SELECT ${index}`),
+      ),
+    )
+    const history = useHistoryStore()
+    await history.load()
+    await history.record({
+      connectionId: 'c1',
+      connectionName: 'Server',
+      query: 'SELECT new',
+      elapsedMs: 5,
+      rowCount: 1,
+      succeeded: true,
+      error: null,
+    })
+    expect(history.entries).toHaveLength(HISTORY_LIMIT)
+    expect(history.entries[0]?.query).toBe('SELECT new')
+    expect(history.entries[HISTORY_LIMIT - 1]?.query).toBe(`SELECT ${HISTORY_LIMIT - 2}`)
   })
 
   it('keeps an entry for this session when it cannot be written', async () => {

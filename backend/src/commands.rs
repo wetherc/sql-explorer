@@ -1101,10 +1101,7 @@ pub async fn get_history<R: Runtime>(app: AppHandle<R>) -> Result<Vec<HistoryEnt
 }
 
 #[tauri::command]
-pub async fn add_history_entry<R: Runtime>(
-    app: AppHandle<R>,
-    entry: HistoryEntry,
-) -> Result<Vec<HistoryEntry>> {
+pub async fn add_history_entry<R: Runtime>(app: AppHandle<R>, entry: HistoryEntry) -> Result<()> {
     store::add_history(&app, entry)
 }
 

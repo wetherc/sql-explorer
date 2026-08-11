@@ -5,6 +5,12 @@ import { createId } from './connections'
 import { useUiStore } from './ui'
 import type { HistoryEntry, SavedQuery } from '@/types/api'
 
+/**
+ * The number of history entries the list keeps. The backend file keeps the
+ * same number, so the two lists hold the same entries.
+ */
+export const HISTORY_LIMIT = 500
+
 /** What the query store reports after one execution. */
 export interface HistoryInput {
   connectionId: string
@@ -68,6 +74,20 @@ export const useHistoryStore = defineStore('history', () => {
     }
   }
 
+  /**
+   * Puts one entry at the front of the list and drops the entries above the
+   * limit. An entry that repeats the statement at the front replaces it. The
+   * backend file follows the same two rules.
+   */
+  function putEntry(entry: HistoryEntry): void {
+    const first = entries.value[0]
+    const rest =
+      first && first.query === entry.query && first.connectionId === entry.connectionId
+        ? entries.value.slice(1)
+        : entries.value
+    entries.value = [entry, ...rest].slice(0, HISTORY_LIMIT)
+  }
+
   /** Adds one execution to the history. */
   async function record(input: HistoryInput): Promise<void> {
     const entry: HistoryEntry = {
@@ -81,13 +101,13 @@ export const useHistoryStore = defineStore('history', () => {
       succeeded: input.succeeded,
       error: input.error,
     }
+    putEntry(entry)
     try {
-      entries.value = await api.addHistoryEntry(entry)
+      await api.addHistoryEntry(entry)
     } catch {
       // The history is a convenience. A failure to write it must not stop
       // the result of the statement from reaching the user, so the entry
       // is kept for this session only.
-      entries.value = [entry, ...entries.value]
     }
   }
 

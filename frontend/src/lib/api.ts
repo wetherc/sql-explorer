@@ -244,7 +244,7 @@ export const api = {
     return invoke('get_history')
   },
 
-  addHistoryEntry(entry: HistoryEntry): Promise<HistoryEntry[]> {
+  addHistoryEntry(entry: HistoryEntry): Promise<void> {
     return invoke('add_history_entry', { entry })
   },
 
