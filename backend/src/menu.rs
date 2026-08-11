@@ -47,7 +47,7 @@ pub const FILE_COMMANDS: [MenuCommand; 4] = [
     },
     MenuCommand {
         id: "file.openFolder",
-        label: "Open Folder of Queries…",
+        label: "Open a Folder",
         accelerator: "CmdOrCtrl+Shift+O",
     },
     MenuCommand {
