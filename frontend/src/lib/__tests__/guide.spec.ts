@@ -11,6 +11,18 @@ describe('GUIDE_TOPICS', () => {
     }
   })
 
+  it('gives each topic the title that its own text carries', () => {
+    for (const topic of GUIDE_TOPICS) {
+      expect(topic.body.split('\n')[0]).toBe(`# ${topic.title}`)
+    }
+  })
+
+  it('leaves the title out of the text that the reader sees', () => {
+    for (const topic of GUIDE_TOPICS) {
+      expect(renderTopic(topic)).not.toContain(`<h1>${topic.title}</h1>`)
+    }
+  })
+
   it('gives each topic a name of its own', () => {
     const names = GUIDE_TOPICS.map((topic) => topic.id)
     expect(new Set(names).size).toBe(names.length)

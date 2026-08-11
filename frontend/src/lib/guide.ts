@@ -11,6 +11,14 @@
  */
 import { marked } from 'marked'
 import startText from '@/guide/start.md?raw'
+import connectionsText from '@/guide/connections.md?raw'
+import explorerText from '@/guide/explorer.md?raw'
+import tabsText from '@/guide/tabs.md?raw'
+import runningText from '@/guide/running.md?raw'
+import parametersText from '@/guide/parameters.md?raw'
+import resultsText from '@/guide/results.md?raw'
+import exportsText from '@/guide/exports.md?raw'
+import keyboardText from '@/guide/keyboard.md?raw'
 
 export interface GuideTopic {
   /** The name the list and the tests use. */
@@ -22,6 +30,14 @@ export interface GuideTopic {
 
 export const GUIDE_TOPICS: GuideTopic[] = [
   { id: 'start', title: 'Where to start', body: startText },
+  { id: 'connections', title: 'Connections', body: connectionsText },
+  { id: 'explorer', title: 'The explorer', body: explorerText },
+  { id: 'tabs', title: 'Tabs and saved statements', body: tabsText },
+  { id: 'running', title: 'Run and stop', body: runningText },
+  { id: 'parameters', title: 'Parameters', body: parametersText },
+  { id: 'results', title: 'The results grid', body: resultsText },
+  { id: 'exports', title: 'Exports and the two row limits', body: exportsText },
+  { id: 'keyboard', title: 'The keyboard', body: keyboardText },
 ]
 
 /** Finds one topic by its name, or the first topic for a name it does not hold. */
