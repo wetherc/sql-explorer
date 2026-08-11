@@ -34,29 +34,37 @@ export const sqlExplorerDark = {
   },
 } as const
 
+/**
+ * The light theme holds no pure white. A window of white panels beside a
+ * white editor is bright enough to tire a reader who works in it for a day,
+ * so each surface stands a step below white and the text on it stands a step
+ * darker than the text of a common light theme. The colours of the marks,
+ * such as the keyword and the error, are darker for the same reason: a light
+ * surface needs a deeper ink than a dark surface does.
+ */
 export const sqlExplorerLight = {
   dark: false,
   colors: {
-    background: '#f4f6f9',
-    surface: '#ffffff',
-    'surface-bright': '#ffffff',
-    'surface-light': '#eef1f6',
-    'surface-variant': '#dde3ec',
-    'on-surface-variant': '#3d4756',
-    primary: '#1f6feb',
-    'primary-darken-1': '#1a5ec4',
-    secondary: '#5b6675',
-    accent: '#8250df',
-    error: '#c8253a',
-    info: '#0969da',
-    success: '#1a7f4b',
-    warning: '#9a6700',
-    'editor-background': '#ffffff',
-    'grid-header': '#eef1f6',
-    'grid-stripe': '#f7f9fc',
-    'on-grid-header': '#3d4756',
-    'on-grid-stripe': '#3d4756',
-    'null-value': '#8892a0',
+    background: '#e7ebf0',
+    surface: '#f6f8fa',
+    'surface-bright': '#fbfcfd',
+    'surface-light': '#eceff4',
+    'surface-variant': '#ccd3de',
+    'on-surface-variant': '#333c49',
+    primary: '#1558c4',
+    'primary-darken-1': '#10469c',
+    secondary: '#4a5462',
+    accent: '#6f3fc4',
+    error: '#b21e30',
+    info: '#0a5fb4',
+    success: '#146b3f',
+    warning: '#7d5300',
+    'editor-background': '#f6f8fa',
+    'grid-header': '#e6eaf0',
+    'grid-stripe': '#f1f4f8',
+    'on-grid-header': '#333c49',
+    'on-grid-stripe': '#333c49',
+    'null-value': '#636c77',
   },
 } as const
 

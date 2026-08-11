@@ -54,12 +54,12 @@ export function registerMonacoThemes(): void {
     base: 'vs',
     inherit: true,
     rules: [
-      { token: 'keyword', foreground: '1f6feb' },
-      { token: 'string.sql', foreground: '1a7f4b' },
-      { token: 'comment', foreground: '8892a0', fontStyle: 'italic' },
-      { token: 'number', foreground: '9a6700' },
-      { token: 'operator.sql', foreground: '8250df' },
-      { token: 'variable.sql', foreground: 'b3510e', fontStyle: 'bold' },
+      { token: 'keyword', foreground: '1558c4' },
+      { token: 'string.sql', foreground: '146b3f' },
+      { token: 'comment', foreground: '636c77', fontStyle: 'italic' },
+      { token: 'number', foreground: '7d5300' },
+      { token: 'operator.sql', foreground: '6f3fc4' },
+      { token: 'variable.sql', foreground: '9a4508', fontStyle: 'bold' },
     ],
     colors: {
       'editor.background': sqlExplorerLight.colors['editor-background'],
