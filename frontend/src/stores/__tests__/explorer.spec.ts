@@ -6,6 +6,7 @@ const apiStub = makeApiStub()
 vi.mock('@/lib/api', () => ({ api: apiStub, CONNECTION_STATUS_EVENT: 'connection-status' }))
 
 const {
+  FILTER_DELAY_MS,
   columnNode,
   constraintHint,
   filterNodes,
@@ -21,6 +22,11 @@ type ExplorerNode = import('@/stores/explorer').ExplorerNode
 const { useConnectionsStore } = await import('@/stores/connections')
 const { useUiStore } = await import('@/stores/ui')
 const { TableKind } = await import('@/types/api')
+
+/** Waits for the pause that the filter of the tree holds. */
+async function afterTheFilterPause(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, FILTER_DELAY_MS + 20))
+}
 
 function node(overrides: Partial<ExplorerNode> = {}): ExplorerNode {
   return {
@@ -752,6 +758,36 @@ describe('explorer store', () => {
     const root = explorer.addRoot('c1')
     await explorer.expand(root)
     explorer.filter = 'sales'
+    // The filter holds the text for a short pause, so the whole tree still
+    // stands here.
+    await afterTheFilterPause()
     expect(explorer.visibleNodes[0]?.children).toHaveLength(1)
+  })
+
+  it('waits for a pause before it matches the tree', async () => {
+    apiStub.listDatabases.mockResolvedValue([{ name: 'Sales' }, { name: 'Other' }])
+    const explorer = await readyStore()
+    const root = explorer.addRoot('c1')
+    await explorer.expand(root)
+
+    explorer.filter = 'sal'
+    explorer.filter = 'sales'
+    expect(explorer.visibleNodes[0]?.children).toHaveLength(2)
+
+    await afterTheFilterPause()
+    expect(explorer.visibleNodes[0]?.children).toHaveLength(1)
+  })
+
+  it('shows the whole tree as soon as the filter is empty', async () => {
+    apiStub.listDatabases.mockResolvedValue([{ name: 'Sales' }, { name: 'Other' }])
+    const explorer = await readyStore()
+    const root = explorer.addRoot('c1')
+    await explorer.expand(root)
+    explorer.filter = 'sales'
+    await afterTheFilterPause()
+
+    explorer.filter = '  '
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(explorer.visibleNodes[0]?.children).toHaveLength(2)
   })
 })

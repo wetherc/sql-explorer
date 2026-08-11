@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { computed, markRaw, ref, shallowRef } from 'vue'
+import { computed, markRaw, ref, shallowRef, watch } from 'vue'
 import { api } from '@/lib/api'
 import { useConnectionsStore } from './connections'
 import { useSettingsStore } from './settings'
@@ -13,6 +13,9 @@ import {
   type DriverCapabilities,
   type TableRef,
 } from '@/types/api'
+
+/** The pause between the last keystroke in the filter and the match. */
+export const FILTER_DELAY_MS = 200
 
 export type NodeKind =
   | 'connection'
@@ -234,7 +237,34 @@ export const useExplorerStore = defineStore('explorer', () => {
   const filter = ref('')
   const loading = ref(false)
 
-  const visibleNodes = computed(() => filterNodes(roots.value, filter.value))
+  /**
+   * The filter text that the tree is matched against. It follows the field
+   * after a short pause, because a match builds a copy of every node that
+   * survives it, and a keystroke would build that copy again.
+   */
+  const appliedFilter = ref('')
+  let filterTimer: ReturnType<typeof setTimeout> | null = null
+
+  function applyFilter(value: string): void {
+    if (filterTimer !== null) {
+      clearTimeout(filterTimer)
+      filterTimer = null
+    }
+    // An empty filter shows the whole tree at once, because the user who
+    // clears the field waits for nothing.
+    if (value.trim() === '') {
+      appliedFilter.value = ''
+      return
+    }
+    filterTimer = setTimeout(() => {
+      filterTimer = null
+      appliedFilter.value = value
+    }, FILTER_DELAY_MS)
+  }
+
+  watch(filter, applyFilter)
+
+  const visibleNodes = computed(() => filterNodes(roots.value, appliedFilter.value))
 
   /**
    * The whole schema of one database of one connection, keyed by the two
@@ -444,6 +474,8 @@ export const useExplorerStore = defineStore('explorer', () => {
   function clear(): void {
     roots.value = []
     filter.value = ''
+    // The watch of the field runs later, and the tree is empty now.
+    applyFilter('')
     snapshots.value = {}
   }
 

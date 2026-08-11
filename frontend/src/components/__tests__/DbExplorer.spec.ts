@@ -7,7 +7,7 @@ vi.mock('@/lib/api', () => ({ api: apiStub, CONNECTION_STATUS_EVENT: 'connection
 const DbExplorer = (await import('@/components/DbExplorer.vue')).default
 const { mountWithPlugins, settle } = await import('./mount')
 const { useConnectionsStore } = await import('@/stores/connections')
-const { useExplorerStore } = await import('@/stores/explorer')
+const { FILTER_DELAY_MS, useExplorerStore } = await import('@/stores/explorer')
 const { useQueryStore } = await import('@/stores/query')
 const { useSettingsStore } = await import('@/stores/settings')
 const { useTabsStore } = await import('@/stores/tabs')
@@ -109,6 +109,8 @@ describe('DbExplorer', () => {
     await wrapper.vm.$nextTick()
 
     await wrapper.find('[data-test="explorer-filter"] input').setValue('nothing')
+    // The filter of the tree holds the text for a short pause.
+    await new Promise((resolve) => setTimeout(resolve, FILTER_DELAY_MS + 20))
     await wrapper.vm.$nextTick()
     expect(wrapper.text()).toContain('Nothing matches the filter')
   })
