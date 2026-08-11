@@ -1339,6 +1339,53 @@ pub async fn pick_folder<R: Runtime>(
     Ok(Some(opened))
 }
 
+/// One file that the user opened through the dialog.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenedFile {
+    pub path: String,
+    pub contents: String,
+}
+
+/// Asks the user for one statement file and reads it.
+///
+/// The folder of the file becomes a root, so a later save of the same tab
+/// reaches the file and the panel can list the folder beside it. Returns
+/// `None` when the user closed the dialog.
+#[tauri::command]
+pub async fn open_statement_file<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<OpenedFile>> {
+    use tauri_plugin_dialog::DialogExt;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("Statement", &["sql", "txt"])
+        .pick_file(move |path| {
+            let _ = sender.send(path);
+        });
+    let Some(path) = receiver
+        .await
+        .ok()
+        .flatten()
+        .and_then(|path| path.into_path().ok())
+    else {
+        return Ok(None);
+    };
+
+    if let Some(folder) = files::folder_of(&path) {
+        state.add_file_root(folder).await;
+    }
+    let contents = files::read_text(&path)?;
+    let opened = path.to_string_lossy().to_string();
+    log::info!("Opened the file '{opened}'.");
+    Ok(Some(OpenedFile {
+        path: opened,
+        contents,
+    }))
+}
+
 /// Records a folder that the workspace file held, so the folders of the last
 /// session are reachable again. The folder must still be a folder on the
 /// disk, so a record that names something else brings nothing back.

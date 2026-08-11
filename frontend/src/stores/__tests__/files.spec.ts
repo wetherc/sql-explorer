@@ -5,7 +5,7 @@ import { makeApiStub } from './helpers'
 const apiStub = makeApiStub()
 vi.mock('@/lib/api', () => ({ api: apiStub, CONNECTION_STATUS_EVENT: 'connection-status' }))
 
-const { baseName, findNode, nodeOfEntry, visibleRows, useFilesStore } =
+const { baseName, findNode, folderOf, nodeOfEntry, visibleRows, useFilesStore } =
   await import('@/stores/files')
 const { useTabsStore } = await import('@/stores/tabs')
 const { useUiStore } = await import('@/stores/ui')
@@ -21,6 +21,15 @@ describe('the helpers of the files panel', () => {
     expect(baseName('C:\\data\\a.sql')).toBe('a.sql')
     expect(baseName('a.sql')).toBe('a.sql')
     expect(baseName('/')).toBe('/')
+  })
+
+  it('names the folder that holds a file', () => {
+    expect(folderOf('/data/reports/a.sql')).toBe('/data/reports')
+    expect(folderOf('C:\\data\\a.sql')).toBe('C:\\data')
+    // A name with no folder in front of it, and a file at the root, hold no
+    // folder that the panel can open.
+    expect(folderOf('a.sql')).toBeNull()
+    expect(folderOf('/a.sql')).toBeNull()
   })
 
   it('builds a node from one entry', () => {
@@ -200,6 +209,64 @@ describe('files store', () => {
 
     expect(tabs.tabs).toHaveLength(0)
     expect(useUiStore().notices.some((notice) => notice.level === 'error')).toBe(true)
+  })
+
+  it('opens a file that the user chose and takes its folder as a root', async () => {
+    apiStub.openStatementFile.mockResolvedValue({
+      path: '/data/reports/daily.sql',
+      contents: 'SELECT 1',
+    })
+    apiStub.listFolder.mockResolvedValue([entry('daily.sql', 'file', '/data/reports')])
+    const files = useFilesStore()
+    const tabs = useTabsStore()
+
+    await files.openFileFromDialog()
+
+    expect(tabs.activeTab).toMatchObject({
+      title: 'daily.sql',
+      query: 'SELECT 1',
+      filePath: '/data/reports/daily.sql',
+    })
+    // The folder joins the panel and the workspace, so the work beside the
+    // file is one click away and the next start reaches it again.
+    expect(files.roots.map((root) => root.path)).toEqual(['/data/reports'])
+    expect(tabs.fileRoots).toEqual(['/data/reports'])
+    expect(files.loading).toBe(false)
+  })
+
+  it('brings a file that a tab already holds forward', async () => {
+    apiStub.openStatementFile.mockResolvedValue({ path: '/data/a.sql', contents: 'SELECT 1' })
+    const files = useFilesStore()
+    const tabs = useTabsStore()
+    await files.openFileFromDialog()
+    const other = tabs.add()
+
+    await files.openFileFromDialog()
+
+    expect(tabs.tabs).toHaveLength(2)
+    expect(tabs.activeTab?.id).not.toBe(other.id)
+    expect(tabs.activeTab?.filePath).toBe('/data/a.sql')
+  })
+
+  it('holds the panel as it is when the user closed the file dialog', async () => {
+    apiStub.openStatementFile.mockResolvedValue(null)
+    const files = useFilesStore()
+    const tabs = useTabsStore()
+
+    await files.openFileFromDialog()
+
+    expect(tabs.tabs).toHaveLength(0)
+    expect(files.hasRoots).toBe(false)
+  })
+
+  it('reports a file of the dialog that cannot be read', async () => {
+    apiStub.openStatementFile.mockRejectedValue({ kind: 'io', message: 'gone', detail: null })
+    const files = useFilesStore()
+
+    await files.openFileFromDialog()
+
+    expect(useUiStore().notices.some((notice) => notice.level === 'error')).toBe(true)
+    expect(files.loading).toBe(false)
   })
 
   it('puts the folders of the workspace back into the panel', () => {

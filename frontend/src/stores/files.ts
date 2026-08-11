@@ -38,6 +38,19 @@ export function baseName(path: string): string {
   return parts[parts.length - 1] || path
 }
 
+/**
+ * The folder that holds a file, or `null` when the path names no folder in
+ * front of the file. The two marks of a path are both read, because the
+ * backend gives the path in the form of the operating system.
+ */
+export function folderOf(path: string): string | null {
+  const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+  if (cut <= 0) {
+    return null
+  }
+  return path.slice(0, cut)
+}
+
 /** Finds one node by its path, wherever it stands in the tree. */
 export function findNode(nodes: FileNode[], path: string): FileNode | undefined {
   for (const node of nodes) {
@@ -202,6 +215,41 @@ export const useFilesStore = defineStore('files', () => {
     }
   }
 
+  /**
+   * Asks the user for one statement file and opens it in a tab. The folder
+   * of the file joins the panel, so the work beside that file is one click
+   * away and a later save of the tab reaches the file.
+   */
+  async function openFileFromDialog(): Promise<void> {
+    loading.value = true
+    try {
+      const opened = await api.openStatementFile()
+      if (!opened) {
+        return
+      }
+      const held = tabs.tabForFile(opened.path)
+      if (held) {
+        tabs.activate(held.id)
+        return
+      }
+      tabs.add({
+        query: opened.contents,
+        title: baseName(opened.path),
+        filePath: opened.path,
+      })
+      const folder = folderOf(opened.path)
+      if (folder !== null) {
+        addRoot(folder)
+        tabs.addFileRoot(folder)
+        await expand(folder)
+      }
+    } catch (error) {
+      ui.reportError(error)
+    } finally {
+      loading.value = false
+    }
+  }
+
   return {
     roots,
     openPaths,
@@ -209,6 +257,7 @@ export const useFilesStore = defineStore('files', () => {
     rows,
     hasRoots,
     openFolder,
+    openFileFromDialog,
     restoreRoots,
     closeRoot,
     expand,

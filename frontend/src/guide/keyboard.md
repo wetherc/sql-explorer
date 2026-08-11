@@ -16,9 +16,11 @@ already hold.
 | -------------------------------- | ---------------------------------- |
 | `Ctrl`/`Cmd` + `Enter`           | Run the statement under the cursor |
 | `Ctrl`/`Cmd` + `Shift` + `Enter` | Run the whole script               |
-| `Ctrl`/`Cmd` + `S`               | Write the statement to a file      |
+| `Ctrl`/`Cmd` + `S`               | Write the query to a file          |
 | `Shift` + `Alt` + `F`            | Lay out the statement              |
-| `Ctrl`/`Cmd` + `T`               | Open a tab                         |
+| `Ctrl`/`Cmd` + `T` or `N`        | Open a query in a new tab          |
+| `Ctrl`/`Cmd` + `O`               | Open a query from a file           |
+| `Ctrl`/`Cmd` + `Shift` + `O`     | Open a folder of queries           |
 | `Ctrl`/`Cmd` + `W`               | Close the tab                      |
 | `Ctrl`/`Cmd` + `1` to `4`        | Show one of the four side panels   |
 | `Ctrl`/`Cmd` + `B`               | Show or hide the side panel        |

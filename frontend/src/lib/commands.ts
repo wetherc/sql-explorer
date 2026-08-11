@@ -88,6 +88,13 @@ export interface Command {
   group: string
   /** The key of the command, or `null` when it has none. */
   key: string | null
+  /**
+   * The other keys that reach the command. A command of a file holds the
+   * key of the desktop beside the key this application grew with, so a user
+   * of either habit reaches it. The list of the keys shows `key` alone,
+   * which keeps one name for each command.
+   */
+  aliases?: string[]
   run: () => void
   /** True when the command can run now. A command with no test always can. */
   enabled?: () => boolean
@@ -98,10 +105,15 @@ export function commandEnabled(command: Command): boolean {
   return command.enabled ? command.enabled() : true
 }
 
+/** Every key that reaches one command, its aliases among them. */
+export function keysOf(command: Command): string[] {
+  return [command.key, ...(command.aliases ?? [])].filter((key): key is string => key !== null)
+}
+
 /** Finds the command that the event asks for, if there is one. */
 export function commandForEvent(commands: Command[], event: KeyboardEvent): Command | null {
   for (const command of commands) {
-    if (command.key !== null && chordMatches(command.key, event)) {
+    if (keysOf(command).some((key) => chordMatches(key, event))) {
       return command
     }
   }

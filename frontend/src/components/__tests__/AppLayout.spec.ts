@@ -375,6 +375,40 @@ describe('AppLayout', () => {
     wrapper.unmount()
   })
 
+  it('holds the four commands of a file in the File menu', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+
+    await wrapper.find('[data-test="file-menu"]').trigger('click')
+    await settle()
+
+    const titles = [...document.querySelectorAll('[data-test^="file-menu-"] .v-list-item-title')]
+    expect(titles.map((item) => item.textContent?.trim())).toEqual([
+      'New query',
+      'Open a query',
+      'Open a folder of queries',
+      'Save the query to a file',
+    ])
+  })
+
+  it('runs a command of the File menu, and holds the one that cannot run', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const tabs = useTabsStore()
+
+    await wrapper.find('[data-test="file-menu"]').trigger('click')
+    await settle()
+
+    // No tab stands open, so the entry that writes a file cannot run.
+    const save = document.querySelector('[data-test="file-menu-query.save"]') as HTMLElement
+    expect(save.classList.contains('v-list-item--disabled')).toBe(true)
+
+    const newQuery = document.querySelector('[data-test="file-menu-tab.new"]') as HTMLElement
+    newQuery.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+    expect(tabs.tabs).toHaveLength(1)
+  })
+
   it('asks before it puts every setting back to its default', async () => {
     const wrapper = mountWithPlugins(AppLayout)
     await settle()
@@ -644,6 +678,36 @@ describe('AppLayout keys', () => {
     window.dispatchEvent(event)
     return event
   }
+
+  it('opens a query with the key of the desktop as well', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const tabs = useTabsStore()
+
+    // The application grew with Ctrl+T, and the desktop names the same
+    // command Ctrl+N, so both reach it.
+    press('KeyN')
+    expect(tabs.tabs).toHaveLength(1)
+    press('KeyT')
+    expect(tabs.tabs).toHaveLength(2)
+    wrapper.unmount()
+  })
+
+  it('opens a file and a folder from their keys', async () => {
+    apiStub.openStatementFile.mockResolvedValue({ path: '/data/a.sql', contents: 'SELECT 1' })
+    apiStub.pickFolder.mockResolvedValue(null)
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+
+    press('KeyO')
+    await settle()
+    expect(apiStub.openStatementFile).toHaveBeenCalled()
+
+    press('KeyO', { shift: true })
+    await settle()
+    expect(apiStub.pickFolder).toHaveBeenCalled()
+    wrapper.unmount()
+  })
 
   it('opens a tab and closes it again', async () => {
     const wrapper = mountWithPlugins(AppLayout)

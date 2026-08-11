@@ -13,6 +13,7 @@ import type {
   ExportRequest,
   ExportSummary,
   FolderEntry,
+  OpenedFile,
   SaveFileRequest,
   SaveStatementRequest,
   HistoryEntry,
@@ -294,6 +295,12 @@ export const api = {
    *  false when that folder is no longer a folder on the disk. */
   restoreFolder(path: string): Promise<boolean> {
     return invoke('restore_folder', { path })
+  },
+
+  /** Asks the user for one statement file and reads it. The folder of that
+   *  file becomes a root. Gives back null when the user closed the dialog. */
+  openStatementFile(): Promise<OpenedFile | null> {
+    return invoke('open_statement_file')
   },
 
   /** Lists the entries of one folder that the user opened. */

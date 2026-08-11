@@ -187,6 +187,12 @@ export interface FolderEntry {
   kind: 'folder' | 'file'
 }
 
+/** One file that the user opened through the dialog. */
+export interface OpenedFile {
+  path: string
+  contents: string
+}
+
 /** What an export to a file needs to know. */
 export interface ExportRequest {
   connectionId: string

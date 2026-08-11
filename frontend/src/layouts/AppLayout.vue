@@ -6,6 +6,32 @@
         SQL Explorer
       </v-app-bar-title>
 
+      <!-- The menu runs the same commands as the keys, so a command holds
+           one path whichever way the user reaches it. -->
+      <v-menu>
+        <template #activator="{ props: menu }">
+          <v-btn v-bind="menu" size="small" text="File" data-test="file-menu" />
+        </template>
+        <v-list density="compact">
+          <v-list-item
+            v-for="entry of fileMenu"
+            :key="entry.id"
+            :title="entry.title"
+            :disabled="!commandEnabled(entry)"
+            :data-test="`file-menu-${entry.id}`"
+            @click="entry.run()"
+          >
+            <template #append>
+              <span v-if="entry.key" class="menu-key text-medium-emphasis">
+                {{ chordLabel(entry.key, apple) }}
+              </span>
+            </template>
+          </v-list-item>
+        </v-list>
+      </v-menu>
+
+      <v-spacer />
+
       <v-tooltip
         location="bottom"
         :text="settings.isDark ? 'Use the light theme' : 'Use the dark theme'"
@@ -490,8 +516,8 @@ const commands: Command[] = [
   },
   {
     id: 'query.save',
-    title: 'Save the statement to a file',
-    group: 'Query',
+    title: 'Save the query to a file',
+    group: 'File',
     key: 'mod+s',
     enabled: hasActiveTab,
     run: () => actionsOfActiveTab()?.save(),
@@ -506,10 +532,27 @@ const commands: Command[] = [
   },
   {
     id: 'tab.new',
-    title: 'New tab',
-    group: 'Tabs',
+    title: 'New query',
+    group: 'File',
     key: 'mod+t',
+    // The desktop names this key Ctrl+N, and the editors this application
+    // grew beside name it Ctrl+T, so both reach it.
+    aliases: ['mod+n'],
     run: () => tabs.add(),
+  },
+  {
+    id: 'file.open',
+    title: 'Open a query',
+    group: 'File',
+    key: 'mod+o',
+    run: () => void files.openFileFromDialog(),
+  },
+  {
+    id: 'file.openFolder',
+    title: 'Open a folder of queries',
+    group: 'File',
+    key: 'mod+shift+o',
+    run: () => void files.openFolder(),
   },
   {
     id: 'tab.rename',
@@ -602,6 +645,20 @@ const commands: Command[] = [
 ]
 
 const commandsWithKeys = computed(() => commands.filter((command) => command.key !== null))
+
+/**
+ * The commands the File menu holds, in the order a reader expects them: the
+ * new one, the two that open, and the one that writes. The menu draws each
+ * command from the same list the keys read, so a menu entry and a key can
+ * never mean two different things.
+ */
+const FILE_MENU_IDS = ['tab.new', 'file.open', 'file.openFolder', 'query.save'] as const
+
+const fileMenu = computed(() =>
+  FILE_MENU_IDS.map((id) => commands.find((command) => command.id === id)).filter(
+    (command): command is Command => command !== undefined,
+  ),
+)
 
 function onKeyDown(event: KeyboardEvent): void {
   // A key of the application must not reach through a dialog, because the
@@ -710,6 +767,16 @@ onBeforeUnmount(() => {
 .app-title {
   font-size: var(--app-text-lg);
   font-weight: 600;
+  /* The title takes the width it needs and no more, so the menu beside it
+     stands next to the name and not at the far end of the bar. */
+  flex: 0 0 auto;
+}
+
+/* The key of a menu entry stands quietly at the end of the row, away from
+   the title of the entry. */
+.menu-key {
+  padding-left: 24px;
+  font-size: var(--app-text-sm);
 }
 
 /* A row of the rail holds an icon and no text. The library keeps a gap of 32

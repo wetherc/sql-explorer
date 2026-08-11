@@ -7,6 +7,7 @@ import {
   commandForEvent,
   filterCommands,
   forgetTabActions,
+  keysOf,
   parseChord,
   registerTabActions,
   tabActions,
@@ -99,6 +100,26 @@ describe('commandForEvent', () => {
 
   it('finds nothing for a key that no command holds', () => {
     expect(commandForEvent([commandFor('mod+w')], keyEvent('KeyZ', { mod: true }))).toBeNull()
+  })
+
+  it('finds a command by an alias of its key', () => {
+    const wanted = { ...commandFor('mod+t'), aliases: ['mod+n'] }
+    const commands = [commandFor('mod+w'), wanted]
+
+    // The key and the alias both reach the command.
+    expect(commandForEvent(commands, keyEvent('KeyT', { mod: true }))).toBe(wanted)
+    expect(commandForEvent(commands, keyEvent('KeyN', { mod: true }))).toBe(wanted)
+    expect(commandForEvent(commands, keyEvent('KeyN', {}))).toBeNull()
+  })
+})
+
+describe('keysOf', () => {
+  it('gives the key of a command with its aliases, and leaves out none', () => {
+    expect(keysOf(commandFor('mod+t'))).toEqual(['mod+t'])
+    expect(keysOf({ ...commandFor('mod+t'), aliases: ['mod+n'] })).toEqual(['mod+t', 'mod+n'])
+    // A command with no key of its own can still hold an alias.
+    expect(keysOf(commandFor(null))).toEqual([])
+    expect(keysOf({ ...commandFor(null), aliases: ['mod+n'] })).toEqual(['mod+n'])
   })
 })
 
