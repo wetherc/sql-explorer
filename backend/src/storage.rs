@@ -103,6 +103,9 @@ pub struct ConnectionOptions {
     pub query_timeout_secs: u64,
     /// The largest number of rows one result set holds.
     pub max_rows: usize,
+    /// The largest number of sessions the editor tabs open on this
+    /// connection at one time.
+    pub max_sessions: usize,
     /// True when the connection asks the server for a read-only session.
     pub read_only: bool,
     /// The name the server records for this client.
@@ -151,6 +154,7 @@ impl Default for ConnectionOptions {
             connect_timeout_secs: 15,
             query_timeout_secs: 300,
             max_rows: 10_000,
+            max_sessions: crate::session::DEFAULT_SESSION_CAP,
             read_only: false,
             application_name: Some("SQL Explorer".to_string()),
             instance_name: None,
@@ -360,9 +364,18 @@ mod tests {
         assert_eq!(options.connect_timeout_secs, 15);
         assert_eq!(options.query_timeout_secs, 300);
         assert_eq!(options.max_rows, 10_000);
+        assert_eq!(options.max_sessions, crate::session::DEFAULT_SESSION_CAP);
         assert!(!options.read_only);
         assert!(!options.integrated_security);
         assert_eq!(options.application_name.as_deref(), Some("SQL Explorer"));
+    }
+
+    #[test]
+    fn a_record_without_a_session_limit_takes_the_default() {
+        let text = r#"{"tlsMode":"verifyFull","maxRows":42}"#;
+        let options: ConnectionOptions = serde_json::from_str(text).unwrap();
+        assert_eq!(options.max_rows, 42);
+        assert_eq!(options.max_sessions, crate::session::DEFAULT_SESSION_CAP);
     }
 
     #[test]

@@ -41,6 +41,8 @@ export interface ConnectionOptions {
   connectTimeoutSecs: number
   queryTimeoutSecs: number
   maxRows: number
+  /** The largest number of sessions the editor tabs open at one time. */
+  maxSessions: number
   readOnly: boolean
   applicationName: string | null
   instanceName: string | null
@@ -399,6 +401,7 @@ export function defaultConnectionOptions(): ConnectionOptions {
     connectTimeoutSecs: 15,
     queryTimeoutSecs: 300,
     maxRows: 10000,
+    maxSessions: 6,
     readOnly: false,
     applicationName: 'SQL Explorer',
     instanceName: null,
