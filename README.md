@@ -6,6 +6,85 @@ tree, runs statements in tabs, and writes the results to a file.
 
 The application is built with Vue 3, Vuetify and [Tauri 2](https://tauri.app/).
 
+![The tree of objects, the editor and the rows of a result](docs/screenshots/overview.png)
+
+## Screenshots
+
+Every picture below comes from the interface with sample connections and
+sample rows. No server, no user and no row in them is real.
+
+### Connections
+
+![The list of connections and the form of a MS SQL Server connection](docs/screenshots/connections.png)
+
+The list groups the connections into folders and marks the state of each one.
+The form shows the fields of the engine that the user chose. This connection
+takes its login from Microsoft Entra ID through the Azure CLI, so the form
+holds no password.
+
+### Objects
+
+![The menu of a table in the tree](docs/screenshots/explorer-menu.png)
+
+The tree holds the databases, the schemas, the tables, the views and the
+columns of each connection. A key column carries its own icon, and each column
+shows its type. The menu of an object builds a preview statement and the CREATE,
+SELECT, INSERT and UPDATE statements of that object.
+
+![The properties of a table](docs/screenshots/properties.png)
+
+The Properties dialog holds the facts of a relation, its columns, its indexes
+and its constraints, in one call to the backend.
+
+### Statements
+
+![The completion of the editor after an alias](docs/screenshots/completion.png)
+
+The editor completes the names of the database. A name after a full stop gives
+the columns of the table that the alias in front of the stop names, with the
+type of each column.
+
+![The values of the named parameters of a statement](docs/screenshots/parameters.png)
+
+A statement that carries a name such as `:country` asks for the values before
+it runs. Each value holds the form that the user chose, so a value stays text
+when it looks like a number. The bar above the editor names the parameters and
+their values.
+
+![The rows of a result, with a filter, a sort and a selection](docs/screenshots/grid.png)
+
+The result grid draws only the rows in view, so a large result stays quick. It
+sorts, it filters, it marks a value that is absent, and it counts the rows that
+the user selected.
+
+![The forms that an export writes](docs/screenshots/export.png)
+
+The rows go to a CSV, JSON, Markdown, INSERT or Excel file, or to the
+clipboard. A whole result goes to a file from the backend, so the rows do not
+pass through the interface.
+
+![The plan of a statement](docs/screenshots/plan.png)
+
+A plan tab shows the plan of one statement. The estimated plan needs no run.
+The actual plan runs the statement, and the interface asks first.
+
+![A statement on AWS Athena, with the data it scanned](docs/screenshots/athena.png)
+
+For Athena the status bar reports the data that the statement scanned, the
+cost of that scan and the cost of the session. The price for each terabyte
+stands in the settings.
+
+![The history and the statements that ran](docs/screenshots/history.png)
+
+The panel holds every statement that ran, with its connection, its time and
+its result. A second tab holds the statements that the user saved. Both
+persist across a restart.
+
+![The palette of commands](docs/screenshots/palette.png)
+
+One registry holds every key of the application. The palette lists the
+commands with the keys that reach them.
+
 ## What it does
 
 **Connections**
