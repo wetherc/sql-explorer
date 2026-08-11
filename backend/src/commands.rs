@@ -464,6 +464,7 @@ pub async fn execute_query<R: Runtime>(
         .await;
 
     let mut sink = ChunkSink::new(on_chunk, options.max_rows);
+    let started = std::time::Instant::now();
     let outcome = {
         let mut guard = session.driver.lock().await;
         run_bounded(
@@ -476,8 +477,16 @@ pub async fn execute_query<R: Runtime>(
     };
 
     state.end_request(&request_id).await;
-    let summary = finish_run(&app, &state, &connection_id, &open, &key, &session, outcome).await?;
-    sink.finish(summary)
+    match finish_run(&app, &state, &connection_id, &open, &key, &session, outcome).await {
+        Ok(summary) => sink.finish(summary),
+        Err(error) => {
+            // The messages that the server sent before the failure still
+            // reach the window. A failure of the channel itself gives way to
+            // the error of the run.
+            let _ = sink.fail(started.elapsed().as_millis() as u64);
+            Err(error)
+        }
+    }
 }
 
 /// What one request for a plan carries.

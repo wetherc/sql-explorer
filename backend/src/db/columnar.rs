@@ -452,6 +452,20 @@ impl ChunkSink {
             })
     }
 
+    /// Sends the frame that ends a run that failed, so the messages that the
+    /// server sent before the failure still reach the window. The rows of a
+    /// set that never ended go nowhere, because the window drops such a set.
+    /// The error of the run travels on the answer of the command.
+    pub fn fail(mut self, elapsed_ms: u64) -> Result<()> {
+        self.batch.clear();
+        self.batch_weight = 0;
+        self.finish(RunSummary {
+            rows_affected: None,
+            elapsed_ms,
+            stats: None,
+        })
+    }
+
     /// Sends the frame that ends the run, with the messages of the server and
     /// the numbers of the run.
     pub fn finish(mut self, summary: RunSummary) -> Result<()> {
@@ -1244,6 +1258,29 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn a_run_that_fails_still_reports_its_messages() {
+        let (channel, messages) = collecting_channel();
+        let mut sink = ChunkSink::new(channel, 10);
+        sink.begin_set(columns()).unwrap();
+        sink.row(vec![json!(1), json!("one")]).unwrap();
+        sink.message(Message::info("halfway"));
+        sink.fail(5).unwrap();
+
+        let frames = frames_of(&messages.lock().unwrap());
+        // The set never ended, so its rows go nowhere: the run holds the
+        // frame that opened the set and the frame that ends the run.
+        assert_eq!(frames.len(), 2);
+        assert!(matches!(frames[0], Frame::BeginSet { set: 0, .. }));
+        let Frame::End { summary } = &frames[1] else {
+            panic!("the last frame does not end the run");
+        };
+        let value: JsonValue = serde_json::from_str(summary).unwrap();
+        assert_eq!(value["elapsedMs"], 5);
+        assert_eq!(value["rowsAffected"], JsonValue::Null);
+        assert_eq!(value["messages"][0]["text"], "halfway");
     }
 
     #[test]
