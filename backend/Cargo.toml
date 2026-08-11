@@ -52,6 +52,15 @@ mysql_async = { version = "0.37", default-features = false, features = [
 # features off leaves `flate2` without a backend, so one is named here.
 flate2 = { version = "1", features = ["rust_backend"] }
 
+# An XLSX file is a ZIP container of XML parts. The export writes the parts
+# one row at a time, so the crate writes and never reads an archive; the
+# advisories of this crate cover the reader alone. The default features add
+# the other compression methods and the AES of the reader, which a writer of
+# XLSX does not need, so only the deflate of `flate2` stays.
+zip = { version = "7.2.0", default-features = false, features = [
+    "deflate-flate2",
+] }
+
 tokio-postgres = { version = "0.7", features = [
     "with-chrono-0_4",
     "with-uuid-1",

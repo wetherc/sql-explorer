@@ -1149,6 +1149,7 @@ pub async fn save_workspace<R: Runtime>(
 pub enum ExportFormat {
     Csv,
     Json,
+    Xlsx,
 }
 
 /// What an export to a file needs to know. The backend asks the user for
@@ -1426,6 +1427,7 @@ pub async fn export_query<R: Runtime>(
     let (label, extension) = match format {
         ExportFormat::Csv => ("CSV", "csv"),
         ExportFormat::Json => ("JSON", "json"),
+        ExportFormat::Xlsx => ("Excel", "xlsx"),
     };
     let Some(path) = ask_save_path(&app, &default_name, label, extension, None).await else {
         return Ok(None);
@@ -1489,6 +1491,11 @@ struct FileSink {
     final_path: std::path::PathBuf,
     temp_path: std::path::PathBuf,
     out: Option<std::io::BufWriter<std::fs::File>>,
+    /// The writer of the sheet, which holds the file while a set is open in
+    /// the xlsx form.
+    sheet: Option<crate::xlsx::SheetWriter<std::io::BufWriter<std::fs::File>>>,
+    /// The name the one sheet of an xlsx file carries.
+    sheet_title: String,
     /// The unique column names of the set, for the JSON objects.
     names: Vec<String>,
     rows: usize,
@@ -1507,11 +1514,18 @@ impl FileSink {
         name.push(".part");
         let temp_path = std::path::PathBuf::from(name);
         let file = std::fs::File::create(&temp_path)?;
+        // The sheet takes the name of the file that the user chose.
+        let sheet_title = path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().to_string())
+            .unwrap_or_default();
         Ok(Self {
             format,
             final_path: path.to_path_buf(),
             temp_path,
             out: Some(std::io::BufWriter::new(file)),
+            sheet: None,
+            sheet_title,
             names: Vec::new(),
             rows: 0,
             truncated: false,
@@ -1531,14 +1545,24 @@ impl FileSink {
     fn finish(mut self) -> Result<ExportSummary> {
         use std::io::Write;
         if self.saw_set {
-            if let ExportFormat::Json = self.format {
-                let rows = self.rows;
-                let out = self.writer()?;
-                if rows == 0 {
-                    writeln!(out, "]")?;
-                } else {
-                    writeln!(out, "\n]")?;
+            match self.format {
+                ExportFormat::Json => {
+                    let rows = self.rows;
+                    let out = self.writer()?;
+                    if rows == 0 {
+                        writeln!(out, "]")?;
+                    } else {
+                        writeln!(out, "\n]")?;
+                    }
                 }
+                // The sheet holds the file while it is open, so the close of
+                // the container gives the file back.
+                ExportFormat::Xlsx => {
+                    if let Some(sheet) = self.sheet.take() {
+                        self.out = Some(sheet.finish()?);
+                    }
+                }
+                ExportFormat::Csv => {}
             }
         }
         let mut out = self.out.take().expect("the file is open until here");
@@ -1557,6 +1581,7 @@ impl FileSink {
 impl Drop for FileSink {
     fn drop(&mut self) {
         if !self.finished {
+            self.sheet.take();
             self.out.take();
             let _ = std::fs::remove_file(&self.temp_path);
         }
@@ -1581,6 +1606,18 @@ impl crate::db::sink::RowSink for FileSink {
             ExportFormat::Json => {
                 self.names = crate::db::unique_column_names(&columns);
                 writeln!(self.writer()?, "[")?;
+            }
+            ExportFormat::Xlsx => {
+                let names = crate::db::unique_column_names(&columns);
+                let file = self
+                    .out
+                    .take()
+                    .ok_or_else(|| Error::Anyhow(anyhow::anyhow!("The export file is closed.")))?;
+                self.sheet = Some(crate::xlsx::SheetWriter::create(
+                    file,
+                    &self.sheet_title,
+                    &names,
+                )?);
             }
         }
         Ok(())
@@ -1612,6 +1649,19 @@ impl crate::db::sink::RowSink for FileSink {
                     writeln!(out, ",")?;
                 }
                 write!(out, "  {text}")?;
+            }
+            ExportFormat::Xlsx => {
+                let sheet = self
+                    .sheet
+                    .as_mut()
+                    .ok_or_else(|| Error::Anyhow(anyhow::anyhow!("The sheet is not open.")))?;
+                // A sheet holds a bounded number of rows. The rows past the
+                // bound stay out of the file, and the summary reports the
+                // result as truncated.
+                if !sheet.row(&row)? {
+                    self.truncated = true;
+                    return Ok(crate::db::sink::SinkControl::Stop);
+                }
             }
         }
         self.rows += 1;
@@ -2170,6 +2220,101 @@ mod tests {
             std::fs::read_to_string(&json).unwrap(),
             "[\n  {\"id\":1,\"name\":\"Ada\"},\n  {\"id\":2,\"name\":null}\n]\n"
         );
+    }
+
+    #[test]
+    fn a_result_reaches_an_excel_file_as_one_sheet() {
+        use crate::db::sink::{RowSink, SinkControl};
+        use crate::db::ColumnInfo;
+        use std::io::Read;
+
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("Daily count.xlsx");
+        let mut sink = FileSink::create(&path, ExportFormat::Xlsx).unwrap();
+        sink.begin_set(vec![
+            ColumnInfo::new("id", "int"),
+            ColumnInfo::new("name", "text"),
+        ])
+        .unwrap();
+        assert_eq!(
+            sink.row(vec![serde_json::json!(1), serde_json::json!("Ada")])
+                .unwrap(),
+            SinkControl::Continue
+        );
+        sink.row(vec![serde_json::json!(2), serde_json::json!(null)])
+            .unwrap();
+        sink.end_set(false).unwrap();
+        let summary = sink.finish().unwrap();
+
+        assert_eq!(summary.rows, 2);
+        assert!(!summary.truncated);
+        assert!(!folder.path().join("Daily count.xlsx.part").exists());
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut sheet = String::new();
+        archive
+            .by_name("xl/worksheets/sheet1.xml")
+            .unwrap()
+            .read_to_string(&mut sheet)
+            .unwrap();
+        assert!(sheet.contains("<t xml:space=\"preserve\">id</t>"));
+        assert!(sheet.contains("<row r=\"2\"><c r=\"A2\"><v>1</v></c>"));
+        // The empty value of the second row leaves out its cell.
+        assert!(sheet.contains("<row r=\"3\"><c r=\"A3\"><v>2</v></c></row>"));
+
+        // The sheet takes the name of the file that the user chose.
+        let mut workbook = String::new();
+        archive
+            .by_name("xl/workbook.xml")
+            .unwrap()
+            .read_to_string(&mut workbook)
+            .unwrap();
+        assert!(workbook.contains(r#"<sheet name="Daily count""#));
+    }
+
+    #[test]
+    fn a_stopped_export_of_an_excel_file_leaves_no_file() {
+        use crate::db::sink::RowSink;
+        use crate::db::ColumnInfo;
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("part.xlsx");
+        let mut sink = FileSink::create(&path, ExportFormat::Xlsx).unwrap();
+        sink.begin_set(vec![ColumnInfo::new("id", "int")]).unwrap();
+        sink.row(vec![serde_json::json!(1)]).unwrap();
+        drop(sink);
+        assert!(!path.exists());
+        assert!(std::fs::read_dir(folder.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn an_excel_export_stops_at_the_bound_of_a_sheet() {
+        use crate::db::sink::{RowSink, SinkControl};
+        use crate::db::ColumnInfo;
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("full.xlsx");
+        let mut sink = FileSink::create(&path, ExportFormat::Xlsx).unwrap();
+        sink.begin_set(vec![ColumnInfo::new("id", "int")]).unwrap();
+
+        // The sheet stands one row below its bound, so the next row is the
+        // last one that fits.
+        sink.sheet
+            .as_mut()
+            .unwrap()
+            .set_rows(crate::xlsx::MAX_SHEET_ROWS - 1);
+        assert_eq!(
+            sink.row(vec![serde_json::json!(1)]).unwrap(),
+            SinkControl::Continue
+        );
+        assert_eq!(
+            sink.row(vec![serde_json::json!(2)]).unwrap(),
+            SinkControl::Stop
+        );
+        sink.end_set(false).unwrap();
+
+        let summary = sink.finish().unwrap();
+        assert!(summary.truncated);
+        assert!(path.exists());
     }
 
     #[test]

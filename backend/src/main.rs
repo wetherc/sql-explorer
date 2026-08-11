@@ -15,6 +15,7 @@ mod sql;
 mod state;
 mod storage;
 mod store;
+mod xlsx;
 
 use state::AppState;
 
