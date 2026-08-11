@@ -10,6 +10,7 @@ use crate::db::{
     TableDetails, TableKind,
 };
 use crate::error::{Error, Result};
+use crate::files;
 use crate::history::{HistoryEntry, SavedQuery};
 use crate::script::{self, ScriptKind};
 use crate::session::{Session, DEFAULT_SESSION};
@@ -1206,6 +1207,82 @@ async fn ask_save_path<R: Runtime>(
         .ok()
         .flatten()
         .and_then(|path| path.into_path().ok())
+}
+
+// --- The files of the user ---
+
+/// Asks the user for a folder and records it as a root.
+///
+/// Every other file command refuses a path outside the roots, so this
+/// command is the only way a folder becomes reachable. Returns the path, or
+/// `None` when the user closed the dialog.
+#[tauri::command]
+pub async fn pick_folder<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<String>> {
+    use tauri_plugin_dialog::DialogExt;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_folder(move |path| {
+        let _ = sender.send(path);
+    });
+    let Some(path) = receiver
+        .await
+        .ok()
+        .flatten()
+        .and_then(|path| path.into_path().ok())
+    else {
+        return Ok(None);
+    };
+    state.add_file_root(path.clone()).await;
+    let opened = path.to_string_lossy().to_string();
+    log::info!("Opened the folder '{opened}'.");
+    Ok(Some(opened))
+}
+
+/// Records a folder that the workspace file held, so the folders of the last
+/// session are reachable again. The folder must still be a folder on the
+/// disk, so a record that names something else brings nothing back.
+#[tauri::command]
+pub async fn restore_folder(path: String, state: tauri::State<'_, AppState>) -> Result<bool> {
+    let Some(root) = files::root_from_record(&path) else {
+        return Ok(false);
+    };
+    state.add_file_root(root).await;
+    Ok(true)
+}
+
+/// Lists the entries of one folder inside the roots.
+#[tauri::command]
+pub async fn list_folder(
+    path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<files::FolderEntry>> {
+    let roots = state.file_roots().await;
+    let target = files::path_inside_roots(std::path::Path::new(&path), &roots)?;
+    files::read_folder(&target)
+}
+
+/// Reads the text of one file inside the roots.
+#[tauri::command]
+pub async fn read_text_file(path: String, state: tauri::State<'_, AppState>) -> Result<String> {
+    let roots = state.file_roots().await;
+    let target = files::path_inside_roots(std::path::Path::new(&path), &roots)?;
+    files::read_text(&target)
+}
+
+/// Writes the text of one file inside the roots.
+#[tauri::command]
+pub async fn write_text_file(
+    path: String,
+    contents: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<()> {
+    let roots = state.file_roots().await;
+    let target = files::path_inside_roots(std::path::Path::new(&path), &roots)?;
+    files::write_text(&target, &contents)?;
+    log::info!("Wrote the file '{}'.", target.display());
+    Ok(())
 }
 
 /// What a request to save one file carries. The content is text, or base64

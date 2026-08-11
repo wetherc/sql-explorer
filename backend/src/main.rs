@@ -6,6 +6,7 @@
 mod commands;
 mod db;
 mod error;
+mod files;
 mod history;
 mod script;
 mod secrets;
@@ -68,6 +69,11 @@ fn main() {
             commands::delete_saved_query,
             commands::get_workspace,
             commands::save_workspace,
+            commands::pick_folder,
+            commands::restore_folder,
+            commands::list_folder,
+            commands::read_text_file,
+            commands::write_text_file,
             commands::save_text_file,
             commands::save_binary_file,
             commands::export_query,

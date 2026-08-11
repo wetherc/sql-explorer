@@ -146,6 +146,10 @@ pub struct AppState {
     /// user interface gave it.
     pub running: Mutex<HashMap<String, RunningRequest>>,
     pub secrets: Box<dyn SecretStore>,
+    /// The folders that the user opened through the dialog of the operating
+    /// system. A command that reads or writes a file refuses every path that
+    /// lies outside these folders.
+    pub file_roots: Mutex<Vec<std::path::PathBuf>>,
 }
 
 impl AppState {
@@ -155,7 +159,22 @@ impl AppState {
             background: Mutex::new(HashMap::new()),
             running: Mutex::new(HashMap::new()),
             secrets,
+            file_roots: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Records a folder that the user accepted. A folder that is already in
+    /// the list is not added twice.
+    pub async fn add_file_root(&self, root: std::path::PathBuf) {
+        let mut roots = self.file_roots.lock().await;
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+
+    /// The folders that the user accepted.
+    pub async fn file_roots(&self) -> Vec<std::path::PathBuf> {
+        self.file_roots.lock().await.clone()
     }
 
     /// Drops the background driver of a connection, so that the next
@@ -472,6 +491,21 @@ mod tests {
         state.start_request("r2", None).await;
         state.end_request("r2").await;
         assert!(state.take_request("r2").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_folder_the_user_opened_is_kept_once() {
+        let state = state();
+        assert!(state.file_roots().await.is_empty());
+
+        let first = std::path::PathBuf::from("/data/statements");
+        let second = std::path::PathBuf::from("/data/other");
+        state.add_file_root(first.clone()).await;
+        state.add_file_root(second.clone()).await;
+        // The same folder a second time adds no second record.
+        state.add_file_root(first.clone()).await;
+
+        assert_eq!(state.file_roots().await, vec![first, second]);
     }
 
     #[test]
