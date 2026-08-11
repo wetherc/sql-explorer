@@ -16,6 +16,7 @@ already hold.
 | -------------------------------- | ---------------------------------- |
 | `Ctrl`/`Cmd` + `Enter`           | Run the statement under the cursor |
 | `Ctrl`/`Cmd` + `Shift` + `Enter` | Run the whole script               |
+| `Ctrl`/`Cmd` + `S`               | Write the statement to a file      |
 | `Shift` + `Alt` + `F`            | Lay out the statement              |
 | `Ctrl`/`Cmd` + `T`               | Open a tab                         |
 | `Ctrl`/`Cmd` + `W`               | Close the tab                      |

@@ -489,6 +489,14 @@ const commands: Command[] = [
     run: () => actionsOfActiveTab()?.cancel(),
   },
   {
+    id: 'query.save',
+    title: 'Save the statement to a file',
+    group: 'Query',
+    key: 'mod+s',
+    enabled: hasActiveTab,
+    run: () => actionsOfActiveTab()?.save(),
+  },
+  {
     id: 'editor.format',
     title: 'Format the statement',
     group: 'Editor',

@@ -781,6 +781,7 @@ describe('AppLayout keys', () => {
       runAll: vi.fn(),
       cancel: vi.fn(),
       format: vi.fn(),
+      save: vi.fn(),
     }
     registerTabActions('key-tab', actions)
 
@@ -788,11 +789,13 @@ describe('AppLayout keys', () => {
     press('Enter', { shift: true })
     press('KeyC', { shift: true })
     press('KeyF', { mod: false, shift: true, alt: true })
+    press('KeyS')
 
     expect(actions.runStatement).toHaveBeenCalled()
     expect(actions.runAll).toHaveBeenCalled()
     expect(actions.cancel).toHaveBeenCalled()
     expect(actions.format).toHaveBeenCalled()
+    expect(actions.save).toHaveBeenCalled()
     wrapper.unmount()
   })
 

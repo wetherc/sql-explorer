@@ -126,6 +126,7 @@ describe('the actions of a tab', () => {
     runAll: vi.fn(),
     cancel: vi.fn(),
     format: vi.fn(),
+    save: vi.fn(),
   }
 
   beforeEach(() => {

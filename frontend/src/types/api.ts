@@ -205,6 +205,16 @@ export interface SaveFileRequest {
   contents: string
 }
 
+/** What a request to save the statement of a tab carries. */
+export interface SaveStatementRequest {
+  /** The file name that the save dialog suggests. */
+  defaultName: string
+  /** The folder the dialog opens in, when the panel holds one. */
+  defaultFolder: string | null
+  /** The text of the statement. */
+  contents: string
+}
+
 export interface ExecOptions {
   maxRows: number
   timeoutSecs: number

@@ -74,6 +74,7 @@ fn main() {
             commands::list_folder,
             commands::read_text_file,
             commands::write_text_file,
+            commands::save_statement_file,
             commands::save_text_file,
             commands::save_binary_file,
             commands::export_query,

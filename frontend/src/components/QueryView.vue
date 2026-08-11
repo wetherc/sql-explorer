@@ -114,6 +114,17 @@
         size="small"
         prepend-icon="mdi-content-save-outline"
         text="Save"
+        :loading="savingFile"
+        data-test="save-file-button"
+        @click="saveToFile"
+      />
+
+      <v-btn
+        size="small"
+        variant="text"
+        icon="mdi-bookmark-outline"
+        aria-label="Save this statement in the library"
+        title="Save this statement in the library"
         data-test="save-query-button"
         @click="savingQuery = true"
       />
@@ -470,6 +481,7 @@ import { bytesToBase64, toXlsx } from '@/lib/xlsx'
 import { formatClockTime, formatRowCount } from '@/lib/format'
 import { useConnectionsStore } from '@/stores/connections'
 import { useExplorerStore } from '@/stores/explorer'
+import { baseName, useFilesStore } from '@/stores/files'
 import { useHistoryStore } from '@/stores/history'
 import { MIN_EDITOR_SIZE, useLayoutStore } from '@/stores/layout'
 import { newQueryState, useQueryStore } from '@/stores/query'
@@ -491,6 +503,7 @@ const tabs = useTabsStore()
 const queries = useQueryStore()
 const connections = useConnectionsStore()
 const explorer = useExplorerStore()
+const files = useFilesStore()
 const history = useHistoryStore()
 const layout = useLayoutStore()
 const settings = useSettingsStore()
@@ -509,6 +522,8 @@ const resultsCollapsed = computed(() => layout.layout.resultsCollapsed)
 /** True while the results panel stands below the editor and not beside it. */
 const resultsBelow = computed(() => layout.layout.resultsOrientation === 'below')
 const savingQuery = ref(false)
+/** True while a write to the disk is on its way. */
+const savingFile = ref(false)
 const saveName = ref('')
 const saveFolder = ref('')
 const askingTable = ref(false)
@@ -950,6 +965,49 @@ function textFor(result: ResultSet, format: ExportFormat): string {
   return toCsv(result)
 }
 
+/** The name the save dialog suggests for a tab that holds no file yet. */
+function suggestedFileName(title: string): string {
+  return title.toLowerCase().endsWith('.sql') ? title : `${title}.sql`
+}
+
+/**
+ * Writes the statement of the tab to a file. A tab that came from the disk
+ * goes back to the same file. A tab without a file reaches the save dialog
+ * of the operating system, which opens in the first folder of the files
+ * panel when the panel holds one.
+ */
+async function saveToFile(): Promise<void> {
+  if (savingFile.value) {
+    return
+  }
+  savingFile.value = true
+  try {
+    const path = props.tab.filePath
+    if (path) {
+      await api.writeTextFile(path, props.tab.query)
+      tabs.markClean(props.tab.id)
+      ui.success(`The file ${baseName(path)} is written.`)
+      return
+    }
+    const written = await api.saveStatementFile({
+      defaultName: suggestedFileName(props.tab.title),
+      defaultFolder: files.roots[0]?.path ?? null,
+      contents: props.tab.query,
+    })
+    if (written === null) {
+      return
+    }
+    tabs.setFilePath(props.tab.id, written)
+    tabs.rename(props.tab.id, baseName(written))
+    tabs.markClean(props.tab.id)
+    ui.success(`The file ${baseName(written)} is written.`)
+  } catch (error) {
+    ui.reportError(error)
+  } finally {
+    savingFile.value = false
+  }
+}
+
 async function confirmSave(): Promise<void> {
   const saved = await history.save({
     id: props.tab.savedQueryId ?? undefined,
@@ -979,6 +1037,9 @@ onMounted(() => {
     runAll,
     cancel,
     format: formatStatement,
+    save: () => {
+      void saveToFile()
+    },
   })
 })
 
@@ -986,7 +1047,7 @@ onBeforeUnmount(() => {
   forgetTabActions(props.tab.id)
 })
 
-defineExpose({ runStatement, runAll, formatStatement, readPlan })
+defineExpose({ runStatement, runAll, formatStatement, readPlan, saveToFile })
 </script>
 
 <style scoped>

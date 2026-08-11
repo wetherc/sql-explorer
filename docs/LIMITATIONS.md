@@ -223,3 +223,12 @@ before it returns it. The library gives no streaming form of the simple
 query, so the memory cost of such a script grows with the size of its
 answer until the row limit applies. A statement with parameters streams
 one row at a time.
+
+## The files panel does not watch the disk
+
+The panel reads a folder when the user opens it and when the user asks for
+a refresh. It holds no watch on the disk, so a file that another program
+writes keeps its old text in the panel and in a tab that shows it. A save
+from a tab writes the whole file, so the last write wins and a change that
+came from outside is lost. A refresh of the folder, or a second open of the
+file, brings the text of the disk back.

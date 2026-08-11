@@ -13,6 +13,7 @@ import type {
   ExportSummary,
   FolderEntry,
   SaveFileRequest,
+  SaveStatementRequest,
   HistoryEntry,
   IndexRef,
   PartitionRef,
@@ -296,6 +297,13 @@ export const api = {
   /** Writes the text of one file inside a folder that the user opened. */
   writeTextFile(path: string, contents: string): Promise<void> {
     return invoke('write_text_file', { path, contents })
+  },
+
+  /** Asks the user for a path and writes the statement of a tab there. The
+   *  folder of that file becomes a root, so a later save reaches it. Gives
+   *  back the path, or null when the user closed the dialog. */
+  saveStatementFile(request: SaveStatementRequest): Promise<string | null> {
+    return invoke('save_statement_file', { request })
   },
 
   /** Asks the user for a path and writes text there. Gives back the path,

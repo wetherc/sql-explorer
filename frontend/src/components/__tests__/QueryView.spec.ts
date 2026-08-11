@@ -9,6 +9,7 @@ const { tabActions } = await import('@/lib/commands')
 const QueryView = (await import('@/components/QueryView.vue')).default
 const { mountWithPlugins, settle } = await import('./mount')
 const { useConnectionsStore } = await import('@/stores/connections')
+const { useFilesStore } = await import('@/stores/files')
 const { useLayoutStore } = await import('@/stores/layout')
 const { useQueryStore } = await import('@/stores/query')
 const { useTabsStore } = await import('@/stores/tabs')
@@ -74,7 +75,7 @@ async function mountedWithResult() {
   return wrapper
 }
 
-async function mountView(query = 'SELECT 1') {
+async function mountView(query = 'SELECT 1', filePath: string | null = null) {
   const wrapper = mountWithPlugins(QueryView, {
     props: {
       tab: {
@@ -85,7 +86,7 @@ async function mountView(query = 'SELECT 1') {
         dirty: false,
         savedQueryId: null,
         params: [],
-        filePath: null,
+        filePath,
       },
     },
   })
@@ -881,6 +882,128 @@ describe('QueryView', () => {
     await settle()
 
     expect(useUiStore().notices.some((notice) => notice.level === 'error')).toBe(true)
+  })
+
+  it('writes the statement back to the file that the tab came from', async () => {
+    apiStub.writeTextFile.mockResolvedValue(undefined)
+    const wrapper = await mountView('SELECT 1', '/data/report.sql')
+    const tabs = useTabsStore()
+    tabs.tabs = [
+      {
+        id: 't1',
+        title: 'report.sql',
+        query: 'SELECT 1',
+        connectionId: 'c1',
+        dirty: true,
+        savedQueryId: null,
+        params: [],
+        filePath: '/data/report.sql',
+      },
+    ]
+
+    await wrapper.find('[data-test="save-file-button"]').trigger('click')
+    await settle()
+
+    expect(apiStub.writeTextFile).toHaveBeenCalledWith('/data/report.sql', 'SELECT 1')
+    expect(apiStub.saveStatementFile).not.toHaveBeenCalled()
+    expect(tabs.tabs[0]?.dirty).toBe(false)
+    expect(useUiStore().notices.some((notice) => notice.level === 'success')).toBe(true)
+  })
+
+  it('asks for a path when the tab holds no file, and keeps that path', async () => {
+    apiStub.saveStatementFile.mockResolvedValue('/data/daily.sql')
+    apiStub.listFolder.mockResolvedValue([])
+    const wrapper = await mountView()
+    const tabs = useTabsStore()
+    tabs.tabs = [
+      {
+        id: 't1',
+        title: 'Query 1',
+        query: 'SELECT 1',
+        connectionId: 'c1',
+        dirty: true,
+        savedQueryId: null,
+        params: [],
+        filePath: null,
+      },
+    ]
+    useFilesStore().restoreRoots(['/data'])
+
+    await wrapper.find('[data-test="save-file-button"]').trigger('click')
+    await settle()
+
+    expect(apiStub.saveStatementFile).toHaveBeenCalledWith({
+      defaultName: 'Query 1.sql',
+      defaultFolder: '/data',
+      contents: 'SELECT 1',
+    })
+    expect(tabs.tabs[0]).toMatchObject({
+      filePath: '/data/daily.sql',
+      title: 'daily.sql',
+      dirty: false,
+    })
+  })
+
+  it('holds the tab as it is when the user closed the save dialog', async () => {
+    apiStub.saveStatementFile.mockResolvedValue(null)
+    const wrapper = await mountView()
+    const tabs = useTabsStore()
+    tabs.tabs = [
+      {
+        id: 't1',
+        title: 'Query 1.sql',
+        query: 'SELECT 1',
+        connectionId: 'c1',
+        dirty: true,
+        savedQueryId: null,
+        params: [],
+        filePath: null,
+      },
+    ]
+
+    await wrapper.find('[data-test="save-file-button"]').trigger('click')
+    await settle()
+
+    // A title that already names a file keeps its one ending.
+    expect(apiStub.saveStatementFile).toHaveBeenCalledWith(
+      expect.objectContaining({ defaultName: 'Query 1.sql', defaultFolder: null }),
+    )
+    expect(tabs.tabs[0]?.filePath).toBeNull()
+    expect(tabs.tabs[0]?.dirty).toBe(true)
+  })
+
+  it('reports a write that the disk refused', async () => {
+    apiStub.writeTextFile.mockRejectedValue({ kind: 'io', message: 'read only', detail: null })
+    const wrapper = await mountView('SELECT 1', '/data/report.sql')
+
+    await wrapper.find('[data-test="save-file-button"]').trigger('click')
+    await settle()
+
+    expect(useUiStore().notices.some((notice) => notice.level === 'error')).toBe(true)
+
+    // The button works again once the first write ends.
+    apiStub.writeTextFile.mockResolvedValue(undefined)
+    await wrapper.find('[data-test="save-file-button"]').trigger('click')
+    await settle()
+    expect(apiStub.writeTextFile).toHaveBeenCalledTimes(2)
+  })
+
+  it('starts one write at a time', async () => {
+    let finish: () => void = () => {}
+    apiStub.writeTextFile.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = () => resolve()
+        }),
+    )
+    const wrapper = await mountView('SELECT 1', '/data/report.sql')
+
+    await wrapper.find('[data-test="save-file-button"]').trigger('click')
+    await wrapper.vm.saveToFile()
+    expect(apiStub.writeTextFile).toHaveBeenCalledTimes(1)
+
+    finish()
+    await settle()
   })
 
   it('moves the split between the editor and the results', async () => {

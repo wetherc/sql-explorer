@@ -133,6 +133,7 @@ export interface TabActions {
   runAll: () => void
   cancel: () => void
   format: () => void
+  save: () => void
 }
 
 const tabActionRegistry = new Map<string, TabActions>()

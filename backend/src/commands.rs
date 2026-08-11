@@ -1192,16 +1192,23 @@ async fn ask_save_path<R: Runtime>(
     default_name: &str,
     filter_label: &str,
     extension: &str,
+    start_folder: Option<&std::path::Path>,
 ) -> Option<std::path::PathBuf> {
     use tauri_plugin_dialog::DialogExt;
     let (sender, receiver) = tokio::sync::oneshot::channel();
-    app.dialog()
+    let mut dialog = app
+        .dialog()
         .file()
         .set_file_name(default_name)
-        .add_filter(filter_label, &[extension])
-        .save_file(move |path| {
-            let _ = sender.send(path);
-        });
+        .add_filter(filter_label, &[extension]);
+    // The dialog opens where the work of the user is, when the interface
+    // knows such a folder.
+    if let Some(folder) = start_folder {
+        dialog = dialog.set_directory(folder);
+    }
+    dialog.save_file(move |path| {
+        let _ = sender.send(path);
+    });
     receiver
         .await
         .ok()
@@ -1285,6 +1292,42 @@ pub async fn write_text_file(
     Ok(())
 }
 
+/// What a request to save the statement of a tab carries.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveStatementRequest {
+    /// The file name that the save dialog suggests.
+    pub default_name: String,
+    /// The folder the dialog opens in, when the interface knows one.
+    pub default_folder: Option<String>,
+    pub contents: String,
+}
+
+/// Asks the user for a path and writes the statement of a tab there.
+///
+/// The folder of the file becomes a root, so the next save of the same tab
+/// reaches the file through `write_text_file`. Returns the path, or `None`
+/// when the user closed the dialog.
+#[tauri::command]
+pub async fn save_statement_file<R: Runtime>(
+    app: AppHandle<R>,
+    request: SaveStatementRequest,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<String>> {
+    let start_folder = request.default_folder.as_deref().map(std::path::Path::new);
+    let Some(path) = ask_save_path(&app, &request.default_name, "SQL", "sql", start_folder).await
+    else {
+        return Ok(None);
+    };
+    files::write_text(&path, &request.contents)?;
+    if let Some(folder) = files::folder_of(&path) {
+        state.add_file_root(folder).await;
+    }
+    let written = path.to_string_lossy().to_string();
+    log::info!("Wrote the file '{written}'.");
+    Ok(Some(written))
+}
+
 /// What a request to save one file carries. The content is text, or base64
 /// text when the file is binary.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1311,6 +1354,7 @@ pub async fn save_text_file<R: Runtime>(
         &request.default_name,
         &request.filter_label,
         &request.extension,
+        None,
     )
     .await
     else {
@@ -1336,6 +1380,7 @@ pub async fn save_binary_file<R: Runtime>(
         &request.default_name,
         &request.filter_label,
         &request.extension,
+        None,
     )
     .await
     else {
@@ -1382,7 +1427,7 @@ pub async fn export_query<R: Runtime>(
         ExportFormat::Csv => ("CSV", "csv"),
         ExportFormat::Json => ("JSON", "json"),
     };
-    let Some(path) = ask_save_path(&app, &default_name, label, extension).await else {
+    let Some(path) = ask_save_path(&app, &default_name, label, extension, None).await else {
         return Ok(None);
     };
 

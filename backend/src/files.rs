@@ -77,6 +77,17 @@ pub fn root_from_record(path: &str) -> Option<PathBuf> {
     candidate.is_dir().then_some(candidate)
 }
 
+/// The folder that holds a file, when that folder is on the disk.
+///
+/// A file that the user names in the save dialog lies outside every root, so
+/// the folder of it becomes a root and the next write of the same tab passes
+/// the guard.
+pub fn folder_of(path: &Path) -> Option<PathBuf> {
+    path.parent()
+        .filter(|parent| parent.is_dir())
+        .map(Path::to_path_buf)
+}
+
 /// True when the name of an entry is one the panel hides.
 fn is_hidden(name: &str) -> bool {
     name.starts_with('.')
@@ -221,6 +232,19 @@ mod tests {
         assert_eq!(root_from_record(&file.to_string_lossy()), None);
         assert_eq!(root_from_record(&root.join("gone").to_string_lossy()), None);
         assert_eq!(root_from_record(""), None);
+    }
+
+    #[test]
+    fn a_file_names_the_folder_that_holds_it() {
+        let root = temp_folder("folder-of");
+        let file = root.join("a.sql");
+
+        // The file itself does not need to be there, because the dialog
+        // names a path before the write.
+        assert_eq!(folder_of(&file), Some(root.clone()));
+        // A folder that is not on the disk names nothing.
+        assert_eq!(folder_of(&root.join("gone").join("a.sql")), None);
+        assert_eq!(folder_of(Path::new("a.sql")), None);
     }
 
     #[test]

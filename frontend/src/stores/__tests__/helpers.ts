@@ -43,6 +43,7 @@ export function makeApiStub() {
     listFolder: vi.fn(),
     readTextFile: vi.fn(),
     writeTextFile: vi.fn(),
+    saveStatementFile: vi.fn(),
     saveTextFile: vi.fn(),
     saveBinaryFile: vi.fn(),
     exportQuery: vi.fn(),
