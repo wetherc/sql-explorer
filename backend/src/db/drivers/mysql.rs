@@ -620,16 +620,12 @@ fn create_query_text(database: Option<&str>, table: &str, kind: TableKind) -> Cr
     CreateQuery::new(format!("SHOW CREATE {word} {name};"), 1)
 }
 
+/// Converts one row into an array of JSON values. The values stay in the row
+/// while they are read, so a row of text costs no copy of that text.
 pub fn row_to_json(row: &MysqlRow, column_count: usize) -> Vec<JsonValue> {
-    let values: Vec<MysqlValue> = (0..column_count)
-        .map(|index| row.as_ref(index).cloned().unwrap_or(MysqlValue::NULL))
-        .collect();
-    values_to_json(&values)
-}
-
-/// Converts a whole row of values into JSON.
-pub fn values_to_json(values: &[MysqlValue]) -> Vec<JsonValue> {
-    values.iter().map(value_to_json).collect()
+    (0..column_count)
+        .map(|index| row.as_ref(index).map_or(JsonValue::Null, value_to_json))
+        .collect()
 }
 
 /// Converts one value of the driver into JSON.
@@ -933,19 +929,19 @@ mod tests {
 
     #[test]
     fn a_row_of_values_gives_one_json_value_for_each_column() {
-        let values = vec![
+        let values = [
             MysqlValue::Int(1),
             MysqlValue::Bytes(b"a".to_vec()),
             MysqlValue::NULL,
         ];
+        let json: Vec<JsonValue> = values.iter().map(value_to_json).collect();
         assert_eq!(
-            values_to_json(&values),
+            json,
             vec![
                 serde_json::json!(1),
                 serde_json::json!("a"),
                 JsonValue::Null
             ]
         );
-        assert!(values_to_json(&[]).is_empty());
     }
 }

@@ -1159,15 +1159,11 @@ pub fn numeric_to_string(value: Numeric) -> String {
 /// of the column does not match the target type, and the type of a column
 /// is not known before the server answers.
 pub fn row_to_json(row: &Row) -> Vec<JsonValue> {
-    let types: Vec<ColumnType> = row
-        .columns()
+    row.columns()
         .iter()
         .map(|column| column.column_type())
-        .collect();
-    types
-        .iter()
         .enumerate()
-        .map(|(index, column_type)| cell_to_json(row, index, *column_type))
+        .map(|(index, column_type)| cell_to_json(row, index, column_type))
         .collect()
 }
 

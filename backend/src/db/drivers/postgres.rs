@@ -883,8 +883,10 @@ pub fn row_to_json(row: &Row) -> Vec<JsonValue> {
 /// Reads one cell. Every target type is an option, because a column that
 /// holds no value would otherwise make the driver panic.
 fn cell_to_json(row: &Row, index: usize) -> JsonValue {
-    let column_type = row.columns()[index].type_().clone();
-    match column_type {
+    // The type stays in the row, because a copy of it would cost a count on
+    // a shared record for each cell of the answer.
+    let column_type = row.columns()[index].type_();
+    match *column_type {
         Type::BOOL => get(row, index).map_or(JsonValue::Null, JsonValue::Bool),
         Type::INT2 => get::<i16>(row, index).map_or(JsonValue::Null, Into::into),
         Type::INT4 => get::<i32>(row, index).map_or(JsonValue::Null, Into::into),
