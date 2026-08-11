@@ -172,6 +172,21 @@ function confirmClose(): void {
   border-bottom: var(--app-divider);
 }
 
+/* The body holds the height that remains, so the views inside it can size
+   themselves against it. Without this rule the body grows with the rows of
+   a result, and the split of the query view slides below the window. */
+.tab-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.tab-body > * {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 .query-tab {
   text-transform: none;
   letter-spacing: normal;
