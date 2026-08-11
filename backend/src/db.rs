@@ -1,6 +1,7 @@
 //! The shared data model that every driver produces and every command
 //! returns.
 
+pub mod columnar;
 pub mod drivers;
 pub mod sink;
 

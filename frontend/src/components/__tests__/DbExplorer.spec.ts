@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { makeApiStub, connectionFixture, infoFixture } from '../../stores/__tests__/helpers'
+import {
+  makeApiStub,
+  connectionFixture,
+  infoFixture,
+  streamed,
+} from '../../stores/__tests__/helpers'
 
 const apiStub = makeApiStub()
 vi.mock('@/lib/api', () => ({ api: apiStub, CONNECTION_STATUS_EVENT: 'connection-status' }))
@@ -117,12 +122,14 @@ describe('DbExplorer', () => {
 
   it('builds the preview statement in the backend and runs it', async () => {
     apiStub.previewQuery.mockResolvedValue('SELECT TOP 1000 * FROM [Sales].[dbo].[orders];')
-    apiStub.executeQuery.mockResolvedValue({
-      results: [],
-      messages: [],
-      rowsAffected: null,
-      elapsedMs: 1,
-    })
+    apiStub.executeQuery.mockImplementation(
+      streamed({
+        results: [],
+        messages: [],
+        rowsAffected: null,
+        elapsedMs: 1,
+      }),
+    )
     apiStub.addHistoryEntry.mockResolvedValue([])
 
     const wrapper = await mountExplorer()

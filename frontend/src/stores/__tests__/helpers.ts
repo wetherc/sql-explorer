@@ -1,5 +1,6 @@
 import { vi } from 'vitest'
-import type { SavedConnection } from '@/types/api'
+import { ResultTable, type ResultStreamHandlers } from '@/lib/results'
+import type { CellValue, ColumnInfo, Message, QueryStats, SavedConnection } from '@/types/api'
 import { DbType, Dialect, defaultConnectionOptions } from '@/types/api'
 
 /** A stub for every backend command, so no test reaches a real bridge. */
@@ -86,5 +87,35 @@ export function infoFixture(connectionId = 'c1', supportsSchemas = true) {
       supportsExplain: true,
     },
     dialect: Dialect.MsSql,
+  }
+}
+
+/** One answer of a run, in the shape a test writes it. */
+export interface ResponseFixture {
+  results: Array<{ columns?: ColumnInfo[]; rows: CellValue[][]; truncated?: boolean }>
+  messages?: Message[]
+  rowsAffected?: number | null
+  elapsedMs?: number
+  stats?: QueryStats | null
+}
+
+/**
+ * Builds the answer of the stub of `executeQuery`. The command sends its rows
+ * on a channel, so the stub reports each set and then the numbers of the run,
+ * as the backend does.
+ */
+export function streamed(response: ResponseFixture) {
+  return async (_request: unknown, handlers: ResultStreamHandlers): Promise<void> => {
+    for (const result of response.results) {
+      handlers.onSet(
+        ResultTable.fromRows(result.columns ?? [], result.rows, result.truncated ?? false),
+      )
+    }
+    handlers.onEnd({
+      messages: response.messages ?? [],
+      rowsAffected: response.rowsAffected ?? null,
+      elapsedMs: response.elapsedMs ?? 0,
+      stats: response.stats ?? null,
+    })
   }
 }

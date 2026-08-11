@@ -78,7 +78,7 @@
 
     <div v-if="result.truncated" class="px-3 py-1">
       <v-alert type="warning" density="compact" variant="tonal" data-test="grid-truncated">
-        The row limit stopped the read at {{ result.rows.length.toLocaleString() }} rows.
+        The row limit stopped the read at {{ result.rowCount.toLocaleString() }} rows.
       </v-alert>
     </div>
 
@@ -98,7 +98,7 @@
           class="grid-table"
           role="grid"
           aria-label="The rows of the result"
-          :aria-rowcount="sortedRows.length + 1"
+          :aria-rowcount="sortedOrder.length + 1"
           :aria-colcount="result.columns.length + 1"
           :aria-busy="busy"
           @keydown="onGridKeyDown"
@@ -179,7 +179,7 @@
             <tr v-if="bottomPad > 0" :style="{ height: `${bottomPad}px` }" aria-hidden="true">
               <td :colspan="result.columns.length + 1"></td>
             </tr>
-            <tr v-if="sortedRows.length === 0">
+            <tr v-if="sortedOrder.length === 0">
               <td
                 :colspan="result.columns.length + 1"
                 class="text-center py-6 text-medium-emphasis"
@@ -215,6 +215,7 @@ import type { ComponentPublicInstance } from 'vue'
 import PanelHeader from './PanelHeader.vue'
 import { compareCells, formatCell, isNullCell, truncate } from '@/lib/format'
 import { toTabSeparated } from '@/lib/export'
+import type { ResultTable } from '@/lib/results'
 import type { CellValue, ResultSet } from '@/types/api'
 
 /** The forms an export can take. */
@@ -226,7 +227,7 @@ export type ExportFormat = 'csv' | 'json' | 'markdown' | 'insert' | 'xlsx'
  */
 export type ExportAllFormat = 'csv' | 'json' | 'xlsx'
 
-const props = withDefaults(defineProps<{ result: ResultSet; busy?: boolean }>(), { busy: false })
+const props = withDefaults(defineProps<{ result: ResultTable; busy?: boolean }>(), { busy: false })
 const emit = defineEmits<{
   (event: 'export', format: ExportFormat, rows: ResultSet): void
   (event: 'export-all', format: ExportAllFormat): void
@@ -313,10 +314,17 @@ const selected = ref(new Set<number>())
 /** The row of the last plain click, from which a click with Shift reaches. */
 const anchor = ref<number | null>(null)
 
-/** Every row of the result with the place it holds in the result. */
-const sourceRows = computed(() =>
-  props.result.rows.map((row, sourceIndex) => ({ row, sourceIndex })),
-)
+/**
+ * The place of every row of the result. The view holds places and not rows,
+ * so a result of many rows costs one number for each row and no object.
+ */
+const sourceOrder = computed(() => {
+  const order = new Array<number>(props.result.rowCount)
+  for (let index = 0; index < order.length; index += 1) {
+    order[index] = index
+  }
+  return order
+})
 
 /**
  * The text of every row in small letters, which the filter matches against.
@@ -325,17 +333,20 @@ const sourceRows = computed(() =>
  * keystrokes, and released when the filter clears or the result changes.
  */
 let rowTexts: string[] | null = null
-let rowTextsSource: typeof props.result.rows | null = null
+let rowTextsSource: ResultTable | null = null
 
-function rowTextsFor(rows: typeof props.result.rows): string[] {
-  if (rowTexts === null || rowTextsSource !== rows) {
-    rowTexts = rows.map((row) =>
-      row
+function rowTextsFor(table: ResultTable): string[] {
+  if (rowTexts === null || rowTextsSource !== table) {
+    const texts = new Array<string>(table.rowCount)
+    for (let index = 0; index < texts.length; index += 1) {
+      texts[index] = table
+        .row(index)
         .map((cell) => formatCell(cell))
         .join(' ')
-        .toLowerCase(),
-    )
-    rowTextsSource = rows
+        .toLowerCase()
+    }
+    rowTexts = texts
+    rowTextsSource = table
   }
   return rowTexts
 }
@@ -347,23 +358,24 @@ watch(appliedSearch, (needle) => {
   }
 })
 
-const filteredRows = computed(() => {
+const filteredOrder = computed(() => {
   const needle = appliedSearch.value
   if (needle === '') {
-    return sourceRows.value
+    return sourceOrder.value
   }
-  const texts = rowTextsFor(props.result.rows)
-  return sourceRows.value.filter((entry) => texts[entry.sourceIndex]?.includes(needle))
+  const texts = rowTextsFor(props.result)
+  return sourceOrder.value.filter((row) => texts[row]?.includes(needle))
 })
 
-const sortedRows = computed(() => {
+const sortedOrder = computed(() => {
   const index = sortIndex.value
   if (index === null) {
-    return filteredRows.value
+    return filteredOrder.value
   }
   const direction = sortDescending.value ? -1 : 1
-  return [...filteredRows.value].sort(
-    (left, right) => compareCells(left.row[index] ?? null, right.row[index] ?? null) * direction,
+  const table = props.result
+  return [...filteredOrder.value].sort(
+    (left, right) => compareCells(table.cell(left, index), table.cell(right, index)) * direction,
   )
 })
 
@@ -385,27 +397,32 @@ const firstVisible = computed(() =>
 )
 const visibleCount = computed(() => Math.ceil(viewportHeight.value / ROW_HEIGHT) + OVERSCAN * 2)
 const lastVisible = computed(() =>
-  Math.min(sortedRows.value.length, firstVisible.value + visibleCount.value),
+  Math.min(sortedOrder.value.length, firstVisible.value + visibleCount.value),
 )
 
+// The rows of the window are the only rows that stand as arrays of values.
 const windowRows = computed(() =>
-  sortedRows.value.slice(firstVisible.value, lastVisible.value).map((entry, offset) => ({
-    ...entry,
-    position: firstVisible.value + offset,
-    // The text of each cell is built once here, so the view does not build
-    // it again for the tooltip and for the body of the cell.
-    texts: entry.row.map((cell) => formatCell(cell)),
-  })),
+  sortedOrder.value.slice(firstVisible.value, lastVisible.value).map((sourceIndex, offset) => {
+    const row = props.result.row(sourceIndex)
+    return {
+      sourceIndex,
+      row,
+      position: firstVisible.value + offset,
+      // The text of each cell is built once here, so the view does not build
+      // it again for the tooltip and for the body of the cell.
+      texts: row.map((cell) => formatCell(cell)),
+    }
+  }),
 )
 
 const topPad = computed(() => firstVisible.value * ROW_HEIGHT)
 const bottomPad = computed(() =>
-  Math.max(0, (sortedRows.value.length - lastVisible.value) * ROW_HEIGHT),
+  Math.max(0, (sortedOrder.value.length - lastVisible.value) * ROW_HEIGHT),
 )
 
 const countLabel = computed(() => {
-  const shown = sortedRows.value.length
-  const total = props.result.rows.length
+  const shown = sortedOrder.value.length
+  const total = props.result.rowCount
   const head =
     shown === total
       ? `${total.toLocaleString()} rows`
@@ -480,7 +497,7 @@ function isFocused(entry: { position: number }, column: number): boolean {
  * follows once the row is drawn.
  */
 function focusCellAt(row: number, column: number, move = true): void {
-  const lastRow = Math.max(0, sortedRows.value.length - 1)
+  const lastRow = Math.max(0, sortedOrder.value.length - 1)
   const lastColumn = Math.max(0, props.result.columns.length - 1)
   focusedRow.value = Math.min(lastRow, Math.max(0, row))
   focusedColumn.value = Math.min(lastColumn, Math.max(0, column))
@@ -511,12 +528,12 @@ function rowsPerPage(): number {
 }
 
 function onGridKeyDown(event: KeyboardEvent): void {
-  if (sortedRows.value.length === 0) {
+  if (sortedOrder.value.length === 0) {
     return
   }
   const row = focusedRow.value
   const column = focusedColumn.value
-  const lastRow = sortedRows.value.length - 1
+  const lastRow = sortedOrder.value.length - 1
   const lastColumn = props.result.columns.length - 1
 
   switch (event.key) {
@@ -558,16 +575,16 @@ function onGridKeyDown(event: KeyboardEvent): void {
   event.preventDefault()
 }
 
-/** The row of the sorted rows the tab stop stands on. */
-function focusedEntry() {
-  return sortedRows.value[focusedRow.value]
+/** The place in the result of the row the tab stop stands on. */
+function focusedSourceRow(): number | undefined {
+  return sortedOrder.value[focusedRow.value]
 }
 
 /** Opens the whole value of the cell the tab stop stands on. */
 function openFocusedCell(): void {
-  const entry = focusedEntry()
-  if (entry) {
-    inspect(entry.row[focusedColumn.value] ?? null, columnName(focusedColumn.value))
+  const row = focusedSourceRow()
+  if (row !== undefined) {
+    inspect(props.result.cell(row, focusedColumn.value), columnName(focusedColumn.value))
   }
 }
 
@@ -576,18 +593,18 @@ function openFocusedCell(): void {
  * when Control or Command is held.
  */
 function toggleFocusedRow(event: KeyboardEvent): void {
-  const entry = focusedEntry()
-  if (entry) {
+  const row = focusedSourceRow()
+  if (row !== undefined) {
     if (event.ctrlKey || event.metaKey) {
       const next = new Set(selected.value)
-      if (next.has(entry.sourceIndex)) {
-        next.delete(entry.sourceIndex)
+      if (next.has(row)) {
+        next.delete(row)
       } else {
-        next.add(entry.sourceIndex)
+        next.add(row)
       }
       selected.value = next
     } else {
-      selected.value = new Set([entry.sourceIndex])
+      selected.value = new Set([row])
     }
     anchor.value = focusedRow.value
   }
@@ -606,8 +623,8 @@ function revealFullValue(event: Event, row: number, column: number): void {
     cell.removeAttribute('title')
     return
   }
-  const entry = sortedRows.value[row]
-  cell.title = entry ? formatCell(entry.row[column] ?? null) : ''
+  const source = sortedOrder.value[row]
+  cell.title = source === undefined ? '' : formatCell(props.result.cell(source, column))
 }
 
 function onCellFocus(event: Event, row: number, column: number): void {
@@ -625,8 +642,8 @@ function onRowClick(position: number, sourceIndex: number, event: MouseEvent): v
     const from = Math.min(anchor.value, position)
     const to = Math.max(anchor.value, position)
     const next = new Set(selected.value)
-    for (const entry of sortedRows.value.slice(from, to + 1)) {
-      next.add(entry.sourceIndex)
+    for (const source of sortedOrder.value.slice(from, to + 1)) {
+      next.add(source)
     }
     selected.value = next
     return
@@ -655,12 +672,14 @@ function clearSelection(): void {
  * filter of the view, and they hold the selection alone when there is one.
  */
 function rowsToExport(): ResultSet {
-  const entries = hasSelection.value
-    ? sortedRows.value.filter((entry) => selected.value.has(entry.sourceIndex))
-    : sortedRows.value
+  const order = hasSelection.value
+    ? sortedOrder.value.filter((row) => selected.value.has(row))
+    : sortedOrder.value
+  // An export builds the rows it writes, and it builds them at the moment the
+  // user asks for the file.
   return {
     columns: props.result.columns,
-    rows: entries.map((entry) => entry.row),
+    rows: order.map((row) => props.result.row(row)),
     truncated: props.result.truncated,
   }
 }

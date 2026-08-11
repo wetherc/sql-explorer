@@ -652,7 +652,7 @@ const collapsedLabel = computed(() => (activePane.value ? paneLabel(activePane.v
 
 function paneLabel(pane: ResultPane): string {
   const name = pane.label ?? `Result ${pane.number}`
-  const head = `${name} (${formatRowCount(pane.result.rows.length)})`
+  const head = `${name} (${formatRowCount(pane.result.rowCount)})`
   return pane.pinned ? `${head} at ${formatClockTime(pane.ranAt)}` : head
 }
 

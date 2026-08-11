@@ -1,5 +1,6 @@
-import { invoke } from '@tauri-apps/api/core'
+import { Channel, invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { ResultStream, type ResultStreamHandlers } from '@/lib/results'
 import type { Dialect } from '@/types/api'
 import type {
   ColumnRef,
@@ -75,15 +76,26 @@ export const api = {
     return invoke('list_active_connections')
   },
 
-  executeQuery(request: {
-    connectionId: string
-    requestId: string
-    query: string
-    tabId?: string
-    queryParams?: Record<string, unknown>
-    options?: ExecOptions
-  }): Promise<QueryResponse> {
-    return call('execute_query', request)
+  /**
+   * Runs a script. The rows arrive on a channel as binary chunks while the
+   * read runs, so neither side holds the whole answer. The handlers receive
+   * each result set as it ends, and then the numbers of the run.
+   */
+  executeQuery(
+    request: {
+      connectionId: string
+      requestId: string
+      query: string
+      tabId?: string
+      queryParams?: Record<string, unknown>
+      options?: ExecOptions
+    },
+    handlers: ResultStreamHandlers,
+  ): Promise<void> {
+    const stream = new ResultStream(handlers)
+    const onChunk = new Channel<ArrayBuffer>()
+    onChunk.onmessage = (message) => stream.feed(message)
+    return invoke('execute_query', { request: withNulls(request), onChunk })
   },
 
   explainQuery(request: {

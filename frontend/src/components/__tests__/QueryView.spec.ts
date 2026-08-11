@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { makeApiStub, connectionFixture, infoFixture } from '../../stores/__tests__/helpers'
+import {
+  makeApiStub,
+  connectionFixture,
+  infoFixture,
+  streamed,
+} from '../../stores/__tests__/helpers'
 
 const apiStub = makeApiStub()
 vi.mock('@/lib/api', () => ({ api: apiStub, CONNECTION_STATUS_EVENT: 'connection-status' }))
@@ -67,7 +72,7 @@ function editorWithText(text: string) {
 
 /** Mounts the view and runs one statement, so a grid is on show. */
 async function mountedWithResult() {
-  apiStub.executeQuery.mockResolvedValue(response)
+  apiStub.executeQuery.mockImplementation(streamed(response))
   const wrapper = await mountView()
   await wrapper.find('[data-test="run-button"]').trigger('click')
   await settle()
@@ -144,16 +149,18 @@ describe('QueryView', () => {
   })
 
   it('marks a message that carries a warning and shows what the server said', async () => {
-    apiStub.executeQuery.mockResolvedValue({
-      ...response,
-      messages: [
-        {
-          level: 'warning' as const,
-          text: 'value out of range',
-          detail: 'WARNING · 22003',
-        },
-      ],
-    })
+    apiStub.executeQuery.mockImplementation(
+      streamed({
+        ...response,
+        messages: [
+          {
+            level: 'warning' as const,
+            text: 'value out of range',
+            detail: 'WARNING · 22003',
+          },
+        ],
+      }),
+    )
     const wrapper = await mountView()
     await wrapper.find('[data-test="run-button"]').trigger('click')
     await settle()
@@ -167,7 +174,7 @@ describe('QueryView', () => {
   })
 
   it('sends the statement to the backend when Run is pressed', async () => {
-    apiStub.executeQuery.mockResolvedValue(response)
+    apiStub.executeQuery.mockImplementation(streamed(response))
     const wrapper = await mountView()
 
     await wrapper.find('[data-test="run-button"]').trigger('click')
@@ -175,12 +182,13 @@ describe('QueryView', () => {
 
     expect(apiStub.executeQuery).toHaveBeenCalledWith(
       expect.objectContaining({ connectionId: 'c1', query: 'SELECT 1' }),
+      expect.anything(),
     )
   })
 
   it('asks for a value before it runs a statement that holds a name', async () => {
     apiStub.queryParameters.mockResolvedValue(['id'])
-    apiStub.executeQuery.mockResolvedValue(response)
+    apiStub.executeQuery.mockImplementation(streamed(response))
     const wrapper = await mountView('SELECT * FROM t WHERE a = :id')
 
     await wrapper.find('[data-test="run-button"]').trigger('click')
@@ -199,12 +207,13 @@ describe('QueryView', () => {
 
     expect(apiStub.executeQuery).toHaveBeenCalledWith(
       expect.objectContaining({ queryParams: { id: '7' } }),
+      expect.anything(),
     )
   })
 
   it('brings the focus to the dialog when a second run asks for the same values', async () => {
     apiStub.queryParameters.mockResolvedValue(['id'])
-    apiStub.executeQuery.mockResolvedValue(response)
+    apiStub.executeQuery.mockImplementation(streamed(response))
     const wrapper = await mountView('SELECT * FROM t WHERE a = :id')
 
     await wrapper.find('[data-test="run-button"]').trigger('click')
@@ -224,7 +233,7 @@ describe('QueryView', () => {
 
   it('runs a second time without the dialog', async () => {
     apiStub.queryParameters.mockResolvedValue(['id'])
-    apiStub.executeQuery.mockResolvedValue(response)
+    apiStub.executeQuery.mockImplementation(streamed(response))
     const wrapper = mountWithPlugins(QueryView, {
       props: {
         tab: {
@@ -246,6 +255,7 @@ describe('QueryView', () => {
     await settle()
     expect(apiStub.executeQuery).toHaveBeenCalledWith(
       expect.objectContaining({ queryParams: { id: 7 } }),
+      expect.anything(),
     )
   })
 
@@ -281,7 +291,7 @@ describe('QueryView', () => {
 
   it('sends an empty value when the user chooses that form', async () => {
     apiStub.queryParameters.mockResolvedValue(['id'])
-    apiStub.executeQuery.mockResolvedValue(response)
+    apiStub.executeQuery.mockImplementation(streamed(response))
     const wrapper = await mountView('SELECT :id')
 
     await wrapper.find('[data-test="run-button"]').trigger('click')
@@ -297,12 +307,13 @@ describe('QueryView', () => {
 
     expect(apiStub.executeQuery).toHaveBeenCalledWith(
       expect.objectContaining({ queryParams: { id: null } }),
+      expect.anything(),
     )
   })
 
   it('refuses a number that it cannot read and holds the confirm button', async () => {
     apiStub.queryParameters.mockResolvedValue(['id'])
-    apiStub.executeQuery.mockResolvedValue(response)
+    apiStub.executeQuery.mockImplementation(streamed(response))
     const wrapper = await mountView('SELECT :id')
 
     await wrapper.find('[data-test="run-button"]').trigger('click')
@@ -335,12 +346,13 @@ describe('QueryView', () => {
 
     expect(apiStub.executeQuery).toHaveBeenCalledWith(
       expect.objectContaining({ queryParams: { id: 12 } }),
+      expect.anything(),
     )
   })
 
   it('offers the two words of a true or false value', async () => {
     apiStub.queryParameters.mockResolvedValue(['flag'])
-    apiStub.executeQuery.mockResolvedValue(response)
+    apiStub.executeQuery.mockImplementation(streamed(response))
     const wrapper = await mountView('SELECT :flag')
 
     await wrapper.find('[data-test="run-button"]').trigger('click')
@@ -366,12 +378,13 @@ describe('QueryView', () => {
 
     expect(apiStub.executeQuery).toHaveBeenCalledWith(
       expect.objectContaining({ queryParams: { flag: true } }),
+      expect.anything(),
     )
   })
 
   it('keeps a word that the true or false form already accepts', async () => {
     apiStub.queryParameters.mockResolvedValue(['flag'])
-    apiStub.executeQuery.mockResolvedValue(response)
+    apiStub.executeQuery.mockImplementation(streamed(response))
     const wrapper = await mountView('SELECT :flag')
 
     await wrapper.find('[data-test="run-button"]').trigger('click')
@@ -643,7 +656,7 @@ describe('QueryView', () => {
   })
 
   it('sends the whole script when Run all is pressed', async () => {
-    apiStub.executeQuery.mockResolvedValue(response)
+    apiStub.executeQuery.mockImplementation(streamed(response))
     const wrapper = await mountView('SELECT 1;\nSELECT 2')
 
     await wrapper.find('[data-test="run-all-button"]').trigger('click')
@@ -651,11 +664,12 @@ describe('QueryView', () => {
 
     expect(apiStub.executeQuery).toHaveBeenCalledWith(
       expect.objectContaining({ query: 'SELECT 1;\nSELECT 2' }),
+      expect.anything(),
     )
   })
 
   it('shows the result after a statement runs', async () => {
-    apiStub.executeQuery.mockResolvedValue(response)
+    apiStub.executeQuery.mockImplementation(streamed(response))
     const wrapper = await mountView()
     await wrapper.find('[data-test="run-button"]').trigger('click')
     await settle()
@@ -763,7 +777,7 @@ describe('QueryView', () => {
   })
 
   it('writes a result to the file the user chose', async () => {
-    apiStub.executeQuery.mockResolvedValue(response)
+    apiStub.executeQuery.mockImplementation(streamed(response))
     apiStub.saveTextFile.mockResolvedValue('/tmp/out.csv')
 
     const wrapper = await mountView()
@@ -781,7 +795,7 @@ describe('QueryView', () => {
   })
 
   it('writes a result as JSON', async () => {
-    apiStub.executeQuery.mockResolvedValue(response)
+    apiStub.executeQuery.mockImplementation(streamed(response))
     apiStub.saveTextFile.mockResolvedValue('/tmp/out.json')
 
     const wrapper = await mountView()
@@ -797,7 +811,7 @@ describe('QueryView', () => {
   })
 
   it('writes nothing when the user closed the file dialog', async () => {
-    apiStub.executeQuery.mockResolvedValue(response)
+    apiStub.executeQuery.mockImplementation(streamed(response))
     apiStub.saveTextFile.mockResolvedValue(null)
 
     const wrapper = await mountView()
@@ -811,7 +825,7 @@ describe('QueryView', () => {
   })
 
   it('reports a failure to write a file', async () => {
-    apiStub.executeQuery.mockResolvedValue(response)
+    apiStub.executeQuery.mockImplementation(streamed(response))
     apiStub.saveTextFile.mockRejectedValue({ kind: 'io', message: 'read only', detail: null })
 
     const wrapper = await mountView()
@@ -825,7 +839,7 @@ describe('QueryView', () => {
   })
 
   it('notes that the rows reached the clipboard', async () => {
-    apiStub.executeQuery.mockResolvedValue(response)
+    apiStub.executeQuery.mockImplementation(streamed(response))
     const wrapper = await mountView()
     await wrapper.find('[data-test="run-button"]').trigger('click')
     await settle()
@@ -1020,22 +1034,24 @@ describe('QueryView', () => {
   })
 
   it('runs the statement that a command of the shell asks for', async () => {
-    apiStub.executeQuery.mockResolvedValue(response)
+    apiStub.executeQuery.mockImplementation(streamed(response))
     await mountView('SELECT 1;\nSELECT 2')
     tabActions('t1')?.runStatement()
     await settle()
     expect(apiStub.executeQuery).toHaveBeenCalledWith(
       expect.objectContaining({ query: 'SELECT 1;\nSELECT 2' }),
+      expect.anything(),
     )
   })
 
   it('runs the whole script that a command of the shell asks for', async () => {
-    apiStub.executeQuery.mockResolvedValue(response)
+    apiStub.executeQuery.mockImplementation(streamed(response))
     await mountView('SELECT 1;\nSELECT 2')
     tabActions('t1')?.runAll()
     await settle()
     expect(apiStub.executeQuery).toHaveBeenCalledWith(
       expect.objectContaining({ query: 'SELECT 1;\nSELECT 2' }),
+      expect.anything(),
     )
   })
 
@@ -1085,7 +1101,7 @@ describe('QueryView', () => {
   })
 
   it('shows the messages the backend sent', async () => {
-    apiStub.executeQuery.mockResolvedValue(response)
+    apiStub.executeQuery.mockImplementation(streamed(response))
     const wrapper = await mountView()
     await wrapper.find('[data-test="run-button"]').trigger('click')
     await settle()
@@ -1203,7 +1219,7 @@ describe('QueryView details', () => {
   })
 
   it('runs the text of the tab when the editor gives nothing', async () => {
-    apiStub.executeQuery.mockResolvedValue(response)
+    apiStub.executeQuery.mockImplementation(streamed(response))
     const wrapper = await mountView('SELECT 42')
     const view = wrapper.vm as unknown as { runStatement: (statement?: string) => void }
     view.runStatement()
@@ -1212,12 +1228,14 @@ describe('QueryView details', () => {
   })
 
   it('stays on the messages when a statement gives no result set', async () => {
-    apiStub.executeQuery.mockResolvedValue({
-      results: [],
-      messages: [{ level: 'info' as const, text: '3 rows affected.', detail: null }],
-      rowsAffected: 3,
-      elapsedMs: 4,
-    })
+    apiStub.executeQuery.mockImplementation(
+      streamed({
+        results: [],
+        messages: [{ level: 'info' as const, text: '3 rows affected.', detail: null }],
+        rowsAffected: 3,
+        elapsedMs: 4,
+      }),
+    )
     const wrapper = await mountView('UPDATE t SET a = 1')
     await wrapper.find('[data-test="run-button"]').trigger('click')
     await settle()
@@ -1258,7 +1276,7 @@ describe('QueryView edge paths', () => {
   })
 
   it('runs the text of the tab when no editor is in place', async () => {
-    apiStub.executeQuery.mockResolvedValue(response)
+    apiStub.executeQuery.mockImplementation(streamed(response))
     const wrapper = await mountView('SELECT 99')
     const view = wrapper.vm as unknown as { runStatement: (statement?: string) => void }
     wrapper.unmount()
@@ -1266,6 +1284,7 @@ describe('QueryView edge paths', () => {
     await settle()
     expect(apiStub.executeQuery).toHaveBeenCalledWith(
       expect.objectContaining({ query: 'SELECT 99' }),
+      expect.anything(),
     )
   })
 
@@ -1294,7 +1313,7 @@ describe('QueryView edge paths', () => {
   })
 
   it('stays on the result that is open when a second statement runs', async () => {
-    apiStub.executeQuery.mockResolvedValue(response)
+    apiStub.executeQuery.mockImplementation(streamed(response))
     const wrapper = await mountView()
 
     await wrapper.find('[data-test="run-button"]').trigger('click')
@@ -1331,7 +1350,7 @@ describe('QueryView edge paths', () => {
   })
 
   it('keeps a result, names it with the time, and closes it again', async () => {
-    apiStub.executeQuery.mockResolvedValue(response)
+    apiStub.executeQuery.mockImplementation(streamed(response))
     const wrapper = await mountView()
     await wrapper.find('[data-test="run-button"]').trigger('click')
     await settle()
@@ -1353,7 +1372,7 @@ describe('QueryView edge paths', () => {
   })
 
   it('closes a result that is not kept', async () => {
-    apiStub.executeQuery.mockResolvedValue(response)
+    apiStub.executeQuery.mockImplementation(streamed(response))
     const wrapper = await mountView()
     await wrapper.find('[data-test="run-button"]').trigger('click')
     await settle()
@@ -1434,7 +1453,7 @@ describe('QueryView edge paths', () => {
   })
 
   it('names the result that is open in the bar', async () => {
-    apiStub.executeQuery.mockResolvedValue(response)
+    apiStub.executeQuery.mockImplementation(streamed(response))
     const wrapper = await mountView()
     await wrapper.find('[data-test="run-button"]').trigger('click')
     await settle()
@@ -1446,7 +1465,7 @@ describe('QueryView edge paths', () => {
   })
 
   it('brings the results panel back when a statement runs', async () => {
-    apiStub.executeQuery.mockResolvedValue(response)
+    apiStub.executeQuery.mockImplementation(streamed(response))
     const wrapper = await mountView()
     const layout = useLayoutStore()
     layout.setResultsCollapsed(true)
@@ -1496,10 +1515,12 @@ describe('QueryView edge paths', () => {
   })
 
   it('keeps a grid for the three results the user opened last', async () => {
-    apiStub.executeQuery.mockResolvedValue({
-      ...response,
-      results: Array.from({ length: 5 }, () => response.results[0]!),
-    })
+    apiStub.executeQuery.mockImplementation(
+      streamed({
+        ...response,
+        results: Array.from({ length: 5 }, () => response.results[0]!),
+      }),
+    )
     const wrapper = await mountView()
     await wrapper.find('[data-test="run-button"]').trigger('click')
     await settle()
@@ -1515,10 +1536,12 @@ describe('QueryView edge paths', () => {
   })
 
   it('gives the place of a closed result to another result', async () => {
-    apiStub.executeQuery.mockResolvedValue({
-      ...response,
-      results: Array.from({ length: 4 }, () => response.results[0]!),
-    })
+    apiStub.executeQuery.mockImplementation(
+      streamed({
+        ...response,
+        results: Array.from({ length: 4 }, () => response.results[0]!),
+      }),
+    )
     const wrapper = await mountView()
     await wrapper.find('[data-test="run-button"]').trigger('click')
     await settle()
@@ -1549,7 +1572,7 @@ describe('QueryView edge paths', () => {
   })
 
   it('moves between a result and the messages', async () => {
-    apiStub.executeQuery.mockResolvedValue(response)
+    apiStub.executeQuery.mockImplementation(streamed(response))
     const wrapper = await mountView()
     await wrapper.find('[data-test="run-button"]').trigger('click')
     await settle()

@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { makeApiStub, connectionFixture } from './helpers'
+import { makeApiStub, connectionFixture, streamed } from './helpers'
 
 const apiStub = makeApiStub()
 vi.mock('@/lib/api', () => ({ api: apiStub, CONNECTION_STATUS_EVENT: 'connection-status' }))
 
 const { newQueryState, totalRows, useQueryStore } = await import('@/stores/query')
+const { ResultTable } = await import('@/lib/results')
 const { useConnectionsStore } = await import('@/stores/connections')
 const { useHistoryStore } = await import('@/stores/history')
 const { useSettingsStore } = await import('@/stores/settings')
@@ -59,12 +60,9 @@ describe('newQueryState', () => {
 describe('totalRows', () => {
   it('counts the rows of every result set', () => {
     expect(totalRows([])).toBe(0)
-    expect(
-      totalRows([
-        { columns: [], rows: [[1], [2]], truncated: false },
-        { columns: [], rows: [[3]], truncated: false },
-      ]),
-    ).toBe(3)
+    expect(totalRows([ResultTable.fromRows([], [[1], [2]]), ResultTable.fromRows([], [[3]])])).toBe(
+      3,
+    )
   })
 })
 
@@ -99,7 +97,7 @@ describe('query store', () => {
   })
 
   it('sends the statement to the backend and keeps the result', async () => {
-    apiStub.executeQuery.mockResolvedValue(response())
+    apiStub.executeQuery.mockImplementation(streamed(response()))
     const settings = useSettingsStore()
     settings.update({ maxRows: 25 })
     const connections = useConnectionsStore()
@@ -108,14 +106,18 @@ describe('query store', () => {
     const queries = useQueryStore()
     expect(await queries.execute('t1', 'c1', ' SELECT 1 ')).toBe(true)
 
-    expect(apiStub.executeQuery).toHaveBeenCalledWith({
-      connectionId: 'c1',
-      requestId: expect.any(String),
-      query: 'SELECT 1',
-      tabId: 't1',
-      queryParams: undefined,
-      options: { maxRows: 25, timeoutSecs: 300 },
-    })
+    expect(apiStub.executeQuery).toHaveBeenCalledWith(
+      {
+        connectionId: 'c1',
+        requestId: expect.any(String),
+        query: 'SELECT 1',
+        tabId: 't1',
+        queryParams: undefined,
+        options: { maxRows: 25, timeoutSecs: 300 },
+      },
+      // The second argument holds the handlers that read the rows.
+      expect.anything(),
+    )
 
     const state = queries.stateFor('t1')
     expect(state.panes).toHaveLength(1)
@@ -128,19 +130,19 @@ describe('query store', () => {
   })
 
   it('uses the default time limit for a connection it does not know', async () => {
-    apiStub.executeQuery.mockResolvedValue(response())
+    apiStub.executeQuery.mockImplementation(streamed(response()))
     const queries = useQueryStore()
     await queries.execute('t1', 'unknown', 'SELECT 1')
     expect(apiStub.executeQuery).toHaveBeenCalledWith(
       expect.objectContaining({ options: { maxRows: 10000, timeoutSecs: 300 } }),
+      expect.anything(),
     )
   })
 
   it('warns when the row limit stopped the read', async () => {
-    apiStub.executeQuery.mockResolvedValue({
-      ...response(),
-      results: [{ columns: [], rows: [[1]], truncated: true }],
-    })
+    apiStub.executeQuery.mockImplementation(
+      streamed({ ...response(), results: [{ columns: [], rows: [[1]], truncated: true }] }),
+    )
     const queries = useQueryStore()
     await queries.execute('t1', 'c1', 'SELECT 1')
     expect(useUiStore().notices.some((notice) => notice.level === 'warning')).toBe(true)
@@ -156,7 +158,7 @@ describe('query store', () => {
     const queries = useQueryStore()
     const first = queries.execute('t1', 'c1', 'SELECT 1')
     expect(await queries.execute('t1', 'c1', 'SELECT 2')).toBe(false)
-    release(response())
+    release(undefined)
     await first
   })
 
@@ -183,7 +185,7 @@ describe('query store', () => {
   })
 
   it('writes every execution to the history', async () => {
-    apiStub.executeQuery.mockResolvedValue(response())
+    apiStub.executeQuery.mockImplementation(streamed(response()))
     const connections = useConnectionsStore()
     await connections.load()
     const history = useHistoryStore()
@@ -203,7 +205,7 @@ describe('query store', () => {
   })
 
   it('reports that the record of a connection is gone in the history', async () => {
-    apiStub.executeQuery.mockResolvedValue(response())
+    apiStub.executeQuery.mockImplementation(streamed(response()))
     const history = useHistoryStore()
     const record = vi.spyOn(history, 'record')
     const queries = useQueryStore()
@@ -262,12 +264,12 @@ describe('query store', () => {
 
     await queries.cancel('t1')
     expect(apiStub.cancelQuery).toHaveBeenCalledWith('c1', requestId)
-    release(response())
+    release(undefined)
     await running
   })
 
   it('remembers the statement and the values of the last run', async () => {
-    apiStub.executeQuery.mockResolvedValue(response())
+    apiStub.executeQuery.mockImplementation(streamed(response()))
     apiStub.explainQuery.mockResolvedValue(response())
     const queries = useQueryStore()
 
@@ -301,7 +303,7 @@ describe('query store', () => {
       'old-connection',
       queries.stateFor('t1').requestId,
     )
-    release(response())
+    release(undefined)
     await running
     expect(queries.stateFor('t1').requestConnectionId).toBeNull()
   })
@@ -324,12 +326,12 @@ describe('query store', () => {
     const running = queries.execute('t1', 'c1', 'SELECT 1')
     await queries.cancel('t1')
     expect(useUiStore().notices.some((notice) => notice.level === 'warning')).toBe(true)
-    release(response())
+    release(undefined)
     await running
   })
 
   it('moves to a result that is there, and to the messages', async () => {
-    apiStub.executeQuery.mockResolvedValue(twoResults())
+    apiStub.executeQuery.mockImplementation(streamed(twoResults()))
     const queries = useQueryStore()
     await queries.execute('t1', 'c1', 'SELECT 1')
     const state = queries.stateFor('t1')
@@ -346,7 +348,7 @@ describe('query store', () => {
   })
 
   it('keeps a result against the next run and lets it go again', async () => {
-    apiStub.executeQuery.mockResolvedValue(twoResults())
+    apiStub.executeQuery.mockImplementation(streamed(twoResults()))
     const queries = useQueryStore()
     await queries.execute('t1', 'c1', 'SELECT 1')
     const state = queries.stateFor('t1')
@@ -366,7 +368,7 @@ describe('query store', () => {
   })
 
   it('numbers the results of the run and not of the list', async () => {
-    apiStub.executeQuery.mockResolvedValue(twoResults())
+    apiStub.executeQuery.mockImplementation(streamed(twoResults()))
     const queries = useQueryStore()
     await queries.execute('t1', 'c1', 'SELECT 1')
     const state = queries.stateFor('t1')
@@ -376,7 +378,7 @@ describe('query store', () => {
   })
 
   it('refuses to keep more results than the settings allow', async () => {
-    apiStub.executeQuery.mockResolvedValue(twoResults())
+    apiStub.executeQuery.mockImplementation(streamed(twoResults()))
     const queries = useQueryStore()
     useSettingsStore().update({ maxPinnedResults: 1 })
     await queries.execute('t1', 'c1', 'SELECT 1')
@@ -389,7 +391,7 @@ describe('query store', () => {
   })
 
   it('keeps nothing for a result that is not there', async () => {
-    apiStub.executeQuery.mockResolvedValue(twoResults())
+    apiStub.executeQuery.mockImplementation(streamed(twoResults()))
     const queries = useQueryStore()
     await queries.execute('t1', 'c1', 'SELECT 1')
     queries.togglePin('t1', 'no-such-result')
@@ -397,7 +399,7 @@ describe('query store', () => {
   })
 
   it('closes a result and shows the one that takes its place', async () => {
-    apiStub.executeQuery.mockResolvedValue(twoResults())
+    apiStub.executeQuery.mockImplementation(streamed(twoResults()))
     const queries = useQueryStore()
     await queries.execute('t1', 'c1', 'SELECT 1')
     const state = queries.stateFor('t1')
@@ -413,7 +415,7 @@ describe('query store', () => {
   })
 
   it('closes the last result and steps back to the one before it', async () => {
-    apiStub.executeQuery.mockResolvedValue(twoResults())
+    apiStub.executeQuery.mockImplementation(streamed(twoResults()))
     const queries = useQueryStore()
     await queries.execute('t1', 'c1', 'SELECT 1')
     const state = queries.stateFor('t1')
@@ -423,7 +425,7 @@ describe('query store', () => {
   })
 
   it('keeps the result on show when another one closes', async () => {
-    apiStub.executeQuery.mockResolvedValue(twoResults())
+    apiStub.executeQuery.mockImplementation(streamed(twoResults()))
     const queries = useQueryStore()
     await queries.execute('t1', 'c1', 'SELECT 1')
     const state = queries.stateFor('t1')
@@ -435,10 +437,12 @@ describe('query store', () => {
   })
 
   it('records the scan of a statement and adds it to the session', async () => {
-    apiStub.executeQuery.mockResolvedValue({
-      ...response(),
-      stats: { scannedBytes: 1024 ** 3, engineMs: 120, queueMs: 3, resultReused: false },
-    })
+    apiStub.executeQuery.mockImplementation(
+      streamed({
+        ...response(),
+        stats: { scannedBytes: 1024 ** 3, engineMs: 120, queueMs: 3, resultReused: false },
+      }),
+    )
     const queries = useQueryStore()
     await queries.execute('t1', 'c1', 'SELECT 1')
     await queries.execute('t2', 'c1', 'SELECT 2')
@@ -449,10 +453,12 @@ describe('query store', () => {
 
   it('warns about a scan above the limit of the settings', async () => {
     useSettingsStore().update({ athenaScanWarningGb: 1, athenaPricePerTerabyte: 5 })
-    apiStub.executeQuery.mockResolvedValue({
-      ...response(),
-      stats: { scannedBytes: 2 * 1024 ** 3, engineMs: null, queueMs: null, resultReused: null },
-    })
+    apiStub.executeQuery.mockImplementation(
+      streamed({
+        ...response(),
+        stats: { scannedBytes: 2 * 1024 ** 3, engineMs: null, queueMs: null, resultReused: null },
+      }),
+    )
     const queries = useQueryStore()
     await queries.execute('t1', 'c1', 'SELECT 1')
 
@@ -462,7 +468,7 @@ describe('query store', () => {
   })
 
   it('counts nothing for an engine that reports no scan', async () => {
-    apiStub.executeQuery.mockResolvedValue(response())
+    apiStub.executeQuery.mockImplementation(streamed(response()))
     const queries = useQueryStore()
     await queries.execute('t1', 'c1', 'SELECT 1')
     expect(queries.stateFor('t1').stats).toBeNull()
@@ -470,7 +476,7 @@ describe('query store', () => {
   })
 
   it('closes nothing for a result that is not there', async () => {
-    apiStub.executeQuery.mockResolvedValue(twoResults())
+    apiStub.executeQuery.mockImplementation(streamed(twoResults()))
     const queries = useQueryStore()
     await queries.execute('t1', 'c1', 'SELECT 1')
     queries.closePane('t1', 'no-such-result')

@@ -1,22 +1,29 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ResultsGrid from '@/components/ResultsGrid.vue'
 import { mountWithPlugins } from './mount'
-import type { ResultSet } from '@/types/api'
+import { ResultTable } from '@/lib/results'
+import type { CellValue, ColumnInfo, ResultSet } from '@/types/api'
 
-function result(overrides: Partial<ResultSet> = {}): ResultSet {
-  return {
-    columns: [
-      { name: 'id', typeName: 'int' },
-      { name: 'name', typeName: 'text' },
-    ],
-    rows: [
-      [2, 'Grace'],
-      [1, 'Ada'],
-      [3, null],
-    ],
-    truncated: false,
-    ...overrides,
-  }
+const columns: ColumnInfo[] = [
+  { name: 'id', typeName: 'int' },
+  { name: 'name', typeName: 'text' },
+]
+
+const records: CellValue[][] = [
+  [2, 'Grace'],
+  [1, 'Ada'],
+  [3, null],
+]
+
+/** The table one test draws. The grid reads the rows through the table. */
+function result(
+  overrides: { columns?: ColumnInfo[]; rows?: CellValue[][]; truncated?: boolean } = {},
+): ResultTable {
+  return ResultTable.fromRows(
+    overrides.columns ?? columns,
+    overrides.rows ?? records,
+    overrides.truncated ?? false,
+  )
 }
 
 describe('ResultsGrid', () => {
@@ -132,11 +139,10 @@ describe('ResultsGrid', () => {
   })
 
   it('reports the scroll position so that only the visible rows are drawn', async () => {
-    const many: ResultSet = {
-      columns: [{ name: 'n', typeName: 'int' }],
-      rows: Array.from({ length: 500 }, (_, index) => [index]),
-      truncated: false,
-    }
+    const many = ResultTable.fromRows(
+      [{ name: 'n', typeName: 'int' }],
+      Array.from({ length: 500 }, (_unused, index) => [index]),
+    )
     const wrapper = mountWithPlugins(ResultsGrid, { props: { result: many } })
     expect(wrapper.findAll('[data-test="grid-row"]').length).toBeLessThan(500)
 
@@ -280,7 +286,7 @@ describe('ResultsGrid', () => {
 
   it('names a cell of a column it cannot find', async () => {
     const wrapper = mountWithPlugins(ResultsGrid, {
-      props: { result: { columns: [], rows: [[1]], truncated: false } },
+      props: { result: ResultTable.fromRows([], [[1]]) },
     })
     await wrapper.findAll('[data-test="grid-cell"]')[0]!.trigger('dblclick')
     expect(document.body.textContent).toContain('1')
@@ -314,14 +320,13 @@ describe('ResultsGrid inspection dialog', () => {
   })
 
   it('sorts a row that is shorter than the header', async () => {
-    const ragged = {
-      columns: [
+    const ragged = ResultTable.fromRows(
+      [
         { name: 'a', typeName: 'int' },
         { name: 'b', typeName: 'int' },
       ],
-      rows: [[2], [1, 5]],
-      truncated: false,
-    }
+      [[2], [1, 5]],
+    )
     const wrapper = mountWithPlugins(ResultsGrid, { props: { result: ragged } })
     await wrapper.findAll('[data-test="grid-header"]')[1]!.trigger('click')
     expect(wrapper.findAll('[data-test="grid-row"]')).toHaveLength(2)

@@ -1,5 +1,6 @@
 //! The commands the user interface calls.
 
+use crate::db::columnar::ChunkSink;
 use crate::db::drivers::{
     athena::AthenaDriver, mssql::MssqlDriver, mysql::MysqlDriver, postgres::PostgresDriver,
     sqlite::SqliteDriver,
@@ -22,6 +23,7 @@ use crate::state::{
 use crate::storage::{DbType, SavedConnection};
 use crate::store;
 use std::sync::Arc;
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Runtime};
 use tokio_util::sync::CancellationToken;
 
@@ -434,12 +436,18 @@ pub struct ExecuteRequest {
     pub options: Option<ExecOptions>,
 }
 
+/// Runs a script and sends its rows to the window as binary chunks.
+///
+/// The rows travel on the channel while the read runs, so neither side holds
+/// the whole answer. The command itself gives no rows back: the last frame of
+/// the channel carries the messages of the server and the numbers of the run.
 #[tauri::command]
 pub async fn execute_query<R: Runtime>(
     app: AppHandle<R>,
     request: ExecuteRequest,
     state: tauri::State<'_, AppState>,
-) -> Result<QueryResponse> {
+    on_chunk: Channel<InvokeResponseBody>,
+) -> Result<()> {
     let ExecuteRequest {
         connection_id,
         request_id,
@@ -455,10 +463,11 @@ pub async fn execute_query<R: Runtime>(
         .start_request(&request_id, session.cancel_handle.clone())
         .await;
 
+    let mut sink = ChunkSink::new(on_chunk, options.max_rows);
     let outcome = {
         let mut guard = session.driver.lock().await;
         run_bounded(
-            guard.execute_query(&query, bound.as_ref(), &options),
+            guard.execute_stream(&query, bound.as_ref(), &options, &mut sink),
             &token,
             options.timeout_secs,
             stop_grace(&session),
@@ -467,7 +476,8 @@ pub async fn execute_query<R: Runtime>(
     };
 
     state.end_request(&request_id).await;
-    finish_run(&app, &state, &connection_id, &open, &key, &session, outcome).await
+    let summary = finish_run(&app, &state, &connection_id, &open, &key, &session, outcome).await?;
+    sink.finish(summary)
 }
 
 /// What one request for a plan carries.

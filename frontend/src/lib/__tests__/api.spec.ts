@@ -3,10 +3,22 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const invoke = vi.fn()
 const listen = vi.fn()
 
-vi.mock('@tauri-apps/api/core', () => ({ invoke: (...args: unknown[]) => invoke(...args) }))
+class ChannelStub {
+  onmessage: ((message: ArrayBuffer) => void) | null = null
+}
+
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: (...args: unknown[]) => invoke(...args),
+  Channel: ChannelStub,
+}))
 vi.mock('@tauri-apps/api/event', () => ({ listen: (...args: unknown[]) => listen(...args) }))
 
 const { api, CONNECTION_STATUS_EVENT } = await import('@/lib/api')
+
+/** The handlers of a run, which these tests do not need to answer. */
+function handlers() {
+  return { onSet: () => {}, onEnd: () => {} }
+}
 const { newConnection } = await import('@/stores/connections')
 const { Dialect } = await import('@/types/api')
 
@@ -173,12 +185,15 @@ describe('api', () => {
   })
 
   it('sends the limits of an execution when they are given', async () => {
-    await api.executeQuery({
-      connectionId: 'c1',
-      requestId: 'r1',
-      query: 'SELECT 1',
-      options: { maxRows: 10, timeoutSecs: 5 },
-    })
+    await api.executeQuery(
+      {
+        connectionId: 'c1',
+        requestId: 'r1',
+        query: 'SELECT 1',
+        options: { maxRows: 10, timeoutSecs: 5 },
+      },
+      handlers(),
+    )
     expect(invoke).toHaveBeenCalledWith('execute_query', {
       request: {
         connectionId: 'c1',
@@ -186,24 +201,30 @@ describe('api', () => {
         query: 'SELECT 1',
         options: { maxRows: 10, timeoutSecs: 5 },
       },
+      // The channel carries the rows of the run.
+      onChunk: expect.anything(),
     })
   })
 
   it('leaves the limits out when none are given', async () => {
-    await api.executeQuery({ connectionId: 'c1', requestId: 'r1', query: 'SELECT 1' })
+    await api.executeQuery({ connectionId: 'c1', requestId: 'r1', query: 'SELECT 1' }, handlers())
     expect(invoke).toHaveBeenCalledWith('execute_query', {
       request: { connectionId: 'c1', requestId: 'r1', query: 'SELECT 1' },
+      onChunk: expect.anything(),
     })
   })
 
   it('sends null for a field the caller set to undefined', async () => {
-    await api.executeQuery({
-      connectionId: 'c1',
-      requestId: 'r1',
-      query: 'SELECT 1',
-      queryParams: undefined,
-      options: undefined,
-    })
+    await api.executeQuery(
+      {
+        connectionId: 'c1',
+        requestId: 'r1',
+        query: 'SELECT 1',
+        queryParams: undefined,
+        options: undefined,
+      },
+      handlers(),
+    )
     expect(invoke).toHaveBeenCalledWith('execute_query', {
       request: {
         connectionId: 'c1',
@@ -212,6 +233,7 @@ describe('api', () => {
         queryParams: null,
         options: null,
       },
+      onChunk: expect.anything(),
     })
   })
 

@@ -8,15 +8,9 @@ import { useSettingsStore } from './settings'
 import { useUiStore } from './ui'
 import { toErrorPayload } from '@/lib/errors'
 import { scanCost } from '@/lib/format'
+import { ResultTable, type ResultStreamHandlers } from '@/lib/results'
 import { PlanKind } from '@/types/api'
-import type {
-  ErrorPayload,
-  ExecOptions,
-  Message,
-  QueryResponse,
-  QueryStats,
-  ResultSet,
-} from '@/types/api'
+import type { ErrorPayload, ExecOptions, Message, QueryStats } from '@/types/api'
 
 /** One gigabyte, as a storage unit counts it. */
 const BYTES_IN_GIGABYTE = 1024 ** 3
@@ -28,7 +22,7 @@ const BYTES_IN_GIGABYTE = 1024 ** 3
  */
 export interface ResultPane {
   id: string
-  result: ResultSet
+  result: ResultTable
   /** The place of the set inside the execution that made it, from one. */
   number: number
   /** The moment of the run, which the title of a kept result holds. */
@@ -82,8 +76,8 @@ export function newQueryState(): QueryState {
 }
 
 /** Counts the rows of every result set of one execution. */
-export function totalRows(results: ResultSet[]): number {
-  return results.reduce((sum, result) => sum + result.rows.length, 0)
+export function totalRows(results: ResultTable[]): number {
+  return results.reduce((sum, result) => sum + result.rowCount, 0)
 }
 
 /** Gives the last result of a list, or nothing when the list is empty. */
@@ -92,7 +86,7 @@ function lastPane(panes: ResultPane[]): ResultPane | undefined {
 }
 
 /** Gives the result sets of a list of panes, in their order. */
-export function resultsOf(panes: ResultPane[]): ResultSet[] {
+export function resultsOf(panes: ResultPane[]): ResultTable[] {
   return panes.map((pane) => pane.result)
 }
 
@@ -143,7 +137,11 @@ export const useQueryStore = defineStore('query', () => {
     tabId: string,
     connectionId: string,
     query: string,
-    call: (requestId: string, options: ExecOptions) => Promise<QueryResponse>,
+    call: (
+      requestId: string,
+      options: ExecOptions,
+      handlers: ResultStreamHandlers,
+    ) => Promise<void>,
     label?: string,
     queryParams?: Record<string, unknown>,
   ): Promise<boolean> {
@@ -178,40 +176,51 @@ export const useQueryStore = defineStore('query', () => {
     const connectionName = connections.nameFor(connectionId)
     let succeeded = false
     let failure: ErrorPayload | null = null
-    let fresh: ResultSet[] = []
+    const fresh: ResultTable[] = []
 
     try {
-      const response = await call(requestId, {
-        maxRows: settings.settings.maxRows,
-        timeoutSecs: connections.byId(connectionId)?.options.queryTimeoutSecs ?? 300,
-      })
       const ranAt = Date.now()
-      fresh = response.results
-      state.panes = [
-        ...state.panes,
-        ...response.results.map((result, index) => ({
-          id: createId(),
-          // The rows never change after the run, so the grid does not need
-          // a proxy around every row and every cell. The raw form keeps a
-          // large result at its own size.
-          result: markRaw(result),
-          number: index + 1,
-          ranAt,
-          pinned: false,
-          label,
-        })),
-      ]
-      state.activePaneId = lastPane(state.panes)?.id ?? null
-      state.messages = response.messages
-      state.rowsAffected = response.rowsAffected
-      state.elapsedMs = response.elapsedMs
-      state.stats = response.stats ?? null
+      await call(
+        requestId,
+        {
+          maxRows: settings.settings.maxRows,
+          timeoutSecs: connections.byId(connectionId)?.options.queryTimeoutSecs ?? 300,
+        },
+        {
+          // A set stands in the interface as soon as it ends, so a script of
+          // several sets shows the first one while the next one reads.
+          onSet: (table) => {
+            fresh.push(table)
+            state.panes = [
+              ...state.panes,
+              {
+                id: createId(),
+                // The table holds the bytes of the rows and never changes
+                // after the run, so the raw form keeps it at its own size and
+                // Vue builds no proxy around it.
+                result: markRaw(table),
+                number: fresh.length,
+                ranAt,
+                pinned: false,
+                label,
+              },
+            ]
+            state.activePaneId = lastPane(state.panes)?.id ?? null
+          },
+          onEnd: (end) => {
+            state.messages = end.messages
+            state.rowsAffected = end.rowsAffected
+            state.elapsedMs = end.elapsedMs
+            state.stats = end.stats
+          },
+        },
+      )
       recordScan(state.stats)
       succeeded = true
       if (label === undefined) {
         state.lastRun = { query: trimmed, params: queryParams }
       }
-      if (response.results.some((result) => result.truncated)) {
+      if (fresh.some((table) => table.truncated)) {
         ui.warn('The row limit stopped the read. Raise it in the settings to see more rows.')
       }
     } catch (error) {
@@ -256,8 +265,11 @@ export const useQueryStore = defineStore('query', () => {
       tabId,
       connectionId,
       text,
-      (requestId, options) =>
-        api.executeQuery({ connectionId, requestId, query: text, tabId, queryParams, options }),
+      (requestId, options, handlers) =>
+        api.executeQuery(
+          { connectionId, requestId, query: text, tabId, queryParams, options },
+          handlers,
+        ),
       undefined,
       queryParams,
     )
@@ -279,8 +291,10 @@ export const useQueryStore = defineStore('query', () => {
       tabId,
       connectionId,
       text,
-      (requestId, options) =>
-        api.explainQuery({
+      // A plan holds few rows, so it comes back as one answer. The store
+      // gives those rows to the same handlers as a run.
+      async (requestId, options, handlers) => {
+        const response = await api.explainQuery({
           connectionId,
           requestId,
           query: text,
@@ -288,7 +302,17 @@ export const useQueryStore = defineStore('query', () => {
           tabId,
           queryParams,
           options,
-        }),
+        })
+        for (const result of response.results) {
+          handlers.onSet(ResultTable.fromRows(result.columns, result.rows, result.truncated))
+        }
+        handlers.onEnd({
+          messages: response.messages,
+          rowsAffected: response.rowsAffected,
+          elapsedMs: response.elapsedMs,
+          stats: response.stats ?? null,
+        })
+      },
       kind === PlanKind.Actual ? 'Actual plan' : 'Estimated plan',
     )
   }

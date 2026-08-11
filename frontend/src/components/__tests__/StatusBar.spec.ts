@@ -8,6 +8,7 @@ const StatusBar = (await import('@/components/StatusBar.vue')).default
 const { mountWithPlugins } = await import('./mount')
 const { useConnectionsStore } = await import('@/stores/connections')
 const { useQueryStore } = await import('@/stores/query')
+const { ResultTable } = await import('@/lib/results')
 const { useTabsStore } = await import('@/stores/tabs')
 const { ConnectionHealth, Dialect } = await import('@/types/api')
 
@@ -104,7 +105,7 @@ describe('StatusBar', () => {
     state.panes = [
       {
         id: 'p1',
-        result: { columns: [], rows: [[1], [2]], truncated: false },
+        result: ResultTable.fromRows([], [[1], [2]]),
         number: 1,
         ranAt: 0,
         pinned: false,
