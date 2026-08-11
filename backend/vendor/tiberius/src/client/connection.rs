@@ -5,11 +5,11 @@
 ))]
 use crate::client::{tls::TlsPreloginWrapper, tls_stream::create_tls_stream};
 use crate::{
-    client::{tls::MaybeTlsStream, AuthMethod, Config},
+    client::{attention::AttentionHandle, tls::MaybeTlsStream, AuthMethod, Config},
     tds::{
         codec::{
             self, Encode, LoginMessage, Packet, PacketCodec, PacketHeader, PacketStatus,
-            PreloginMessage, TokenDone,
+            PacketType, PreloginMessage, TokenDone,
         },
         stream::TokenStream,
         Context, HEADER_BYTES,
@@ -22,7 +22,7 @@ use bytes::BytesMut;
 use codec::TokenSspi;
 use futures_util::io::{AsyncRead, AsyncWrite};
 use futures_util::ready;
-use futures_util::sink::SinkExt;
+use futures_util::sink::{Sink, SinkExt};
 use futures_util::stream::{Stream, TryStream, TryStreamExt};
 #[cfg(all(unix, feature = "integrated-auth-gssapi"))]
 use libgssapi::{
@@ -34,6 +34,7 @@ use libgssapi::{
 use pretty_hex::*;
 #[cfg(all(unix, feature = "integrated-auth-gssapi"))]
 use std::ops::Deref;
+use std::sync::Arc;
 use std::{cmp, fmt::Debug, io, pin::Pin, task};
 use task::Poll;
 use tracing::{event, Level};
@@ -57,6 +58,9 @@ where
     flushed: bool,
     context: Context,
     buf: BytesMut,
+    attention: Arc<AttentionHandle>,
+    attention_flushing: bool,
+    attention_pending: bool,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin + Send> Debug for Connection<S> {
@@ -86,6 +90,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             context,
             flushed: false,
             buf: BytesMut::new(),
+            attention: Arc::new(AttentionHandle::default()),
+            attention_flushing: false,
+            attention_pending: false,
         };
 
         let fed_auth_required = matches!(config.auth, AuthMethod::AADToken(_));
@@ -166,6 +173,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
     where
         E: Sized + Encode<BytesMut>,
     {
+        // A cancel signal that arrived with no request in flight targets a
+        // request that already ended. The new request must not inherit it.
+        self.attention.clear();
+
         self.flushed = false;
         let packet_size = (self.context.packet_size() as usize) - HEADER_BYTES;
 
@@ -448,7 +459,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             event!(Level::INFO, "Performing a TLS handshake");
 
             let Self {
-                transport, context, ..
+                transport,
+                context,
+                attention,
+                ..
             } = self;
             let mut stream = match transport.into_inner() {
                 MaybeTlsStream::Raw(tcp) => {
@@ -467,6 +481,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
                 context,
                 flushed: false,
                 buf: BytesMut::new(),
+                attention,
+                attention_flushing: false,
+                attention_pending: false,
             })
         } else {
             event!(
@@ -496,6 +513,98 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
     pub(crate) async fn close(mut self) -> crate::Result<()> {
         self.transport.close().await
     }
+
+    /// Gives the shared handle that asks the server to cancel the request in
+    /// flight.
+    pub(crate) fn attention_handle(&self) -> Arc<AttentionHandle> {
+        self.attention.clone()
+    }
+
+    /// Records the acknowledgement of an attention packet. The token stream
+    /// calls this when a `DONE` token carries the attention flag.
+    pub(crate) fn attention_acknowledged(&mut self) {
+        self.attention_pending = false;
+    }
+
+    /// Reads and discards tokens until the acknowledgement of an attention
+    /// packet arrives. A new request must wait for the acknowledgement of the
+    /// old one, or it would read the acknowledgement as its own response.
+    pub(crate) async fn drain_attention_ack(&mut self) -> crate::Result<()> {
+        if !self.attention_pending {
+            return Ok(());
+        }
+
+        // The acknowledgement comes as a message of its own when the response
+        // finished before the attention packet reached the server.
+        self.flushed = false;
+
+        let mut stream = TokenStream::new(self).try_unfold();
+
+        loop {
+            match stream.try_next().await {
+                // A token of the stopped request. Read past it.
+                Ok(Some(_)) => (),
+                Ok(None) => {
+                    return Err(crate::Error::Protocol(
+                        "the acknowledgement of the attention packet never arrived".into(),
+                    ))
+                }
+                // The token stream turns the acknowledgement into this error.
+                Err(crate::Error::Canceled) => return Ok(()),
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Sends an attention packet when a signal asks for one, and drives the
+    /// write of that packet to completion. The caller polls the transport for
+    /// reads right after, so both halves make progress on every poll.
+    fn poll_attention(&mut self, cx: &mut task::Context<'_>) -> crate::Result<()> {
+        self.attention.register(cx.waker());
+
+        if self.attention.wanted() {
+            if self.flushed || self.attention_pending {
+                // The request already ended, or an attention packet already
+                // went out. A second packet would confuse the bookkeeping of
+                // the acknowledgement.
+                self.attention.clear();
+            } else {
+                match Pin::new(&mut self.transport).poll_ready(cx) {
+                    Poll::Ready(Ok(())) => {
+                        let id = self.context.next_packet_id();
+                        let mut header = PacketHeader::new(HEADER_BYTES, id);
+                        header.set_type(PacketType::AttentionSignal);
+                        header.set_status(PacketStatus::EndOfMessage);
+
+                        event!(Level::DEBUG, "Sending an attention packet");
+
+                        Pin::new(&mut self.transport)
+                            .start_send(Packet::new(header, BytesMut::new()))?;
+
+                        self.attention.clear();
+                        self.attention_pending = true;
+                        self.attention_flushing = true;
+                    }
+                    Poll::Ready(Err(e)) => return Err(e),
+                    // The sink holds too much data. The signal stays set and
+                    // the next poll tries again.
+                    Poll::Pending => (),
+                }
+            }
+        }
+
+        if self.attention_flushing {
+            match Pin::new(&mut self.transport).poll_flush(cx) {
+                Poll::Ready(Ok(())) => self.attention_flushing = false,
+                Poll::Ready(Err(e)) => return Err(e),
+                // The flush registered its own waker and continues on the
+                // next poll. The read below makes progress in the meantime.
+                Poll::Pending => (),
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin + Send> Stream for Connection<S> {
@@ -503,6 +612,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Stream for Connection<S> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+
+        if let Err(e) = this.poll_attention(cx) {
+            return Poll::Ready(Some(Err(e)));
+        }
 
         match ready!(this.transport.try_poll_next_unpin(cx)) {
             Some(Ok(packet)) => {

@@ -44,3 +44,7 @@ __screenshots__/
 
 # Tauri generates these permission schemas at build time
 /backend/gen/schemas
+
+# The output of the standalone test run of the vendored tiberius.
+backend/vendor/tiberius/target/
+backend/vendor/tiberius/Cargo.lock

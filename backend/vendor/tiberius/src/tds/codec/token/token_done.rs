@@ -54,6 +54,13 @@ impl TokenDone {
         self.status.is_empty()
     }
 
+    /// True when this token acknowledges an attention packet. The server sets
+    /// the flag on the last `DONE` of a request that an attention packet
+    /// stopped.
+    pub(crate) fn is_attention_ack(&self) -> bool {
+        self.status.contains(DoneStatus::Attention)
+    }
+
     pub(crate) fn rows(&self) -> u64 {
         self.done_rows
     }

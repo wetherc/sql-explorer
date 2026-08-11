@@ -36,5 +36,6 @@ printf '\033[36m[4/5]\033[0m Formatting and linting of the backend\n'
 
 printf '\033[36m[5/5]\033[0m Unit tests of the backend\n'
 (cd backend && cargo test) || fail 'a backend test failed'
+(cd backend && cargo test --manifest-path vendor/tiberius/Cargo.toml --no-default-features --features tds73 --lib) || fail 'a test of the vendored tiberius failed'
 
 printf '\n\033[32mEvery check passed.\033[0m\n'

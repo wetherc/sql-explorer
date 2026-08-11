@@ -133,5 +133,10 @@ strip = true
 # asks for. Release 0.4.6 builds a slice from the address of an empty GSSAPI
 # buffer, which is undefined behaviour and stops a build that checks it. The
 # same change is in the source of `tiberius` but not in any release.
+#
+# The copy also carries a cancel API that the release does not have. A call to
+# `Client::attention_handle` gives a handle, and a signal on the handle sends a
+# TDS attention packet to the server. The server stops the running statement,
+# the statement ends with `Error::Canceled`, and the connection stays open.
 [patch.crates-io]
 tiberius = { path = "vendor/tiberius" }

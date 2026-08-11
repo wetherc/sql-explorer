@@ -1,3 +1,4 @@
+mod attention;
 mod auth;
 mod config;
 mod connection;
@@ -10,6 +11,7 @@ mod tls;
 ))]
 mod tls_stream;
 
+pub use attention::AttentionHandle;
 pub use auth::*;
 pub use config::*;
 pub(crate) use connection::*;
@@ -75,6 +77,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
         })
     }
 
+    /// Gives a handle that cancels the request in flight. The handle can move
+    /// to another task or thread, and a call to [`signal`] there asks the
+    /// server to stop the running request. The cancelled request then ends
+    /// with [`Error::Canceled`], and the connection stays open for the next
+    /// query.
+    ///
+    /// [`signal`]: struct.AttentionHandle.html#method.signal
+    /// [`Error::Canceled`]: enum.Error.html
+    pub fn attention_handle(&self) -> std::sync::Arc<AttentionHandle> {
+        self.connection.attention_handle()
+    }
+
     /// Executes SQL statements in the SQL Server, returning the number rows
     /// affected. Useful for `INSERT`, `UPDATE` and `DELETE` statements. The
     /// `query` can define the parameter placement by annotating them with
@@ -123,6 +137,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
         query: impl Into<Cow<'a, str>>,
         params: &[&dyn ToSql],
     ) -> crate::Result<ExecuteResult> {
+        self.connection.drain_attention_ack().await?;
         self.connection.flush_stream().await?;
         let rpc_params = Self::rpc_params(query);
 
@@ -185,6 +200,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
     where
         'a: 'b,
     {
+        self.connection.drain_attention_ack().await?;
         self.connection.flush_stream().await?;
         let rpc_params = Self::rpc_params(query);
 
@@ -236,6 +252,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
     where
         'a: 'b,
     {
+        self.connection.drain_attention_ack().await?;
         self.connection.flush_stream().await?;
 
         let req = BatchRequest::new(query, self.connection.context().transaction_descriptor());
@@ -301,6 +318,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
         table: &'a str,
     ) -> crate::Result<BulkLoadRequest<'a, S>> {
         // Start the bulk request
+        self.connection.drain_attention_ack().await?;
         self.connection.flush_stream().await?;
 
         // retrieve column metadata from server
@@ -332,6 +350,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
             .filter(|column| column.base.flags.contains(ColumnFlag::Updateable))
             .collect();
 
+        self.connection.drain_attention_ack().await?;
         self.connection.flush_stream().await?;
         let col_data = columns.iter().map(|c| format!("{}", c)).join(", ");
         let query = format!("INSERT BULK {} ({})", table, col_data);

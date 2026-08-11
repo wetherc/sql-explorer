@@ -36,25 +36,6 @@ features = [
     "docs",
 ]
 
-[[test]]
-name = "query"
-path = "tests/query.rs"
-
-[[test]]
-name = "named-instance-async"
-path = "tests/named-instance-async.rs"
-required-features = ["sql-browser-async-std"]
-
-[[test]]
-name = "named-instance-tokio"
-path = "tests/named-instance-tokio.rs"
-required-features = ["sql-browser-tokio"]
-
-[[test]]
-name = "named-instance-smol"
-path = "tests/named-instance-smol.rs"
-required-features = ["sql-browser-smol"]
-
 [dependencies.async-io]
 version = "1.8"
 optional = true
@@ -180,40 +161,6 @@ features = ["log"]
 [dependencies.uuid]
 version = "1.0"
 
-[dev-dependencies.anyhow]
-version = "1"
-
-[dev-dependencies.async-std]
-version = "1"
-features = ["attributes"]
-
-[dev-dependencies.azure_identity]
-version = "0.5.0"
-
-[dev-dependencies.chrono]
-version = "0.4.38"
-
-[dev-dependencies.env_logger]
-version = "0.9"
-
-[dev-dependencies.indicatif]
-version = "0.17"
-
-[dev-dependencies.indoc]
-version = "1.0.7"
-
-[dev-dependencies.names]
-version = "0.14"
-
-[dev-dependencies.oauth2]
-version = "4.2.3"
-
-[dev-dependencies.paste]
-version = "1.0"
-
-[dev-dependencies.reqwest]
-version = "0.11.10"
-
 [dev-dependencies.tokio]
 version = "1.0"
 features = [
@@ -229,9 +176,6 @@ features = [
 [dev-dependencies.tokio-util]
 version = "0.7"
 features = ["compat"]
-
-[dev-dependencies.url]
-version = "2.2.2"
 
 [dev-dependencies.uuid]
 version = "1.0"

@@ -63,6 +63,10 @@ pub enum Error {
     #[error("BULK UPLOAD input failure: {0}")]
     /// Invalid input in Bulk Upload
     BulkInput(Cow<'static, str>),
+    #[error("The server stopped the request after an attention packet")]
+    /// The server stopped the request after an attention packet. The
+    /// connection stays open and takes the next query.
+    Canceled,
 }
 
 impl Error {

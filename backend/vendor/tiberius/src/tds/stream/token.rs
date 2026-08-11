@@ -148,21 +148,36 @@ where
         Ok(ReceivedToken::Order(order))
     }
 
+    /// Records the acknowledgement of an attention packet when the token
+    /// carries the attention flag. The request that the packet stopped ends
+    /// with [`Error::Canceled`].
+    fn check_attention(&mut self, done: &TokenDone) -> crate::Result<()> {
+        if done.is_attention_ack() {
+            self.conn.attention_acknowledged();
+            return Err(Error::Canceled);
+        }
+
+        Ok(())
+    }
+
     async fn get_done_value(&mut self) -> crate::Result<ReceivedToken> {
         let done = TokenDone::decode(self.conn).await?;
         event!(Level::TRACE, "{}", done);
+        self.check_attention(&done)?;
         Ok(ReceivedToken::Done(done))
     }
 
     async fn get_done_proc_value(&mut self) -> crate::Result<ReceivedToken> {
         let done = TokenDone::decode(self.conn).await?;
         event!(Level::TRACE, "{}", done);
+        self.check_attention(&done)?;
         Ok(ReceivedToken::DoneProc(done))
     }
 
     async fn get_done_in_proc_value(&mut self) -> crate::Result<ReceivedToken> {
         let done = TokenDone::decode(self.conn).await?;
         event!(Level::TRACE, "{}", done);
+        self.check_attention(&done)?;
         Ok(ReceivedToken::DoneInProc(done))
     }
 
