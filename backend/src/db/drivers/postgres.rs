@@ -11,17 +11,18 @@ use crate::db::drivers::{
     rows_affected_message, rows_returned_message, size_text, table_kind, CancelHandle,
     DatabaseDriver, NumberValue,
 };
+use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, Message, MessageLevel, PlanKind, QueryParams, QueryResponse, ResultSet, Routine,
-    Schema, SchemaSnapshot, SnapshotColumn, Table, TableFact, TableKind,
+    IndexInfo, Message, MessageLevel, PlanKind, QueryParams, QueryResponse, Routine, Schema,
+    SchemaSnapshot, SnapshotColumn, Table, TableFact, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::Dialect;
 use crate::storage::{SavedConnection, TlsMode};
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
-use futures_util::{stream, StreamExt};
+use futures_util::{pin_mut, stream, StreamExt, TryStreamExt};
 use postgres_types::Type;
 use rust_decimal::Decimal;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -337,24 +338,33 @@ impl DatabaseDriver for PostgresDriver {
         Ok(())
     }
 
-    async fn execute_query(
+    /// Runs a script and feeds the sink. The path with parameters streams
+    /// the rows through `query_raw`. The path without parameters goes
+    /// through the simple protocol, whose library gathers the whole answer
+    /// before it returns, so that path feeds the sink from a vector and
+    /// keeps its memory cost.
+    ///
+    /// The notices of the server reach the sink after the run, in their
+    /// arrival order.
+    async fn execute_stream(
         &mut self,
         query: &str,
         params: Option<&QueryParams>,
         options: &ExecOptions,
-    ) -> Result<QueryResponse> {
+        sink: &mut dyn RowSink,
+    ) -> Result<RunSummary> {
         let started = Instant::now();
         // A notice that arrived before this run belongs to no answer, so the
         // buffer starts empty.
         let _ = self.take_notices();
         let outcome = match params {
-            Some(params) => self.run_with_params(query, params, options).await,
-            None => self.run_simple(query, options).await,
+            Some(params) => self.stream_with_params(query, params, options, sink).await,
+            None => self.stream_simple(query, options, sink).await,
         };
 
         let notices = self.take_notices();
-        let mut response = match outcome {
-            Ok(response) => response,
+        let rows_affected = match outcome {
+            Ok(rows_affected) => rows_affected,
             Err(error) => {
                 // A run that failed carries the error and no answer, so the
                 // notices of that run reach the log alone.
@@ -364,9 +374,14 @@ impl DatabaseDriver for PostgresDriver {
                 return Err(error);
             }
         };
-        response.messages.splice(0..0, notices);
-        response.elapsed_ms = started.elapsed().as_millis() as u64;
-        Ok(response)
+        for notice in notices {
+            sink.message(notice);
+        }
+        Ok(RunSummary {
+            rows_affected,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            stats: None,
+        })
     }
 
     async fn explain(
@@ -669,101 +684,139 @@ impl CancelHandle for PostgresCancel {
 }
 
 impl PostgresDriver {
-    /// Runs a script through the simple protocol.
-    async fn run_simple(&mut self, query: &str, options: &ExecOptions) -> Result<QueryResponse> {
+    /// Runs a script through the simple protocol and feeds the sink. The
+    /// library gathers the whole answer of a simple query before it
+    /// returns, so the memory cost of this path stays.
+    async fn stream_simple(
+        &mut self,
+        query: &str,
+        options: &ExecOptions,
+        sink: &mut dyn RowSink,
+    ) -> Result<Option<u64>> {
         let messages = self.client.simple_query(query).await?;
-        let mut response = QueryResponse::default();
-        let mut current: Option<ResultSet> = None;
+        let mut rows_affected: Option<u64> = None;
+        let mut open = false;
+        let mut count = 0usize;
+        let mut truncated = false;
+        let mut stopped = false;
 
         for message in messages {
             match message {
                 SimpleQueryMessage::RowDescription(columns) => {
-                    if let Some(set) = current.take() {
-                        push_set(&mut response, set);
+                    if open {
+                        sink.message(rows_returned_message(count, truncated));
+                        sink.end_set(truncated)?;
                     }
-                    current = Some(ResultSet::new(
+                    sink.begin_set(
                         columns
                             .iter()
                             .map(|column| ColumnInfo::new(column.name(), "text"))
                             .collect(),
-                    ));
+                    )?;
+                    open = true;
+                    count = 0;
+                    truncated = false;
                 }
                 SimpleQueryMessage::Row(row) => {
-                    let Some(set) = current.as_mut() else {
-                        continue;
-                    };
-                    if set.rows.len() >= options.max_rows {
-                        set.truncated = true;
+                    if !open || stopped {
                         continue;
                     }
-                    set.rows.push(
-                        (0..row.len())
-                            .map(|index| match row.get(index) {
-                                Some(value) => JsonValue::String(value.to_string()),
-                                None => JsonValue::Null,
-                            })
-                            .collect(),
-                    );
+                    if count >= options.max_rows {
+                        truncated = true;
+                        continue;
+                    }
+                    let values = (0..row.len())
+                        .map(|index| match row.get(index) {
+                            Some(value) => JsonValue::String(value.to_string()),
+                            None => JsonValue::Null,
+                        })
+                        .collect();
+                    if sink.row(values)? == SinkControl::Stop {
+                        truncated = true;
+                        stopped = true;
+                        continue;
+                    }
+                    count += 1;
                 }
                 SimpleQueryMessage::CommandComplete(affected) => {
-                    if let Some(set) = current.take() {
-                        push_set(&mut response, set);
+                    if open {
+                        sink.message(rows_returned_message(count, truncated));
+                        sink.end_set(truncated)?;
+                        open = false;
                     } else {
-                        response.rows_affected =
-                            Some(response.rows_affected.unwrap_or(0) + affected);
-                        response.messages.push(rows_affected_message(affected));
+                        rows_affected = Some(rows_affected.unwrap_or(0) + affected);
+                        sink.message(rows_affected_message(affected));
+                    }
+                    // A stop ends the feed. The statements already ran on
+                    // the server, so the stop drops their output alone.
+                    if stopped {
+                        return Ok(rows_affected);
                     }
                 }
                 _ => {}
             }
         }
-        if let Some(set) = current.take() {
-            push_set(&mut response, set);
+        if open {
+            sink.message(rows_returned_message(count, truncated));
+            sink.end_set(truncated)?;
         }
-        Ok(response)
+        Ok(rows_affected)
     }
 
     /// Runs one statement with bound parameters through the extended
-    /// protocol.
-    async fn run_with_params(
+    /// protocol and streams the rows into the sink one at a time. The
+    /// stream drops at a stop, and the connection task discards the rows
+    /// that remain.
+    async fn stream_with_params(
         &mut self,
         query: &str,
         params: &QueryParams,
         options: &ExecOptions,
-    ) -> Result<QueryResponse> {
+        sink: &mut dyn RowSink,
+    ) -> Result<Option<u64>> {
         let bound = bind_params(params)?;
         let borrowed: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = bound
             .iter()
             .map(|value| value.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
             .collect();
 
-        let rows = self.client.query(query, borrowed.as_slice()).await?;
-        let mut response = QueryResponse::default();
-        if rows.is_empty() {
-            response.messages.push(rows_affected_message(0));
-            return Ok(response);
-        }
+        let rows = self.client.query_raw(query, borrowed).await?;
+        pin_mut!(rows);
 
-        let mut set = ResultSet::new(
-            rows[0]
-                .columns()
-                .iter()
-                .map(|column| ColumnInfo::new(column.name(), column.type_().name()))
-                .collect(),
-        );
-        for row in &rows {
-            if set.rows.len() >= options.max_rows {
-                set.truncated = true;
+        let mut open = false;
+        let mut count = 0usize;
+        let mut truncated = false;
+        while let Some(row) = rows.try_next().await? {
+            if !open {
+                sink.begin_set(
+                    row.columns()
+                        .iter()
+                        .map(|column| ColumnInfo::new(column.name(), column.type_().name()))
+                        .collect(),
+                )?;
+                open = true;
+            }
+            if count >= options.max_rows {
+                truncated = true;
                 break;
             }
-            set.rows.push(row_to_json(row));
+            if sink.row(row_to_json(&row))? == SinkControl::Stop {
+                truncated = true;
+                break;
+            }
+            count += 1;
         }
-        push_set(&mut response, set);
-        Ok(response)
+
+        if open {
+            sink.message(rows_returned_message(count, truncated));
+            sink.end_set(truncated)?;
+        } else {
+            sink.message(rows_affected_message(0));
+        }
+        Ok(None)
     }
 }
 
-/// Adds a result set and the message that belongs to it.
 /// The keyword that asks PostgreSQL for a plan. The analysed form runs the
 /// statement, so a statement that writes rows writes them.
 pub fn plan_prefix(kind: PlanKind) -> &'static str {
@@ -792,13 +845,6 @@ fn create_query_text(schema: Option<&str>, table: &str, kind: TableKind) -> Opti
         ),
         0,
     ))
-}
-
-fn push_set(response: &mut QueryResponse, set: ResultSet) {
-    response
-        .messages
-        .push(rows_returned_message(set.rows.len(), set.truncated));
-    response.results.push(set);
 }
 
 /// Turns the JSON parameters into values the driver can bind.
@@ -1141,15 +1187,5 @@ mod tests {
             array_to_json(Some(Vec::<Option<i32>>::new())),
             serde_json::json!([])
         );
-    }
-
-    #[test]
-    fn a_result_set_is_added_with_its_message() {
-        let mut response = QueryResponse::default();
-        let mut set = ResultSet::new(vec![ColumnInfo::new("a", "text")]);
-        set.rows.push(vec![JsonValue::Null]);
-        push_set(&mut response, set);
-        assert_eq!(response.results.len(), 1);
-        assert_eq!(response.messages, vec![Message::info("1 row returned.")]);
     }
 }

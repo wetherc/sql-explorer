@@ -58,21 +58,15 @@ One sink remains to write:
   in memory. It writes the first result set and answers `Stop` at the end
   of that set, because the export writes one file.
 
-One known change of behaviour comes with the conversion of PostgreSQL: the
-driver splices the notices that arrive before the run at the front of the
-messages (`postgres.rs`, `execute_query`). The sink receives messages in
-arrival order and has no way to put one at the front. The Messages tab
-then shows the notices in arrival order.
+The PostgreSQL driver is converted. Its path with parameters streams the
+rows through `query_raw`. Its path without parameters goes through
+`simple_query`, whose library gathers the whole answer before it returns,
+so that path feeds the sink from the vector and keeps its memory cost.
+The notices of the server now reach the messages in arrival order, after
+the rows; the old code put them at the front.
 
 ### The drivers that remain
 
-- **PostgreSQL**: the driver does not use `query_raw` today. The path with
-  parameters uses `client.query`, which gathers every row; convert it to
-  `query_raw`, which gives a `RowStream`. The path without parameters uses
-  `simple_query`, which returns a vector that the library already
-  gathered. The library gives no public streaming form of the simple
-  query, so that path feeds the sink from the vector and keeps its memory
-  cost. Record this limit in the module comment.
 - **MySQL**: the driver uses `exec_iter` and then `result.collect()`,
   which gathers each set before the row limit applies. Replace the collect
   with a read of one row at a time through `next().await`, and forward
@@ -113,10 +107,9 @@ bound in `LIMITATIONS.md`.
 
 ### The order of the work
 
-1. Convert the PostgreSQL driver.
-2. Convert the MS SQL Server driver, the MySQL driver and the Athena
+1. Convert the MS SQL Server driver, the MySQL driver and the Athena
    driver, and delete the `execute_query` copy of each converted driver.
-3. Switch the export command to `FileSink` and delete the buffered export
+2. Switch the export command to `FileSink` and delete the buffered export
    path. Test that a stop in the middle of an export leaves no file, and
    that the formula-mark escape of `csv_field` stays in place.
 
