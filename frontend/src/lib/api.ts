@@ -13,6 +13,7 @@ import type {
   ExportRequest,
   ExportSummary,
   FolderEntry,
+  MenuCommandState,
   OpenedFile,
   SaveFileRequest,
   SaveStatementRequest,
@@ -352,6 +353,12 @@ export const api = {
 
   onConnectionStatus(handler: (event: ConnectionStatusEvent) => void): Promise<UnlistenFn> {
     return listen<ConnectionStatusEvent>(CONNECTION_STATUS_EVENT, (event) => handler(event.payload))
+  },
+
+  /** Tells the backend which commands of the menu can run now, so the
+   *  operating system greys out the ones that cannot. */
+  setMenuCommands(states: MenuCommandState[]): Promise<void> {
+    return invoke('set_menu_commands', { states })
   },
 
   /** Hears the menu of the operating system. The payload is the identifier

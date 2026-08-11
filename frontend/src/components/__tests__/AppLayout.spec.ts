@@ -42,6 +42,7 @@ describe('AppLayout', () => {
     apiStub.queryParameters.mockResolvedValue([])
     apiStub.onConnectionStatus.mockResolvedValue(() => {})
     apiStub.onMenuCommand.mockResolvedValue(() => {})
+    apiStub.setMenuCommands.mockResolvedValue(undefined)
   })
 
   it('reads everything it needs when it opens', async () => {
@@ -104,6 +105,43 @@ describe('AppLayout', () => {
     // The window still answers every key, so the failure is a notice and
     // not a stop.
     expect(useUiStore().notices.some((notice) => notice.level === 'error')).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('tells the backend which commands of the menu can run', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+
+    // No tab stands open, so the command that writes a file cannot run.
+    const first = apiStub.setMenuCommands.mock.calls[0]?.[0] as Array<{
+      id: string
+      enabled: boolean
+    }>
+    expect(first).toEqual([
+      { id: 'tab.new', enabled: true },
+      { id: 'file.open', enabled: true },
+      { id: 'file.openFolder', enabled: true },
+      { id: 'query.save', enabled: false },
+    ])
+
+    // A tab opens, so the command that writes a file can run, and the
+    // backend hears of the change.
+    useTabsStore().add()
+    await settle()
+    const calls = apiStub.setMenuCommands.mock.calls
+    const last = calls[calls.length - 1]?.[0] as Array<{ id: string; enabled: boolean }>
+    expect(last).toContainEqual({ id: 'query.save', enabled: true })
+    wrapper.unmount()
+  })
+
+  it('keeps working when the state of the menu cannot be sent', async () => {
+    apiStub.setMenuCommands.mockRejectedValue({ kind: 'internal', message: 'no', detail: null })
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+
+    // The menu then reads wrongly, and nothing else fails with it, so the
+    // failure reaches no notice.
+    expect(useUiStore().notices).toHaveLength(0)
     wrapper.unmount()
   })
 

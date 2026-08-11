@@ -52,6 +52,7 @@ export function makeApiStub() {
     supportedEngines: vi.fn(),
     onConnectionStatus: vi.fn(),
     onMenuCommand: vi.fn(),
+    setMenuCommands: vi.fn(),
   }
 }
 

@@ -169,6 +169,39 @@ pub fn names_a_command(id: &str) -> bool {
     FILE_COMMANDS.iter().any(|command| command.id == id)
 }
 
+/// Turns one item of the menu on or off.
+///
+/// The state of a command lives in the interface, which tells the backend
+/// what changed. An item that the menu does not hold is left alone, so an
+/// identifier of a command that carries no item costs nothing.
+///
+/// Returns true when the menu held the item.
+pub fn set_command_enabled<R: Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    enabled: bool,
+) -> tauri::Result<bool> {
+    let Some(menu) = app.menu() else {
+        return Ok(false);
+    };
+    // The items of this application live one level down, in the File menu,
+    // so the walk goes through the submenus.
+    for kind in menu.items()? {
+        let Some(submenu) = kind.as_submenu() else {
+            continue;
+        };
+        let Some(found) = submenu.get(id) else {
+            continue;
+        };
+        let Some(item) = found.as_menuitem() else {
+            continue;
+        };
+        item.set_enabled(enabled)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

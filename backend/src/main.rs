@@ -92,6 +92,7 @@ fn main() {
             commands::save_workspace,
             commands::pick_folder,
             commands::open_statement_file,
+            commands::set_menu_commands,
             commands::restore_folder,
             commands::list_folder,
             commands::read_text_file,

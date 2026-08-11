@@ -634,6 +634,33 @@ function runCommandById(id: string): void {
   }
 }
 
+/** The commands that the menu of the operating system draws. */
+const MENU_COMMAND_IDS: string[] = ['tab.new', 'file.open', 'file.openFolder', 'query.save']
+
+/**
+ * What the menu of the operating system shows for each command it holds.
+ * The state of a command lives here, because the tabs and the connections
+ * that decide it live here, so the backend is told of each change.
+ */
+const menuCommandStates = computed(() =>
+  // The order follows the menu and not the registry, so a reader of the
+  // two lists sees one order.
+  MENU_COMMAND_IDS.map((id) => {
+    const command = commands.find((entry) => entry.id === id)
+    return { id, enabled: command ? commandEnabled(command) : false }
+  }),
+)
+
+watch(
+  menuCommandStates,
+  (states) => {
+    // A menu that keeps an old state is a menu that reads wrongly, and
+    // nothing else fails with it, so the failure stays out of the notices.
+    void Promise.resolve(api.setMenuCommands(states)).catch(() => {})
+  },
+  { immediate: true, deep: true },
+)
+
 function onKeyDown(event: KeyboardEvent): void {
   // A key of the application must not reach through a dialog, because the
   // dialog holds the attention of the user. Each dialog counts itself in the

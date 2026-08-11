@@ -187,6 +187,12 @@ export interface FolderEntry {
   kind: 'folder' | 'file'
 }
 
+/** What the interface says about one command of the menu of the system. */
+export interface MenuCommandState {
+  id: string
+  enabled: boolean
+}
+
 /** One file that the user opened through the dialog. */
 export interface OpenedFile {
   path: string

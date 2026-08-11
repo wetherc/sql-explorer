@@ -1339,6 +1339,37 @@ pub async fn pick_folder<R: Runtime>(
     Ok(Some(opened))
 }
 
+/// What the interface says about one command of the menu.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MenuCommandState {
+    pub id: String,
+    pub enabled: bool,
+}
+
+/// Turns the items of the menu on and off.
+///
+/// The state of a command lives in the interface, because the interface
+/// holds the tabs and the connections that decide it. The interface sends
+/// the state of every item it knows whenever one of them changes, and the
+/// backend then sets the items of the menu that the operating system draws.
+///
+/// A state that names no item of the menu is dropped, so the interface can
+/// send the whole list without a check of its own.
+#[tauri::command]
+pub async fn set_menu_commands<R: Runtime>(
+    app: AppHandle<R>,
+    states: Vec<MenuCommandState>,
+) -> Result<()> {
+    for state in states {
+        if !crate::menu::names_a_command(&state.id) {
+            continue;
+        }
+        crate::menu::set_command_enabled(&app, &state.id, state.enabled)?;
+    }
+    Ok(())
+}
+
 /// One file that the user opened through the dialog.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
