@@ -353,6 +353,9 @@
       <v-card ref="paramCard">
         <v-card-title class="text-subtitle-1">Give the values of the parameters</v-card-title>
         <v-card-text class="d-flex flex-column ga-3">
+          <div class="text-caption text-medium-emphasis" data-test="parameters-help">
+            Write <code>:name</code> in the statement to make a parameter.
+          </div>
           <div
             v-for="row of paramRows"
             :key="row.name"
@@ -361,7 +364,7 @@
           >
             <div class="param-name text-medium-emphasis">:{{ row.name }}</div>
             <v-select
-              v-model="row.kind"
+              :model-value="row.kind"
               :items="PARAM_KINDS"
               item-title="title"
               item-value="value"
@@ -369,12 +372,24 @@
               hide-details
               class="param-kind"
               :data-test="`parameter-kind-${row.name}`"
+              @update:model-value="(kind) => onParamKindChange(row, kind as ParamKind)"
             />
-            <v-text-field
+            <!-- A value of the true or false form takes one of two words, so
+                 it is chosen and not written. -->
+            <v-select
+              v-if="row.kind === ParamKind.Boolean"
               v-model="row.text"
-              :disabled="row.kind === ParamKind.Null"
+              :items="BOOLEAN_VALUES"
               label="Value"
               hide-details
+              :data-test="`parameter-value-${row.name}`"
+            />
+            <v-text-field
+              v-else
+              v-model="row.text"
+              :disabled="row.kind === ParamKind.Null"
+              :error-messages="paramProblem(row) ?? undefined"
+              label="Value"
               :data-test="`parameter-value-${row.name}`"
             />
           </div>
@@ -385,6 +400,7 @@
           <v-btn
             color="primary"
             text="Use these values"
+            :disabled="paramsAreWrong"
             data-test="parameters-confirm"
             @click="confirmParams"
           />
@@ -440,7 +456,7 @@ import { newQueryState, useQueryStore } from '@/stores/query'
 import { useSettingsStore } from '@/stores/settings'
 import { useTabsStore } from '@/stores/tabs'
 import { useUiStore } from '@/stores/ui'
-import { alignParams, needsAValue, paramsForRun } from '@/lib/params'
+import { alignParams, needsAValue, paramProblem, paramsForRun } from '@/lib/params'
 import { Dialect, ParamKind, PlanKind, type ParamValue, type ResultSet } from '@/types/api'
 import type { ExportFormat } from './ResultsGrid.vue'
 import type { ResultPane } from '@/stores/query'
@@ -573,6 +589,24 @@ const PARAM_KINDS = [
   { title: 'True or false', value: ParamKind.Boolean },
   { title: 'Empty value', value: ParamKind.Null },
 ]
+
+/** The two words that a value of the true or false form takes. */
+const BOOLEAN_VALUES = ['true', 'false']
+
+/** True while one row of the dialog holds a text that its form refuses. */
+const paramsAreWrong = computed(() => paramRows.value.some((row) => paramProblem(row) !== null))
+
+/**
+ * Answers a change of the form of one value. A value that becomes a true or
+ * false value takes one of the two words, because the box that shows it holds
+ * those two alone.
+ */
+function onParamKindChange(row: ParamValue, kind: ParamKind): void {
+  row.kind = kind
+  if (kind === ParamKind.Boolean && !BOOLEAN_VALUES.includes(row.text.trim().toLowerCase())) {
+    row.text = 'false'
+  }
+}
 
 /**
  * Reads the names of the parameters of a statement and hands the values to

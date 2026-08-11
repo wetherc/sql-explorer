@@ -20,10 +20,28 @@ export function jsonOfParam(value: ParamValue): unknown {
     return value.text.trim().toLowerCase() === 'true'
   }
   if (value.kind === ParamKind.Number) {
+    // The dialog refuses a text that is not a number, so this call never
+    // meets one. A text that still arrives keeps its own form, and the
+    // server judges it.
     const number = Number(value.text.trim())
-    return Number.isFinite(number) ? number : null
+    return Number.isFinite(number) ? number : value.text
   }
   return value.text
+}
+
+/**
+ * True when the text of a value does not fit the form the user chose. The
+ * dialog blocks its confirm button while one row is wrong.
+ */
+export function paramProblem(value: ParamValue): string | null {
+  if (value.kind !== ParamKind.Number) {
+    return null
+  }
+  const text = value.text.trim()
+  if (text === '') {
+    return null
+  }
+  return Number.isFinite(Number(text)) ? null : 'Write a number.'
 }
 
 /** Builds the map of values that a run sends beside the statement. */

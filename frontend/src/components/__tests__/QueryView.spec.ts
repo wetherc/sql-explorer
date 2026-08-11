@@ -297,6 +297,113 @@ describe('QueryView', () => {
     )
   })
 
+  it('refuses a number that it cannot read and holds the confirm button', async () => {
+    apiStub.queryParameters.mockResolvedValue(['id'])
+    apiStub.executeQuery.mockResolvedValue(response)
+    const wrapper = await mountView('SELECT :id')
+
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+
+    const kind = wrapper
+      .findAllComponents({ name: 'VSelect' })
+      .find((item) => String(item.attributes('data-test')).startsWith('parameter-kind'))!
+    await kind.vm.$emit('update:modelValue', 'number')
+    await settle()
+
+    const field = document.querySelector(
+      '[data-test="parameter-value-id"] input',
+    ) as HTMLInputElement
+    field.value = 'two'
+    field.dispatchEvent(new Event('input'))
+    await settle()
+
+    expect(document.body.textContent).toContain('Write a number.')
+    const confirm = document.querySelector('[data-test="parameters-confirm"]') as HTMLElement
+    expect(confirm.hasAttribute('disabled')).toBe(true)
+
+    // A number that the box accepts opens the way again.
+    field.value = '12'
+    field.dispatchEvent(new Event('input'))
+    await settle()
+    expect(document.body.textContent).not.toContain('Write a number.')
+    ;(document.querySelector('[data-test="parameters-confirm"]') as HTMLElement).click()
+    await settle()
+
+    expect(apiStub.executeQuery).toHaveBeenCalledWith(
+      expect.objectContaining({ queryParams: { id: 12 } }),
+    )
+  })
+
+  it('offers the two words of a true or false value', async () => {
+    apiStub.queryParameters.mockResolvedValue(['flag'])
+    apiStub.executeQuery.mockResolvedValue(response)
+    const wrapper = await mountView('SELECT :flag')
+
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+
+    const kind = wrapper
+      .findAllComponents({ name: 'VSelect' })
+      .find((item) => String(item.attributes('data-test')).startsWith('parameter-kind'))!
+    await kind.vm.$emit('update:modelValue', 'boolean')
+    await settle()
+
+    // The value becomes a box of two words, which starts at false.
+    const value = wrapper
+      .findAllComponents({ name: 'VSelect' })
+      .find((item) => item.attributes('data-test') === 'parameter-value-flag')!
+    expect(value.props('items')).toEqual(['true', 'false'])
+    expect(value.props('modelValue')).toBe('false')
+
+    await value.vm.$emit('update:modelValue', 'true')
+    await settle()
+    ;(document.querySelector('[data-test="parameters-confirm"]') as HTMLElement).click()
+    await settle()
+
+    expect(apiStub.executeQuery).toHaveBeenCalledWith(
+      expect.objectContaining({ queryParams: { flag: true } }),
+    )
+  })
+
+  it('keeps a word that the true or false form already accepts', async () => {
+    apiStub.queryParameters.mockResolvedValue(['flag'])
+    apiStub.executeQuery.mockResolvedValue(response)
+    const wrapper = await mountView('SELECT :flag')
+
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+    const field = document.querySelector(
+      '[data-test="parameter-value-flag"] input',
+    ) as HTMLInputElement
+    field.value = 'true'
+    field.dispatchEvent(new Event('input'))
+    await settle()
+
+    const kind = wrapper
+      .findAllComponents({ name: 'VSelect' })
+      .find((item) => String(item.attributes('data-test')).startsWith('parameter-kind'))!
+    await kind.vm.$emit('update:modelValue', 'boolean')
+    await settle()
+
+    const value = wrapper
+      .findAllComponents({ name: 'VSelect' })
+      .find((item) => item.attributes('data-test') === 'parameter-value-flag')!
+    expect(value.props('modelValue')).toBe('true')
+  })
+
+  it('says how a parameter is written', async () => {
+    apiStub.queryParameters.mockResolvedValue(['id'])
+    const wrapper = await mountView('SELECT :id')
+
+    await wrapper.find('[data-test="parameters-button"]').trigger('click')
+    await settle()
+
+    expect(document.querySelector('[data-test="parameters-help"]')?.textContent).toContain(
+      'to make a parameter',
+    )
+  })
+
   it('closes the parameter dialog when the overlay reports it', async () => {
     apiStub.queryParameters.mockResolvedValue(['id'])
     const wrapper = await mountView('SELECT :id')

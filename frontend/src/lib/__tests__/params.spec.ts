@@ -4,6 +4,7 @@ import {
   jsonOfParam,
   needsAValue,
   newParamValue,
+  paramProblem,
   paramsForRun,
   parseParamValues,
 } from '@/lib/params'
@@ -29,8 +30,22 @@ describe('jsonOfParam', () => {
     expect(jsonOfParam({ name: 'a', kind: ParamKind.Null, text: 'ignored' })).toBeNull()
   })
 
-  it('gives an empty value for a number it cannot read', () => {
-    expect(jsonOfParam({ name: 'a', kind: ParamKind.Number, text: 'two' })).toBeNull()
+  it('keeps the text of a number it cannot read, so no value goes missing', () => {
+    expect(jsonOfParam({ name: 'a', kind: ParamKind.Number, text: 'two' })).toBe('two')
+  })
+})
+
+describe('paramProblem', () => {
+  it('names a text that the number form refuses', () => {
+    expect(paramProblem({ name: 'a', kind: ParamKind.Number, text: 'two' })).toBe('Write a number.')
+  })
+
+  it('finds no fault in a text that fits its form', () => {
+    expect(paramProblem({ name: 'a', kind: ParamKind.Number, text: ' 12 ' })).toBeNull()
+    // An empty box waits for the user, and the run itself asks for the value.
+    expect(paramProblem({ name: 'a', kind: ParamKind.Number, text: '  ' })).toBeNull()
+    expect(paramProblem({ name: 'a', kind: ParamKind.Text, text: 'two' })).toBeNull()
+    expect(paramProblem({ name: 'a', kind: ParamKind.Null, text: 'two' })).toBeNull()
   })
 })
 
