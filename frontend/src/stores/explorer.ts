@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { computed, ref } from 'vue'
+import { computed, markRaw, ref, shallowRef } from 'vue'
 import { api } from '@/lib/api'
 import { useConnectionsStore } from './connections'
 import { useSettingsStore } from './settings'
@@ -240,8 +240,14 @@ export const useExplorerStore = defineStore('explorer', () => {
    * The whole schema of one database of one connection, keyed by the two
    * names. The editor reads these names, so a relation the user never opened
    * in the tree is still offered.
+   *
+   * A snapshot holds up to tens of thousands of column records and never
+   * changes after it arrives, so the record sits in a shallow reference and
+   * each snapshot is marked raw. A deep proxy over that many objects would
+   * cost memory and tracking for nothing. Every write replaces the whole
+   * record, which is what a shallow reference reacts to.
    */
-  const snapshots = ref<Record<string, SchemaSnapshot>>({})
+  const snapshots = shallowRef<Record<string, SchemaSnapshot>>({})
 
   /** The bounds the settings put on a read of a schema. */
   function snapshotOptions(): { maxColumns: number; ownConnection: boolean } {
@@ -283,7 +289,7 @@ export const useExplorerStore = defineStore('explorer', () => {
         // editor stay a list this store can read.
         return null
       }
-      snapshots.value = { ...snapshots.value, [key]: snapshot }
+      snapshots.value = { ...snapshots.value, [key]: markRaw(snapshot) }
       if (!snapshot.complete) {
         ui.warn(
           `The schema of ${database} is larger than the limit of ${options.maxColumns} columns, ` +
