@@ -108,9 +108,12 @@ describe('ExplorerTree', () => {
     expect(wrapper.find('.node-hint').text()).toBe('int not null')
   })
 
-  it('holds the whole name under the pointer, because a long name is cut short', () => {
+  it('shows the whole name of a long row, which the panel scrolls to', () => {
     const wrapper = mountTree([node({ label: 'a_very_long_table_name_indeed' })])
-    expect(wrapper.find('.node-label').attributes('title')).toBe('a_very_long_table_name_indeed')
+    const label = wrapper.find('.node-label')
+    expect(label.text()).toBe('a_very_long_table_name_indeed')
+    // The name is not cut short, so it needs no second copy under the pointer.
+    expect(label.attributes('title')).toBeUndefined()
   })
 })
 
@@ -181,6 +184,21 @@ describe('ExplorerTree as a tree a reader can follow', () => {
 
     await wrapper.trigger('keydown', { key: 'ArrowUp' })
     expect(tabStop(wrapper)).toBe(1)
+  })
+
+  it('keeps the place of the scroll across when it moves the focus', async () => {
+    const wrapper = mountTree([node(), node({ key: 'db2' })])
+    const row = wrapper.findAll('[data-test="tree-row"]')[1]!.element as HTMLElement
+    const focus = vi.spyOn(row, 'focus')
+    const scroll = vi.fn()
+    row.scrollIntoView = scroll
+
+    await wrapper.trigger('keydown', { key: 'ArrowDown' })
+    await wrapper.vm.$nextTick()
+
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true })
+    expect(scroll).toHaveBeenCalledWith({ block: 'nearest', inline: 'nearest' })
+    wrapper.unmount()
   })
 
   it('stays where it is at the top and at the bottom', async () => {

@@ -42,9 +42,7 @@
           {{ row.node.icon }}
         </v-icon>
 
-        <!-- A long name is cut short on screen, so the whole name waits under
-             the pointer. -->
-        <span class="node-label" :title="row.node.label">{{ row.node.label }}</span>
+        <span class="node-label">{{ row.node.label }}</span>
         <span v-if="row.node.hint" class="node-hint">{{ row.node.hint }}</span>
       </div>
 
@@ -193,10 +191,19 @@ function openMenuAt(x: number, y: number, node: ExplorerNode): void {
   emit('context', { x, y, node })
 }
 
-/** Moves the focus to one row and lets the browser draw it there. */
+/**
+ * Moves the focus to one row and brings that row into view. The browser
+ * scrolls a focused element on both axes, which would lose the place of a
+ * horizontal scroll on each step of a walk up or down, so the row asks for
+ * the nearest edge of each axis instead.
+ */
 function focusRow(key: string): void {
   focusedKey.value = key
-  void nextTick(() => rowElements.get(key)?.focus())
+  void nextTick(() => {
+    const row = rowElements.get(key)
+    row?.focus({ preventScroll: true })
+    row?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  })
 }
 
 /** The place of the row that holds the focus among the rows a key can reach. */
@@ -344,8 +351,13 @@ defineExpose({ focusRow })
 </script>
 
 <style scoped>
+/* Each row takes the width of the widest row, so a long name reaches past
+   the panel and the scroll of the panel brings it into view. A tree that is
+   narrower than the panel still fills the panel. */
 .explorer-tree {
   outline: none;
+  width: max-content;
+  min-width: 100%;
 }
 
 .tree-row {
@@ -384,10 +396,7 @@ defineExpose({ focusRow })
 }
 
 .node-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
-  min-width: 0;
 }
 
 /* The hint sits against the right edge, so the hints of the rows align. */
