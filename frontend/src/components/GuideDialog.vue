@@ -1,5 +1,16 @@
 <template>
-  <AppDialog :model-value="open" max-width="900" scrollable @update:model-value="close">
+  <!-- The height stands on the dialog and not on the card. A scrollable
+       dialog makes the card a flex item of the box that holds it, with a
+       basis of the whole height, and that basis wins over a height of the
+       card. The box would then take the height of the topic that stands
+       open. -->
+  <AppDialog
+    :model-value="open"
+    max-width="900"
+    height="70vh"
+    scrollable
+    @update:model-value="close"
+  >
     <v-card class="guide-card">
       <v-card-title class="text-subtitle-1">Guide</v-card-title>
       <v-card-text class="guide-body d-flex ga-4">
@@ -54,15 +65,22 @@ function close(open: boolean): void {
 <style scoped>
 /* The dialog holds one size, whatever the topic that stands open, so the
    window does not jump as the reader moves from topic to topic. The text of
-   a long topic scrolls inside it. */
+   a long topic scrolls inside it. The card fills the height of the dialog,
+   which the dialog itself holds. */
 .guide-card {
-  height: 70vh;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
 }
 
 .guide-body {
   flex: 1 1 auto;
   min-height: 0;
-  overflow: hidden;
+  /* The two columns scroll on their own, so this box never scrolls. The
+     library gives a scrollable dialog an automatic overflow here, which
+     would put a second bar beside the one of the topic. */
+  overflow: hidden !important;
 }
 
 .topic-list {

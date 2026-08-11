@@ -48,6 +48,18 @@ describe('GuideDialog', () => {
     expect(text?.textContent).not.toContain('**')
   })
 
+  it('holds its height on the dialog, so a topic cannot change it', async () => {
+    const wrapper = await mountGuide()
+
+    // A scrollable dialog makes the card a flex item with a basis of the
+    // whole height, and that basis wins over a height of the card. The
+    // height therefore belongs to the dialog.
+    expect(wrapper.findComponent({ name: 'VDialog' }).props('height')).toBe('70vh')
+
+    const content = document.querySelector('.v-overlay__content') as HTMLElement
+    expect(content.style.height).toBe('70vh')
+  })
+
   it('reports that the reader closed it', async () => {
     const wrapper = await mountGuide()
 
