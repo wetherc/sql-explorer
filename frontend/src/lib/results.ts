@@ -22,6 +22,7 @@ const ENCODING_INT32 = 2
 const ENCODING_FLOAT64 = 3
 const ENCODING_TEXT = 4
 const ENCODING_JSON = 5
+const ENCODING_DICT = 6
 
 const decoder = new TextDecoder()
 
@@ -38,6 +39,17 @@ type SegmentColumn =
       bytes: Uint8Array
       /** The values that were read already, so a filter reads each once. */
       cache: Array<CellValue | undefined>
+    }
+  | {
+      kind: 'dict'
+      nulls: Uint8Array
+      /** The place in the dictionary of the text of each row. */
+      codes: Uint32Array
+      /** The end of each text of the dictionary in `bytes`. */
+      ends: Uint32Array
+      bytes: Uint8Array
+      /** The texts that were read already, one for each different text. */
+      cache: Array<string | undefined>
     }
 
 /**
@@ -169,9 +181,32 @@ function valueOf(column: SegmentColumn, row: number): CellValue {
       return bitSet(column.nulls, row) ? null : (column.values[row] ?? null)
     case 'float64':
       return bitSet(column.nulls, row) ? null : (column.values[row] ?? null)
+    case 'dict':
+      return dictValue(column, row)
     default:
       return textValue(column, row)
   }
+}
+
+/**
+ * Reads one value of a column that holds each of its texts once. Every row of
+ * one text gives back that one text, so a column of many rows costs one text
+ * for each different value.
+ */
+function dictValue(column: Extract<SegmentColumn, { kind: 'dict' }>, row: number): CellValue {
+  if (bitSet(column.nulls, row)) {
+    return null
+  }
+  const code = column.codes[row] ?? 0
+  const held = column.cache[code]
+  if (held !== undefined) {
+    return held
+  }
+  const end = column.ends[code] ?? 0
+  const start = code === 0 ? 0 : (column.ends[code - 1] ?? 0)
+  const text = decoder.decode(column.bytes.subarray(start, end))
+  column.cache[code] = text
+  return text
 }
 
 /** Reads one value of a column of text or of JSON, and keeps it. */
@@ -331,7 +366,7 @@ function readColumn(
   if (encoding === ENCODING_NULL) {
     return { column: { kind: 'null' }, at }
   }
-  if (encoding > ENCODING_JSON) {
+  if (encoding > ENCODING_DICT) {
     throw new Error(`The rows hold a column of the unknown form ${encoding}.`)
   }
   const nulls = readMask(buffer, at, rows)
@@ -377,6 +412,26 @@ function readColumn(
           cache: new Array(rows),
         },
         at: lengthAt + 4 + length,
+      }
+    }
+    case ENCODING_DICT: {
+      const countAt = align(nulls.at, 4)
+      const count = view.getUint32(countAt, true)
+      const ends = new Uint32Array(buffer, countAt + 4, count)
+      const lengthAt = countAt + 4 + count * 4
+      const length = view.getUint32(lengthAt, true)
+      const bytes = new Uint8Array(buffer, lengthAt + 4, length)
+      const codesAt = align(lengthAt + 4 + length, 4)
+      return {
+        column: {
+          kind: 'dict',
+          nulls: nulls.mask,
+          codes: new Uint32Array(buffer, codesAt, rows),
+          ends,
+          bytes,
+          cache: new Array(count),
+        },
+        at: codesAt + rows * 4,
       }
     }
     default:

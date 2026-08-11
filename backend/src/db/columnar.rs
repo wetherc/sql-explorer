@@ -6,7 +6,8 @@
 //! as a typed array, and a column of text becomes one buffer of UTF-8 bytes
 //! with an end offset for each value. The frontend therefore holds the bytes
 //! of the answer once, and it builds no object for a row and no object for a
-//! cell.
+//! cell. A column of text that repeats its values carries each text once and a
+//! number for each row.
 //!
 //! Every number in the form is little-endian. One message holds one or more
 //! frames, and each frame starts with one byte that names its kind.
@@ -16,6 +17,8 @@ use crate::db::{ColumnInfo, Message, QueryStats};
 use crate::error::{Error, Result};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use tauri::ipc::{Channel, InvokeResponseBody};
 
 /// The kind byte of each frame.
@@ -39,7 +42,14 @@ pub enum ColumnEncoding {
     Text = 4,
     /// As `Text`, and each value holds the JSON of the value.
     Json = 5,
+    /// One buffer that holds each text of the column once, with a number for
+    /// each row that names the text of that row.
+    Dict = 6,
 }
+
+/// The smallest chunk that can take the dictionary encoding. A short chunk
+/// holds few bytes of text, so the dictionary would save little.
+const DICT_MIN_ROWS: usize = 64;
 
 /// Picks the encoding of one column from the values of one chunk. The values
 /// arrive as JSON, so a column can hold anything, and the encoding therefore
@@ -49,12 +59,15 @@ pub fn pick_encoding<'a>(values: impl Iterator<Item = &'a JsonValue> + Clone) ->
     if present.peek().is_none() {
         return ColumnEncoding::Null;
     }
-    let present = values.filter(|value| !value.is_null());
+    let rows = values.clone().count();
+    let present = values.clone().filter(|value| !value.is_null());
     let mut all_bool = true;
     let mut all_int32 = true;
     let mut all_number = true;
     let mut all_text = true;
+    let mut present_count = 0usize;
     for value in present {
+        present_count += 1;
         match value {
             JsonValue::Bool(_) => {
                 all_int32 = false;
@@ -96,10 +109,37 @@ pub fn pick_encoding<'a>(values: impl Iterator<Item = &'a JsonValue> + Clone) ->
     } else if all_number {
         ColumnEncoding::Float64
     } else if all_text {
-        ColumnEncoding::Text
+        match repeats_enough(values, rows, present_count) {
+            true => ColumnEncoding::Dict,
+            false => ColumnEncoding::Text,
+        }
     } else {
         ColumnEncoding::Json
     }
+}
+
+/// True when the texts of a column repeat enough for the dictionary encoding.
+/// The test stops as soon as the column holds too many different texts, so a
+/// column of keys costs one pass and one small set.
+fn repeats_enough<'a>(
+    values: impl Iterator<Item = &'a JsonValue>,
+    rows: usize,
+    present: usize,
+) -> bool {
+    if rows < DICT_MIN_ROWS {
+        return false;
+    }
+    let limit = present / 2;
+    let mut seen: HashSet<&str> = HashSet::new();
+    for value in values {
+        if let JsonValue::String(text) = value {
+            seen.insert(text.as_str());
+            if seen.len() > limit {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Writes the frame that opens one result set.
@@ -144,6 +184,7 @@ pub fn write_chunk(buffer: &mut Vec<u8>, set: u32, columns: usize, rows: &[Vec<J
             ColumnEncoding::Float64 => write_float64_column(buffer, rows, index),
             ColumnEncoding::Text => write_text_column(buffer, rows, index, false),
             ColumnEncoding::Json => write_text_column(buffer, rows, index, true),
+            ColumnEncoding::Dict => write_dict_column(buffer, rows, index),
         }
     }
 }
@@ -239,6 +280,44 @@ fn write_text_column(buffer: &mut Vec<u8>, rows: &[Vec<JsonValue>], index: usize
     }
     buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     buffer.extend_from_slice(&bytes);
+}
+
+/// Writes each text of the column once, and then a number for each row that
+/// names the text of that row. A null holds the number zero, and the mask of
+/// the nulls tells the reader to give null for that row.
+fn write_dict_column(buffer: &mut Vec<u8>, rows: &[Vec<JsonValue>], index: usize) {
+    write_null_mask(buffer, rows, index);
+    pad_to(buffer, 4);
+    let mut places: HashMap<&str, u32> = HashMap::new();
+    let mut ends: Vec<u32> = Vec::new();
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut codes: Vec<u32> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let code = match cell(row, index) {
+            JsonValue::String(text) => match places.get(text.as_str()) {
+                Some(code) => *code,
+                None => {
+                    let code = ends.len() as u32;
+                    bytes.extend_from_slice(text.as_bytes());
+                    ends.push(bytes.len() as u32);
+                    places.insert(text.as_str(), code);
+                    code
+                }
+            },
+            _ => 0,
+        };
+        codes.push(code);
+    }
+    buffer.extend_from_slice(&(ends.len() as u32).to_le_bytes());
+    for end in ends {
+        buffer.extend_from_slice(&end.to_le_bytes());
+    }
+    buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    buffer.extend_from_slice(&bytes);
+    pad_to(buffer, 4);
+    for code in codes {
+        buffer.extend_from_slice(&code.to_le_bytes());
+    }
 }
 
 /// The number of rows of one chunk. A chunk of this size holds enough rows to
@@ -482,6 +561,7 @@ mod tests {
                     3 => ColumnEncoding::Float64,
                     4 => ColumnEncoding::Text,
                     5 => ColumnEncoding::Json,
+                    6 => ColumnEncoding::Dict,
                     other => panic!("the encoding {other} is unknown"),
                 };
                 encodings.push(encoding);
@@ -546,8 +626,36 @@ mod tests {
                         })
                         .collect()
                 }
+                ColumnEncoding::Dict => self.dict_column(&nulls),
                 _ => self.text_column(&nulls, encoding == ColumnEncoding::Json),
             }
+        }
+
+        fn dict_column(&mut self, nulls: &[bool]) -> Vec<JsonValue> {
+            self.align(4);
+            let count = self.u32() as usize;
+            let ends: Vec<u32> = (0..count).map(|_| self.u32()).collect();
+            let length = self.u32() as usize;
+            let bytes = self.bytes[self.at..self.at + length].to_vec();
+            self.at += length;
+            let mut texts = Vec::with_capacity(count);
+            let mut start = 0usize;
+            for end in ends {
+                let end = end as usize;
+                texts.push(std::str::from_utf8(&bytes[start..end]).unwrap().to_string());
+                start = end;
+            }
+            self.align(4);
+            nulls
+                .iter()
+                .map(|null| {
+                    let code = self.u32() as usize;
+                    match null {
+                        true => JsonValue::Null,
+                        false => JsonValue::String(texts[code].clone()),
+                    }
+                })
+                .collect()
         }
 
         fn text_column(&mut self, nulls: &[bool], as_json: bool) -> Vec<JsonValue> {
@@ -759,6 +867,98 @@ mod tests {
                 rows: Vec::new(),
             }]
         );
+    }
+
+    /// Rows of one column of text, where each text comes from a small group.
+    fn repeating_rows(rows: usize, groups: usize) -> Vec<Vec<JsonValue>> {
+        (0..rows)
+            .map(|index| vec![json!(format!("state {}", index % groups))])
+            .collect()
+    }
+
+    #[test]
+    fn a_column_of_texts_that_repeat_holds_each_text_once() {
+        let rows = repeating_rows(DICT_MIN_ROWS, 3);
+        let mut buffer = Vec::new();
+        write_chunk(&mut buffer, 0, 1, &rows);
+
+        let frames = Reader::new(&buffer).frames();
+        let Frame::Chunk {
+            encodings,
+            rows: read,
+            ..
+        } = &frames[0]
+        else {
+            panic!("the frame is not a chunk");
+        };
+        assert_eq!(*encodings, vec![ColumnEncoding::Dict]);
+        assert_eq!(*read, rows);
+
+        // The bytes of the texts stand once, so the chunk is far smaller than
+        // the chunk that holds a text for each row.
+        let mut plain = Vec::new();
+        write_text_column(&mut plain, &rows, 0, false);
+        assert!(buffer.len() < plain.len());
+    }
+
+    #[test]
+    fn a_column_of_texts_that_repeat_keeps_its_nulls() {
+        let mut rows = repeating_rows(DICT_MIN_ROWS, 2);
+        rows[0][0] = JsonValue::Null;
+        rows[9][0] = JsonValue::Null;
+        let mut buffer = Vec::new();
+        write_chunk(&mut buffer, 0, 1, &rows);
+
+        let frames = Reader::new(&buffer).frames();
+        let Frame::Chunk {
+            encodings,
+            rows: read,
+            ..
+        } = &frames[0]
+        else {
+            panic!("the frame is not a chunk");
+        };
+        assert_eq!(*encodings, vec![ColumnEncoding::Dict]);
+        assert_eq!(*read, rows);
+    }
+
+    #[test]
+    fn a_column_of_texts_that_differ_holds_a_text_for_each_row() {
+        let rows = repeating_rows(DICT_MIN_ROWS, DICT_MIN_ROWS);
+        let mut buffer = Vec::new();
+        write_chunk(&mut buffer, 0, 1, &rows);
+        let frames = Reader::new(&buffer).frames();
+        let Frame::Chunk { encodings, .. } = &frames[0] else {
+            panic!("the frame is not a chunk");
+        };
+        assert_eq!(*encodings, vec![ColumnEncoding::Text]);
+    }
+
+    #[test]
+    fn a_short_chunk_of_texts_holds_a_text_for_each_row() {
+        let rows = repeating_rows(DICT_MIN_ROWS - 1, 2);
+        let mut buffer = Vec::new();
+        write_chunk(&mut buffer, 0, 1, &rows);
+        let frames = Reader::new(&buffer).frames();
+        let Frame::Chunk { encodings, .. } = &frames[0] else {
+            panic!("the frame is not a chunk");
+        };
+        assert_eq!(*encodings, vec![ColumnEncoding::Text]);
+    }
+
+    #[test]
+    fn a_column_of_json_holds_no_dictionary() {
+        // The values repeat, and a column of JSON keeps the text of each row.
+        let rows: Vec<Vec<JsonValue>> = (0..DICT_MIN_ROWS)
+            .map(|index| vec![json!({ "a": index % 2 })])
+            .collect();
+        let mut buffer = Vec::new();
+        write_chunk(&mut buffer, 0, 1, &rows);
+        let frames = Reader::new(&buffer).frames();
+        let Frame::Chunk { encodings, .. } = &frames[0] else {
+            panic!("the frame is not a chunk");
+        };
+        assert_eq!(*encodings, vec![ColumnEncoding::Json]);
     }
 
     /// The messages that a channel of a test kept.

@@ -78,6 +78,53 @@ function intSetMessage(values: Array<number | null>): ArrayBuffer {
   return writer.buffer()
 }
 
+/**
+ * The frames of one set of one column of text that holds each of its texts
+ * once, as the backend writes it for a column whose values repeat.
+ */
+function dictSetMessage(values: Array<string | null>): ArrayBuffer {
+  const writer = new Writer()
+  writer.u8(FRAME_BEGIN_SET).u32(0).u32(1).text('state').text('text')
+  writer.u8(FRAME_CHUNK).u32(0).u32(values.length).u32(1)
+  writer.u8(6)
+  const mask = new Uint8Array(Math.ceil(values.length / 8))
+  values.forEach((value, index) => {
+    if (value === null) {
+      mask[index >> 3]! |= 1 << (index % 8)
+    }
+  })
+  writer.raw([...mask])
+  writer.pad(4)
+  const texts: string[] = []
+  const codes: number[] = []
+  for (const value of values) {
+    if (value === null) {
+      codes.push(0)
+      continue
+    }
+    let code = texts.indexOf(value)
+    if (code < 0) {
+      code = texts.length
+      texts.push(value)
+    }
+    codes.push(code)
+  }
+  const bytes = new TextEncoder().encode(texts.join(''))
+  writer.u32(texts.length)
+  let end = 0
+  for (const text of texts) {
+    end += new TextEncoder().encode(text).length
+    writer.u32(end)
+  }
+  writer.u32(bytes.length).raw([...bytes])
+  writer.pad(4)
+  for (const code of codes) {
+    writer.u32(code)
+  }
+  writer.u8(FRAME_END_SET).u32(0).u8(0)
+  return writer.buffer()
+}
+
 function collect(): {
   stream: ResultStream
   sets: ResultTable[]
@@ -324,6 +371,32 @@ describe('the reader of the chunks', () => {
       walked.push(row)
     }
     expect(walked).toEqual([[1], [2], [3]])
+  })
+
+  it('reads a column of texts that hold each text once', () => {
+    const { stream, sets } = collect()
+    stream.feed(dictSetMessage(['open', 'shut', 'open', null, 'shut']))
+
+    const table = sets[0]!
+    expect(table.rowCount).toBe(5)
+    expect(table.slice(0, 5)).toEqual([['open'], ['shut'], ['open'], [null], ['shut']])
+    // A second read gives the text that the first read kept.
+    expect(table.cell(2, 0)).toBe('open')
+  })
+
+  it('builds one text for each different text of a column', () => {
+    const values = Array.from({ length: 300 }, (_, index) => `state ${index % 3}`)
+    const { stream, sets } = collect()
+    stream.feed(dictSetMessage(values))
+
+    const table = sets[0]!
+    const decode = vi.spyOn(TextDecoder.prototype, 'decode')
+    for (const row of table.rows()) {
+      expect(typeof row[0]).toBe('string')
+    }
+    const built = decode.mock.calls.length
+    decode.mockRestore()
+    expect(built).toBe(3)
   })
 
   it('gives no value for a column that the chunk does not hold', () => {
