@@ -387,10 +387,13 @@ defineExpose({ focusRow })
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
 }
 
+/* The hint sits against the right edge, so the hints of the rows align. */
 .node-hint {
-  margin-left: 8px;
+  margin-left: auto;
+  padding-left: 8px;
   font-size: var(--app-text-xs);
   color: rgb(var(--v-theme-on-surface-variant));
   white-space: nowrap;
