@@ -7,7 +7,7 @@ the cause and the state of any fix.
 
 `backend/vendor/tiberius` holds a copy of `tiberius` 0.12.3, which is the
 newest release. Cargo is pointed at the copy through `[patch.crates-io]` in
-`backend/Cargo.toml`. The copy carries two changes that the release does not.
+`backend/Cargo.toml`. The copy carries three changes that the release does not.
 Read this list before an upgrade, because an upgrade drops the copy and brings
 each defect back.
 
@@ -26,6 +26,17 @@ expects.
 
 The change is in `src/client/tls.rs`, in `poll_read` of
 `TlsPreloginWrapper`. The source of `tiberius` does not hold this change.
+
+### The client can send an attention packet
+
+The release gives no way to stop a statement that runs. The copy adds
+`Client::attention_handle`, which returns a handle that another task can
+hold while the driver reads the results. A call to `signal` on the handle
+makes the connection send an `Attention` packet. The server then ends the
+statement, the stream of the statement ends with `Error::Canceled`, and
+the connection stays open for the next statement. The change is in
+`src/client.rs`, in `src/client/attention.rs` and in
+`src/client/connection.rs`.
 
 ### The Kerberos library needs a newer `libgssapi`
 
@@ -140,16 +151,19 @@ that time leaves the connection in a known state, and the connection stays
 open. PostgreSQL and MySQL work this way, and SQLite and Athena end a statement
 without touching the connection at all.
 
-MS SQL Server has no such channel, because `tiberius` sends no attention
-packet. Stop and the time limit both drop the exchange in the middle of a
-message, which leaves the connection in no known state. The application then
-opens a new connection in its place at once, so the tab can run again without
-the user opening the connection by hand. The new session is empty: a temporary
-table, an open transaction and any `SET` of the old session are gone with it.
-The statement itself keeps running on the server until it ends by itself.
+MS SQL Server works this way as well. The copy of `tiberius` that this
+application holds sends an attention packet, the server ends the statement,
+and the connection stays open with its session. A server that does not
+answer the packet in five seconds leaves the connection in no known
+state, and the application then opens a new connection in its place. The
+new session is empty: a temporary table, an open transaction and any `SET`
+of the old session are gone with it.
 
 The time limit works the same way on every engine, because a statement that
 passes the limit is dropped in the middle of the exchange whatever the engine.
+A statement that waits for the same connection while the application replaces
+it still runs on the old session and fails. Its tab can run again at once,
+because the next statement takes the new connection.
 
 ## Athena takes no bound parameters
 

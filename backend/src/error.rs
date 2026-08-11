@@ -161,6 +161,7 @@ impl Error {
             // user, not a fault of the database.
             Error::Postgres(error) if is_postgres_stop(error) => ErrorKind::Cancelled,
             Error::MySql(error) if is_mysql_stop(error) => ErrorKind::Cancelled,
+            Error::Tiberius(tiberius::error::Error::Canceled) => ErrorKind::Cancelled,
             Error::Tiberius(_)
             | Error::MySql(_)
             | Error::Postgres(_)
@@ -413,6 +414,12 @@ mod tests {
             message: "Query execution was interrupted".to_string(),
         });
         assert_eq!(Error::MySql(stopped).kind(), ErrorKind::Cancelled);
+    }
+
+    #[test]
+    fn the_cancel_answer_of_mssql_is_a_stop() {
+        let stopped = Error::Tiberius(tiberius::error::Error::Canceled);
+        assert_eq!(stopped.kind(), ErrorKind::Cancelled);
     }
 
     #[test]

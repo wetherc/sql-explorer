@@ -9,7 +9,7 @@ use crate::db::drivers::{
     add_constraint_column, add_index_column, add_snapshot_column, bytes_to_json, constraint_kind,
     f64_to_json, number_out_of_range, number_value, parameter_type_refused, routine_kind,
     rows_affected_message, rows_returned_message, single_statement, size_text, table_kind,
-    DatabaseDriver, NumberValue,
+    CancelHandle, DatabaseDriver, NumberValue,
 };
 use crate::db::sink::{BufferSink, RowSink, RunSummary, SinkControl};
 use crate::db::{
@@ -24,9 +24,12 @@ use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use futures_util::TryStreamExt;
 use serde_json::Value as JsonValue;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tiberius::numeric::Numeric;
-use tiberius::{AuthMethod, Client, ColumnType, Config, EncryptionLevel, QueryItem, Row};
+use tiberius::{
+    AttentionHandle, AuthMethod, Client, ColumnType, Config, EncryptionLevel, QueryItem, Row,
+};
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
@@ -466,9 +469,7 @@ impl DatabaseDriver for MssqlDriver {
         DriverCapabilities {
             supports_schemas: true,
             supports_multiple_databases: true,
-            // The driver sends no attention signal, so a stop closes the
-            // connection instead of the statement alone.
-            supports_cancel: false,
+            supports_cancel: true,
             supports_transactions: true,
             supports_routines: true,
             supports_indexes: true,
@@ -852,6 +853,25 @@ impl DatabaseDriver for MssqlDriver {
         }
         Ok(constraints)
     }
+
+    fn cancel_handle(&self) -> Option<Arc<dyn CancelHandle>> {
+        Some(Arc::new(MssqlCancel(self.client.attention_handle())))
+    }
+}
+
+/// A handle that asks the server to stop the statement that runs on this
+/// connection. The connection sends an attention packet, the server ends
+/// the statement, and the stream of the statement ends with the cancel
+/// error of `tiberius`. The connection then stays open for the next
+/// statement.
+struct MssqlCancel(Arc<AttentionHandle>);
+
+#[async_trait]
+impl CancelHandle for MssqlCancel {
+    async fn cancel(&self) -> Result<()> {
+        self.0.signal();
+        Ok(())
+    }
 }
 
 /// Reads the rows, the pages and the day of the last change of one relation.
@@ -1108,6 +1128,14 @@ fn read<T>(result: tiberius::Result<Option<T>>) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn the_cancel_handle_signals_and_reports_no_fault() {
+        let handle = MssqlCancel(Arc::new(AttentionHandle::default()));
+        handle.cancel().await.unwrap();
+        // A second request for a statement that already stopped does no harm.
+        handle.cancel().await.unwrap();
+    }
 
     #[test]
     fn each_plan_has_its_own_session_switch() {
