@@ -1,7 +1,6 @@
 import 'vuetify/styles'
-import '@mdi/font/css/materialdesignicons.css'
 import { createVuetify } from 'vuetify'
-import { aliases, mdi } from 'vuetify/iconsets/mdi'
+import { aliases, mdi } from './icons'
 
 /**
  * The two themes of the application. Every colour a component uses comes
