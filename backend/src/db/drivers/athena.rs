@@ -159,6 +159,11 @@ const INCOMPLETE_KEYS_MESSAGE: &str =
 /// The name this application gives to the credentials it builds itself.
 const CREDENTIALS_SOURCE: &str = "sql-explorer";
 
+/// The words that name a session token which is too old.
+const EXPIRED_TOKEN_MESSAGE: &str =
+    "The session token has expired. Paste a new one, or use a profile, which reads a fresh token \
+     on each connection.";
+
 /// Builds the credentials that the user typed, or `None` when the
 /// connection reads the chain of the AWS tools instead.
 ///
@@ -922,7 +927,21 @@ fn describe<E: std::error::Error + 'static, R: std::fmt::Debug>(
         reason.push_str(&cause.to_string());
         source = cause.source();
     }
+    // A session token that is too old is a fault of the credentials and not
+    // of the statement, so the user reads what to do about it.
+    if names_an_expired_token(&reason) {
+        return Error::Authentication(format!("{EXPIRED_TOKEN_MESSAGE} {reason}"));
+    }
     Error::Athena(format!("{context}: {reason}"))
+}
+
+/// The words that name a session token which is too old. AWS answers with
+/// the code `ExpiredToken`, or `ExpiredTokenException` from some services,
+/// and the text of the message names the token as well.
+fn names_an_expired_token(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("expiredtoken")
+        || lower.contains("security token included in the request is expired")
 }
 
 /// Doubles the wait between two checks, up to two seconds.
@@ -1178,6 +1197,18 @@ mod tests {
             color: None,
             group: None,
         }
+    }
+
+    #[test]
+    fn a_session_token_that_is_too_old_is_named_by_the_answer() {
+        assert!(names_an_expired_token("ExpiredToken: the token is old"));
+        assert!(names_an_expired_token("ExpiredTokenException"));
+        assert!(names_an_expired_token(
+            "The security token included in the request is expired"
+        ));
+        // Another refusal of the service is not this one.
+        assert!(!names_an_expired_token("AccessDeniedException"));
+        assert!(!names_an_expired_token("the token is valid"));
     }
 
     #[test]
