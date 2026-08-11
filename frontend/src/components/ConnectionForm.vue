@@ -577,10 +577,10 @@ async function focusToken(): Promise<void> {
   gap: 12px;
 }
 
-/* A long list of problems scrolls inside the warning, so the warning never
-   takes the whole card. */
+/* The warning shows every problem at once, whatever the number of them, so
+   it never scrolls. It keeps its whole height while the fields above it give
+   way, because the fields already scroll. */
 .form-problems {
-  max-height: 20vh;
-  overflow-y: auto;
+  flex: 0 0 auto;
 }
 </style>

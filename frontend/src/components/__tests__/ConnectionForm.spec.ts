@@ -132,6 +132,21 @@ describe('ConnectionForm', () => {
     expect(wrapper.find('[data-test="form-problems"]').text()).toContain('needs a name')
   })
 
+  it('shows every problem at once, and not a part of them', async () => {
+    const empty = connectionFixture({ name: '', host: '', port: null })
+    const wrapper = await mountForm(empty)
+
+    // Each problem takes a line of its own, so a record with three faults
+    // draws three lines and the reader needs no scroll to reach the last.
+    const lines = wrapper.findAll('[data-test="form-problems"] .v-alert__content div')
+    expect(lines).toHaveLength(3)
+    expect(lines.map((line) => line.text())).toEqual([
+      'The connection needs a name.',
+      'The connection needs a host.',
+      'The port must be a whole number between 1 and 65535.',
+    ])
+  })
+
   it('holds the warning outside the part of the card that scrolls', async () => {
     const wrapper = await mountForm(connectionFixture({ name: '' }))
     const warning = wrapper.find('[data-test="form-problems"]').element
