@@ -59,11 +59,17 @@ body.app-resizing * {
   cursor: col-resize !important;
 }
 
-/* The split between the editor and the results runs across, so its drag
-   carries the shape of a drag across. */
+/* The split between the editor and the results runs across while the results
+   stand below, so its drag carries the shape of a drag across. The results
+   beside the editor make the same split run up and down. */
 body:has(.splitpanes--horizontal.splitpanes--dragging),
 body:has(.splitpanes--horizontal.splitpanes--dragging) * {
   cursor: row-resize !important;
+}
+
+body:has(.splitpanes--vertical.splitpanes--dragging),
+body:has(.splitpanes--vertical.splitpanes--dragging) * {
+  cursor: col-resize !important;
 }
 
 /* The panel and the work area beside it both ease from one width to the next,

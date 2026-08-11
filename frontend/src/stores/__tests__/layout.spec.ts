@@ -28,6 +28,7 @@ describe('parseLayout', () => {
       panelWidth: 420,
       editorSize: 60,
       resultsCollapsed: true,
+      resultsOrientation: 'beside',
     }
     expect(parseLayout(JSON.stringify(stored))).toEqual(stored)
   })
@@ -35,6 +36,12 @@ describe('parseLayout', () => {
   it('falls back when the state of the results panel is not a true or false value', () => {
     expect(parseLayout(JSON.stringify({ resultsCollapsed: 'yes' })).resultsCollapsed).toBe(
       defaultLayout().resultsCollapsed,
+    )
+  })
+
+  it('refuses a place of the results panel it does not know', () => {
+    expect(parseLayout(JSON.stringify({ resultsOrientation: 'above' })).resultsOrientation).toBe(
+      defaultLayout().resultsOrientation,
     )
   })
 
@@ -145,6 +152,22 @@ describe('useLayoutStore', () => {
 
     layout.setResultsCollapsed(true)
     expect(layout.layout.resultsCollapsed).toBe(true)
+  })
+
+  it('moves the results panel between the two places it can take', () => {
+    const layout = useLayoutStore()
+    layout.setEditorSize(70)
+
+    layout.toggleResultsOrientation()
+    expect(layout.layout.resultsOrientation).toBe('beside')
+    // One share of the editor serves both places.
+    expect(layout.layout.editorSize).toBe(70)
+
+    layout.toggleResultsOrientation()
+    expect(layout.layout.resultsOrientation).toBe('below')
+
+    layout.setResultsOrientation('beside')
+    expect(layout.layout.resultsOrientation).toBe('beside')
   })
 
   it('keeps the share it has when the new one is not a number', () => {

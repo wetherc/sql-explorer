@@ -5,6 +5,9 @@ import { safeStorage } from './settings'
 /** The three side panels the rail opens. */
 export type Panel = 'connections' | 'explorer' | 'history'
 
+/** The two places the results panel can take beside the editor. */
+export type ResultsOrientation = 'below' | 'beside'
+
 /** The shape of the work area that a restart brings back. */
 export interface Layout {
   /** The side panel that stands open. */
@@ -17,6 +20,8 @@ export interface Layout {
   editorSize: number
   /** True while the results panel is a bar below the editor. */
   resultsCollapsed: boolean
+  /** The place the results panel takes: below the editor, or beside it. */
+  resultsOrientation: ResultsOrientation
 }
 
 /** The smallest and the largest share the editor may take. */
@@ -41,6 +46,7 @@ export function defaultLayout(): Layout {
     panelWidth: 320,
     editorSize: 45,
     resultsCollapsed: false,
+    resultsOrientation: 'below',
   }
 }
 
@@ -48,6 +54,8 @@ export function defaultLayout(): Layout {
 export const LAYOUT_KEY = 'sql-explorer.layout'
 
 const PANELS: Panel[] = ['connections', 'explorer', 'history']
+
+const ORIENTATIONS: ResultsOrientation[] = ['below', 'beside']
 
 /** Reads the shape and falls back on the defaults for a bad record. */
 export function parseLayout(raw: string | null): Layout {
@@ -66,6 +74,9 @@ export function parseLayout(raw: string | null): Layout {
         typeof parsed.resultsCollapsed === 'boolean'
           ? parsed.resultsCollapsed
           : defaults.resultsCollapsed,
+      resultsOrientation: ORIENTATIONS.includes(parsed.resultsOrientation as ResultsOrientation)
+        ? (parsed.resultsOrientation as ResultsOrientation)
+        : defaults.resultsOrientation,
     }
   } catch {
     return defaults
@@ -183,6 +194,18 @@ export const useLayoutStore = defineStore('layout', () => {
     setResultsCollapsed(!layout.value.resultsCollapsed)
   }
 
+  /**
+   * Moves the results panel between the two places it can take. One share of
+   * the editor serves both places.
+   */
+  function setResultsOrientation(orientation: ResultsOrientation): void {
+    update({ resultsOrientation: orientation })
+  }
+
+  function toggleResultsOrientation(): void {
+    setResultsOrientation(layout.value.resultsOrientation === 'below' ? 'beside' : 'below')
+  }
+
   return {
     layout,
     resizingPanel,
@@ -200,5 +223,7 @@ export const useLayoutStore = defineStore('layout', () => {
     setEditorSize,
     setResultsCollapsed,
     toggleResults,
+    setResultsOrientation,
+    toggleResultsOrientation,
   }
 })

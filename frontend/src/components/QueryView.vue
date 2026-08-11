@@ -120,7 +120,7 @@
     </div>
 
     <splitpanes
-      horizontal
+      :horizontal="resultsBelow"
       class="panes"
       :class="{ 'results-away': resultsCollapsed }"
       @resize="onPaneResize"
@@ -210,6 +210,30 @@
                   </template>
                 </v-tooltip>
               </template>
+
+              <v-tooltip
+                location="bottom"
+                :text="
+                  resultsBelow
+                    ? 'Move the results beside the editor'
+                    : 'Move the results below the editor'
+                "
+              >
+                <template #activator="{ props: tip }">
+                  <v-btn
+                    v-bind="tip"
+                    :icon="resultsBelow ? 'mdi-dock-right' : 'mdi-dock-bottom'"
+                    size="small"
+                    :aria-label="
+                      resultsBelow
+                        ? 'Move the results beside the editor'
+                        : 'Move the results below the editor'
+                    "
+                    data-test="move-results"
+                    @click="layout.toggleResultsOrientation()"
+                  />
+                </template>
+              </v-tooltip>
 
               <v-tooltip location="bottom" text="Put the results away">
                 <template #activator="{ props: tip }">
@@ -446,6 +470,8 @@ const paramCard = ref<{ $el: HTMLElement } | null>(null)
 const editorSize = computed(() => layout.layout.editorSize)
 /** True while the results panel is a bar below the editor. */
 const resultsCollapsed = computed(() => layout.layout.resultsCollapsed)
+/** True while the results panel stands below the editor and not beside it. */
+const resultsBelow = computed(() => layout.layout.resultsOrientation === 'below')
 const savingQuery = ref(false)
 const saveName = ref('')
 const saveFolder = ref('')
@@ -940,6 +966,7 @@ defineExpose({ runStatement, runAll, formatStatement, readPlan })
 :deep(.splitpanes__splitter) {
   background: rgb(var(--v-theme-surface-variant));
   min-height: 4px;
+  min-width: 4px;
 }
 
 /* The splitter has nothing to move while the results panel is away. */

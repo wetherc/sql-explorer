@@ -1068,6 +1068,39 @@ describe('QueryView edge paths', () => {
     expect(wrapper.find('[data-test="results-bar"]').exists()).toBe(false)
   })
 
+  it('moves the results panel to the side of the editor and back', async () => {
+    const wrapper = await mountView()
+    const layout = useLayoutStore()
+    const panes = () => wrapper.findComponent({ name: 'splitpanes' })
+    expect(panes().props('horizontal')).toBe(true)
+
+    await wrapper.find('[data-test="move-results"]').trigger('click')
+    await wrapper.vm.$nextTick()
+
+    expect(layout.layout.resultsOrientation).toBe('beside')
+    expect(panes().props('horizontal')).toBe(false)
+    expect(wrapper.find('[data-test="move-results"]').attributes('aria-label')).toContain(
+      'below the editor',
+    )
+
+    await wrapper.find('[data-test="move-results"]').trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(layout.layout.resultsOrientation).toBe('below')
+    expect(panes().props('horizontal')).toBe(true)
+  })
+
+  it('keeps one bar for the results panel in each place', async () => {
+    const wrapper = await mountView()
+    const layout = useLayoutStore()
+    layout.setResultsOrientation('beside')
+    await wrapper.vm.$nextTick()
+
+    await wrapper.find('[data-test="collapse-results"]').trigger('click')
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('[data-test="results-bar"]').exists()).toBe(true)
+  })
+
   it('names the result that is open in the bar', async () => {
     apiStub.executeQuery.mockResolvedValue(response)
     const wrapper = await mountView()
