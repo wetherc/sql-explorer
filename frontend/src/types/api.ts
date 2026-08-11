@@ -67,8 +67,6 @@ export interface ConnectionOptions {
   awsCredentialSource: AwsCredentialSource
   /** The access key ID, which names the key and is no secret. */
   awsAccessKeyId: string | null
-  /** True when the keychain holds a session token for this connection. */
-  awsSessionTokenSet: boolean
   athenaWorkgroup: string | null
   athenaOutputLocation: string | null
   athenaCatalog: string | null
@@ -466,7 +464,6 @@ export function defaultConnectionOptions(): ConnectionOptions {
     awsProfile: null,
     awsCredentialSource: AwsCredentialSource.Chain,
     awsAccessKeyId: null,
-    awsSessionTokenSet: false,
     athenaWorkgroup: null,
     athenaOutputLocation: null,
     athenaCatalog: null,

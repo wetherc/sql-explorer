@@ -147,10 +147,6 @@ pub struct ConnectionOptions {
     /// The access key ID, which names the key and is no secret. The secret
     /// access key and the session token stay in the keychain.
     pub aws_access_key_id: Option<String>,
-    /// True when the keychain holds a session token for this connection.
-    /// The form reads the flag to tell an empty field that keeps the stored
-    /// token from a connection that carries none.
-    pub aws_session_token_set: bool,
     pub athena_workgroup: Option<String>,
     /// The S3 location that Athena writes the results to.
     pub athena_output_location: Option<String>,
@@ -187,7 +183,6 @@ impl Default for ConnectionOptions {
             aws_profile: None,
             aws_credential_source: AwsCredentialSource::default(),
             aws_access_key_id: None,
-            aws_session_token_set: false,
             athena_workgroup: None,
             athena_output_location: None,
             athena_catalog: None,
@@ -467,7 +462,6 @@ mod tests {
             AwsCredentialSource::Chain
         );
         assert_eq!(connection.options.aws_access_key_id, None);
-        assert!(!connection.options.aws_session_token_set);
         assert_eq!(connection.aws_secret_access_key, None);
     }
 

@@ -1159,17 +1159,13 @@ pub async fn save_connection<R: Runtime>(
         &secrets::aws_secret_key(&connection.id),
         connection.aws_secret_access_key.as_deref(),
     )?;
-    let token_held = store_secret(
+    store_secret(
         &state,
         &secrets::aws_token_key(&connection.id),
         connection.aws_session_token.as_deref(),
     )?;
 
-    // The flag of the record follows the store, so the form always sees
-    // what the keychain holds.
-    let mut record = connection.without_secrets();
-    record.options.aws_session_token_set = token_held;
-    store::write_connection(&app, &record)
+    store::write_connection(&app, &connection.without_secrets())
 }
 
 #[tauri::command]
