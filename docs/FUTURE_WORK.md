@@ -42,14 +42,31 @@ stop the whole run. `RunSummary` carries `rows_affected`, `elapsed_ms` and
 `stats`. `BufferSink` keeps the rows up to `max_rows` and builds the
 present `QueryResponse`.
 
-The trait `DatabaseDriver` holds the pair: `execute_stream` has a default
-body that returns `Unsupported`, and `execute_query` has a default body
-that runs `execute_stream` into a `BufferSink`. A driver that gains
-`execute_stream` then deletes its own `execute_query`. The SQLite driver
-took this path: its blocking closure sends events through a bounded
-channel, the async side drives the sink, and a `Stop` travels back through
-a shared flag. The driver itself bounds the read at `max_rows` and keeps
-the exact row counts of its messages.
+The trait `DatabaseDriver` holds the pair: `execute_stream` streams the
+rows into the sink, and `execute_query` has a default body that runs
+`execute_stream` into a `BufferSink`. Every driver is converted, and no
+driver holds its own `execute_query`:
+
+- **SQLite**: the blocking closure sends events through a bounded channel,
+  the async side drives the sink, and a `Stop` travels back through a
+  shared flag.
+- **PostgreSQL**: the path with parameters streams the rows through
+  `query_raw`. The path without parameters goes through `simple_query`,
+  whose library gathers the whole answer before it returns, so that path
+  feeds the sink from the vector and keeps its memory cost. The notices of
+  the server reach the messages in arrival order, after the rows; the old
+  code put them at the front.
+- **MySQL**: the driver reads one row at a time through `next().await`.
+  A set that passed the row limit or a stop drains one row at a time, so
+  the connection stays fit for the next set.
+- **MS SQL Server**: `stream_sets` walks the `QueryStream` and feeds the
+  sink. The whole stream is walked to its end even after a stop, because
+  a stream that is dropped in the middle leaves the connection in the
+  middle of a message. The plan reader of `explain` buffers through a
+  `BufferSink` and filters the plan sets as before.
+- **Athena**: the page loop feeds the sink. A `Stop` or the row limit
+  returns without a fetch of the pages that remain. The catalog helpers
+  buffer through a `BufferSink`.
 
 One sink remains to write:
 
@@ -57,28 +74,6 @@ One sink remains to write:
   export command uses it, and a large export then holds one row at a time
   in memory. It writes the first result set and answers `Stop` at the end
   of that set, because the export writes one file.
-
-The PostgreSQL driver is converted. Its path with parameters streams the
-rows through `query_raw`. Its path without parameters goes through
-`simple_query`, whose library gathers the whole answer before it returns,
-so that path feeds the sink from the vector and keeps its memory cost.
-The notices of the server now reach the messages in arrival order, after
-the rows; the old code put them at the front.
-
-### The drivers that remain
-
-- **MySQL**: the driver uses `exec_iter` and then `result.collect()`,
-  which gathers each set before the row limit applies. Replace the collect
-  with a read of one row at a time through `next().await`, and forward
-  each row to the sink.
-- **MS SQL Server**: the driver already walks a `QueryStream` in
-  `collect_sets`; forward each item to the sink instead of a vector. The
-  function already drains the rows past `max_rows` to keep the connection
-  fit for use. A `Stop` from the sink must drain in the same way, and the
-  existing timeout bounds that drain.
-- **Athena**: the page loop in `read_results` forwards each page to the
-  sink instead of a vector. A `Stop` returns without a fetch of the pages
-  that remain.
 
 ### Paging for the grid
 
@@ -107,9 +102,7 @@ bound in `LIMITATIONS.md`.
 
 ### The order of the work
 
-1. Convert the MS SQL Server driver, the MySQL driver and the Athena
-   driver, and delete the `execute_query` copy of each converted driver.
-2. Switch the export command to `FileSink` and delete the buffered export
+1. Switch the export command to `FileSink` and delete the buffered export
    path. Test that a stop in the middle of an export leaves no file, and
    that the formula-mark escape of `csv_field` stays in place.
 

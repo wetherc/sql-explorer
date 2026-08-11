@@ -8,6 +8,7 @@ use crate::db::drivers::{
     add_snapshot_column, f64_to_json, prefixed_plan, rows_returned_message, table_kind,
     CancelHandle, DatabaseDriver,
 };
+use crate::db::sink::{BufferSink, RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, CreateQuery, Database, DriverCapabilities, ExecOptions, Partition,
     PlanKind, QueryParams, QueryResponse, QueryStats, ResultSet, Schema, SchemaSnapshot,
@@ -191,12 +192,32 @@ impl AthenaDriver {
         Ok(Box::new(driver))
     }
 
-    /// Starts one statement and waits for it to reach a final state.
+    /// Runs one statement and buffers its rows, for a caller that reads the
+    /// catalog and needs the whole answer at once.
     async fn run_statement(
         &self,
         statement: &str,
         options: &ExecOptions,
     ) -> Result<(Option<ResultSet>, QueryStats)> {
+        let (execution_id, stats) = self.start_and_wait(statement, options).await?;
+        let mut sink = BufferSink::new(options.max_rows);
+        self.stream_results(
+            &execution_id,
+            options,
+            statement_repeats_names(statement),
+            &mut sink,
+        )
+        .await?;
+        let set = sink.into_response(RunSummary::default()).results.pop();
+        Ok((set, stats))
+    }
+
+    /// Starts one statement and waits for it to reach a final state.
+    async fn start_and_wait(
+        &self,
+        statement: &str,
+        options: &ExecOptions,
+    ) -> Result<(String, QueryStats)> {
         let mut start = self
             .client
             .start_query_execution()
@@ -241,11 +262,7 @@ impl AthenaDriver {
         let outcome = self.wait_for(&execution_id, options).await;
         self.set_running(None);
         let stats = outcome?;
-
-        let set = self
-            .read_results(&execution_id, options, statement_repeats_names(statement))
-            .await?;
-        Ok((set, stats))
+        Ok((execution_id, stats))
     }
 
     /// Waits until the statement reaches a final state. The wait grows
@@ -296,17 +313,23 @@ impl AthenaDriver {
         }
     }
 
-    /// Reads the pages of the result, up to the row limit. The first row is
-    /// dropped when the statement repeats the column names there.
-    async fn read_results(
+    /// Reads the pages of the result and feeds each row to the sink, up to
+    /// the row limit. The first row is dropped when the statement repeats
+    /// the column names there. A stop of the sink or the row limit ends the
+    /// read without a fetch of the pages that remain.
+    ///
+    /// Returns true when the sink stopped the run.
+    async fn stream_results(
         &self,
         execution_id: &str,
         options: &ExecOptions,
         expect_header: bool,
-    ) -> Result<Option<ResultSet>> {
+        sink: &mut dyn RowSink,
+    ) -> Result<bool> {
         let mut token: Option<String> = None;
-        let mut set: Option<ResultSet> = None;
+        let mut columns: Option<Vec<ColumnInfo>> = None;
         let mut first_page = true;
+        let mut count = 0usize;
 
         loop {
             let page = self
@@ -323,8 +346,8 @@ impl AthenaDriver {
                 break;
             };
 
-            if set.is_none() {
-                let columns = result_set
+            if columns.is_none() {
+                let read = result_set
                     .result_set_metadata()
                     .map(|metadata| {
                         metadata
@@ -334,35 +357,38 @@ impl AthenaDriver {
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                if columns.is_empty() {
+                if read.is_empty() {
                     break;
                 }
-                set = Some(ResultSet::new(columns));
+                sink.begin_set(read.clone())?;
+                columns = Some(read);
             }
 
-            let current = set.as_mut().expect("the result set exists");
+            let known = columns.as_ref().expect("the columns are read");
             let rows = result_set.rows();
             // A statement that reads rows repeats the column names in the
             // first row of the first page. A row of another statement that
             // happens to spell the column names is data and stays.
-            let rows = if expect_header
-                && first_page
-                && !rows.is_empty()
-                && is_header(&rows[0], &current.columns)
-            {
-                &rows[1..]
-            } else {
-                rows
-            };
+            let rows =
+                if expect_header && first_page && !rows.is_empty() && is_header(&rows[0], known) {
+                    &rows[1..]
+                } else {
+                    rows
+                };
             first_page = false;
 
             for row in rows {
-                if current.rows.len() >= options.max_rows {
-                    current.truncated = true;
-                    return Ok(set);
+                if count >= options.max_rows {
+                    sink.message(rows_returned_message(count, true));
+                    sink.end_set(true)?;
+                    return Ok(false);
                 }
-                let values = row_to_json(row, &current.columns);
-                current.rows.push(values);
+                if sink.row(row_to_json(row, known))? == SinkControl::Stop {
+                    sink.message(rows_returned_message(count, true));
+                    sink.end_set(true)?;
+                    return Ok(true);
+                }
+                count += 1;
             }
 
             token = page.next_token().map(str::to_string);
@@ -371,7 +397,11 @@ impl AthenaDriver {
             }
         }
 
-        Ok(set)
+        if columns.is_some() {
+            sink.message(rows_returned_message(count, false));
+            sink.end_set(false)?;
+        }
+        Ok(false)
     }
 
     /// Asks the service to stop a statement.
@@ -576,12 +606,13 @@ impl DatabaseDriver for AthenaDriver {
         self.list_databases_inner().await.map(|_| ())
     }
 
-    async fn execute_query(
+    async fn execute_stream(
         &mut self,
         query: &str,
         params: Option<&QueryParams>,
         options: &ExecOptions,
-    ) -> Result<QueryResponse> {
+        sink: &mut dyn RowSink,
+    ) -> Result<RunSummary> {
         if params.is_some_and(|values| !values.is_empty()) {
             return Err(Error::Unsupported(
                 "Athena takes no bound parameters through this client. Put the values into the \
@@ -591,23 +622,27 @@ impl DatabaseDriver for AthenaDriver {
         }
 
         let started = Instant::now();
-        let mut response = QueryResponse::default();
         let mut total = QueryStats::default();
         for statement in split_statements(query, Dialect::Athena) {
-            let (set, stats) = self.run_statement(&statement, options).await?;
+            let (execution_id, stats) = self.start_and_wait(&statement, options).await?;
             total.add(&stats);
-            if let Some(set) = set {
-                response
-                    .messages
-                    .push(rows_returned_message(set.rows.len(), set.truncated));
-                response.results.push(set);
+            let stopped = self
+                .stream_results(
+                    &execution_id,
+                    options,
+                    statement_repeats_names(&statement),
+                    sink,
+                )
+                .await?;
+            if stopped {
+                break;
             }
         }
-        if !total.is_empty() {
-            response.stats = Some(total);
-        }
-        response.elapsed_ms = started.elapsed().as_millis() as u64;
-        Ok(response)
+        Ok(RunSummary {
+            rows_affected: None,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            stats: (!total.is_empty()).then_some(total),
+        })
     }
 
     async fn explain(

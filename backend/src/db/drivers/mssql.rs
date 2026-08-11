@@ -11,6 +11,7 @@ use crate::db::drivers::{
     rows_affected_message, rows_returned_message, single_statement, size_text, table_kind,
     DatabaseDriver, NumberValue,
 };
+use crate::db::sink::{BufferSink, RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
     IndexInfo, Message, PlanKind, QueryParams, QueryResponse, ResultSet, Routine, Schema,
@@ -229,25 +230,39 @@ impl MssqlDriver {
         Ok(Box::new(MssqlDriver { client }))
     }
 
-    /// Runs one statement through the path that keeps rows, and collects every
-    /// result set it produced.
-    async fn collect_sets(
+    /// Runs one statement through the path that keeps rows, and feeds each
+    /// result set to the sink as it arrives. The whole stream is walked to
+    /// its end even past the row limit or a stop of the sink, because a
+    /// stream that is dropped in the middle leaves the connection in the
+    /// middle of a message.
+    ///
+    /// Returns true when the sink stopped the run.
+    async fn stream_sets(
         &mut self,
         statement: &str,
         params: &[&dyn tiberius::ToSql],
         options: &ExecOptions,
-    ) -> Result<Vec<ResultSet>> {
+        sink: &mut dyn RowSink,
+    ) -> Result<bool> {
         let mut stream = self.client.query(statement, params).await?;
-        let mut sets: Vec<ResultSet> = Vec::new();
-        let mut current: Option<ResultSet> = None;
+        let mut open = false;
+        let mut count = 0usize;
+        let mut truncated = false;
+        let mut stopped = false;
 
         while let Some(item) = stream.try_next().await? {
             match item {
                 QueryItem::Metadata(metadata) => {
-                    if let Some(set) = current.take() {
-                        sets.push(set);
+                    if open {
+                        sink.message(rows_returned_message(count, truncated));
+                        sink.end_set(truncated)?;
+                        open = false;
                     }
-                    current = Some(ResultSet::new(
+                    // After a stop the sets that remain drain without a feed.
+                    if stopped {
+                        continue;
+                    }
+                    sink.begin_set(
                         metadata
                             .columns()
                             .iter()
@@ -255,24 +270,33 @@ impl MssqlDriver {
                                 ColumnInfo::new(column.name(), type_name(column.column_type()))
                             })
                             .collect(),
-                    ));
+                    )?;
+                    open = true;
+                    count = 0;
+                    truncated = false;
                 }
                 QueryItem::Row(row) => {
-                    let Some(set) = current.as_mut() else {
-                        continue;
-                    };
-                    if set.rows.len() >= options.max_rows {
-                        set.truncated = true;
+                    if !open || stopped {
                         continue;
                     }
-                    set.rows.push(row_to_json(&row));
+                    if count >= options.max_rows {
+                        truncated = true;
+                        continue;
+                    }
+                    if sink.row(row_to_json(&row))? == SinkControl::Stop {
+                        truncated = true;
+                        stopped = true;
+                        continue;
+                    }
+                    count += 1;
                 }
             }
         }
-        if let Some(set) = current.take() {
-            sets.push(set);
+        if open {
+            sink.message(rows_returned_message(count, truncated));
+            sink.end_set(truncated)?;
         }
-        Ok(sets)
+        Ok(stopped)
     }
 
     /// Runs one statement of the session that carries no rows back, such as
@@ -474,14 +498,15 @@ impl DatabaseDriver for MssqlDriver {
         Ok(())
     }
 
-    async fn execute_query(
+    async fn execute_stream(
         &mut self,
         query: &str,
         params: Option<&QueryParams>,
         options: &ExecOptions,
-    ) -> Result<QueryResponse> {
+        sink: &mut dyn RowSink,
+    ) -> Result<RunSummary> {
         let started = Instant::now();
-        let mut response = QueryResponse::default();
+        let mut rows_affected: Option<u64> = None;
 
         // A script with parameters is sent whole, because the parameter
         // positions belong to the script and not to one statement.
@@ -497,25 +522,25 @@ impl DatabaseDriver for MssqlDriver {
                 bound.iter().map(|value| value.as_ref()).collect();
 
             if returns_rows(&statement) {
-                let sets = self
-                    .collect_sets(&statement, borrowed.as_slice(), options)
+                let stopped = self
+                    .stream_sets(&statement, borrowed.as_slice(), options, sink)
                     .await?;
-                for set in &sets {
-                    response
-                        .messages
-                        .push(rows_returned_message(set.rows.len(), set.truncated));
+                if stopped {
+                    break;
                 }
-                response.results.extend(sets);
             } else {
                 let result = self.client.execute(&statement, borrowed.as_slice()).await?;
                 let affected: u64 = result.rows_affected().iter().sum();
-                response.rows_affected = Some(response.rows_affected.unwrap_or(0) + affected);
-                response.messages.push(rows_affected_message(affected));
+                rows_affected = Some(rows_affected.unwrap_or(0) + affected);
+                sink.message(rows_affected_message(affected));
             }
         }
 
-        response.elapsed_ms = started.elapsed().as_millis() as u64;
-        Ok(response)
+        Ok(RunSummary {
+            rows_affected,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            stats: None,
+        })
     }
 
     /// Reads the plan of one statement.
@@ -542,8 +567,10 @@ impl DatabaseDriver for MssqlDriver {
         let started = Instant::now();
 
         self.run_switch(&format!("SET {switch} ON")).await?;
+        // The plan sets are filtered after the run, so the rows buffer here.
+        let mut sink = BufferSink::new(options.max_rows);
         let outcome = self
-            .collect_sets(&statement, borrowed.as_slice(), options)
+            .stream_sets(&statement, borrowed.as_slice(), options, &mut sink)
             .await;
         if let Err(error) = self.run_switch(&format!("SET {switch} OFF")).await {
             // The switch holds for the session, so a session that keeps it on
@@ -556,7 +583,9 @@ impl DatabaseDriver for MssqlDriver {
             )));
         }
 
-        let (results, found) = select_plan_sets(outcome?);
+        outcome?;
+        let sets = sink.into_response(RunSummary::default()).results;
+        let (results, found) = select_plan_sets(sets);
         let mut response = QueryResponse {
             results,
             elapsed_ms: started.elapsed().as_millis() as u64,

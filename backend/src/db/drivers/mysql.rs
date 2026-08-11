@@ -6,10 +6,11 @@ use crate::db::drivers::{
     routine_kind, rows_affected_message, rows_returned_message, size_text, table_kind,
     CancelHandle, DatabaseDriver, NumberValue,
 };
+use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, Message, PlanKind, QueryParams, QueryResponse, ResultSet, Routine, Schema,
-    SchemaSnapshot, SnapshotColumn, Table, TableFact, TableKind,
+    IndexInfo, Message, PlanKind, QueryParams, QueryResponse, Routine, Schema, SchemaSnapshot,
+    SnapshotColumn, Table, TableFact, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
@@ -140,13 +141,20 @@ pub fn bind_params(params: Option<&QueryParams>) -> Result<mysql_async::Params> 
     Ok(mysql_async::Params::Positional(values))
 }
 
-/// Runs one statement and collects everything it produced.
-async fn run_statement(
+/// Runs one statement and feeds each row to the sink as the driver reads
+/// it. A set that passed the row limit or a stop of the sink drains one row
+/// at a time, so the connection stays fit for the next set.
+///
+/// The flag `stopped` carries a stop of the sink back to the caller, and a
+/// run that arrives with the flag set drains its sets without a feed.
+async fn stream_statement(
     conn: &mut Conn,
     statement: &str,
     params: mysql_async::Params,
     options: &ExecOptions,
-    response: &mut QueryResponse,
+    sink: &mut dyn RowSink,
+    rows_affected: &mut Option<u64>,
+    stopped: &mut bool,
 ) -> Result<()> {
     let mut result = conn.exec_iter(statement, params).await?;
 
@@ -167,33 +175,48 @@ async fn run_statement(
             // The statement changed rows instead of returning them.
             let affected = result.affected_rows();
             let info = result.info().to_string();
-            response.rows_affected = Some(response.rows_affected.unwrap_or(0) + affected);
-            response.messages.push(rows_affected_message(affected));
+            *rows_affected = Some(rows_affected.unwrap_or(0) + affected);
+            sink.message(rows_affected_message(affected));
             if !info.is_empty() {
                 // The server sends the text of the statement, such as the
                 // rows it matched and the warnings it counted.
-                response.messages.push(Message::info(info));
+                sink.message(Message::info(info));
             }
             if result.is_empty() {
                 break;
             }
-            let _: Vec<MysqlRow> = result.collect().await?;
+            while result.next().await?.is_some() {}
             continue;
         }
 
-        let mut set = ResultSet::new(columns.clone());
-        let rows: Vec<MysqlRow> = result.collect().await?;
-        for row in rows {
-            if set.rows.len() >= options.max_rows {
-                set.truncated = true;
+        if *stopped {
+            while result.next().await?.is_some() {}
+            if result.is_empty() {
                 break;
             }
-            set.rows.push(row_to_json(&row, columns.len()));
+            continue;
         }
-        response
-            .messages
-            .push(rows_returned_message(set.rows.len(), set.truncated));
-        response.results.push(set);
+
+        sink.begin_set(columns.clone())?;
+        let mut count = 0usize;
+        let mut truncated = false;
+        while let Some(row) = result.next().await? {
+            if truncated || *stopped {
+                continue;
+            }
+            if count >= options.max_rows {
+                truncated = true;
+                continue;
+            }
+            if sink.row(row_to_json(&row, columns.len()))? == SinkControl::Stop {
+                truncated = true;
+                *stopped = true;
+                continue;
+            }
+            count += 1;
+        }
+        sink.message(rows_returned_message(count, truncated));
+        sink.end_set(truncated)?;
 
         if result.is_empty() {
             break;
@@ -238,14 +261,16 @@ impl DatabaseDriver for MysqlDriver {
         Ok(())
     }
 
-    async fn execute_query(
+    async fn execute_stream(
         &mut self,
         query: &str,
         params: Option<&QueryParams>,
         options: &ExecOptions,
-    ) -> Result<QueryResponse> {
+        sink: &mut dyn RowSink,
+    ) -> Result<RunSummary> {
         let started = Instant::now();
-        let mut response = QueryResponse::default();
+        let mut rows_affected: Option<u64> = None;
+        let mut stopped = false;
 
         let statements: Vec<String> = if params.is_some() {
             vec![query.to_string()]
@@ -254,13 +279,28 @@ impl DatabaseDriver for MysqlDriver {
         };
 
         for statement in statements {
+            if stopped {
+                break;
+            }
             let bound = bind_params(params)?;
             let conn = self.conn()?;
-            run_statement(conn, &statement, bound, options, &mut response).await?;
+            stream_statement(
+                conn,
+                &statement,
+                bound,
+                options,
+                sink,
+                &mut rows_affected,
+                &mut stopped,
+            )
+            .await?;
         }
 
-        response.elapsed_ms = started.elapsed().as_millis() as u64;
-        Ok(response)
+        Ok(RunSummary {
+            rows_affected,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            stats: None,
+        })
     }
 
     async fn explain(
