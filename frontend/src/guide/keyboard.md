@@ -12,17 +12,17 @@ already hold.
 
 ## The keys of the work
 
-| Keys                             | What they do                                    |
-| -------------------------------- | ----------------------------------------------- |
-| `Ctrl`/`Cmd` + `Enter`           | Run the statement under the cursor              |
-| `Ctrl`/`Cmd` + `Shift` + `Enter` | Run the whole script                            |
-| `Shift` + `Alt` + `F`            | Lay out the statement                           |
-| `Ctrl`/`Cmd` + `T`               | Open a tab                                      |
-| `Ctrl`/`Cmd` + `W`               | Close the tab                                   |
-| `Ctrl`/`Cmd` + `1`, `2`, `3`     | Show the connections, the explorer, the history |
-| `Ctrl`/`Cmd` + `B`               | Show or hide the side panel                     |
-| `Ctrl`/`Cmd` + `J`               | Show or hide the results panel                  |
-| `Ctrl`/`Cmd` + `,`               | Open the settings                               |
+| Keys                             | What they do                       |
+| -------------------------------- | ---------------------------------- |
+| `Ctrl`/`Cmd` + `Enter`           | Run the statement under the cursor |
+| `Ctrl`/`Cmd` + `Shift` + `Enter` | Run the whole script               |
+| `Shift` + `Alt` + `F`            | Lay out the statement              |
+| `Ctrl`/`Cmd` + `T`               | Open a tab                         |
+| `Ctrl`/`Cmd` + `W`               | Close the tab                      |
+| `Ctrl`/`Cmd` + `1` to `4`        | Show one of the four side panels   |
+| `Ctrl`/`Cmd` + `B`               | Show or hide the side panel        |
+| `Ctrl`/`Cmd` + `J`               | Show or hide the results panel     |
+| `Ctrl`/`Cmd` + `,`               | Open the settings                  |
 
 ## In the explorer
 

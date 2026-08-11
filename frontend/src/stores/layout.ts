@@ -2,8 +2,8 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { safeStorage } from './settings'
 
-/** The three side panels the rail opens. */
-export type Panel = 'connections' | 'explorer' | 'history'
+/** The side panels the rail opens. */
+export type Panel = 'connections' | 'explorer' | 'files' | 'history'
 
 /** The two places the results panel can take beside the editor. */
 export type ResultsOrientation = 'below' | 'beside'
@@ -53,7 +53,7 @@ export function defaultLayout(): Layout {
 /** The key under which the shape of the work area lives in the browser store. */
 export const LAYOUT_KEY = 'sql-explorer.layout'
 
-const PANELS: Panel[] = ['connections', 'explorer', 'history']
+const PANELS: Panel[] = ['connections', 'explorer', 'files', 'history']
 
 const ORIENTATIONS: ResultsOrientation[] = ['below', 'beside']
 

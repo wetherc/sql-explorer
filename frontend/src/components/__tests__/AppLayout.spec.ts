@@ -18,6 +18,7 @@ const {
   useLayoutStore,
 } = await import('@/stores/layout')
 const { useExplorerStore } = await import('@/stores/explorer')
+const { useFilesStore } = await import('@/stores/files')
 const { SETTINGS_KEY, defaultSettings, useSettingsStore } = await import('@/stores/settings')
 const { useTabsStore } = await import('@/stores/tabs')
 const { useUiStore } = await import('@/stores/ui')
@@ -72,13 +73,17 @@ describe('AppLayout', () => {
     wrapper.unmount()
   })
 
-  it('moves between the three panels', async () => {
+  it('moves between the four panels', async () => {
     const wrapper = mountWithPlugins(AppLayout)
     await settle()
 
     await wrapper.find('[data-test="rail-explorer"]').trigger('click')
     await wrapper.vm.$nextTick()
     expect(wrapper.findComponent({ name: 'DbExplorer' }).isVisible()).toBe(true)
+
+    await wrapper.find('[data-test="rail-files"]').trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findComponent({ name: 'FilesPanel' }).isVisible()).toBe(true)
 
     await wrapper.find('[data-test="rail-history"]').trigger('click')
     await wrapper.vm.$nextTick()
@@ -286,6 +291,21 @@ describe('AppLayout', () => {
     await wrapper.findComponent({ name: 'QueryTabs' }).vm.$emit('open-connections')
     await wrapper.vm.$nextTick()
     expect(wrapper.findComponent({ name: 'ConnectionManager' }).isVisible()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('puts the folders of the last session into the files panel', async () => {
+    apiStub.getWorkspace.mockResolvedValue({
+      tabs: [],
+      activeTabId: null,
+      fileRoots: ['/data', '/gone'],
+    })
+    // The second folder is no longer a folder on the disk.
+    apiStub.restoreFolder.mockImplementation((path: string) => Promise.resolve(path === '/data'))
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+
+    expect(useFilesStore().roots.map((root) => root.path)).toEqual(['/data'])
     wrapper.unmount()
   })
 
@@ -638,7 +658,7 @@ describe('AppLayout keys', () => {
     wrapper.unmount()
   })
 
-  it('moves between the three panels', async () => {
+  it('moves between the four panels', async () => {
     const wrapper = mountWithPlugins(AppLayout)
     await settle()
 
@@ -647,6 +667,10 @@ describe('AppLayout keys', () => {
     expect(wrapper.find('[data-test="rail-explorer"]').classes()).toContain('v-list-item--active')
 
     press('Digit3')
+    await settle()
+    expect(wrapper.find('[data-test="rail-files"]').classes()).toContain('v-list-item--active')
+
+    press('Digit4')
     await settle()
     expect(wrapper.find('[data-test="rail-history"]').classes()).toContain('v-list-item--active')
 

@@ -83,6 +83,7 @@
         v-show="layout.layout.panel === 'explorer'"
         @open-connections="layout.showPanel('connections')"
       />
+      <FilesPanel v-show="layout.layout.panel === 'files'" />
       <HistoryPanel v-show="layout.layout.panel === 'history'" />
 
       <!-- The edge of the panel answers a drag and an arrow key. The ARIA
@@ -306,6 +307,7 @@ import CommandPalette from '@/components/CommandPalette.vue'
 import ConnectionManager from '@/components/ConnectionManager.vue'
 import GuideDialog from '@/components/GuideDialog.vue'
 import DbExplorer from '@/components/DbExplorer.vue'
+import FilesPanel from '@/components/FilesPanel.vue'
 import HistoryPanel from '@/components/HistoryPanel.vue'
 import NoticeHost from '@/components/NoticeHost.vue'
 import QueryTabs from '@/components/QueryTabs.vue'
@@ -321,6 +323,7 @@ import {
 import { holdBackHostMenu } from '@/lib/contextmenu'
 import { useConnectionsStore } from '@/stores/connections'
 import { useExplorerStore } from '@/stores/explorer'
+import { useFilesStore } from '@/stores/files'
 import { useHistoryStore } from '@/stores/history'
 import {
   MAX_PANEL_WIDTH,
@@ -336,6 +339,7 @@ import type { UnlistenFn } from '@tauri-apps/api/event'
 
 const connections = useConnectionsStore()
 const explorer = useExplorerStore()
+const files = useFilesStore()
 const history = useHistoryStore()
 const layout = useLayoutStore()
 const settings = useSettingsStore()
@@ -364,6 +368,7 @@ let unholdHostMenu: (() => void) | null = null
 const railItems: Array<{ value: Panel; icon: string; label: string }> = [
   { value: 'connections', icon: 'mdi-lan-connect', label: 'Connections' },
   { value: 'explorer', icon: 'mdi-database-search', label: 'Explorer' },
+  { value: 'files', icon: 'mdi-folder-outline', label: 'Files' },
   { value: 'history', icon: 'mdi-history', label: 'History and saved statements' },
 ]
 
@@ -529,10 +534,17 @@ const commands: Command[] = [
     run: () => layout.showPanel('explorer'),
   },
   {
+    id: 'view.files',
+    title: 'Show the files',
+    group: 'View',
+    key: 'mod+3',
+    run: () => layout.showPanel('files'),
+  },
+  {
     id: 'view.history',
     title: 'Show the history',
     group: 'View',
-    key: 'mod+3',
+    key: 'mod+4',
     run: () => layout.showPanel('history'),
   },
   {
@@ -620,6 +632,9 @@ onMounted(async () => {
   await connections.load()
   await history.load()
   await tabs.restore()
+  // The restore keeps the folders that the backend took back, so the panel
+  // shows those folders alone.
+  files.restoreRoots(tabs.fileRoots)
   for (const info of Object.values(connections.active)) {
     explorer.addRoot(info.connectionId)
   }
