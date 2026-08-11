@@ -16,8 +16,9 @@ use crate::db::{
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
-use crate::storage::SavedConnection;
+use crate::storage::{AwsCredentialSource, SavedConnection};
 use async_trait::async_trait;
+use aws_credential_types::Credentials;
 use aws_sdk_athena::types::{
     QueryExecutionContext, QueryExecutionState, QueryExecutionStatistics, ResultConfiguration,
     ResultReuseByAgeConfiguration, ResultReuseConfiguration, Row as AthenaRow,
@@ -151,6 +152,38 @@ fn read_statistics(statistics: Option<&QueryExecutionStatistics>) -> QueryStats 
 /// The name Athena gives to the catalog that AWS Glue provides.
 pub const DEFAULT_CATALOG: &str = "AwsDataCatalog";
 
+/// The words that name a pair of keys with a part missing.
+const INCOMPLETE_KEYS_MESSAGE: &str =
+    "An Athena connection with keys needs an access key ID and a secret access key.";
+
+/// The name this application gives to the credentials it builds itself.
+const CREDENTIALS_SOURCE: &str = "sql-explorer";
+
+/// Builds the credentials that the user typed, or `None` when the
+/// connection reads the chain of the AWS tools instead.
+///
+/// The session token stays optional, because a permanent pair of keys
+/// carries none. A pair with a part missing is refused here, before a
+/// request opens, so the user reads what is wrong and not what the service
+/// answered.
+fn typed_credentials(connection: &SavedConnection) -> Result<Option<Credentials>> {
+    if connection.options.aws_credential_source != AwsCredentialSource::Keys {
+        return Ok(None);
+    }
+    let access_key_id = trimmed(connection.options.aws_access_key_id.as_deref());
+    let secret_access_key = trimmed(connection.aws_secret_access_key.as_deref());
+    let (Some(access_key_id), Some(secret_access_key)) = (access_key_id, secret_access_key) else {
+        return Err(Error::Configuration(INCOMPLETE_KEYS_MESSAGE.to_string()));
+    };
+    Ok(Some(Credentials::new(
+        access_key_id,
+        secret_access_key,
+        trimmed(connection.aws_session_token.as_deref()).map(str::to_string),
+        None,
+        CREDENTIALS_SOURCE,
+    )))
+}
+
 impl AthenaDriver {
     pub async fn connect(connection: &SavedConnection) -> Result<Box<dyn DatabaseDriver>> {
         let region = connection
@@ -166,8 +199,15 @@ impl AthenaDriver {
 
         let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .region(aws_config::Region::new(region));
-        if let Some(profile) = trimmed(connection.options.aws_profile.as_deref()) {
-            loader = loader.profile_name(profile);
+        // The keys of the user take the place of the whole chain. The
+        // profile belongs to the chain, so the two never stand together.
+        match typed_credentials(connection)? {
+            Some(credentials) => loader = loader.credentials_provider(credentials),
+            None => {
+                if let Some(profile) = trimmed(connection.options.aws_profile.as_deref()) {
+                    loader = loader.profile_name(profile);
+                }
+            }
         }
         let config = loader.load().await;
 
@@ -1121,9 +1161,9 @@ mod tests {
         assert_eq!(trimmed(None), None);
     }
 
-    #[tokio::test]
-    async fn a_connection_without_a_region_is_refused() {
-        let connection = SavedConnection {
+    /// A connection of the tests, with no field of AWS filled in.
+    fn athena_connection() -> SavedConnection {
+        SavedConnection {
             id: "id".into(),
             name: "name".into(),
             db_type: crate::storage::DbType::Athena,
@@ -1137,7 +1177,78 @@ mod tests {
             options: crate::storage::ConnectionOptions::default(),
             color: None,
             group: None,
-        };
+        }
+    }
+
+    #[test]
+    fn a_connection_of_the_chain_builds_no_credentials() {
+        let mut connection = athena_connection();
+        // The keys are ignored while the source stands at the chain.
+        connection.options.aws_access_key_id = Some("AKIAEXAMPLE".into());
+        connection.aws_secret_access_key = Some("the-secret".into());
+
+        assert!(typed_credentials(&connection).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_pair_of_keys_builds_the_credentials_of_the_user() {
+        let mut connection = athena_connection();
+        connection.options.aws_credential_source = AwsCredentialSource::Keys;
+        connection.options.aws_access_key_id = Some(" AKIAEXAMPLE ".into());
+        connection.aws_secret_access_key = Some("the-secret".into());
+
+        let credentials = typed_credentials(&connection).unwrap().unwrap();
+        assert_eq!(credentials.access_key_id(), "AKIAEXAMPLE");
+        assert_eq!(credentials.secret_access_key(), "the-secret");
+        // A permanent pair of keys carries no session token.
+        assert_eq!(credentials.session_token(), None);
+
+        connection.aws_session_token = Some("the-token".into());
+        let with_token = typed_credentials(&connection).unwrap().unwrap();
+        assert_eq!(with_token.session_token(), Some("the-token"));
+    }
+
+    #[test]
+    fn a_pair_of_keys_with_a_part_missing_is_refused() {
+        let mut connection = athena_connection();
+        connection.options.aws_credential_source = AwsCredentialSource::Keys;
+
+        // Neither part is there.
+        let error = typed_credentials(&connection).err().unwrap();
+        assert_eq!(error.kind(), crate::error::ErrorKind::Configuration);
+        assert_eq!(error.to_string(), INCOMPLETE_KEYS_MESSAGE);
+
+        // The access key ID alone is not enough.
+        connection.options.aws_access_key_id = Some("AKIAEXAMPLE".into());
+        assert!(typed_credentials(&connection).is_err());
+
+        // A secret of spaces alone counts as no secret.
+        connection.aws_secret_access_key = Some("   ".into());
+        assert!(typed_credentials(&connection).is_err());
+
+        // The secret alone is not enough either.
+        connection.options.aws_access_key_id = None;
+        connection.aws_secret_access_key = Some("the-secret".into());
+        assert!(typed_credentials(&connection).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_connection_with_a_part_of_the_keys_missing_opens_no_request() {
+        let mut connection = athena_connection();
+        connection.options.aws_region = Some("us-east-1".into());
+        connection.options.aws_credential_source = AwsCredentialSource::Keys;
+        connection.options.aws_access_key_id = Some("AKIAEXAMPLE".into());
+
+        // The refusal comes before the first request, so the test reaches
+        // no service.
+        let error = AthenaDriver::connect(&connection).await.err().unwrap();
+        assert_eq!(error.kind(), crate::error::ErrorKind::Configuration);
+        assert_eq!(error.to_string(), INCOMPLETE_KEYS_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn a_connection_without_a_region_is_refused() {
+        let connection = athena_connection();
         assert_eq!(
             AthenaDriver::connect(&connection)
                 .await
