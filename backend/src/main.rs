@@ -17,7 +17,7 @@ mod storage;
 mod store;
 mod xlsx;
 
-use state::AppState;
+use state::{spawn_session_reaper, AppState, SESSION_REAP_INTERVAL};
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -36,6 +36,10 @@ fn main() {
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new(secrets::build_store()))
+        .setup(|app| {
+            spawn_session_reaper(app.handle().clone(), SESSION_REAP_INTERVAL);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::connect,
             commands::test_connection,

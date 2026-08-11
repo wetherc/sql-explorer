@@ -16,6 +16,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use tauri::Manager;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -177,6 +178,22 @@ impl AppState {
         self.file_roots.lock().await.clone()
     }
 
+    /// Closes the tab sessions of every open connection that stood idle past
+    /// the limit. The map of the connections is free again before the sweep
+    /// starts, so the sweep holds no lock that a command needs.
+    pub async fn reap_idle_sessions(&self) {
+        let pools: Vec<Arc<SessionPool>> = self
+            .connections
+            .lock()
+            .await
+            .values()
+            .map(|open| open.sessions.clone())
+            .collect();
+        for pool in pools {
+            pool.reap_idle().await;
+        }
+    }
+
     /// Drops the background driver of a connection, so that the next
     /// metadata read opens a fresh one.
     pub async fn clear_background(&self, connection_id: &str) {
@@ -265,6 +282,29 @@ impl AppState {
     pub async fn take_request(&self, request_id: &str) -> Option<RunningRequest> {
         self.running.lock().await.remove(request_id)
     }
+}
+
+/// The time between two sweeps for idle sessions.
+pub const SESSION_REAP_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Starts a task that closes the idle tab sessions of every connection at
+/// each sweep. A sweep also ran when a command asked for a session, and a
+/// user who leaves the application open with no request keeps every session
+/// of every tab. The task holds the server sessions for that time alone.
+pub fn spawn_session_reaper<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    interval: Duration,
+) -> tauri::async_runtime::JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
+        let mut sweeps = tokio::time::interval(interval);
+        // The first tick of an interval comes at once, and nothing is idle
+        // at the start.
+        sweeps.tick().await;
+        loop {
+            sweeps.tick().await;
+            app.state::<AppState>().reap_idle_sessions().await;
+        }
+    })
 }
 
 #[cfg(test)]
@@ -506,6 +546,57 @@ mod tests {
         state.add_file_root(first.clone()).await;
 
         assert_eq!(state.file_roots().await, vec![first, second]);
+    }
+
+    /// Puts one tab session into the pool of a connection and moves the
+    /// moment of its last answer into the past.
+    async fn with_idle_tab_session(open: &OpenConnection) {
+        let session = open
+            .sessions
+            .insert("t1", Session::new(Box::new(StubDriver)))
+            .await;
+        session.age(crate::session::SESSION_IDLE_REAP).await;
+    }
+
+    #[tokio::test]
+    async fn a_sweep_closes_the_idle_sessions_of_every_connection() {
+        let state = state();
+        let first = OpenConnection::new(descriptor(), Box::new(StubDriver));
+        let mut second_record = descriptor();
+        second_record.id = "c2".into();
+        let second = OpenConnection::new(second_record, Box::new(StubDriver));
+        with_idle_tab_session(&first).await;
+        with_idle_tab_session(&second).await;
+        state.insert("c1", first.clone()).await;
+        state.insert("c2", second.clone()).await;
+
+        state.reap_idle_sessions().await;
+
+        assert_eq!(first.sessions.tab_count().await, 0);
+        assert_eq!(second.sessions.tab_count().await, 0);
+        // The default session of each connection stays, because the health
+        // check covers it.
+        assert!(first.sessions.get(DEFAULT_SESSION).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn the_task_sweeps_while_the_application_runs() {
+        let app = tauri::test::mock_app();
+        app.manage(state());
+        let open = OpenConnection::new(descriptor(), Box::new(StubDriver));
+        with_idle_tab_session(&open).await;
+        app.state::<AppState>().insert("c1", open.clone()).await;
+
+        let task = spawn_session_reaper(app.handle().clone(), Duration::from_millis(5));
+        for _ in 0..100 {
+            if open.sessions.tab_count().await == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        task.abort();
+
+        assert_eq!(open.sessions.tab_count().await, 0);
     }
 
     #[test]
