@@ -6,14 +6,6 @@
         SQL Explorer
       </v-app-bar-title>
 
-      <v-btn
-        size="small"
-        prepend-icon="mdi-plus"
-        text="New query"
-        data-test="app-new-query"
-        @click="tabs.add()"
-      />
-
       <v-tooltip
         location="bottom"
         :text="settings.isDark ? 'Use the light theme' : 'Use the dark theme'"

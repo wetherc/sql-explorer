@@ -288,11 +288,11 @@ describe('AppLayout', () => {
     wrapper.unmount()
   })
 
-  it('opens a tab from the application bar', async () => {
+  it('holds no button for a new tab beside the title', async () => {
     const wrapper = mountWithPlugins(AppLayout)
     await settle()
-    await wrapper.find('[data-test="app-new-query"]').trigger('click')
-    expect(useTabsStore().tabs).toHaveLength(1)
+    // The tab row is where a new tab appears, so it holds that button.
+    expect(wrapper.find('[data-test="app-new-query"]').exists()).toBe(false)
     wrapper.unmount()
   })
 
