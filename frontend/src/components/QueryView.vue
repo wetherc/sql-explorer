@@ -102,7 +102,6 @@
         item-title="title"
         item-value="value"
         label="Connection"
-        density="compact"
         hide-details
         class="connection-select"
         data-test="connection-select"
@@ -145,7 +144,6 @@
           <div class="results-tab-row d-flex align-center">
             <v-tabs
               :model-value="state.activePaneId ?? MESSAGES_TAB"
-              density="compact"
               show-arrows
               class="results-tabs flex-grow-1"
               @update:model-value="onResultTabChange"
@@ -220,7 +218,6 @@
                 v-if="state.error"
                 type="error"
                 variant="tonal"
-                density="compact"
                 class="mb-3"
                 data-test="query-error"
               >
@@ -235,7 +232,7 @@
                 :class="`message-${message.level}`"
                 data-test="query-message"
               >
-                <v-icon v-if="message.level !== 'info'" size="14" class="mr-1">
+                <v-icon v-if="message.level !== 'info'" size="x-small" class="mr-1">
                   {{ message.level === 'error' ? 'mdi-alert-circle' : 'mdi-alert' }}
                 </v-icon>
                 {{ message.text }}
@@ -298,7 +295,6 @@
               item-title="title"
               item-value="value"
               label="Form"
-              density="compact"
               hide-details
               class="param-kind"
               :data-test="`parameter-kind-${row.name}`"
@@ -307,7 +303,6 @@
               v-model="row.text"
               :disabled="row.kind === ParamKind.Null"
               label="Value"
-              density="compact"
               hide-details
               :data-test="`parameter-value-${row.name}`"
             />

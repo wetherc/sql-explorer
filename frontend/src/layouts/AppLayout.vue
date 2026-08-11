@@ -305,6 +305,7 @@ import {
   tabActions,
   type Command,
 } from '@/lib/commands'
+import { holdBackHostMenu } from '@/lib/contextmenu'
 import { useConnectionsStore } from '@/stores/connections'
 import { useExplorerStore } from '@/stores/explorer'
 import { useHistoryStore } from '@/stores/history'
@@ -344,6 +345,8 @@ function resetSettings(): void {
   settings.reset()
 }
 let unlisten: UnlistenFn | null = null
+/** Stops holding back the menu of the host, once the shell holds it back. */
+let unholdHostMenu: (() => void) | null = null
 
 const railItems: Array<{ value: Panel; icon: string; label: string }> = [
   { value: 'connections', icon: 'mdi-lan-connect', label: 'Connections' },
@@ -573,6 +576,7 @@ onMounted(async () => {
   // otherwise take the binding with it, and the user would then have an
   // application that answers no key at all.
   window.addEventListener('keydown', onKeyDown)
+  unholdHostMenu = holdBackHostMenu(window)
 
   await connections.loadEngines()
   await connections.load()
@@ -592,6 +596,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeyDown)
+  unholdHostMenu?.()
   // A drag that is still under way would otherwise leave its listeners and the
   // class it put on the body behind.
   endPanelDrag()

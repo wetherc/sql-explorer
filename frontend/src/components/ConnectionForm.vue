@@ -164,7 +164,6 @@
           label="Reuse the result of an earlier run"
           hint="A reused result scans no data, so it costs nothing."
           persistent-hint
-          density="compact"
           data-test="athena-reuse-switch"
         />
         <v-text-field
@@ -275,7 +274,6 @@
         v-if="problems.length > 0"
         type="warning"
         variant="tonal"
-        density="compact"
         class="mt-3"
         data-test="form-problems"
       >

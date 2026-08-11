@@ -7,7 +7,6 @@
         <v-text-field
           v-model="filter"
           autofocus
-          density="compact"
           hide-details
           placeholder="Type the name of a command"
           prepend-inner-icon="mdi-magnify"
@@ -28,7 +27,6 @@
       <v-list
         id="palette-listbox"
         ref="list"
-        density="compact"
         class="palette-list"
         role="listbox"
         aria-label="Commands"
