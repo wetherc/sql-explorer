@@ -19,15 +19,6 @@ export interface FileNode {
   loaded: boolean
 }
 
-/** The endings of the files the panel shows. */
-const STATEMENT_ENDINGS = ['.sql', '.txt']
-
-/** True when the panel shows a file of this name. */
-export function isStatementFile(name: string): boolean {
-  const lower = name.toLowerCase()
-  return STATEMENT_ENDINGS.some((ending) => lower.endsWith(ending))
-}
-
 /** Builds a node from one entry of a folder. */
 export function nodeOfEntry(entry: FolderEntry, depth: number): FileNode {
   return {
@@ -158,9 +149,7 @@ export const useFilesStore = defineStore('files', () => {
     node.loading = true
     try {
       const entries = await api.listFolder(node.path)
-      node.children = entries
-        .filter((entry) => entry.kind === 'folder' || isStatementFile(entry.name))
-        .map((entry) => nodeOfEntry(entry, node.depth + 1))
+      node.children = entries.map((entry) => nodeOfEntry(entry, node.depth + 1))
       node.loaded = true
     } catch (error) {
       ui.reportError(error)

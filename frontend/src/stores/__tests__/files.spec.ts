@@ -5,7 +5,7 @@ import { makeApiStub } from './helpers'
 const apiStub = makeApiStub()
 vi.mock('@/lib/api', () => ({ api: apiStub, CONNECTION_STATUS_EVENT: 'connection-status' }))
 
-const { baseName, findNode, isStatementFile, nodeOfEntry, visibleRows, useFilesStore } =
+const { baseName, findNode, nodeOfEntry, visibleRows, useFilesStore } =
   await import('@/stores/files')
 const { useTabsStore } = await import('@/stores/tabs')
 const { useUiStore } = await import('@/stores/ui')
@@ -16,14 +16,6 @@ function entry(name: string, kind: 'folder' | 'file' = 'file', root = '/data') {
 }
 
 describe('the helpers of the files panel', () => {
-  it('keeps the files that hold a statement', () => {
-    expect(isStatementFile('report.sql')).toBe(true)
-    expect(isStatementFile('REPORT.SQL')).toBe(true)
-    expect(isStatementFile('notes.txt')).toBe(true)
-    expect(isStatementFile('image.png')).toBe(false)
-    expect(isStatementFile('sql')).toBe(false)
-  })
-
   it('names a file without the folders in front of it', () => {
     expect(baseName('/data/reports/a.sql')).toBe('a.sql')
     expect(baseName('C:\\data\\a.sql')).toBe('a.sql')
@@ -82,8 +74,8 @@ describe('files store', () => {
     await files.openFolder()
 
     expect(files.hasRoots).toBe(true)
-    // The folder stands open, so its entries are rows of the panel.
-    expect(files.rows.map((row) => row.name)).toEqual(['data', 'reports', 'a.sql'])
+    // The folder stands open, so every entry of it is a row of the panel.
+    expect(files.rows.map((row) => row.name)).toEqual(['data', 'reports', 'a.sql', 'image.png'])
     // The workspace holds the folder, so the next start reaches it again.
     expect(tabs.fileRoots).toEqual(['/data'])
     expect(files.loading).toBe(false)
