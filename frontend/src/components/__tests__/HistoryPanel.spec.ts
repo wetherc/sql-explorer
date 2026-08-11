@@ -189,6 +189,24 @@ describe('HistoryPanel asking before it takes something away', () => {
     expect(questions.every((question) => question.props('open') === false)).toBe(true)
   })
 
+  it('draws the rows of the window alone when the history is long', async () => {
+    apiStub.getHistory.mockResolvedValue(
+      Array.from({ length: 500 }, (_unused, index) => ({
+        ...entry,
+        id: `h${index}`,
+        query: `SELECT ${index}`,
+      })),
+    )
+    const wrapper = mountWithPlugins(HistoryPanel)
+    await useHistoryStore().load()
+    await wrapper.vm.$nextTick()
+
+    const rows = wrapper.findAll('[data-test="history-entry"]')
+    expect(rows.length).toBeGreaterThan(0)
+    expect(rows.length).toBeLessThan(50)
+    expect(rows[0]?.text()).toContain('SELECT 0')
+  })
+
   it('keeps a saved statement when the question is refused', async () => {
     apiStub.getSavedQueries.mockResolvedValue([savedQuery])
     const wrapper = mountWithPlugins(HistoryPanel)

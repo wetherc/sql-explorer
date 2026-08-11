@@ -27,32 +27,37 @@
       </template>
     </PanelHeader>
 
-    <div class="body">
+    <div ref="bodyRef" class="body">
       <template v-if="mode === 'history'">
+        <!-- The list draws the rows that stand in the window alone, because
+             the history holds up to five hundred entries. -->
         <v-list v-if="history.visibleEntries.length > 0" density="compact" class="pa-0">
-          <v-list-item
-            v-for="entry in history.visibleEntries"
-            :key="entry.id"
-            data-test="history-entry"
-            @click="openEntry(entry)"
+          <v-virtual-scroll
+            :items="history.visibleEntries"
+            :item-height="ITEM_HEIGHT"
+            :height="listHeight"
           >
-            <template #prepend>
-              <v-icon
-                size="small"
-                :color="entry.succeeded ? 'success' : 'error'"
-                :aria-label="entry.succeeded ? 'succeeded' : 'failed'"
-              >
-                {{ entry.succeeded ? 'mdi-check' : 'mdi-alert-circle-outline' }}
-              </v-icon>
+            <template #default="{ item: entry }">
+              <v-list-item :key="entry.id" data-test="history-entry" @click="openEntry(entry)">
+                <template #prepend>
+                  <v-icon
+                    size="small"
+                    :color="entry.succeeded ? 'success' : 'error'"
+                    :aria-label="entry.succeeded ? 'succeeded' : 'failed'"
+                  >
+                    {{ entry.succeeded ? 'mdi-check' : 'mdi-alert-circle-outline' }}
+                  </v-icon>
+                </template>
+                <v-list-item-title class="query-line">
+                  {{ summariseQuery(entry.query) }}
+                </v-list-item-title>
+                <v-list-item-subtitle>
+                  {{ entry.connectionName }} · {{ formatTimestamp(entry.ranAt) }} ·
+                  {{ formatDuration(entry.elapsedMs) }} · {{ formatRowCount(entry.rowCount) }}
+                </v-list-item-subtitle>
+              </v-list-item>
             </template>
-            <v-list-item-title class="query-line">
-              {{ summariseQuery(entry.query) }}
-            </v-list-item-title>
-            <v-list-item-subtitle>
-              {{ entry.connectionName }} · {{ formatTimestamp(entry.ranAt) }} ·
-              {{ formatDuration(entry.elapsedMs) }} · {{ formatRowCount(entry.rowCount) }}
-            </v-list-item-subtitle>
-          </v-list-item>
+          </v-virtual-scroll>
         </v-list>
         <EmptyState
           v-else
@@ -64,30 +69,33 @@
 
       <template v-else>
         <v-list v-if="history.visibleSavedQueries.length > 0" density="compact" class="pa-0">
-          <v-list-item
-            v-for="query in history.visibleSavedQueries"
-            :key="query.id"
-            data-test="saved-entry"
-            @click="openSaved(query)"
+          <v-virtual-scroll
+            :items="history.visibleSavedQueries"
+            :item-height="ITEM_HEIGHT"
+            :height="listHeight"
           >
-            <template #prepend>
-              <v-icon size="small">mdi-bookmark-outline</v-icon>
+            <template #default="{ item: query }">
+              <v-list-item :key="query.id" data-test="saved-entry" @click="openSaved(query)">
+                <template #prepend>
+                  <v-icon size="small">mdi-bookmark-outline</v-icon>
+                </template>
+                <v-list-item-title>{{ query.name }}</v-list-item-title>
+                <v-list-item-subtitle class="query-line">
+                  {{ summariseQuery(query.query) }}
+                </v-list-item-subtitle>
+                <template #append>
+                  <v-btn
+                    icon="mdi-delete"
+                    size="x-small"
+                    color="error"
+                    aria-label="Delete the saved statement"
+                    data-test="delete-saved"
+                    @click.stop="pendingDelete = query"
+                  />
+                </template>
+              </v-list-item>
             </template>
-            <v-list-item-title>{{ query.name }}</v-list-item-title>
-            <v-list-item-subtitle class="query-line">
-              {{ summariseQuery(query.query) }}
-            </v-list-item-subtitle>
-            <template #append>
-              <v-btn
-                icon="mdi-delete"
-                size="x-small"
-                color="error"
-                aria-label="Delete the saved statement"
-                data-test="delete-saved"
-                @click.stop="pendingDelete = query"
-              />
-            </template>
-          </v-list-item>
+          </v-virtual-scroll>
         </v-list>
         <EmptyState
           v-else
@@ -121,7 +129,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import EmptyState from './EmptyState.vue'
 import PanelHeader from './PanelHeader.vue'
@@ -136,6 +144,35 @@ const tabs = useTabsStore()
 const connections = useConnectionsStore()
 
 const mode = ref<'history' | 'saved'>('history')
+
+/** The height of one row of either list. */
+const ITEM_HEIGHT = 56
+
+/** The element that holds the list, which gives the height of the window. */
+const bodyRef = ref<HTMLElement | null>(null)
+/**
+ * The height of the window of the list. The value stands here and not in the
+ * style, because the list needs a number to count the rows it draws. The
+ * first value serves a place where nothing is laid out.
+ */
+const listHeight = ref(600)
+let sizeObserver: ResizeObserver | null = null
+
+onMounted(() => {
+  const element = bodyRef.value
+  if (!element || typeof ResizeObserver === 'undefined') {
+    return
+  }
+  sizeObserver = new ResizeObserver(() => {
+    listHeight.value = element.clientHeight || listHeight.value
+  })
+  sizeObserver.observe(element)
+})
+
+onBeforeUnmount(() => {
+  sizeObserver?.disconnect()
+  sizeObserver = null
+})
 
 /** True while the question about emptying the history stands open. */
 const clearing = ref(false)
@@ -182,7 +219,8 @@ function openSaved(query: SavedQuery): void {
 
 .body {
   flex: 1 1 auto;
-  overflow: auto;
+  /* The list of the rows scrolls itself, so this element does not. */
+  overflow: hidden;
   min-height: 0;
 }
 
