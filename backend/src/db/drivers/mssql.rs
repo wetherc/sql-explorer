@@ -142,11 +142,12 @@ const EXPIRED_TOKEN_MESSAGE: &str = "The access token has expired. Paste a new o
                                      connection.";
 
 /// The words that report a statement which the row limit ended. The server
-/// stops the whole batch, so a script gives back no set after the one that
-/// reached the limit.
+/// stops the whole batch, so a statement that answers with more than one
+/// result set gives back no set after the one that reached the limit.
 const ENDED_AT_THE_LIMIT_MESSAGE: &str =
-    "The read reached the row limit, so the statement was ended on the server. A script gives \
-     back no result set after this one. Raise the row limit in the settings to read further.";
+    "The read reached the row limit, so the statement was ended on the server. A statement that \
+     answers with more than one result set gives back no set after this one. Raise the row limit \
+     in the settings to read further.";
 
 /// True when the token names a moment that is more than the allowance in the
 /// past. A token that cannot be read is not refused here.
@@ -293,12 +294,17 @@ impl MssqlDriver {
     /// result set to the sink as it arrives.
     ///
     /// A stream that is dropped in the middle leaves the connection in the
-    /// middle of a message, so the stream is always walked to its end. Once
-    /// the read reaches the row limit, or the sink stops, the attention
-    /// packet goes to the server. The server ends the statement, the stream
-    /// ends with the cancel error of `tiberius`, and the walk then covers
-    /// the rows in flight alone. The next statement of the session waits for
-    /// the acknowledgement of the attention packet before it starts.
+    /// middle of a message, so the stream is always walked to its end. With
+    /// `may_end_early`, the attention packet goes to the server once the read
+    /// reaches the row limit or the sink stops. The server ends the
+    /// statement, the stream ends with the cancel error of `tiberius`, and
+    /// the walk then covers the rows in flight alone. The next statement of
+    /// the session waits for the acknowledgement of the attention packet
+    /// before it starts.
+    ///
+    /// The packet ends the whole batch, so a batch that holds more than one
+    /// statement arrives with `may_end_early` false and keeps the walk. No
+    /// statement of such a batch then loses its result set.
     ///
     /// Returns true when the sink stopped the run.
     async fn stream_sets(
@@ -307,6 +313,7 @@ impl MssqlDriver {
         params: &[&dyn tiberius::ToSql],
         options: &ExecOptions,
         sink: &mut dyn RowSink,
+        may_end_early: bool,
     ) -> Result<bool> {
         // The handle is taken before the stream, because the stream holds
         // the client while it lives.
@@ -359,7 +366,7 @@ impl MssqlDriver {
                     }
                     if count >= options.max_rows {
                         truncated = true;
-                        if !asked_to_end {
+                        if may_end_early && !asked_to_end {
                             attention.signal();
                             asked_to_end = true;
                             ended_at_limit = true;
@@ -369,7 +376,7 @@ impl MssqlDriver {
                     if sink.row(row_to_json(&row))? == SinkControl::Stop {
                         truncated = true;
                         stopped = true;
-                        if !asked_to_end {
+                        if may_end_early && !asked_to_end {
                             attention.signal();
                             asked_to_end = true;
                         }
@@ -614,12 +621,19 @@ impl DatabaseDriver for MssqlDriver {
         let started = Instant::now();
         let mut rows_affected: Option<u64> = None;
 
+        let split = split_statements(query, Dialect::MsSql);
+        // The attention packet of the row limit ends a whole batch. A batch
+        // that holds more than one statement therefore keeps the walk, so
+        // that no statement of it loses its result set. Each statement of a
+        // script without parameters goes as a batch of its own, so only the
+        // whole script below can hold more than one.
+        let may_end_early = params.is_none() || split.len() <= 1;
         // A script with parameters is sent whole, because the parameter
         // positions belong to the script and not to one statement.
         let statements: Vec<String> = if params.is_some() {
             vec![query.to_string()]
         } else {
-            split_statements(query, Dialect::MsSql)
+            split
         };
 
         for statement in statements {
@@ -629,7 +643,13 @@ impl DatabaseDriver for MssqlDriver {
 
             if returns_rows(&statement) {
                 let stopped = self
-                    .stream_sets(&statement, borrowed.as_slice(), options, sink)
+                    .stream_sets(
+                        &statement,
+                        borrowed.as_slice(),
+                        options,
+                        sink,
+                        may_end_early,
+                    )
                     .await?;
                 if stopped {
                     break;
@@ -676,7 +696,7 @@ impl DatabaseDriver for MssqlDriver {
         // The plan sets are filtered after the run, so the rows buffer here.
         let mut sink = BufferSink::new(options.max_rows);
         let outcome = self
-            .stream_sets(&statement, borrowed.as_slice(), options, &mut sink)
+            .stream_sets(&statement, borrowed.as_slice(), options, &mut sink, true)
             .await;
         if let Err(error) = self.run_switch(&format!("SET {switch} OFF")).await {
             // The switch holds for the session, so a session that keeps it on
@@ -1363,7 +1383,7 @@ mod tests {
         };
         let mut sink = BufferSink::new(options.max_rows);
         let stopped = driver
-            .stream_sets("SELECT a FROM b", &[], &options, &mut sink)
+            .stream_sets("SELECT a FROM b", &[], &options, &mut sink, true)
             .await
             .unwrap();
         let response = sink.into_response(RunSummary::default());
@@ -1387,9 +1407,59 @@ mod tests {
         // The session runs a second statement on the same connection.
         let mut next = BufferSink::new(options.max_rows);
         driver
-            .stream_sets("SELECT 1", &[], &options, &mut next)
+            .stream_sets("SELECT 1", &[], &options, &mut next, true)
             .await
             .unwrap();
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_batch_of_several_statements_walks_the_rest_of_the_result() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            accept_login(&mut socket).await;
+
+            // The whole answer arrives at once, and the server waits for no
+            // attention packet.
+            let kind = read_message(&mut socket).await;
+            assert!(kind == PACKET_RPC || kind == PACKET_SQL_BATCH);
+            let mut answer = int_metadata();
+            for value in 0..5 {
+                answer.extend_from_slice(&int_row(value));
+            }
+            answer.extend_from_slice(&done_token(0, 5));
+            write_packet(&mut socket, END_OF_MESSAGE, &answer).await;
+        });
+
+        let tcp = TcpStream::connect(address).await.unwrap();
+        let client = Client::connect(test_config(), tcp.compat_write())
+            .await
+            .unwrap();
+        let mut driver = MssqlDriver { client };
+
+        let options = ExecOptions {
+            max_rows: 2,
+            timeout_secs: 30,
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        driver
+            .stream_sets("SELECT a FROM b", &[], &options, &mut sink, false)
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        // The set still holds the rows of the limit and reports the warning.
+        assert_eq!(response.results[0].rows.len(), 2);
+        assert!(response.results[0].truncated);
+        // The statement ran to its end, so no message names an early end.
+        assert!(!response
+            .messages
+            .iter()
+            .any(|message| message.text == ENDED_AT_THE_LIMIT_MESSAGE));
 
         server.await.unwrap();
     }
@@ -1414,7 +1484,7 @@ mod tests {
         };
         let mut sink = BufferSink::new(2);
         let stopped = driver
-            .stream_sets("SELECT a FROM b", &[], &options, &mut sink)
+            .stream_sets("SELECT a FROM b", &[], &options, &mut sink, true)
             .await
             .unwrap();
         let response = sink.into_response(RunSummary::default());
@@ -1430,7 +1500,7 @@ mod tests {
 
         let mut next = BufferSink::new(options.max_rows);
         driver
-            .stream_sets("SELECT 1", &[], &options, &mut next)
+            .stream_sets("SELECT 1", &[], &options, &mut next, true)
             .await
             .unwrap();
 

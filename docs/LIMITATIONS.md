@@ -247,8 +247,10 @@ can still end with the timeout message.
 
 ## The row limit ends a whole batch on MS SQL Server
 
-The attention packet ends the whole batch, not one result set of it. A
-script whose first statement passes the row limit therefore gives back no
-set for the statements after it. The messages of the run say so. A higher
-row limit in the settings, or a smaller first statement, brings the later
-sets back.
+The attention packet ends the whole batch, not one result set of it. Each
+statement of a script goes to the server as a batch of its own, and a script
+with parameters that holds more than one statement keeps the walk, so a
+script loses no result set. A single statement that answers with more than
+one result set, such as a call of a procedure, gives back no set after the
+one that reached the limit. The messages of the run say so. A higher row
+limit in the settings brings the later sets back.
