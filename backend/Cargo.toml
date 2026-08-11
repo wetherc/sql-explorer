@@ -109,6 +109,8 @@ custom-protocol = ["tauri/custom-protocol"]
 
 [dev-dependencies]
 tempfile = "3"
+# The tests of the command layer run against a mock application handle.
+tauri = { version = "2", features = ["test"] }
 # A test of a time limit moves the clock of the runtime instead of waiting.
 tokio = { version = "1", features = ["test-util"] }
 # The probe under `examples/` prints the trace of `tiberius`, which uses

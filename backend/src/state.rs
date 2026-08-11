@@ -53,6 +53,10 @@ pub struct OpenConnection {
     pub sessions: Arc<SessionPool>,
     pub capabilities: DriverCapabilities,
     pub dialect: Dialect,
+    /// True when every tab must share the default session. A SQLite database
+    /// that lives in memory needs this, because each new connection to it
+    /// opens a separate empty database.
+    pub single_session: bool,
 }
 
 impl OpenConnection {
@@ -60,6 +64,7 @@ impl OpenConnection {
         let capabilities = driver.capabilities();
         let dialect = driver.dialect();
         let cap = descriptor.options.max_sessions.max(1);
+        let single_session = shares_no_second_connection(&descriptor);
         let sessions = Arc::new(SessionPool::with_session(
             cap,
             DEFAULT_SESSION,
@@ -70,7 +75,18 @@ impl OpenConnection {
             sessions,
             capabilities,
             dialect,
+            single_session,
         }
+    }
+
+    /// Returns the key of the session that a request with the given tab
+    /// uses. A connection that allows one session alone maps every tab to
+    /// the default session.
+    pub fn session_key(&self, tab_id: Option<&str>) -> String {
+        if self.single_session {
+            return DEFAULT_SESSION.to_string();
+        }
+        tab_id.unwrap_or(DEFAULT_SESSION).to_string()
     }
 
     /// Returns the session that a request without a tab uses.
@@ -79,6 +95,23 @@ impl OpenConnection {
             .get(DEFAULT_SESSION)
             .await
             .ok_or_else(|| Error::NotConnected(self.descriptor.id.clone()))
+    }
+}
+
+/// True when a second connection to the same record reaches a different
+/// database. A SQLite database that lives in memory alone does this: each
+/// new connection opens a separate empty database, unless the path names a
+/// shared cache.
+fn shares_no_second_connection(descriptor: &SavedConnection) -> bool {
+    if descriptor.db_type != crate::storage::DbType::Sqlite {
+        return false;
+    }
+    match &descriptor.options.file_path {
+        Some(path) => {
+            let in_memory = path.contains(":memory:") || path.contains("mode=memory");
+            in_memory && !path.contains("cache=shared")
+        }
+        None => false,
     }
 }
 
@@ -323,6 +356,45 @@ mod tests {
         record.options.max_sessions = 0;
         let open = OpenConnection::new(record, Box::new(StubDriver));
         assert_eq!(open.sessions.cap(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_key_of_a_session_follows_the_tab() {
+        let open = OpenConnection::new(descriptor(), Box::new(StubDriver));
+        assert!(!open.single_session);
+        assert_eq!(open.session_key(Some("t1")), "t1");
+        assert_eq!(open.session_key(None), DEFAULT_SESSION);
+    }
+
+    #[tokio::test]
+    async fn a_connection_with_one_session_maps_every_tab_to_it() {
+        let mut record = descriptor();
+        record.db_type = DbType::Sqlite;
+        record.options.file_path = Some(":memory:".into());
+        let open = OpenConnection::new(record, Box::new(StubDriver));
+        assert!(open.single_session);
+        assert_eq!(open.session_key(Some("t1")), DEFAULT_SESSION);
+    }
+
+    #[test]
+    fn only_a_memory_database_without_a_shared_cache_forbids_a_second_connection() {
+        let mut record = descriptor();
+        assert!(!shares_no_second_connection(&record));
+
+        record.db_type = DbType::Sqlite;
+        assert!(!shares_no_second_connection(&record));
+
+        record.options.file_path = Some("/tmp/data.db".into());
+        assert!(!shares_no_second_connection(&record));
+
+        record.options.file_path = Some(":memory:".into());
+        assert!(shares_no_second_connection(&record));
+
+        record.options.file_path = Some("file:one?mode=memory".into());
+        assert!(shares_no_second_connection(&record));
+
+        record.options.file_path = Some("file:one?mode=memory&cache=shared".into());
+        assert!(!shares_no_second_connection(&record));
     }
 
     #[tokio::test]

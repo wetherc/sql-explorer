@@ -5,9 +5,6 @@
 //! because they run on one server session. The statements of two tabs run at
 //! the same time, because each tab has its own session.
 
-// The command layer does not call this module yet.
-#![allow(dead_code)]
-
 use crate::db::drivers::{CancelHandle, DatabaseDriver};
 use crate::state::HEALTH_CHECK_AFTER;
 use std::collections::HashMap;
@@ -101,13 +98,12 @@ impl SessionPool {
     /// Builds a pool that already holds one session. The connect command
     /// uses this form, because the connection opens with one driver.
     pub fn with_session(cap: usize, key: &str, session: Session) -> Self {
-        let mut sessions = HashMap::new();
-        sessions.insert(key.to_string(), Arc::new(session));
-        Self {
-            sessions: Mutex::new(sessions),
-            open_lock: Mutex::new(()),
-            cap,
-        }
+        let pool = Self::new(cap);
+        pool.sessions
+            .try_lock()
+            .expect("the pool is new and nothing holds it")
+            .insert(key.to_string(), Arc::new(session));
+        pool
     }
 
     /// The largest number of tab sessions this pool opens.
@@ -187,11 +183,6 @@ impl SessionPool {
         for key in &gone {
             sessions.remove(key);
         }
-    }
-
-    /// Removes every session.
-    pub async fn clear(&self) {
-        self.sessions.lock().await.clear();
     }
 }
 
@@ -432,17 +423,6 @@ mod tests {
         assert!(pool.get(DEFAULT_SESSION).await.is_some());
         assert_eq!(pool.tab_count().await, 0);
         assert_eq!(pool.cap(), 2);
-    }
-
-    #[tokio::test]
-    async fn a_clear_removes_every_session() {
-        let pool = pool();
-        pool.insert(DEFAULT_SESSION, Session::new(Box::new(StubDriver::plain())))
-            .await;
-        pool.insert("t1", Session::new(Box::new(StubDriver::plain())))
-            .await;
-        pool.clear().await;
-        assert!(pool.is_empty().await);
     }
 
     #[tokio::test]

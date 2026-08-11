@@ -115,6 +115,23 @@ pub async fn disconnect<R: Runtime>(
     Ok(())
 }
 
+/// Releases the session of one tab. The interface calls this when a tab
+/// closes or moves to another connection. A statement that still runs on
+/// the session completes, and the session then goes.
+#[tauri::command]
+pub async fn release_session(
+    connection_id: String,
+    tab_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<()> {
+    if let Ok(open) = state.connection(&connection_id).await {
+        if open.sessions.release(&tab_id).await {
+            log::info!("The session of tab '{tab_id}' on '{connection_id}' is released.");
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn list_active_connections(
     state: tauri::State<'_, AppState>,
@@ -130,26 +147,47 @@ pub async fn list_active_connections(
         .collect())
 }
 
-/// Returns one healthy session of a connection, under the given key.
+/// Returns one healthy session of a connection for one tab, and the key the
+/// session sits under.
 ///
-/// A key that the pool holds gives its session back after a health check. A
-/// key that the pool does not hold gives the error of a lost connection; the
-/// caller that may open new sessions asks the pool for that first.
+/// A tab that already holds a session gets it back after a health check. A
+/// tab without a session gets a new one, up to the cap of the pool. The
+/// sessions that other tabs left idle go on the way in.
 async fn session_for<R: Runtime>(
     app: &AppHandle<R>,
     state: &AppState,
     connection_id: &str,
-    key: &str,
-) -> Result<(OpenConnection, Arc<Session>)> {
+    tab_id: Option<&str>,
+) -> Result<(OpenConnection, Arc<Session>, String)> {
     let open = state.connection(connection_id).await?;
-    let session = match open.sessions.get(key).await {
-        Some(session) => session,
-        None => {
-            return Err(Error::NotConnected(connection_id.to_string()));
-        }
-    };
-    let session = ensure_session_healthy(app, state, connection_id, &open, key, session).await?;
-    Ok((open, session))
+    let key = open.session_key(tab_id);
+    open.sessions.reap_idle().await;
+
+    if let Some(session) = open.sessions.get(&key).await {
+        let session =
+            ensure_session_healthy(app, state, connection_id, &open, &key, session).await?;
+        return Ok((open, session, key));
+    }
+
+    // One session opens at a time, so the count against the cap stays exact
+    // and two requests of one tab open one session, not two.
+    let pool = open.sessions.clone();
+    let _opening = pool.begin_open().await;
+    if let Some(session) = pool.get(&key).await {
+        return Ok((open, session, key));
+    }
+    if key != DEFAULT_SESSION && pool.at_cap().await {
+        return Err(Error::Configuration(format!(
+            "This connection already uses {} sessions. Close a tab, or raise the session \
+             limit in the connection options.",
+            pool.cap()
+        )));
+    }
+
+    let full = with_password(state, open.descriptor.clone())?;
+    let driver = open_driver(&full).await?;
+    let session = pool.insert(&key, Session::new(driver)).await;
+    Ok((open, session, key))
 }
 
 /// Confirms that a session that stood idle still answers, and opens a new
@@ -225,7 +263,7 @@ async fn ensure_healthy<R: Runtime>(
     state: &AppState,
     connection_id: &str,
 ) -> Result<OpenConnection> {
-    let (open, _session) = session_for(app, state, connection_id, DEFAULT_SESSION).await?;
+    let (open, _session, _key) = session_for(app, state, connection_id, None).await?;
     Ok(open)
 }
 
@@ -385,6 +423,10 @@ pub struct ExecuteRequest {
     pub connection_id: String,
     pub request_id: String,
     pub query: String,
+    /// The tab that runs the statement. A request without a tab runs on the
+    /// default session.
+    #[serde(default)]
+    pub tab_id: Option<String>,
     #[serde(default)]
     pub query_params: Option<ParamValues>,
     #[serde(default)]
@@ -401,10 +443,11 @@ pub async fn execute_query<R: Runtime>(
         connection_id,
         request_id,
         query,
+        tab_id,
         query_params,
         options,
     } = request;
-    let (open, session) = session_for(&app, &state, &connection_id, DEFAULT_SESSION).await?;
+    let (open, session, key) = session_for(&app, &state, &connection_id, tab_id.as_deref()).await?;
     let options = options.unwrap_or_else(|| open.descriptor.exec_options());
     let (query, bound) = prepare_parameters(&query, open.dialect, query_params.as_ref())?;
     let token = state
@@ -423,16 +466,7 @@ pub async fn execute_query<R: Runtime>(
     };
 
     state.end_request(&request_id).await;
-    finish_run(
-        &app,
-        &state,
-        &connection_id,
-        &open,
-        DEFAULT_SESSION,
-        &session,
-        outcome,
-    )
-    .await
+    finish_run(&app, &state, &connection_id, &open, &key, &session, outcome).await
 }
 
 /// What one request for a plan carries.
@@ -443,6 +477,10 @@ pub struct PlanRequest {
     pub request_id: String,
     pub query: String,
     pub kind: PlanKind,
+    /// The tab that asks for the plan. A request without a tab runs on the
+    /// default session.
+    #[serde(default)]
+    pub tab_id: Option<String>,
     #[serde(default)]
     pub query_params: Option<ParamValues>,
     #[serde(default)]
@@ -461,10 +499,11 @@ pub async fn explain_query<R: Runtime>(
         request_id,
         query,
         kind,
+        tab_id,
         query_params,
         options,
     } = request;
-    let (open, session) = session_for(&app, &state, &connection_id, DEFAULT_SESSION).await?;
+    let (open, session, key) = session_for(&app, &state, &connection_id, tab_id.as_deref()).await?;
     let options = options.unwrap_or_else(|| open.descriptor.exec_options());
     // A plan needs the values of the parameters, because the plan of a
     // statement depends on the values it holds.
@@ -485,16 +524,7 @@ pub async fn explain_query<R: Runtime>(
     };
 
     state.end_request(&request_id).await;
-    finish_run(
-        &app,
-        &state,
-        &connection_id,
-        &open,
-        DEFAULT_SESSION,
-        &session,
-        outcome,
-    )
-    .await
+    finish_run(&app, &state, &connection_id, &open, &key, &session, outcome).await
 }
 
 /// Closes the accounts of one exchange. A limit that ended the exchange asks
@@ -1133,6 +1163,10 @@ pub struct ExportRequest {
     pub format: ExportFormat,
     /// The row limit of the export, which is higher than the one of the view.
     pub max_rows: usize,
+    /// The tab that runs the export. The export runs on the session of the
+    /// tab, so it sees the temporary tables the tab created.
+    #[serde(default)]
+    pub tab_id: Option<String>,
     /// The values of the named parameters of the statement.
     #[serde(default)]
     pub query_params: Option<ParamValues>,
@@ -1263,6 +1297,7 @@ pub async fn export_query<R: Runtime>(
         default_name,
         format,
         max_rows,
+        tab_id,
         query_params,
     } = request;
 
@@ -1274,7 +1309,7 @@ pub async fn export_query<R: Runtime>(
         return Ok(None);
     };
 
-    let (open, session) = session_for(&app, &state, &connection_id, DEFAULT_SESSION).await?;
+    let (open, session, key) = session_for(&app, &state, &connection_id, tab_id.as_deref()).await?;
     if !crate::sql::only_reads(&query, open.dialect) {
         return Err(Error::Unsupported(
             "An export to a file runs the statement again, so it accepts a statement that only reads."
@@ -1306,16 +1341,7 @@ pub async fn export_query<R: Runtime>(
         .await
     };
     state.end_request(&request_id).await;
-    finish_run(
-        &app,
-        &state,
-        &connection_id,
-        &open,
-        DEFAULT_SESSION,
-        &session,
-        outcome,
-    )
-    .await?;
+    finish_run(&app, &state, &connection_id, &open, &key, &session, outcome).await?;
 
     if !sink.saw_set {
         return Err(Error::Unsupported(
@@ -2097,5 +2123,203 @@ mod tests {
         // number and not as a formula.
         assert_eq!(csv_field(&json!(-5)), "-5");
         assert_eq!(csv_field(&json!("a=b")), "a=b");
+    }
+
+    /// Builds a state with one open SQLite connection, for the tests of the
+    /// sessions of the tabs.
+    async fn state_with_sqlite(
+        descriptor: SavedConnection,
+    ) -> (tauri::App<tauri::test::MockRuntime>, AppState) {
+        let app = tauri::test::mock_app();
+        let driver = open_driver(&descriptor).await.unwrap();
+        let state = AppState::new(Box::new(MemoryStore::default()));
+        let id = descriptor.id.clone();
+        state
+            .insert(&id, OpenConnection::new(descriptor, driver))
+            .await;
+        (app, state)
+    }
+
+    fn temp_sqlite() -> (tempfile::TempDir, SavedConnection) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tabs.db");
+        (dir, sqlite_connection(path.to_str().unwrap()))
+    }
+
+    #[tokio::test]
+    async fn each_tab_takes_a_session_of_its_own() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (app, state) = state_with_sqlite(descriptor).await;
+
+        let (open, first, key_one) = session_for(app.handle(), &state, "s1", Some("t1"))
+            .await
+            .unwrap();
+        let (_, second, key_two) = session_for(app.handle(), &state, "s1", Some("t2"))
+            .await
+            .unwrap();
+        assert_eq!(key_one, "t1");
+        assert_eq!(key_two, "t2");
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(open.sessions.tab_count().await, 2);
+
+        // The tab keeps its session from one run to the next.
+        let (_, again, _) = session_for(app.handle(), &state, "s1", Some("t1"))
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &again));
+    }
+
+    #[tokio::test]
+    async fn a_request_without_a_tab_takes_the_default_session() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (app, state) = state_with_sqlite(descriptor).await;
+
+        let (open, session, key) = session_for(app.handle(), &state, "s1", None).await.unwrap();
+        assert_eq!(key, DEFAULT_SESSION);
+        let default = open.default_session().await.unwrap();
+        assert!(Arc::ptr_eq(&session, &default));
+        assert_eq!(open.sessions.tab_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn the_cap_stops_a_new_tab_with_a_clear_message() {
+        let (_dir, mut descriptor) = temp_sqlite();
+        descriptor.options.max_sessions = 1;
+        let (app, state) = state_with_sqlite(descriptor).await;
+
+        session_for(app.handle(), &state, "s1", Some("t1"))
+            .await
+            .unwrap();
+        let error = session_for(app.handle(), &state, "s1", Some("t2"))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), crate::error::ErrorKind::Configuration);
+        assert!(error.to_string().contains("session limit"));
+
+        // The tab that holds a session keeps it, and the default session
+        // stays outside the cap.
+        assert!(session_for(app.handle(), &state, "s1", Some("t1"))
+            .await
+            .is_ok());
+        assert!(session_for(app.handle(), &state, "s1", None).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_database_in_memory_gives_every_tab_the_default_session() {
+        let descriptor = sqlite_connection(":memory:");
+        let (app, state) = state_with_sqlite(descriptor).await;
+
+        let (open, session, key) = session_for(app.handle(), &state, "s1", Some("t1"))
+            .await
+            .unwrap();
+        assert!(open.single_session);
+        assert_eq!(key, DEFAULT_SESSION);
+        let default = open.default_session().await.unwrap();
+        assert!(Arc::ptr_eq(&session, &default));
+    }
+
+    #[tokio::test]
+    async fn a_released_tab_session_leaves_the_pool() {
+        use tauri::Manager;
+        let (_dir, descriptor) = temp_sqlite();
+        let (app, state) = state_with_sqlite(descriptor).await;
+        session_for(app.handle(), &state, "s1", Some("t1"))
+            .await
+            .unwrap();
+
+        app.manage(state);
+        let managed: tauri::State<'_, AppState> = app.state();
+        release_session("s1".to_string(), "t1".to_string(), managed.clone())
+            .await
+            .unwrap();
+        let open = managed.connection("s1").await.unwrap();
+        assert_eq!(open.sessions.tab_count().await, 0);
+
+        // A tab or a connection that is unknown changes nothing.
+        release_session("s1".to_string(), "t9".to_string(), managed.clone())
+            .await
+            .unwrap();
+        release_session("nope".to_string(), "t1".to_string(), managed)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_stop_replaces_only_the_session_that_ran_the_statement() {
+        struct FrailDriver;
+
+        #[async_trait::async_trait]
+        impl DatabaseDriver for FrailDriver {
+            fn capabilities(&self) -> crate::db::DriverCapabilities {
+                crate::db::DriverCapabilities::default()
+            }
+            fn dialect(&self) -> Dialect {
+                Dialect::Sqlite
+            }
+            async fn ping(&mut self) -> Result<()> {
+                Ok(())
+            }
+            async fn list_databases(&mut self) -> Result<Vec<Database>> {
+                Ok(Vec::new())
+            }
+            async fn list_schemas(&mut self, _database: &str) -> Result<Vec<Schema>> {
+                Ok(Vec::new())
+            }
+            async fn list_tables(
+                &mut self,
+                _database: &str,
+                _schema: Option<&str>,
+            ) -> Result<Vec<Table>> {
+                Ok(Vec::new())
+            }
+            async fn list_columns(
+                &mut self,
+                _database: &str,
+                _schema: Option<&str>,
+                _table: &str,
+            ) -> Result<Vec<AppColumn>> {
+                Ok(Vec::new())
+            }
+        }
+
+        let (_dir, descriptor) = temp_sqlite();
+        let (app, state) = state_with_sqlite(descriptor).await;
+        let open = state.connection("s1").await.unwrap();
+
+        // A driver that does not keep its connection after a stop sits in
+        // the slot of the tab.
+        let frail = open
+            .sessions
+            .insert("t1", crate::session::Session::new(Box::new(FrailDriver)))
+            .await;
+        let default_before = open.default_session().await.unwrap();
+
+        let outcome: Bounded<()> = Bounded::Stopped(Error::Cancelled);
+        let result = finish_run(app.handle(), &state, "s1", &open, "t1", &frail, outcome).await;
+        assert!(result.is_err());
+
+        // The slot of the tab holds a new session, and the default session
+        // stays as it was.
+        let replaced = open.sessions.get("t1").await.unwrap();
+        assert!(!Arc::ptr_eq(&frail, &replaced));
+        let default_after = open.default_session().await.unwrap();
+        assert!(Arc::ptr_eq(&default_before, &default_after));
+    }
+
+    #[tokio::test]
+    async fn a_stop_keeps_the_session_of_a_driver_that_survives_it() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (app, state) = state_with_sqlite(descriptor).await;
+        let (open, session, key) = session_for(app.handle(), &state, "s1", Some("t1"))
+            .await
+            .unwrap();
+
+        // SQLite aborts a statement cleanly, so the session stays.
+        let outcome: Bounded<()> = Bounded::Stopped(Error::Cancelled);
+        let result = finish_run(app.handle(), &state, "s1", &open, &key, &session, outcome).await;
+        assert!(result.is_err());
+        let kept = open.sessions.get("t1").await.unwrap();
+        assert!(Arc::ptr_eq(&session, &kept));
     }
 }

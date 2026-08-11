@@ -43,6 +43,7 @@ fn main() {
             commands::explain_query,
             commands::query_parameters,
             commands::cancel_query,
+            commands::release_session,
             commands::list_databases,
             commands::list_schemas,
             commands::list_tables,
