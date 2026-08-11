@@ -310,8 +310,12 @@ export const useExplorerStore = defineStore('explorer', () => {
     snapshots.value = kept
   }
 
-  /** The names the editor offers as completions. */
-  const schemaIndex = computed<SchemaIndex>(() => {
+  /**
+   * The part of the index that the snapshots hold, with the names it saw.
+   * It lives apart from `schemaIndex` so that a change of the tree leaves
+   * this part cached, because the snapshots hold most of the names.
+   */
+  const snapshotIndex = computed(() => {
     const index = emptySchemaIndex()
     const seen = {
       databases: new Set<string>(),
@@ -319,7 +323,6 @@ export const useExplorerStore = defineStore('explorer', () => {
       tables: new Set<string>(),
     }
 
-    // The snapshots come first, because they hold the whole database.
     for (const [key, snapshot] of Object.entries(snapshots.value)) {
       const connectionId = key.slice(0, key.indexOf('/'))
       if (!seen.databases.has(snapshot.database)) {
@@ -348,9 +351,31 @@ export const useExplorerStore = defineStore('explorer', () => {
         }
       }
     }
+    return { index, seen }
+  })
+
+  /** The names the editor offers as completions. */
+  const schemaIndex = computed<SchemaIndex>(() => {
+    // The snapshots come first, because they hold the whole database. The
+    // copies hold references to the entries of the cached part, so a change
+    // of the tree pays for the copies and the walk, not for a rebuild of
+    // the snapshot part.
+    const base = snapshotIndex.value
+    const index: SchemaIndex = {
+      databases: [...base.index.databases],
+      schemas: [...base.index.schemas],
+      tables: [...base.index.tables],
+      columns: [...base.index.columns],
+    }
+    const seen = {
+      databases: new Set(base.seen.databases),
+      schemas: new Set(base.seen.schemas),
+      tables: new Set(base.seen.tables),
+    }
 
     // The tree adds what the user has opened and the snapshots do not hold.
-    const fromSnapshot = new Set(seen.tables)
+    // The walk reads the set of the cached part and mutates the copies only.
+    const fromSnapshot = base.seen.tables
     walk(roots.value, (node) => {
       const qualifier = [node.database, node.schema].filter(Boolean).join('.')
       const identity = `${node.connectionId}/${qualifier}/${node.table ?? node.label}`

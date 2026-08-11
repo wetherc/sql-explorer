@@ -1,14 +1,13 @@
 # Future work
 
-This document holds the designs for three known weaknesses that the current
+This document holds the designs for two known weaknesses that the current
 code does not correct. Each section gives the problem, the design of the
 correction, the order of the work, and the risks. The claims about the code
 were examined against the source on 2026-08-10, and the errors of the first
 version are corrected here.
 
-The work runs in this order across the sections: section 3, then section 1,
-then section 2. Section 3 is a measurement and depends on nothing. Section 1
-adds new commands, and those commands follow the request convention that
+The work runs in the order of the sections. Section 1 adds new commands,
+and those commands follow the request convention that
 `frontend/src/lib/api.ts` states above its `call` helper. Section 2 comes
 last.
 
@@ -229,38 +228,3 @@ of the server.
 
 Small. The parse must not reject a token it cannot read; an unreadable
 token goes to the server unchanged, and the server stays the judge.
-
-## 3. Measure the schema index before touching it
-
-### The finding, corrected
-
-A review claimed that `schemaIndex` in `frontend/src/stores/explorer.ts`
-rebuilds on every tree click because `node.loading = true` invalidates it.
-Verification shows that Vue tracks dependencies for each property: the
-index never reads `loading`, so that write does not invalidate it. The
-index rebuilds only when `children` or the snapshots change. A first
-expansion of a node assigns `children`, so each first expansion walks the
-whole tree again and reads about seven properties on each node. Those
-changes carry new names, so the rebuild is necessary work, but the cost of
-one walk at twenty thousand columns is unknown.
-
-### What remains worth doing
-
-Only a measurement, and work after it only if the measurement says so:
-
-- Measure the rebuild in a test in `explorer.spec.ts`: build a snapshot of
-  about two hundred relations with one hundred columns each, cause a
-  rebuild, and record the time with `performance.now()`. Record the number
-  in the test output and assert nothing about it. Instrumentation does not
-  ship in the store; a permanent probe goes behind `import.meta.env.DEV`
-  if one is ever wanted.
-- If the rebuild stays under roughly ten milliseconds, stop here and
-  delete this section.
-- If it does not: split the computed in two, one over the snapshots and one
-  over the tree, and merge the two in a third. A change in the tree then
-  leaves the snapshot part cached, which holds most of the names.
-
-### The risks
-
-None until the measurement runs. The split doubles the bookkeeping for
-duplicate names, so it should not land without the numbers.
