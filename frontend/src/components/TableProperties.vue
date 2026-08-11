@@ -6,6 +6,21 @@
       <v-card-text>
         <v-progress-linear v-if="loading" indeterminate class="mb-3" />
 
+        <!-- The read of the properties can fail on its own, so the dialog
+             holds the failure and offers the read again. Closing the dialog
+             and pushing a notice would take the user away from what they
+             asked for. -->
+        <v-alert
+          v-else-if="failure"
+          type="error"
+          variant="tonal"
+          density="compact"
+          data-test="properties-error"
+        >
+          <div class="font-weight-medium">{{ failure.message }}</div>
+          <pre v-if="failure.detail" class="app-code-block mt-2">{{ failure.detail }}</pre>
+        </v-alert>
+
         <template v-else-if="details">
           <div class="text-subtitle-2 mb-1">General</div>
           <v-table density="compact" class="mb-4">
@@ -81,6 +96,14 @@
 
       <v-card-actions>
         <v-spacer />
+        <v-btn
+          v-if="failure && node"
+          color="primary"
+          variant="flat"
+          text="Try again"
+          data-test="properties-retry"
+          @click="read(node)"
+        />
         <v-btn text="Close" data-test="properties-close" @click="emit('close')" />
       </v-card-actions>
     </v-card>
@@ -91,16 +114,17 @@
 import AppDialog from './AppDialog.vue'
 import { computed, ref, watch } from 'vue'
 import { api } from '@/lib/api'
+import { toErrorPayload } from '@/lib/errors'
 import { constraintHint, type ExplorerNode } from '@/stores/explorer'
-import { useUiStore } from '@/stores/ui'
-import type { IndexRef, TableDetails } from '@/types/api'
+import type { ErrorPayload, IndexRef, TableDetails } from '@/types/api'
 
 const props = defineProps<{ open: boolean; node: ExplorerNode | null }>()
 const emit = defineEmits<{ (event: 'close'): void }>()
 
-const ui = useUiStore()
 const details = ref<TableDetails | null>(null)
 const loading = ref(false)
+/** What the read of the properties reported, while it failed. */
+const failure = ref<ErrorPayload | null>(null)
 
 const title = computed(() => {
   const node = props.node
@@ -122,6 +146,7 @@ function indexRule(index: IndexRef): string {
 async function read(node: ExplorerNode): Promise<void> {
   loading.value = true
   details.value = null
+  failure.value = null
   try {
     details.value = await api.tableDetails(
       node.connectionId,
@@ -130,8 +155,7 @@ async function read(node: ExplorerNode): Promise<void> {
       node.table ?? node.label,
     )
   } catch (error) {
-    ui.reportError(error)
-    emit('close')
+    failure.value = toErrorPayload(error)
   } finally {
     loading.value = false
   }

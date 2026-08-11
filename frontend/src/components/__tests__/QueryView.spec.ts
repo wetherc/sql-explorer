@@ -199,6 +199,26 @@ describe('QueryView', () => {
     )
   })
 
+  it('brings the focus to the dialog when a second run asks for the same values', async () => {
+    apiStub.queryParameters.mockResolvedValue(['id'])
+    apiStub.executeQuery.mockResolvedValue(response)
+    const wrapper = await mountView('SELECT * FROM t WHERE a = :id')
+
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+    const field = document.querySelector('[data-test="parameter-value-id"] input') as HTMLElement
+    expect(field).not.toBeNull()
+    ;(document.activeElement as HTMLElement)?.blur()
+
+    // A second run arrives while the dialog still waits for the values.
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+
+    expect(document.activeElement).toBe(field)
+    // The dialog says what it needs, so no notice repeats it.
+    expect(useUiStore().notices).toHaveLength(0)
+  })
+
   it('runs a second time without the dialog', async () => {
     apiStub.queryParameters.mockResolvedValue(['id'])
     apiStub.executeQuery.mockResolvedValue(response)

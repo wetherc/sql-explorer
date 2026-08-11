@@ -108,13 +108,50 @@ describe('TableProperties', () => {
     void wrapper
   })
 
-  it('reports a failure and closes itself', async () => {
-    apiStub.tableDetails.mockRejectedValue({ kind: 'database', message: 'no', detail: null })
+  it('holds a failure of the read and stays open', async () => {
+    apiStub.tableDetails.mockRejectedValue({
+      kind: 'database',
+      message: 'The relation is gone.',
+      detail: 'relation "orders" does not exist',
+    })
     const wrapper = mountWithPlugins(TableProperties, { props: { open: true, node: node() } })
     await settle()
 
-    expect(useUiStore().notices[0]?.level).toBe('error')
-    expect(wrapper.emitted('close')).toHaveLength(1)
+    const alert = document.querySelector('[data-test="properties-error"]')
+    expect(alert?.textContent).toContain('The relation is gone.')
+    expect(alert?.textContent).toContain('relation "orders" does not exist')
+    // The dialog is what the user asked for, so it stays.
+    expect(wrapper.emitted('close')).toBeUndefined()
+    expect(useUiStore().notices).toHaveLength(0)
+  })
+
+  it('reads again on request, and shows what it found', async () => {
+    apiStub.tableDetails.mockRejectedValueOnce({
+      kind: 'database',
+      message: 'The relation is gone.',
+      detail: null,
+    })
+    const wrapper = mountWithPlugins(TableProperties, { props: { open: true, node: node() } })
+    await settle()
+    expect(document.querySelector('[data-test="properties-error"]')).not.toBeNull()
+
+    apiStub.tableDetails.mockResolvedValue(details)
+    const retry = document.querySelector('[data-test="properties-retry"]') as HTMLElement
+    retry.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+
+    expect(document.querySelector('[data-test="properties-error"]')).toBeNull()
+    expect(document.querySelectorAll('[data-test="property-column"]').length).toBeGreaterThan(0)
+    void wrapper
+  })
+
+  it('offers no way to read again while nothing failed', async () => {
+    apiStub.tableDetails.mockResolvedValue(details)
+    const wrapper = mountWithPlugins(TableProperties, { props: { open: true, node: node() } })
+    await settle()
+
+    expect(document.querySelector('[data-test="properties-retry"]')).toBeNull()
+    void wrapper
   })
 
   it('closes itself when the overlay reports it', async () => {

@@ -282,7 +282,7 @@
     </AppDialog>
 
     <AppDialog v-model="askingParams" max-width="520">
-      <v-card>
+      <v-card ref="paramCard">
         <v-card-title class="text-subtitle-1">Give the values of the parameters</v-card-title>
         <v-card-text class="d-flex flex-column ga-3">
           <div
@@ -395,6 +395,8 @@ const settings = useSettingsStore()
 const ui = useUiStore()
 
 const editorRef = ref<InstanceType<typeof SqlEditor> | null>(null)
+/** The card of the parameter dialog, which a second request focuses. */
+const paramCard = ref<{ $el: HTMLElement } | null>(null)
 /**
  * The share the editor takes of the split. It lives in the layout store, so
  * every tab shows the same split and a restart brings it back.
@@ -470,6 +472,21 @@ const activePane = computed(
  * Names a result. A result the user keeps also carries the time of its run,
  * so that two results of the same statement can be told apart.
  */
+/**
+ * Brings the focus to the dialog that asks for the values of the parameters.
+ * A second request for a run arrives while that dialog stands open, and the
+ * dialog is what the user has to answer first.
+ */
+function focusParamDialog(): void {
+  const card = paramCard.value?.$el as HTMLElement | undefined
+  // The value of the first parameter is what the dialog waits for, so the
+  // focus goes there and not to the kind that stands beside it.
+  const field =
+    card?.querySelector<HTMLElement>('[data-test^="parameter-value-"] input') ??
+    card?.querySelector<HTMLElement>('input, button')
+  field?.focus()
+}
+
 function paneLabel(pane: ResultPane): string {
   const name = pane.label ?? `Result ${pane.number}`
   const head = `${name} (${formatRowCount(pane.result.rows.length)})`
@@ -511,7 +528,10 @@ async function withParams(
     // One run at a time waits for its values. A second request would take
     // the place of the first one without a word.
     if (askingParams.value) {
-      ui.warn('The dialog for the parameter values is already open.')
+      // The dialog the user already has is the answer to this request, so the
+      // focus goes to it. A notice would say the same thing and leave the user
+      // to find the dialog on their own.
+      focusParamDialog()
       return
     }
     paramRows.value = rows.map((row) => ({ ...row }))
