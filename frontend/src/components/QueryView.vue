@@ -287,11 +287,15 @@
                  of such a result survive a switch to another result and
                  back. An older result builds its grid again. -->
             <template v-for="pane in state.panes" :key="pane.id">
+              <!-- A kept result belongs to an earlier run, so the cover of a
+                   running statement lies over it alone. A result of the run
+                   itself shows its rows while they arrive. -->
               <ResultsGrid
                 v-if="livePaneIds.has(pane.id)"
                 v-show="state.activePaneId === pane.id"
                 :result="pane.result"
-                :busy="state.running"
+                :rows="pane.rows"
+                :busy="state.running && pane.pinned"
                 @export="onExport"
                 @export-all="onExportAll"
                 @copied="onCopied"
@@ -652,7 +656,7 @@ const collapsedLabel = computed(() => (activePane.value ? paneLabel(activePane.v
 
 function paneLabel(pane: ResultPane): string {
   const name = pane.label ?? `Result ${pane.number}`
-  const head = `${name} (${formatRowCount(pane.result.rowCount)})`
+  const head = `${name} (${formatRowCount(pane.rows)})`
   return pane.pinned ? `${head} at ${formatClockTime(pane.ranAt)}` : head
 }
 

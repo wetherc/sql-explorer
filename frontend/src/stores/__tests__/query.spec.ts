@@ -129,6 +129,41 @@ describe('query store', () => {
     expect(state.requestId).toBeNull()
   })
 
+  it('shows a set while it streams and grows the count of its rows', async () => {
+    const counts: Array<{ panes: number; rows: number | undefined }> = []
+    apiStub.executeQuery.mockImplementation(async (_request, handlers) => {
+      const table = new ResultTable([{ name: 'n', typeName: 'int' }])
+      const state = useQueryStore().stateFor('t1')
+      const note = () => counts.push({ panes: state.panes.length, rows: state.panes[0]?.rows })
+      handlers.onBegin?.(table)
+      note()
+      table.addSegment([], 2)
+      handlers.onRows?.(table)
+      note()
+      table.addSegment([], 1)
+      handlers.onRows?.(table)
+      note()
+      handlers.onSet(table)
+      handlers.onEnd({ messages: [], rowsAffected: null, elapsedMs: 1, stats: null })
+    })
+    const connections = useConnectionsStore()
+    await connections.load()
+
+    const queries = useQueryStore()
+    expect(await queries.execute('t1', 'c1', 'SELECT 1')).toBe(true)
+
+    // The pane opened with the set and the count followed the rows. The end
+    // of the set opened no second pane.
+    expect(counts).toEqual([
+      { panes: 1, rows: 0 },
+      { panes: 1, rows: 2 },
+      { panes: 1, rows: 3 },
+    ])
+    const state = queries.stateFor('t1')
+    expect(state.panes).toHaveLength(1)
+    expect(state.panes[0]?.rows).toBe(3)
+  })
+
   it('uses the default time limit for a connection it does not know', async () => {
     apiStub.executeQuery.mockImplementation(streamed(response()))
     const queries = useQueryStore()

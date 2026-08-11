@@ -227,7 +227,20 @@ export type ExportFormat = 'csv' | 'json' | 'markdown' | 'insert' | 'xlsx'
  */
 export type ExportAllFormat = 'csv' | 'json' | 'xlsx'
 
-const props = withDefaults(defineProps<{ result: ResultTable; busy?: boolean }>(), { busy: false })
+const props = withDefaults(
+  defineProps<{
+    result: ResultTable
+    /** The rows the table holds. The table stands outside the reactivity of
+     *  Vue, so this count tells the grid that rows arrived while the set
+     *  streams. A grid without it reads the count of the table once. */
+    rows?: number
+    busy?: boolean
+  }>(),
+  { busy: false, rows: undefined },
+)
+
+/** The number of rows of the result, which grows while the set streams. */
+const rowTotal = computed(() => props.rows ?? props.result.rowCount)
 const emit = defineEmits<{
   (event: 'export', format: ExportFormat, rows: ResultSet): void
   (event: 'export-all', format: ExportAllFormat): void
@@ -319,7 +332,7 @@ const anchor = ref<number | null>(null)
  * so a result of many rows costs one number for each row and no object.
  */
 const sourceOrder = computed(() => {
-  const order = new Array<number>(props.result.rowCount)
+  const order = new Array<number>(rowTotal.value)
   for (let index = 0; index < order.length; index += 1) {
     order[index] = index
   }
@@ -336,8 +349,10 @@ let rowTexts: string[] | null = null
 let rowTextsSource: ResultTable | null = null
 
 function rowTextsFor(table: ResultTable): string[] {
-  if (rowTexts === null || rowTextsSource !== table) {
-    const texts = new Array<string>(table.rowCount)
+  // Rows that arrived while the set streams are not in the copy, so the
+  // copy is built again when the count of the rows moved past it.
+  if (rowTexts === null || rowTextsSource !== table || rowTexts.length !== rowTotal.value) {
+    const texts = new Array<string>(rowTotal.value)
     for (let index = 0; index < texts.length; index += 1) {
       texts[index] = table
         .row(index)
@@ -422,7 +437,7 @@ const bottomPad = computed(() =>
 
 const countLabel = computed(() => {
   const shown = sortedOrder.value.length
-  const total = props.result.rowCount
+  const total = rowTotal.value
   const head =
     shown === total
       ? `${total.toLocaleString()} rows`

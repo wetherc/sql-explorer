@@ -243,6 +243,11 @@ export interface RunEnd {
 
 /** What the reader of a run tells its caller. */
 export interface ResultStreamHandlers {
+  /** A result set has opened. The table holds no row yet and fills while
+   *  the set streams, so the interface can show the rows as they arrive. */
+  onBegin?: (table: ResultTable) => void
+  /** A chunk of rows joined the table of an open set. */
+  onRows?: (table: ResultTable) => void
   /** A result set has ended, with every row it holds. */
   onSet: (table: ResultTable) => void
   /** The run has ended. */
@@ -299,7 +304,9 @@ export class ResultStream {
       columns.push({ name: name.text, typeName: typeName.text })
       cursor = typeName.at
     }
-    this.open.set(set, new ResultTable(columns))
+    const table = new ResultTable(columns)
+    this.open.set(set, table)
+    this.handlers.onBegin?.(table)
     return cursor
   }
 
@@ -316,7 +323,11 @@ export class ResultStream {
       columns.push(read.column)
       cursor = read.at
     }
-    this.open.get(set)?.addSegment(columns, rows)
+    const table = this.open.get(set)
+    if (table) {
+      table.addSegment(columns, rows)
+      this.handlers.onRows?.(table)
+    }
     return cursor
   }
 

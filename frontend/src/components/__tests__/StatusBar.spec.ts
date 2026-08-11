@@ -106,6 +106,7 @@ describe('StatusBar', () => {
       {
         id: 'p1',
         result: ResultTable.fromRows([], [[1], [2]]),
+        rows: 2,
         number: 1,
         ranAt: 0,
         pinned: false,

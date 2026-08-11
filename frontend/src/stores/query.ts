@@ -23,6 +23,10 @@ const BYTES_IN_GIGABYTE = 1024 ** 3
 export interface ResultPane {
   id: string
   result: ResultTable
+  /** The rows the table holds. The table itself stands outside the deep
+   *  reactivity of Vue, so this count tells the grid that rows arrived
+   *  while the set streams. */
+  rows: number
   /** The place of the set inside the execution that made it, from one. */
   number: number
   /** The moment of the run, which the title of a kept result holds. */
@@ -180,6 +184,26 @@ export const useQueryStore = defineStore('query', () => {
 
     try {
       const ranAt = Date.now()
+      const openPane = (table: ResultTable): void => {
+        fresh.push(table)
+        state.panes = [
+          ...state.panes,
+          {
+            id: createId(),
+            // The table holds the bytes of the rows and changes only while
+            // the set streams, so the raw form keeps it at its own size and
+            // Vue builds no proxy around it. The count of the rows beside it
+            // carries the growth to the grid.
+            result: markRaw(table),
+            rows: table.rowCount,
+            number: fresh.length,
+            ranAt,
+            pinned: false,
+            label,
+          },
+        ]
+        state.activePaneId = lastPane(state.panes)?.id ?? null
+      }
       await call(
         requestId,
         {
@@ -187,25 +211,24 @@ export const useQueryStore = defineStore('query', () => {
           timeoutSecs: connections.byId(connectionId)?.options.queryTimeoutSecs ?? 300,
         },
         {
-          // A set stands in the interface as soon as it ends, so a script of
-          // several sets shows the first one while the next one reads.
+          // A set stands in the interface as soon as it opens, and its rows
+          // appear while the set streams.
+          onBegin: (table) => openPane(table),
+          onRows: (table) => {
+            const pane = state.panes.find((pane) => pane.result === table)
+            if (pane) {
+              pane.rows = table.rowCount
+            }
+          },
           onSet: (table) => {
-            fresh.push(table)
-            state.panes = [
-              ...state.panes,
-              {
-                id: createId(),
-                // The table holds the bytes of the rows and never changes
-                // after the run, so the raw form keeps it at its own size and
-                // Vue builds no proxy around it.
-                result: markRaw(table),
-                number: fresh.length,
-                ranAt,
-                pinned: false,
-                label,
-              },
-            ]
-            state.activePaneId = lastPane(state.panes)?.id ?? null
+            // A plan and the stub of a test give the set whole, with no
+            // frame that opens it, so the pane opens here instead.
+            const pane = state.panes.find((pane) => pane.result === table)
+            if (pane) {
+              pane.rows = table.rowCount
+            } else {
+              openPane(table)
+            }
           },
           onEnd: (end) => {
             state.messages = end.messages

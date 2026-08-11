@@ -54,6 +54,19 @@ describe('ResultsGrid', () => {
     expect(wrapper.find('[data-test="grid-count"]').text()).toBe('3 rows')
   })
 
+  it('draws the rows that arrived while the set streams', async () => {
+    const table = new ResultTable(columns)
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: table, rows: 0 } })
+    expect(wrapper.findAll('[data-test="grid-row"]')).toHaveLength(0)
+
+    // The table grows outside the reactivity of Vue, and the count of the
+    // rows carries the growth to the grid.
+    table.addSegment([], 2)
+    await wrapper.setProps({ rows: 2 })
+    expect(wrapper.findAll('[data-test="grid-row"]')).toHaveLength(2)
+    expect(wrapper.find('[data-test="grid-count"]').text()).toBe('2 rows')
+  })
+
   it('reports that the row limit stopped the read', () => {
     const wrapper = mountWithPlugins(ResultsGrid, {
       props: { result: result({ truncated: true }) },
@@ -109,6 +122,21 @@ describe('ResultsGrid', () => {
     await wrapper.vm.$nextTick()
     expect(wrapper.findAll('[data-test="grid-row"]')).toHaveLength(1)
     expect(wrapper.find('[data-test="grid-count"]').text()).toBe('1 of 3 rows')
+  })
+
+  it('matches a row that arrived after the filter was set', async () => {
+    const table = ResultTable.fromRows(columns, records)
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: table, rows: 3 } })
+    await wrapper.find('[data-test="grid-filter"] input').setValue('null')
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findAll('[data-test="grid-row"]')).toHaveLength(1)
+
+    // A row of nulls arrives while the filter stands, and the filter reads
+    // the rows again when the count moves.
+    table.addSegment([], 1)
+    await wrapper.setProps({ rows: 4 })
+    expect(wrapper.findAll('[data-test="grid-row"]')).toHaveLength(2)
   })
 
   it('opens the whole value of a cell', async () => {

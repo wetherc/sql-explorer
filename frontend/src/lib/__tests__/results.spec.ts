@@ -399,6 +399,29 @@ describe('the reader of the chunks', () => {
     expect(built).toBe(3)
   })
 
+  it('reports the opening of a set and each chunk of rows', () => {
+    const counts: number[] = []
+    let began: ResultTable | null = null
+    let ended: ResultTable | null = null
+    const stream = new ResultStream({
+      onBegin: (table) => {
+        began = table
+        counts.push(table.rowCount)
+      },
+      onRows: (table) => counts.push(table.rowCount),
+      onSet: (table) => {
+        ended = table
+      },
+      onEnd: () => {},
+    })
+    stream.feed(intSetMessage([1, 2, 3]))
+
+    // The set opens empty, the chunk brings its rows, and the set that ends
+    // is the one that opened.
+    expect(counts).toEqual([0, 3])
+    expect(ended).toBe(began)
+  })
+
   it('refuses a code that names no text of the dictionary', () => {
     const writer = new Writer()
     writer.u8(FRAME_BEGIN_SET).u32(0).u32(1).text('state').text('text')
