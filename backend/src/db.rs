@@ -2,6 +2,7 @@
 //! returns.
 
 pub mod drivers;
+pub mod sink;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;

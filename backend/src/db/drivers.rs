@@ -7,6 +7,7 @@ pub mod mysql;
 pub mod postgres;
 pub mod sqlite;
 
+use crate::db::sink::{BufferSink, RowSink, RunSummary};
 use crate::db::{
     AppColumn, Constraint, ConstraintKind, CreateQuery, Database, DriverCapabilities, ExecOptions,
     IndexInfo, Message, Partition, PlanKind, QueryParams, QueryResponse, Routine, RoutineKind,
@@ -50,13 +51,39 @@ pub trait DatabaseDriver: Send + Sync {
         false
     }
 
-    /// Runs a script and returns every result set it produced.
+    /// Runs a script and sends each row to the sink as the read produces it.
+    /// A driver that streams holds one row at a time, and the sink decides
+    /// what the rows become.
+    ///
+    /// The default refuses. A driver keeps its own `execute_query` until it
+    /// implements this method.
+    async fn execute_stream(
+        &mut self,
+        _query: &str,
+        _params: Option<&QueryParams>,
+        _options: &ExecOptions,
+        _sink: &mut dyn RowSink,
+    ) -> Result<RunSummary> {
+        Err(Error::Unsupported(
+            "This driver does not stream rows.".to_string(),
+        ))
+    }
+
+    /// Runs a script and returns every result set it produced. The default
+    /// runs `execute_stream` into a buffer that keeps the rows up to the row
+    /// limit. A driver overrides this method until it has `execute_stream`.
     async fn execute_query(
         &mut self,
         query: &str,
         params: Option<&QueryParams>,
         options: &ExecOptions,
-    ) -> Result<QueryResponse>;
+    ) -> Result<QueryResponse> {
+        let mut sink = BufferSink::new(options.max_rows);
+        let summary = self
+            .execute_stream(query, params, options, &mut sink)
+            .await?;
+        Ok(sink.into_response(summary))
+    }
 
     async fn list_databases(&mut self) -> Result<Vec<Database>>;
 
@@ -808,5 +835,131 @@ mod tests {
         assert!(BareDriver
             .create_query(None, None, "t", TableKind::Table)
             .is_none());
+    }
+
+    /// A driver that has `execute_stream` alone, to prove that the default
+    /// `execute_query` buffers the streamed rows.
+    struct StreamDriver;
+
+    #[async_trait]
+    impl DatabaseDriver for StreamDriver {
+        fn capabilities(&self) -> DriverCapabilities {
+            DriverCapabilities::default()
+        }
+        fn dialect(&self) -> Dialect {
+            Dialect::Sqlite
+        }
+        async fn ping(&mut self) -> Result<()> {
+            Ok(())
+        }
+        async fn execute_stream(
+            &mut self,
+            _query: &str,
+            _params: Option<&QueryParams>,
+            _options: &ExecOptions,
+            sink: &mut dyn RowSink,
+        ) -> Result<RunSummary> {
+            use crate::db::sink::SinkControl;
+            use crate::db::ColumnInfo;
+            sink.begin_set(vec![ColumnInfo::new("id", "int")])?;
+            for value in 0..3 {
+                if sink.row(vec![serde_json::json!(value)])? == SinkControl::Stop {
+                    break;
+                }
+            }
+            sink.end_set(false)?;
+            sink.message(Message::info("done"));
+            Ok(RunSummary {
+                rows_affected: None,
+                elapsed_ms: 7,
+                stats: None,
+            })
+        }
+        async fn list_databases(&mut self) -> Result<Vec<Database>> {
+            Ok(Vec::new())
+        }
+        async fn list_schemas(&mut self, _database: &str) -> Result<Vec<Schema>> {
+            Ok(Vec::new())
+        }
+        async fn list_tables(
+            &mut self,
+            _database: &str,
+            _schema: Option<&str>,
+        ) -> Result<Vec<Table>> {
+            Ok(Vec::new())
+        }
+        async fn list_columns(
+            &mut self,
+            _database: &str,
+            _schema: Option<&str>,
+            _table: &str,
+        ) -> Result<Vec<AppColumn>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn the_default_execute_query_buffers_the_streamed_rows() {
+        let mut driver = StreamDriver;
+        let options = ExecOptions {
+            max_rows: 2,
+            ..ExecOptions::default()
+        };
+        let response = driver
+            .execute_query("SELECT 1", None, &options)
+            .await
+            .unwrap();
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].rows.len(), 2);
+        assert!(response.results[0].truncated);
+        assert_eq!(response.messages[0].text, "done");
+        assert_eq!(response.elapsed_ms, 7);
+    }
+
+    /// A driver that overrides nothing of the execution pair.
+    struct NoStreamDriver;
+
+    #[async_trait]
+    impl DatabaseDriver for NoStreamDriver {
+        fn capabilities(&self) -> DriverCapabilities {
+            DriverCapabilities::default()
+        }
+        fn dialect(&self) -> Dialect {
+            Dialect::Sqlite
+        }
+        async fn ping(&mut self) -> Result<()> {
+            Ok(())
+        }
+        async fn list_databases(&mut self) -> Result<Vec<Database>> {
+            Ok(Vec::new())
+        }
+        async fn list_schemas(&mut self, _database: &str) -> Result<Vec<Schema>> {
+            Ok(Vec::new())
+        }
+        async fn list_tables(
+            &mut self,
+            _database: &str,
+            _schema: Option<&str>,
+        ) -> Result<Vec<Table>> {
+            Ok(Vec::new())
+        }
+        async fn list_columns(
+            &mut self,
+            _database: &str,
+            _schema: Option<&str>,
+            _table: &str,
+        ) -> Result<Vec<AppColumn>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_driver_without_a_stream_refuses_the_default_execution() {
+        let mut driver = NoStreamDriver;
+        let error = driver
+            .execute_query("SELECT 1", None, &ExecOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), crate::error::ErrorKind::Unsupported);
     }
 }

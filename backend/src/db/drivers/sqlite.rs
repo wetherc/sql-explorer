@@ -8,10 +8,11 @@ use crate::db::drivers::{
     add_index_column, bytes_to_json, f64_to_json, number_out_of_range, number_value, prefixed_plan,
     rows_affected_message, rows_returned_message, CancelHandle, DatabaseDriver, NumberValue,
 };
+use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, ConstraintKind, CreateQuery, Database, DriverCapabilities,
-    ExecOptions, IndexInfo, Message, PlanKind, QueryParams, QueryResponse, ResultSet, Schema,
-    Table, TableFact, TableKind,
+    ExecOptions, IndexInfo, Message, PlanKind, QueryParams, QueryResponse, Schema, Table,
+    TableFact, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
@@ -20,6 +21,7 @@ use async_trait::async_trait;
 use rusqlite::types::{Value as SqliteValue, ValueRef};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value as JsonValue;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -143,12 +145,17 @@ impl DatabaseDriver for SqliteDriver {
         .await
     }
 
-    async fn execute_query(
+    /// Runs the statements on the pool for blocking work and feeds the sink
+    /// as the rows arrive. The closure sends blocks of rows through a bounded
+    /// channel, and this side drives the sink. A `Stop` of the sink travels
+    /// back through a shared flag that the closure reads on each row.
+    async fn execute_stream(
         &mut self,
         query: &str,
         params: Option<&QueryParams>,
         options: &ExecOptions,
-    ) -> Result<QueryResponse> {
+        sink: &mut dyn RowSink,
+    ) -> Result<RunSummary> {
         let started = Instant::now();
         let bound = bind_params(params)?;
         let statements: Vec<String> = if params.is_some() {
@@ -157,19 +164,66 @@ impl DatabaseDriver for SqliteDriver {
             split_statements(query, Dialect::Sqlite)
         };
         let options = *options;
+        let stop = Arc::new(AtomicBool::new(false));
 
-        let mut response = self
-            .with_connection(move |connection| {
-                let mut response = QueryResponse::default();
-                for statement in statements {
-                    run_statement(connection, &statement, &bound, &options, &mut response)?;
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<RowEvent>(EVENT_CAPACITY);
+        let connection = self.connection.clone();
+        let flag = stop.clone();
+        let reader = tokio::task::spawn_blocking(move || {
+            let guard = connection
+                .lock()
+                .map_err(|_| Error::Connection("The SQLite connection is not usable.".into()))?;
+            let mut rows_affected: Option<u64> = None;
+            for statement in statements {
+                if flag.load(Ordering::Relaxed) {
+                    break;
                 }
-                Ok(response)
-            })
-            .await?;
+                stream_statement(
+                    &guard,
+                    &statement,
+                    &bound,
+                    &options,
+                    &sender,
+                    &flag,
+                    &mut rows_affected,
+                )?;
+            }
+            Ok::<Option<u64>, Error>(rows_affected)
+        });
 
-        response.elapsed_ms = started.elapsed().as_millis() as u64;
-        Ok(response)
+        // A `Stop` ends the whole run, so the rows of the set that stopped
+        // are dropped until its end arrives.
+        let mut skip_rows = false;
+        while let Some(event) = receiver.recv().await {
+            match event {
+                RowEvent::BeginSet(columns) => {
+                    skip_rows = false;
+                    sink.begin_set(columns)?;
+                }
+                RowEvent::Rows(rows) => {
+                    for row in rows {
+                        if skip_rows {
+                            continue;
+                        }
+                        if sink.row(row)? == SinkControl::Stop {
+                            skip_rows = true;
+                            stop.store(true, Ordering::Relaxed);
+                        }
+                    }
+                }
+                RowEvent::EndSet(truncated) => sink.end_set(truncated)?,
+                RowEvent::Message(message) => sink.message(message),
+            }
+        }
+
+        let rows_affected = reader
+            .await
+            .map_err(|error| Error::Connection(error.to_string()))??;
+        Ok(RunSummary {
+            rows_affected,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            stats: None,
+        })
     }
 
     /// SQLite holds one plan, which it gives without running the statement.
@@ -400,21 +454,47 @@ fn create_query_text(table: &str) -> CreateQuery {
     )
 }
 
-/// Runs one statement and adds what it produced to the response.
-fn run_statement(
+/// One step of a run, sent from the blocking closure to the async side.
+enum RowEvent {
+    BeginSet(Vec<ColumnInfo>),
+    Rows(Vec<Vec<JsonValue>>),
+    EndSet(bool),
+    Message(Message),
+}
+
+/// The number of rows one event carries. A block amortizes the cost of the
+/// channel over many rows.
+const ROW_BLOCK: usize = 1000;
+
+/// The number of events the channel holds. The bound keeps the memory of a
+/// fast read small while the sink works.
+const EVENT_CAPACITY: usize = 4;
+
+/// Sends one event, and reports a closed channel as a cancelled run. The
+/// channel closes when the receiving future is dropped, for example when a
+/// time limit ends the run.
+fn send_event(sender: &tokio::sync::mpsc::Sender<RowEvent>, event: RowEvent) -> Result<()> {
+    sender.blocking_send(event).map_err(|_| Error::Cancelled)
+}
+
+/// Runs one statement and sends what it produces through the channel. The
+/// row limit stops the read of one set, and the stop flag ends it early.
+fn stream_statement(
     connection: &Connection,
     statement_text: &str,
     params: &[SqliteValue],
     options: &ExecOptions,
-    response: &mut QueryResponse,
+    sender: &tokio::sync::mpsc::Sender<RowEvent>,
+    stop: &AtomicBool,
+    rows_affected: &mut Option<u64>,
 ) -> Result<()> {
     let mut statement = connection.prepare(statement_text)?;
     let column_count = statement.column_count();
 
     if column_count == 0 {
         let affected = statement.execute(rusqlite::params_from_iter(params.iter()))? as u64;
-        response.rows_affected = Some(response.rows_affected.unwrap_or(0) + affected);
-        response.messages.push(rows_affected_message(affected));
+        *rows_affected = Some(rows_affected.unwrap_or(0) + affected);
+        send_event(sender, RowEvent::Message(rows_affected_message(affected)))?;
         return Ok(());
     }
 
@@ -431,24 +511,35 @@ fn run_statement(
             )
         })
         .collect();
+    send_event(sender, RowEvent::BeginSet(columns))?;
 
-    let mut set = ResultSet::new(columns);
     let mut rows = statement.query(rusqlite::params_from_iter(params.iter()))?;
+    let mut block: Vec<Vec<JsonValue>> = Vec::new();
+    let mut count = 0usize;
+    let mut truncated = false;
     while let Some(row) = rows.next()? {
-        if set.rows.len() >= options.max_rows {
-            set.truncated = true;
+        if stop.load(Ordering::Relaxed) || count >= options.max_rows {
+            truncated = true;
             break;
         }
-        set.rows.push(
+        block.push(
             (0..column_count)
                 .map(|index| value_to_json(row.get_ref(index).unwrap_or(ValueRef::Null)))
                 .collect(),
         );
+        count += 1;
+        if block.len() >= ROW_BLOCK {
+            send_event(sender, RowEvent::Rows(std::mem::take(&mut block)))?;
+        }
     }
-    response
-        .messages
-        .push(rows_returned_message(set.rows.len(), set.truncated));
-    response.results.push(set);
+    if !block.is_empty() {
+        send_event(sender, RowEvent::Rows(block))?;
+    }
+    send_event(
+        sender,
+        RowEvent::Message(rows_returned_message(count, truncated)),
+    )?;
+    send_event(sender, RowEvent::EndSet(truncated))?;
     Ok(())
 }
 
@@ -1059,6 +1150,120 @@ mod tests {
             bind_params(Some(&params)).unwrap_err().kind(),
             crate::error::ErrorKind::Configuration
         );
+    }
+
+    /// A sink that records what it receives and stops after a set number of
+    /// rows, to test the stream path of the driver.
+    struct RecordingSink {
+        stop_after: usize,
+        sets_begun: usize,
+        rows: Vec<Vec<JsonValue>>,
+        ends: Vec<bool>,
+        messages: Vec<Message>,
+    }
+
+    impl RecordingSink {
+        fn new(stop_after: usize) -> Self {
+            Self {
+                stop_after,
+                sets_begun: 0,
+                rows: Vec::new(),
+                ends: Vec::new(),
+                messages: Vec::new(),
+            }
+        }
+    }
+
+    impl RowSink for RecordingSink {
+        fn begin_set(&mut self, _columns: Vec<ColumnInfo>) -> Result<()> {
+            self.sets_begun += 1;
+            Ok(())
+        }
+        fn row(&mut self, row: Vec<JsonValue>) -> Result<SinkControl> {
+            self.rows.push(row);
+            if self.rows.len() >= self.stop_after {
+                Ok(SinkControl::Stop)
+            } else {
+                Ok(SinkControl::Continue)
+            }
+        }
+        fn end_set(&mut self, truncated: bool) -> Result<()> {
+            self.ends.push(truncated);
+            Ok(())
+        }
+        fn message(&mut self, message: Message) {
+            self.messages.push(message);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stream_feeds_the_sink_and_reports_the_run() {
+        let mut driver = open_memory().await;
+        let mut sink = RecordingSink::new(usize::MAX);
+        let summary = driver
+            .execute_stream(
+                "CREATE TABLE pets (name TEXT); \
+                 INSERT INTO pets VALUES ('cat'), ('dog'); \
+                 SELECT name FROM pets ORDER BY name;",
+                None,
+                &ExecOptions::default(),
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        assert_eq!(summary.rows_affected, Some(2));
+        assert_eq!(sink.sets_begun, 1);
+        assert_eq!(sink.rows.len(), 2);
+        assert_eq!(sink.ends, vec![false]);
+        assert!(sink
+            .messages
+            .iter()
+            .any(|message| message.text == "2 rows returned."));
+    }
+
+    #[tokio::test]
+    async fn a_stop_of_the_sink_ends_the_whole_run() {
+        let mut driver = open_memory().await;
+        driver
+            .execute_query(
+                "CREATE TABLE numbers (n INTEGER)",
+                None,
+                &ExecOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        // The sink stops after the first row. The first statement gives more
+        // blocks than the channel holds, so the reader is still inside that
+        // statement when the flag lands, and the insert must not run.
+        let mut sink = RecordingSink::new(1);
+        driver
+            .execute_stream(
+                "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c \
+                 WHERE x < 100000) SELECT x FROM c; \
+                 INSERT INTO numbers VALUES (5);",
+                None,
+                &ExecOptions {
+                    max_rows: 100_000,
+                    timeout_secs: 300,
+                },
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        assert_eq!(sink.sets_begun, 1);
+        assert_eq!(sink.rows.len(), 1);
+        assert_eq!(sink.ends, vec![true]);
+
+        let count = driver
+            .execute_query(
+                "SELECT COUNT(*) FROM numbers",
+                None,
+                &ExecOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(count.results[0].rows[0], vec![serde_json::json!(0)]);
     }
 
     #[test]

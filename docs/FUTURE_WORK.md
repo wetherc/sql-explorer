@@ -35,72 +35,37 @@ That is a different design, and this document does not give it.
 
 ### The design
 
-Add a sink interface that receives rows as the driver reads them:
+The sink interface lives in `backend/src/db/sink.rs`: `RowSink` receives
+`begin_set`, `row`, `end_set` and `message` as the driver reads, and the
+answer of `row` is a `SinkControl` that tells the driver to go on or to
+stop the whole run. `RunSummary` carries `rows_affected`, `elapsed_ms` and
+`stats`. `BufferSink` keeps the rows up to `max_rows` and builds the
+present `QueryResponse`.
 
-```rust
-/// Where the rows of one execution go.
-pub trait RowSink: Send {
-    /// Starts one result set. Called once for each set of the run.
-    fn begin_set(&mut self, columns: Vec<ColumnInfo>) -> Result<()>;
-    /// Receives one row. The answer tells the driver to go on or to stop
-    /// the read, for example because a row limit is reached.
-    fn row(&mut self, row: Vec<JsonValue>) -> Result<SinkControl>;
-    /// Ends one result set.
-    fn end_set(&mut self, truncated: bool) -> Result<()>;
-    /// Receives one message of the server.
-    fn message(&mut self, message: Message);
-}
+The trait `DatabaseDriver` holds the pair: `execute_stream` has a default
+body that returns `Unsupported`, and `execute_query` has a default body
+that runs `execute_stream` into a `BufferSink`. A driver that gains
+`execute_stream` then deletes its own `execute_query`. The SQLite driver
+took this path: its blocking closure sends events through a bounded
+channel, the async side drives the sink, and a `Stop` travels back through
+a shared flag. The driver itself bounds the read at `max_rows` and keeps
+the exact row counts of its messages.
 
-pub enum SinkControl {
-    Continue,
-    Stop,
-}
-```
+One sink remains to write:
 
-Add one method to `DatabaseDriver`:
-
-```rust
-async fn execute_stream(
-    &mut self,
-    query: &str,
-    params: Option<&QueryParams>,
-    options: &ExecOptions,
-    sink: &mut dyn RowSink,
-) -> Result<RunSummary>;
-```
-
-`RunSummary` carries `rows_affected`, `elapsed_ms` and `stats`. When every
-driver has `execute_stream`, the present `execute_query` becomes a default
-method: it runs `execute_stream` into a `BufferSink` that builds the present
-`QueryResponse`. One code path then serves both forms. Until that point,
-each driver keeps its own `execute_query`, and `execute_stream` has a
-default body that returns `Unsupported`.
-
-Two sinks:
-
-- `BufferSink` keeps the rows up to `max_rows` and reports `truncated`.
-  It reproduces the behaviour of today, with one known change: the
-  PostgreSQL driver splices the notices that arrive before the run at the
-  front of the messages (`postgres.rs`, `execute_query`). The sink receives
-  messages in arrival order and has no way to put one at the front. The
-  Messages tab then shows the notices in arrival order.
 - `FileSink` writes each row to a CSV or JSON file as it arrives. The
   export command uses it, and a large export then holds one row at a time
   in memory. It writes the first result set and answers `Stop` at the end
   of that set, because the export writes one file.
 
-### The drivers
+One known change of behaviour comes with the conversion of PostgreSQL: the
+driver splices the notices that arrive before the run at the front of the
+messages (`postgres.rs`, `execute_query`). The sink receives messages in
+arrival order and has no way to put one at the front. The Messages tab
+then shows the notices in arrival order.
 
-The first version of this document misstated three of the five drivers.
-The corrected state of each driver is:
+### The drivers that remain
 
-- **SQLite**: the read runs inside `spawn_blocking` through
-  `with_connection`, and the whole response builds inside the blocking
-  closure. Restructure `with_connection`: the closure sends events
-  (`BeginSet`, a block of about one thousand rows, `EndSet`, `Message`)
-  through a bounded channel with a capacity of a few blocks, and the async
-  side drives the sink. A `Stop` travels back through a shared flag that
-  the closure examines on each row.
 - **PostgreSQL**: the driver does not use `query_raw` today. The path with
   parameters uses `client.query`, which gathers every row; convert it to
   `query_raw`, which gives a `RowStream`. The path without parameters uses
@@ -148,24 +113,17 @@ bound in `LIMITATIONS.md`.
 
 ### The order of the work
 
-1. Add `RowSink`, `SinkControl`, `RunSummary` and `BufferSink` in a new
-   module `backend/src/db/sink.rs`, with unit tests for a run with more
-   than one set, a truncation through `Stop`, the message order, and an
-   empty run.
-2. Convert the SQLite driver. The end-to-end tests run against SQLite in
-   memory through the existing `open_memory` helper.
-3. Convert the PostgreSQL driver.
-4. Convert the MS SQL Server driver, the MySQL driver and the Athena
-   driver. Then make `execute_query` the default trait method and delete
-   the five copies in the drivers.
-5. Switch the export command to `FileSink` and delete the buffered export
+1. Convert the PostgreSQL driver.
+2. Convert the MS SQL Server driver, the MySQL driver and the Athena
+   driver, and delete the `execute_query` copy of each converted driver.
+3. Switch the export command to `FileSink` and delete the buffered export
    path. Test that a stop in the middle of an export leaves no file, and
    that the formula-mark escape of `csv_field` stays in place.
 
 ### The risks
 
-- The sink crosses `await` points, so it needs `Send`, and the SQLite
-  bridge adds a channel whose backpressure the bounded capacity holds.
+- The sink crosses `await` points, so it needs `Send`. The bounded
+  capacity of the channel holds the backpressure of the SQLite bridge.
 - `run_bounded` in `backend/src/commands.rs` drops the driver future in
   the middle of a message when the user stops the run or the time limit
   ends it. The drop can land between `begin_set` and `end_set`.
