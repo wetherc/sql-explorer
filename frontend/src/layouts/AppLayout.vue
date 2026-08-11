@@ -569,6 +569,11 @@ const unwatchSystemTheme = settings.watchSystemTheme()
 theme.change(settings.resolvedTheme)
 
 onMounted(async () => {
+  // The keys are bound before anything is read. A read that fails would
+  // otherwise take the binding with it, and the user would then have an
+  // application that answers no key at all.
+  window.addEventListener('keydown', onKeyDown)
+
   await connections.loadEngines()
   await connections.load()
   await history.load()
@@ -576,8 +581,13 @@ onMounted(async () => {
   for (const info of Object.values(connections.active)) {
     explorer.addRoot(info.connectionId)
   }
-  unlisten = await api.onConnectionStatus((event) => connections.applyStatus(event))
-  window.addEventListener('keydown', onKeyDown)
+  try {
+    unlisten = await api.onConnectionStatus((event) => connections.applyStatus(event))
+  } catch (error) {
+    // The application still runs without the reports of the backend. It then
+    // learns of a connection that dropped when it next uses that connection.
+    ui.reportError(error)
+  }
 })
 
 onBeforeUnmount(() => {

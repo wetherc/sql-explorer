@@ -756,6 +756,22 @@ describe('AppLayout keys', () => {
     wrapper.unmount()
   })
 
+  it('answers the keys even when a read of the opening fails', async () => {
+    // The reports of the backend cannot be listened for, which took the
+    // binding of the keys with it before.
+    apiStub.onConnectionStatus.mockRejectedValue(new Error('no bridge'))
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+
+    const tabs = useTabsStore()
+    press('KeyT')
+    await settle()
+
+    expect(tabs.tabs).toHaveLength(1)
+    expect(useUiStore().notices.some((notice) => notice.level === 'error')).toBe(true)
+    wrapper.unmount()
+  })
+
   it('stops listening once it is gone', async () => {
     const wrapper = mountWithPlugins(AppLayout)
     await settle()

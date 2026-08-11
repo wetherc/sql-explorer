@@ -5,7 +5,7 @@
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount, watch } from 'vue'
+import { nextTick, onBeforeUnmount, watch } from 'vue'
 import { useUiStore } from '@/stores/ui'
 
 /**
@@ -26,6 +26,8 @@ const emit = defineEmits<{ (event: 'update:modelValue', value: boolean): void }>
 
 const ui = useUiStore()
 let counted = false
+/** The element that held the focus before the dialog took it. */
+let opener: HTMLElement | null = null
 
 function count(open: boolean): void {
   if (open === counted) {
@@ -34,9 +36,31 @@ function count(open: boolean): void {
   counted = open
   if (open) {
     ui.addDialog()
+    rememberOpener()
   } else {
     ui.removeDialog()
+    returnFocus()
   }
+}
+
+/**
+ * Holds the element the focus stood on. A dialog takes the focus from
+ * whatever opened it, and the focus has to go back there when the dialog
+ * closes, or the user of a keyboard is left at the top of the document.
+ */
+function rememberOpener(): void {
+  const active = document.activeElement
+  opener = active instanceof HTMLElement && active !== document.body ? active : null
+}
+
+function returnFocus(): void {
+  const target = opener
+  opener = null
+  if (!target || !target.isConnected) {
+    return
+  }
+  // The dialog is still going away, so the focus waits for it to finish.
+  void nextTick(() => target.focus())
 }
 
 function onChange(value: boolean): void {

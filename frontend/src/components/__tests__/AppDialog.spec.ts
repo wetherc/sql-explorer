@@ -56,3 +56,55 @@ describe('AppDialog', () => {
     expect(document.querySelector('[data-test="body"]')?.textContent).toBe('Inside')
   })
 })
+
+describe('AppDialog and the focus of the user', () => {
+  /** Puts a button in the document and gives it the focus. */
+  function opener(): HTMLButtonElement {
+    const button = document.createElement('button')
+    document.body.append(button)
+    button.focus()
+    return button
+  }
+
+  it('gives the focus back to whatever opened it', async () => {
+    // The dialog is mounted first, because mounting empties the document.
+    const wrapper = mountWithPlugins(AppDialog, { props: { modelValue: false } })
+    const button = opener()
+
+    await wrapper.setProps({ modelValue: true })
+    await settle()
+    ;(document.activeElement as HTMLElement)?.blur()
+
+    await wrapper.setProps({ modelValue: false })
+    await settle()
+
+    expect(document.activeElement).toBe(button)
+    button.remove()
+  })
+
+  it('gives the focus to nothing when the opener has gone', async () => {
+    const wrapper = mountWithPlugins(AppDialog, { props: { modelValue: false } })
+    const button = opener()
+
+    await wrapper.setProps({ modelValue: true })
+    await settle()
+    button.remove()
+
+    await wrapper.setProps({ modelValue: false })
+    await settle()
+
+    expect(document.activeElement).not.toBe(button)
+  })
+
+  it('holds no opener when the focus stood on nothing', async () => {
+    const wrapper = mountWithPlugins(AppDialog, { props: { modelValue: false } })
+    ;(document.activeElement as HTMLElement)?.blur()
+
+    await wrapper.setProps({ modelValue: true })
+    await settle()
+    await wrapper.setProps({ modelValue: false })
+    await settle()
+
+    expect(document.activeElement).toBe(document.body)
+  })
+})
