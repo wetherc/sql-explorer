@@ -677,10 +677,15 @@ watch(
 // same workspace. The write waits for a short pause, because a keystroke in
 // the editor changes the tabs and one write for each keystroke would put a
 // file write behind every letter.
+//
+// The watch walks the tab records instead of serialising them, because a
+// serialisation of every open statement on each keystroke costs time and
+// garbage in proportion to the whole workspace. The records serialise once,
+// inside the write after the pause.
 const PERSIST_DELAY_MS = 250
 let persistTimer: ReturnType<typeof setTimeout> | null = null
 watch(
-  () => JSON.stringify(tabs.snapshot()),
+  () => [tabs.tabs, tabs.activeTabId],
   () => {
     if (persistTimer !== null) {
       clearTimeout(persistTimer)
@@ -690,6 +695,7 @@ watch(
       void tabs.persist()
     }, PERSIST_DELAY_MS)
   },
+  { deep: true },
 )
 onBeforeUnmount(() => {
   if (persistTimer !== null) {
