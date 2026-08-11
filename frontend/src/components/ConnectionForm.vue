@@ -314,17 +314,20 @@
           </v-expansion-panel-text>
         </v-expansion-panel>
       </v-expansion-panels>
-
-      <v-alert
-        v-if="problems.length > 0"
-        type="warning"
-        variant="tonal"
-        class="mt-3"
-        data-test="form-problems"
-      >
-        <div v-for="problem in problems" :key="problem">{{ problem }}</div>
-      </v-alert>
     </v-card-text>
+
+    <!-- The warning stands outside the part that scrolls, so a form of many
+         fields cannot push it past the edge of the card. -->
+    <v-alert
+      v-if="problems.length > 0"
+      type="warning"
+      variant="tonal"
+      density="compact"
+      class="form-problems mx-4 mb-2"
+      data-test="form-problems"
+    >
+      <div v-for="problem in problems" :key="problem">{{ problem }}</div>
+    </v-alert>
 
     <v-card-actions>
       <v-btn
@@ -562,11 +565,22 @@ async function focusToken(): Promise<void> {
 </script>
 
 <style scoped>
+/**
+ * The dialog stands as `scrollable`, so the card holds the height of the
+ * window and this part alone scrolls. A height of its own here would let the
+ * card grow past the window, and the warning and the buttons below it would
+ * then stand off the screen.
+ */
 .form-body {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  max-height: 70vh;
+}
+
+/* A long list of problems scrolls inside the warning, so the warning never
+   takes the whole card. */
+.form-problems {
+  max-height: 20vh;
   overflow-y: auto;
 }
 </style>

@@ -132,6 +132,20 @@ describe('ConnectionForm', () => {
     expect(wrapper.find('[data-test="form-problems"]').text()).toContain('needs a name')
   })
 
+  it('holds the warning outside the part of the card that scrolls', async () => {
+    const wrapper = await mountForm(connectionFixture({ name: '' }))
+    const warning = wrapper.find('[data-test="form-problems"]').element
+    // The fields scroll, so a warning inside them would move out of sight
+    // when the engine changes and the list of the fields grows.
+    expect(wrapper.find('.form-body').element.contains(warning)).toBe(false)
+
+    // The warning stays when the engine changes to one with more fields.
+    await wrapper.findComponent({ name: 'VSelect' }).vm.$emit('update:modelValue', DbType.Athena)
+    await settle()
+    expect(wrapper.find('[data-test="form-problems"]').text()).toContain('needs a name')
+    expect(wrapper.find('.form-body').element.contains(warning)).toBe(false)
+  })
+
   it('describes each transport setting', async () => {
     const wrapper = await mountForm()
     const advanced = wrapper.findComponent({ name: 'VExpansionPanel' })
