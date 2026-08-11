@@ -44,6 +44,22 @@ export function paramProblem(value: ParamValue): string | null {
   return Number.isFinite(Number(text)) ? null : 'Write a number.'
 }
 
+/**
+ * The words that name one parameter and its value in the bar above the
+ * editor. A name that waits for the user reads as unset, and an empty value
+ * reads as the words that the dialog gives it.
+ */
+export function paramChipLabel(name: string, values: ParamValue[]): string {
+  const held = values.find((value) => value.name === name)
+  if (!held || needsAValue(held)) {
+    return `:${name} = unset`
+  }
+  if (held.kind === ParamKind.Null) {
+    return `:${name} = empty value`
+  }
+  return `:${name} = ${held.text}`
+}
+
 /** Builds the map of values that a run sends beside the statement. */
 export function paramsForRun(values: ParamValue[]): Record<string, unknown> {
   const map: Record<string, unknown> = {}

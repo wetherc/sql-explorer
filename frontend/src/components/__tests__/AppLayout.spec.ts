@@ -38,6 +38,7 @@ describe('AppLayout', () => {
     apiStub.getSavedQueries.mockResolvedValue([])
     apiStub.getWorkspace.mockResolvedValue({ tabs: [], activeTabId: null })
     apiStub.saveWorkspace.mockResolvedValue(undefined)
+    apiStub.queryParameters.mockResolvedValue([])
     apiStub.onConnectionStatus.mockResolvedValue(() => {})
   })
 
@@ -466,6 +467,7 @@ describe('AppLayout settings dialog', () => {
     apiStub.getSavedQueries.mockResolvedValue([])
     apiStub.getWorkspace.mockResolvedValue({ tabs: [], activeTabId: null })
     apiStub.saveWorkspace.mockResolvedValue(undefined)
+    apiStub.queryParameters.mockResolvedValue([])
     apiStub.onConnectionStatus.mockResolvedValue(() => {})
   })
 
@@ -499,6 +501,7 @@ describe('AppLayout dialog state', () => {
     apiStub.getSavedQueries.mockResolvedValue([])
     apiStub.getWorkspace.mockResolvedValue({ tabs: [], activeTabId: null })
     apiStub.saveWorkspace.mockResolvedValue(undefined)
+    apiStub.queryParameters.mockResolvedValue([])
     apiStub.onConnectionStatus.mockResolvedValue(() => {})
   })
 
@@ -578,6 +581,7 @@ describe('AppLayout keys', () => {
     apiStub.getSavedQueries.mockResolvedValue([])
     apiStub.getWorkspace.mockResolvedValue({ tabs: [], activeTabId: null })
     apiStub.saveWorkspace.mockResolvedValue(undefined)
+    apiStub.queryParameters.mockResolvedValue([])
     apiStub.onConnectionStatus.mockResolvedValue(() => {})
     forgetTabActions('key-tab')
   })

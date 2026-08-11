@@ -15,6 +15,8 @@ describe('QueryTabs', () => {
     Object.values(apiStub).forEach((fn) => fn.mockReset())
     apiStub.getConnections.mockResolvedValue([connectionFixture()])
     apiStub.listActiveConnections.mockResolvedValue([infoFixture()])
+    // The view of a tab reads the names of the parameters as it opens.
+    apiStub.queryParameters.mockResolvedValue([])
   })
 
   it('points at the connections when none is open', () => {
@@ -107,6 +109,8 @@ describe('QueryTabs renaming a tab', () => {
     Object.values(apiStub).forEach((fn) => fn.mockReset())
     apiStub.getConnections.mockResolvedValue([connectionFixture()])
     apiStub.listActiveConnections.mockResolvedValue([infoFixture()])
+    // The view of a tab reads the names of the parameters as it opens.
+    apiStub.queryParameters.mockResolvedValue([])
   })
 
   /** Mounts the view with one tab and opens the edit of its name. */
@@ -217,6 +221,10 @@ describe('QueryTabs renaming a tab', () => {
 })
 
 describe('QueryTabs asking before it loses work', () => {
+  beforeEach(() => {
+    apiStub.queryParameters.mockResolvedValue([])
+  })
+
   it('closes a tab that holds no change without a question', async () => {
     const wrapper = mountWithPlugins(QueryTabs)
     const tabs = useTabsStore()

@@ -4,6 +4,7 @@ import {
   jsonOfParam,
   needsAValue,
   newParamValue,
+  paramChipLabel,
   paramProblem,
   paramsForRun,
   parseParamValues,
@@ -46,6 +47,24 @@ describe('paramProblem', () => {
     expect(paramProblem({ name: 'a', kind: ParamKind.Number, text: '  ' })).toBeNull()
     expect(paramProblem({ name: 'a', kind: ParamKind.Text, text: 'two' })).toBeNull()
     expect(paramProblem({ name: 'a', kind: ParamKind.Null, text: 'two' })).toBeNull()
+  })
+})
+
+describe('paramChipLabel', () => {
+  it('names a value that the tab holds', () => {
+    const values = [
+      { name: 'id', kind: ParamKind.Number, text: '7' },
+      { name: 'gone', kind: ParamKind.Null, text: '' },
+    ]
+    expect(paramChipLabel('id', values)).toBe(':id = 7')
+    expect(paramChipLabel('gone', values)).toBe(':gone = empty value')
+  })
+
+  it('says that a value is still missing', () => {
+    expect(paramChipLabel('id', [])).toBe(':id = unset')
+    expect(paramChipLabel('id', [{ name: 'id', kind: ParamKind.Text, text: '  ' }])).toBe(
+      ':id = unset',
+    )
   })
 })
 

@@ -392,6 +392,98 @@ describe('QueryView', () => {
     expect(value.props('modelValue')).toBe('true')
   })
 
+  it('names the parameters of the statement in a bar above the editor', async () => {
+    apiStub.queryParameters.mockResolvedValue(['id', 'city'])
+    const wrapper = mountWithPlugins(QueryView, {
+      props: {
+        tab: {
+          id: 't1',
+          title: 'Query 1',
+          query: 'SELECT * FROM t WHERE a = :id AND b = :city',
+          connectionId: 'c1',
+          dirty: false,
+          savedQueryId: null,
+          params: [{ name: 'id', kind: 'number', text: '7' }],
+        },
+      },
+    })
+    await useConnectionsStore().load()
+    await settle()
+
+    const bar = wrapper.find('[data-test="parameter-bar"]')
+    expect(bar.exists()).toBe(true)
+    expect(wrapper.find('[data-test="parameter-chip-id"]').text()).toBe(':id = 7')
+    // A value that is still missing stands out.
+    const missing = wrapper
+      .findAllComponents({ name: 'VChip' })
+      .find((chip) => chip.attributes('data-test') === 'parameter-chip-city')!
+    expect(missing.text()).toBe(':city = unset')
+    expect(missing.props('color')).toBe('warning')
+  })
+
+  it('opens the values dialog from a chip of the bar', async () => {
+    apiStub.queryParameters.mockResolvedValue(['id'])
+    const wrapper = await mountView('SELECT :id')
+    await settle()
+
+    await wrapper.find('[data-test="parameter-chip-id"]').trigger('click')
+    await settle()
+
+    expect(document.querySelector('[data-test="parameter-value-id"]')).not.toBeNull()
+  })
+
+  it('waits for the writing to stop before it reads the names again', async () => {
+    vi.useFakeTimers()
+    try {
+      apiStub.queryParameters.mockResolvedValue(['id'])
+      const wrapper = await mountView('SELECT :id')
+      await vi.runAllTimersAsync()
+      const reads = apiStub.queryParameters.mock.calls.length
+
+      // Three letters arrive one after the other inside the wait.
+      await wrapper.setProps({ tab: { ...wrapper.props('tab'), query: 'SELECT :i' } })
+      await wrapper.setProps({ tab: { ...wrapper.props('tab'), query: 'SELECT :id' } })
+      await wrapper.setProps({ tab: { ...wrapper.props('tab'), query: 'SELECT :id2' } })
+      await vi.advanceTimersByTimeAsync(299)
+      expect(apiStub.queryParameters.mock.calls.length).toBe(reads)
+
+      await vi.advanceTimersByTimeAsync(1)
+      expect(apiStub.queryParameters.mock.calls.length).toBe(reads + 1)
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('takes its wait away when the view goes', async () => {
+    vi.useFakeTimers()
+    try {
+      apiStub.queryParameters.mockResolvedValue(['id'])
+      const wrapper = await mountView('SELECT :id')
+      await vi.runAllTimersAsync()
+      const reads = apiStub.queryParameters.mock.calls.length
+
+      // The view goes while the wait of the last change still runs.
+      await wrapper.setProps({ tab: { ...wrapper.props('tab'), query: 'SELECT :id2' } })
+      wrapper.unmount()
+      await vi.advanceTimersByTimeAsync(400)
+
+      expect(apiStub.queryParameters.mock.calls.length).toBe(reads)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('holds the bar back when the names cannot be read', async () => {
+    apiStub.queryParameters.mockRejectedValue({ kind: 'database', message: 'no', detail: null })
+    const wrapper = await mountView('SELECT :id')
+    await settle()
+
+    expect(wrapper.find('[data-test="parameter-bar"]').exists()).toBe(false)
+    // The bar is a help alone, so it raises no alarm of its own.
+    expect(useUiStore().notices).toHaveLength(0)
+  })
+
   it('says how a parameter is written', async () => {
     apiStub.queryParameters.mockResolvedValue(['id'])
     const wrapper = await mountView('SELECT :id')

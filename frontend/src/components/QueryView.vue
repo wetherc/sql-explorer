@@ -119,6 +119,26 @@
       />
     </div>
 
+    <!-- The bar names the parameters that the statement holds, so the
+         feature is plain to see and the values are one click away. -->
+    <div
+      v-if="paramNames.length > 0"
+      class="parameter-bar d-flex align-center flex-wrap ga-1 px-2 py-1"
+      data-test="parameter-bar"
+    >
+      <v-chip
+        v-for="name of paramNames"
+        :key="name"
+        size="x-small"
+        label
+        :color="paramIsUnset(name) ? 'warning' : undefined"
+        :data-test="`parameter-chip-${name}`"
+        @click="editParams()"
+      >
+        {{ paramChipLabel(name, tab.params) }}
+      </v-chip>
+    </div>
+
     <splitpanes
       :horizontal="resultsBelow"
       class="panes"
@@ -456,7 +476,7 @@ import { newQueryState, useQueryStore } from '@/stores/query'
 import { useSettingsStore } from '@/stores/settings'
 import { useTabsStore } from '@/stores/tabs'
 import { useUiStore } from '@/stores/ui'
-import { alignParams, needsAValue, paramProblem, paramsForRun } from '@/lib/params'
+import { alignParams, needsAValue, paramChipLabel, paramProblem, paramsForRun } from '@/lib/params'
 import { Dialect, ParamKind, PlanKind, type ParamValue, type ResultSet } from '@/types/api'
 import type { ExportFormat } from './ResultsGrid.vue'
 import type { ResultPane } from '@/stores/query'
@@ -592,6 +612,62 @@ const PARAM_KINDS = [
 
 /** The two words that a value of the true or false form takes. */
 const BOOLEAN_VALUES = ['true', 'false']
+
+/**
+ * The wait before the names of the parameters are read again. The names come
+ * from the backend, and a read for each letter that the user writes would
+ * cross the bridge far too often.
+ */
+const PARAMETER_DEBOUNCE_MS = 300
+
+/** The names that the statement of the tab holds, for the bar. */
+const paramNames = ref<string[]>([])
+let namesTimer: ReturnType<typeof setTimeout> | null = null
+
+/** True while the value of one name is still missing. */
+function paramIsUnset(name: string): boolean {
+  const held = props.tab.params.find((value) => value.name === name)
+  return !held || needsAValue(held)
+}
+
+/** Reads the names that the statement holds, for the bar above the editor. */
+async function readParamNames(): Promise<void> {
+  try {
+    paramNames.value = await api.queryParameters(props.tab.query, dialect.value)
+  } catch {
+    // The bar is a help and not the run itself, so a failure to read the
+    // names stays quiet. The run reports a failure of its own.
+    paramNames.value = []
+  }
+}
+
+// The names are read again after the user stops writing, and at once when
+// the tab or its engine changes.
+watch(
+  () => [props.tab.id, props.tab.query, dialect.value] as const,
+  (next, previous) => {
+    if (namesTimer !== null) {
+      clearTimeout(namesTimer)
+    }
+    // The first read and a move to another tab need the names at once. A
+    // change of the text can wait until the user stops writing.
+    if (next[0] !== previous?.[0]) {
+      void readParamNames()
+      return
+    }
+    namesTimer = setTimeout(() => {
+      namesTimer = null
+      void readParamNames()
+    }, PARAMETER_DEBOUNCE_MS)
+  },
+  { immediate: true },
+)
+
+onBeforeUnmount(() => {
+  if (namesTimer !== null) {
+    clearTimeout(namesTimer)
+  }
+})
 
 /** True while one row of the dialog holds a text that its form refuses. */
 const paramsAreWrong = computed(() => paramRows.value.some((row) => paramProblem(row) !== null))
@@ -943,6 +1019,12 @@ defineExpose({ runStatement, runAll, formatStatement, readPlan })
 .panes {
   flex: 1 1 auto;
   min-height: 0;
+}
+
+.parameter-bar {
+  flex: 0 0 auto;
+  border-bottom: var(--app-divider-soft);
+  font-family: var(--app-font-mono);
 }
 
 .results-pane {
