@@ -525,7 +525,7 @@ const commands: Command[] = [
   },
   {
     id: 'file.openFolder',
-    title: 'Open a folder of queries',
+    title: 'Open a folder',
     group: 'File',
     key: 'mod+shift+o',
     run: () => void files.openFolder(),

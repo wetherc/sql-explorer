@@ -164,7 +164,6 @@
             v-model="awsSecretAccessKey"
             label="Secret access key"
             type="password"
-            :hint="awsSecretHint"
             persistent-hint
             data-test="aws-secret-field"
           />
@@ -391,8 +390,8 @@ const tlsItems = [
 ]
 
 const awsSourceItems = [
-  { title: 'The AWS tools of this machine', value: AwsCredentialSource.Chain },
-  { title: 'Keys that you paste here', value: AwsCredentialSource.Keys },
+  { title: 'A registered AWS profile', value: AwsCredentialSource.Chain },
+  { title: 'Access keys that you paste here', value: AwsCredentialSource.Keys },
 ]
 
 const colorItems = [
@@ -407,7 +406,7 @@ const tlsHint = computed(() => {
     case TlsMode.VerifyFull:
       return 'The identity of the server is checked. Use this outside a trusted network.'
     case TlsMode.Require:
-      return 'The traffic is encrypted, but a server that gives a false certificate is accepted.'
+      return 'The traffic is encrypted, but a server that gives a unverified certificate is accepted.'
     case TlsMode.Prefer:
       return 'The connection continues without encryption when the server offers none.'
     default:
@@ -435,13 +434,13 @@ const needsAccessToken = computed(
 const authHint = computed(() => {
   switch (draft.value.options.mssqlAuth) {
     case MssqlAuth.Integrated:
-      return 'The server takes the account of the user who runs the application. Windows uses its own credentials. macOS and Linux use the Kerberos ticket of the user, so run `kinit` first and give the full host name.'
+      return 'macOS and Linux use the user\'s Kerberos ticket, so you may need to run `kinit` first.'
     case MssqlAuth.EntraAzureCli:
       return 'The application asks the Azure CLI for a token. Run `az login` first.'
     case MssqlAuth.EntraAccessToken:
       return 'Paste a token for https://database.windows.net/. A token lives for about one hour.'
     default:
-      return 'The server holds the login and the password.'
+      return 'A local SQL user login and password.'
   }
 })
 
@@ -453,21 +452,12 @@ const tokenHint = computed(() =>
 
 const passwordHint = computed(() =>
   props.isNew
-    ? 'The password goes into the keychain of the operating system.'
+    ? 'The password is stored in your operating system\'s keychain.'
     : 'Leave this empty to keep the password that is already stored.',
 )
 
-const awsSecretHint = computed(() =>
-  props.isNew
-    ? 'The secret access key goes into the keychain of the operating system.'
-    : 'Leave this empty to keep the secret access key that is already stored.',
-)
-
 const awsTokenHint = computed(() => {
-  if (draft.value.options.awsSessionTokenSet) {
-    return 'Leave this empty to keep the stored token. A token lives for a limited time.'
-  }
-  return 'A permanent pair of keys needs no session token.'
+  return 'Not required for static IAM keys.'
 })
 
 const problems = computed(() => validateConnection(withSecrets()))
