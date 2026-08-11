@@ -31,6 +31,28 @@ import type {
 export const CONNECTION_STATUS_EVENT = 'connection-status'
 
 /**
+ * The convention for the shape of a command: a command with more than two
+ * fields takes one `request` record, and a command with one or two plain
+ * fields takes them flat. A new command follows this convention.
+ *
+ * The backend reads the record with `serde(default)` on the optional
+ * fields, so an absent field is safe. This helper also turns `undefined`
+ * into `null`, so a caller can pass either and the wire carries one form.
+ */
+function call<T>(command: string, request: Record<string, unknown>): Promise<T> {
+  return invoke(command, { request: withNulls(request) })
+}
+
+/** Replaces `undefined` with `null` in the fields of a record. */
+function withNulls(value: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const [key, entry] of Object.entries(value)) {
+    out[key] = entry === undefined ? null : entry
+  }
+  return out
+}
+
+/**
  * Every call the interface makes to the backend. Keeping them in one place
  * means a command name appears once, and the tests replace one module.
  */
@@ -109,7 +131,7 @@ export const api = {
     database: string,
     schemaName: string | null,
   ): Promise<TableRef[]> {
-    return invoke('list_tables', { connectionId, database, schemaName })
+    return call('list_tables', { connectionId, database, schemaName })
   },
 
   listColumns(
@@ -118,7 +140,7 @@ export const api = {
     schemaName: string | null,
     tableName: string,
   ): Promise<ColumnRef[]> {
-    return invoke('list_columns', { connectionId, database, schemaName, tableName })
+    return call('list_columns', { connectionId, database, schemaName, tableName })
   },
 
   listRoutines(
@@ -126,7 +148,7 @@ export const api = {
     database: string,
     schemaName: string | null,
   ): Promise<RoutineRef[]> {
-    return invoke('list_routines', { connectionId, database, schemaName })
+    return call('list_routines', { connectionId, database, schemaName })
   },
 
   listIndexes(
@@ -135,7 +157,7 @@ export const api = {
     schemaName: string | null,
     tableName: string,
   ): Promise<IndexRef[]> {
-    return invoke('list_indexes', { connectionId, database, schemaName, tableName })
+    return call('list_indexes', { connectionId, database, schemaName, tableName })
   },
 
   listConstraints(
@@ -144,7 +166,7 @@ export const api = {
     schemaName: string | null,
     tableName: string,
   ): Promise<ConstraintRef[]> {
-    return invoke('list_constraints', { connectionId, database, schemaName, tableName })
+    return call('list_constraints', { connectionId, database, schemaName, tableName })
   },
 
   listPartitions(
@@ -153,7 +175,7 @@ export const api = {
     schemaName: string | null,
     tableName: string,
   ): Promise<PartitionRef[]> {
-    return invoke('list_partitions', { connectionId, database, schemaName, tableName })
+    return call('list_partitions', { connectionId, database, schemaName, tableName })
   },
 
   /**
@@ -166,7 +188,7 @@ export const api = {
     schemaName: string | null,
     tableName: string,
   ): Promise<TableDetails> {
-    return invoke('table_details', { connectionId, database, schemaName, tableName })
+    return call('table_details', { connectionId, database, schemaName, tableName })
   },
 
   /**

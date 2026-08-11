@@ -553,93 +553,120 @@ pub async fn list_schemas<R: Runtime>(
     guard.list_schemas(&database).await
 }
 
+/// Names one schema of one connection. The commands that list the relations
+/// or the routines of a schema take this request.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaScope {
+    pub connection_id: String,
+    pub database: String,
+    #[serde(default)]
+    pub schema_name: Option<String>,
+}
+
+/// Names one relation of one connection. The commands that list the parts of
+/// a relation take this request.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableScope {
+    pub connection_id: String,
+    pub database: String,
+    #[serde(default)]
+    pub schema_name: Option<String>,
+    pub table_name: String,
+}
+
 #[tauri::command]
 pub async fn list_tables<R: Runtime>(
     app: AppHandle<R>,
-    connection_id: String,
-    database: String,
-    schema_name: Option<String>,
+    request: SchemaScope,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<Table>> {
-    let driver = metadata_driver(&app, &state, &connection_id).await?;
+    let driver = metadata_driver(&app, &state, &request.connection_id).await?;
     let mut guard = driver.lock().await;
-    guard.list_tables(&database, schema_name.as_deref()).await
+    guard
+        .list_tables(&request.database, request.schema_name.as_deref())
+        .await
 }
 
 #[tauri::command]
 pub async fn list_columns<R: Runtime>(
     app: AppHandle<R>,
-    connection_id: String,
-    database: String,
-    schema_name: Option<String>,
-    table_name: String,
+    request: TableScope,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<AppColumn>> {
-    let driver = metadata_driver(&app, &state, &connection_id).await?;
+    let driver = metadata_driver(&app, &state, &request.connection_id).await?;
     let mut guard = driver.lock().await;
     guard
-        .list_columns(&database, schema_name.as_deref(), &table_name)
+        .list_columns(
+            &request.database,
+            request.schema_name.as_deref(),
+            &request.table_name,
+        )
         .await
 }
 
 #[tauri::command]
 pub async fn list_routines<R: Runtime>(
     app: AppHandle<R>,
-    connection_id: String,
-    database: String,
-    schema_name: Option<String>,
+    request: SchemaScope,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<Routine>> {
-    let driver = metadata_driver(&app, &state, &connection_id).await?;
+    let driver = metadata_driver(&app, &state, &request.connection_id).await?;
     let mut guard = driver.lock().await;
-    guard.list_routines(&database, schema_name.as_deref()).await
+    guard
+        .list_routines(&request.database, request.schema_name.as_deref())
+        .await
 }
 
 #[tauri::command]
 pub async fn list_indexes<R: Runtime>(
     app: AppHandle<R>,
-    connection_id: String,
-    database: String,
-    schema_name: Option<String>,
-    table_name: String,
+    request: TableScope,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<IndexInfo>> {
-    let driver = metadata_driver(&app, &state, &connection_id).await?;
+    let driver = metadata_driver(&app, &state, &request.connection_id).await?;
     let mut guard = driver.lock().await;
     guard
-        .list_indexes(&database, schema_name.as_deref(), &table_name)
+        .list_indexes(
+            &request.database,
+            request.schema_name.as_deref(),
+            &request.table_name,
+        )
         .await
 }
 
 #[tauri::command]
 pub async fn list_constraints<R: Runtime>(
     app: AppHandle<R>,
-    connection_id: String,
-    database: String,
-    schema_name: Option<String>,
-    table_name: String,
+    request: TableScope,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<Constraint>> {
-    let driver = metadata_driver(&app, &state, &connection_id).await?;
+    let driver = metadata_driver(&app, &state, &request.connection_id).await?;
     let mut guard = driver.lock().await;
     guard
-        .list_constraints(&database, schema_name.as_deref(), &table_name)
+        .list_constraints(
+            &request.database,
+            request.schema_name.as_deref(),
+            &request.table_name,
+        )
         .await
 }
 
 #[tauri::command]
 pub async fn list_partitions<R: Runtime>(
     app: AppHandle<R>,
-    connection_id: String,
-    database: String,
-    schema_name: Option<String>,
-    table_name: String,
+    request: TableScope,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<Partition>> {
-    let driver = metadata_driver(&app, &state, &connection_id).await?;
+    let driver = metadata_driver(&app, &state, &request.connection_id).await?;
     let mut guard = driver.lock().await;
     guard
-        .list_partitions(&database, schema_name.as_deref(), &table_name)
+        .list_partitions(
+            &request.database,
+            request.schema_name.as_deref(),
+            &request.table_name,
+        )
         .await
 }
 
@@ -651,23 +678,20 @@ pub async fn list_partitions<R: Runtime>(
 #[tauri::command]
 pub async fn table_details<R: Runtime>(
     app: AppHandle<R>,
-    connection_id: String,
-    database: String,
-    schema_name: Option<String>,
-    table_name: String,
+    request: TableScope,
     state: tauri::State<'_, AppState>,
 ) -> Result<TableDetails> {
-    let driver = metadata_driver(&app, &state, &connection_id).await?;
-    let schema = schema_name.as_deref();
+    let driver = metadata_driver(&app, &state, &request.connection_id).await?;
+    let database = &request.database;
+    let schema = request.schema_name.as_deref();
+    let table = &request.table_name;
     let mut guard = driver.lock().await;
 
     let details = TableDetails {
-        facts: guard.table_facts(&database, schema, &table_name).await?,
-        columns: guard.list_columns(&database, schema, &table_name).await?,
-        indexes: guard.list_indexes(&database, schema, &table_name).await?,
-        constraints: guard
-            .list_constraints(&database, schema, &table_name)
-            .await?,
+        facts: guard.table_facts(database, schema, table).await?,
+        columns: guard.list_columns(database, schema, table).await?,
+        indexes: guard.list_indexes(database, schema, table).await?,
+        constraints: guard.list_constraints(database, schema, table).await?,
     };
 
     Ok(details)
@@ -1277,6 +1301,55 @@ mod tests {
     use crate::secrets::MemoryStore;
     use crate::sql::Dialect;
     use crate::storage::ConnectionOptions;
+
+    #[test]
+    fn a_schema_scope_reads_a_full_request() {
+        let scope: SchemaScope =
+            serde_json::from_str(r#"{"connectionId":"c1","database":"db","schemaName":"dbo"}"#)
+                .unwrap();
+        assert_eq!(scope.connection_id, "c1");
+        assert_eq!(scope.database, "db");
+        assert_eq!(scope.schema_name.as_deref(), Some("dbo"));
+    }
+
+    #[test]
+    fn a_schema_scope_takes_a_schema_that_is_null_or_absent() {
+        let with_null: SchemaScope =
+            serde_json::from_str(r#"{"connectionId":"c1","database":"db","schemaName":null}"#)
+                .unwrap();
+        assert_eq!(with_null.schema_name, None);
+
+        let absent: SchemaScope =
+            serde_json::from_str(r#"{"connectionId":"c1","database":"db"}"#).unwrap();
+        assert_eq!(absent.schema_name, None);
+    }
+
+    #[test]
+    fn a_table_scope_reads_a_full_request() {
+        let scope: TableScope = serde_json::from_str(
+            r#"{"connectionId":"c1","database":"db","schemaName":"dbo","tableName":"t"}"#,
+        )
+        .unwrap();
+        assert_eq!(scope.connection_id, "c1");
+        assert_eq!(scope.database, "db");
+        assert_eq!(scope.schema_name.as_deref(), Some("dbo"));
+        assert_eq!(scope.table_name, "t");
+    }
+
+    #[test]
+    fn a_table_scope_takes_a_schema_that_is_null_or_absent() {
+        let with_null: TableScope = serde_json::from_str(
+            r#"{"connectionId":"c1","database":"db","schemaName":null,"tableName":"t"}"#,
+        )
+        .unwrap();
+        assert_eq!(with_null.schema_name, None);
+
+        let absent: TableScope =
+            serde_json::from_str(r#"{"connectionId":"c1","database":"db","tableName":"t"}"#)
+                .unwrap();
+        assert_eq!(absent.schema_name, None);
+        assert_eq!(absent.table_name, "t");
+    }
 
     #[test]
     fn a_statement_without_a_name_keeps_its_text_and_carries_no_parameter() {

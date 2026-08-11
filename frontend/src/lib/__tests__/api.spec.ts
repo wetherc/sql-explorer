@@ -44,24 +44,17 @@ describe('api', () => {
 
     await api.listTables('c1', 'db', 'dbo')
     expect(invoke).toHaveBeenCalledWith('list_tables', {
-      connectionId: 'c1',
-      database: 'db',
-      schemaName: 'dbo',
+      request: { connectionId: 'c1', database: 'db', schemaName: 'dbo' },
     })
 
     await api.listColumns('c1', 'db', 'dbo', 't')
     expect(invoke).toHaveBeenCalledWith('list_columns', {
-      connectionId: 'c1',
-      database: 'db',
-      schemaName: 'dbo',
-      tableName: 't',
+      request: { connectionId: 'c1', database: 'db', schemaName: 'dbo', tableName: 't' },
     })
 
     await api.listRoutines('c1', 'db', 'dbo')
     expect(invoke).toHaveBeenCalledWith('list_routines', {
-      connectionId: 'c1',
-      database: 'db',
-      schemaName: 'dbo',
+      request: { connectionId: 'c1', database: 'db', schemaName: 'dbo' },
     })
 
     for (const [method, command] of [
@@ -71,10 +64,7 @@ describe('api', () => {
     ] as const) {
       await api[method]('c1', 'db', 'dbo', 't')
       expect(invoke).toHaveBeenCalledWith(command, {
-        connectionId: 'c1',
-        database: 'db',
-        schemaName: 'dbo',
-        tableName: 't',
+        request: { connectionId: 'c1', database: 'db', schemaName: 'dbo', tableName: 't' },
       })
     }
 
@@ -246,10 +236,19 @@ describe('api', () => {
   it('names the relation whose parts it reads', async () => {
     await api.tableDetails('c1', 'db', 'dbo', 't')
     expect(invoke).toHaveBeenCalledWith('table_details', {
-      connectionId: 'c1',
-      database: 'db',
-      schemaName: 'dbo',
-      tableName: 't',
+      request: { connectionId: 'c1', database: 'db', schemaName: 'dbo', tableName: 't' },
+    })
+  })
+
+  it('sends null for a schema that the caller left empty', async () => {
+    await api.listTables('c1', 'db', null)
+    expect(invoke).toHaveBeenCalledWith('list_tables', {
+      request: { connectionId: 'c1', database: 'db', schemaName: null },
+    })
+
+    await api.listColumns('c1', 'db', undefined as unknown as string | null, 't')
+    expect(invoke).toHaveBeenCalledWith('list_columns', {
+      request: { connectionId: 'c1', database: 'db', schemaName: null, tableName: 't' },
     })
   })
 
