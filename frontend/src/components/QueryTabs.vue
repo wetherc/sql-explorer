@@ -18,8 +18,26 @@
           class="query-tab"
           data-test="query-tab"
           @keydown.delete.prevent="askClose(tab)"
+          @dblclick.stop.prevent="startRename(tab)"
         >
-          <span class="tab-title">{{ tab.title }}</span>
+          <!-- The field stops its own pointer events, so an edit does not
+               fight the activation of the tab under it. -->
+          <input
+            v-if="renamingId === tab.id"
+            ref="titleField"
+            v-model="renameText"
+            class="tab-title-field"
+            aria-label="The name of the tab"
+            data-test="tab-title-field"
+            @click.stop
+            @mousedown.stop
+            @dblclick.stop
+            @keydown.stop
+            @keydown.enter.prevent="commitRename"
+            @keydown.esc.prevent="cancelRename"
+            @blur="commitRename"
+          />
+          <span v-else class="tab-title">{{ tab.title }}</span>
           <span v-if="tab.dirty" class="dirty-mark" aria-hidden="true">●</span>
           <span v-if="tab.dirty" class="app-visually-hidden">, has changes</span>
           <v-icon
@@ -100,7 +118,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import EmptyState from './EmptyState.vue'
 import QueryView from './QueryView.vue'
@@ -133,6 +151,54 @@ const emptyHint = computed(() =>
 function newTab(): void {
   tabs.add()
 }
+
+/** The tab whose name the user edits, and the text of that edit. */
+const renamingId = ref<string | null>(null)
+const renameText = ref('')
+// The field sits inside a loop, so Vue gathers its element into an array.
+const titleField = ref<HTMLInputElement[]>([])
+
+/**
+ * Starts an edit of the name of a tab. The tab that the edit belongs to
+ * becomes the active tab, because the edit stands inside it.
+ */
+function startRename(tab: QueryTab): void {
+  tabs.activate(tab.id)
+  renamingId.value = tab.id
+  renameText.value = tab.title
+  void nextTick(() => {
+    const field = titleField.value[0]
+    field?.focus()
+    field?.select()
+  })
+}
+
+/**
+ * Writes the name the edit holds. An empty text keeps the name that the tab
+ * already carries, which the store enforces as well.
+ */
+function commitRename(): void {
+  const id = renamingId.value
+  if (id === null) {
+    return
+  }
+  renamingId.value = null
+  tabs.rename(id, renameText.value)
+}
+
+function cancelRename(): void {
+  renamingId.value = null
+}
+
+/** Starts an edit of the name of the tab that stands open. */
+function renameActiveTab(): void {
+  const tab = tabs.tabs.find((item) => item.id === tabs.activeTabId)
+  if (tab) {
+    startRename(tab)
+  }
+}
+
+defineExpose({ renameActiveTab })
 
 /** The tab that waits on an answer, while its changes are not saved. */
 const pendingClose = ref<QueryTab | null>(null)
@@ -197,6 +263,19 @@ function confirmClose(): void {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* The field takes the place of the label, so the tab keeps its width while
+   the user writes in it. */
+.tab-title-field {
+  max-width: 200px;
+  min-width: 80px;
+  color: inherit;
+  font: inherit;
+  background: rgba(var(--v-theme-on-surface), 0.08);
+  border-radius: 3px;
+  padding: 0 4px;
+  outline: none;
 }
 
 .dirty-mark {

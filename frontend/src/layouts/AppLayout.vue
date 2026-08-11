@@ -90,7 +90,7 @@
 
     <v-main class="main-area">
       <div class="main-content">
-        <QueryTabs @open-connections="layout.showPanel('connections')" />
+        <QueryTabs ref="queryTabs" @open-connections="layout.showPanel('connections')" />
         <StatusBar />
       </div>
     </v-main>
@@ -415,6 +415,9 @@ function endPanelDrag(): void {
   layout.endPanelResize()
 }
 
+/** The tab row, which holds the edit of the name of a tab. */
+const queryTabs = ref<InstanceType<typeof QueryTabs> | null>(null)
+
 /** The actions of the tab that is open, when a tab is open. */
 function actionsOfActiveTab() {
   return tabActions(tabs.activeTabId)
@@ -473,6 +476,14 @@ const commands: Command[] = [
     group: 'Tabs',
     key: 'mod+t',
     run: () => tabs.add(),
+  },
+  {
+    id: 'tab.rename',
+    title: 'Rename the tab',
+    group: 'Tabs',
+    key: null,
+    enabled: hasActiveTab,
+    run: () => queryTabs.value?.renameActiveTab(),
   },
   {
     id: 'tab.close',

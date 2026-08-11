@@ -288,6 +288,24 @@ describe('AppLayout', () => {
     wrapper.unmount()
   })
 
+  it('starts the edit of the name of a tab from the palette', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const tabs = useTabsStore()
+    tabs.add()
+    await settle()
+
+    const rename = wrapper
+      .findComponent({ name: 'CommandPalette' })
+      .props('commands')
+      .find((command: { id: string }) => command.id === 'tab.rename')
+    rename.run()
+    await settle()
+
+    expect(wrapper.find('[data-test="tab-title-field"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
   it('holds no button for a new tab beside the title', async () => {
     const wrapper = mountWithPlugins(AppLayout)
     await settle()

@@ -102,6 +102,120 @@ describe('QueryTabs', () => {
   })
 })
 
+describe('QueryTabs renaming a tab', () => {
+  beforeEach(() => {
+    Object.values(apiStub).forEach((fn) => fn.mockReset())
+    apiStub.getConnections.mockResolvedValue([connectionFixture()])
+    apiStub.listActiveConnections.mockResolvedValue([infoFixture()])
+  })
+
+  /** Mounts the view with one tab and opens the edit of its name. */
+  async function mountEditing() {
+    const wrapper = mountWithPlugins(QueryTabs)
+    const tabs = useTabsStore()
+    const tab = tabs.add()
+    await settle()
+
+    await wrapper.find('[data-test="query-tab"]').trigger('dblclick')
+    await settle()
+    return { wrapper, tabs, tab }
+  }
+
+  it('writes the name that the edit holds', async () => {
+    const { wrapper, tabs, tab } = await mountEditing()
+    const field = wrapper.find('[data-test="tab-title-field"]')
+    expect(field.exists()).toBe(true)
+    expect((field.element as HTMLInputElement).value).toBe(tab.title)
+    // The edit takes the pointer, so the user writes at once.
+    expect(document.activeElement).toBe(field.element)
+
+    await field.setValue('Sales report')
+    await field.trigger('keydown', { key: 'Enter' })
+    await settle()
+
+    expect(tabs.tabs[0]?.title).toBe('Sales report')
+    expect(wrapper.find('[data-test="tab-title-field"]').exists()).toBe(false)
+  })
+
+  it('keeps the pointer events of the edit away from the tab', async () => {
+    const { wrapper, tabs } = await mountEditing()
+    const field = wrapper.find('[data-test="tab-title-field"]')
+
+    await field.trigger('mousedown')
+    await field.trigger('click')
+    await field.trigger('dblclick')
+    await settle()
+
+    // The edit stands open, and the click did not close it or start another.
+    expect(wrapper.find('[data-test="tab-title-field"]').exists()).toBe(true)
+    expect(tabs.tabs).toHaveLength(1)
+  })
+
+  it('writes the name when the field loses the focus', async () => {
+    const { wrapper, tabs } = await mountEditing()
+
+    await wrapper.find('[data-test="tab-title-field"]').setValue('From the blur')
+    await wrapper.find('[data-test="tab-title-field"]').trigger('blur')
+    await settle()
+
+    expect(tabs.tabs[0]?.title).toBe('From the blur')
+  })
+
+  it('keeps the name that the tab holds when the edit is cancelled', async () => {
+    const { wrapper, tabs, tab } = await mountEditing()
+
+    await wrapper.find('[data-test="tab-title-field"]').setValue('Thrown away')
+    await wrapper.find('[data-test="tab-title-field"]').trigger('keydown', { key: 'Escape' })
+    await settle()
+
+    expect(tabs.tabs[0]?.title).toBe(tab.title)
+    expect(wrapper.find('[data-test="tab-title-field"]').exists()).toBe(false)
+  })
+
+  it('keeps the name that the tab holds for an empty text', async () => {
+    const { wrapper, tabs, tab } = await mountEditing()
+
+    await wrapper.find('[data-test="tab-title-field"]').setValue('   ')
+    await wrapper.find('[data-test="tab-title-field"]').trigger('keydown', { key: 'Enter' })
+    await settle()
+
+    expect(tabs.tabs[0]?.title).toBe(tab.title)
+  })
+
+  it('writes nothing when the field goes after a cancel', async () => {
+    const { wrapper, tabs, tab } = await mountEditing()
+    const field = wrapper.find('[data-test="tab-title-field"]')
+
+    await field.setValue('Thrown away')
+    await field.trigger('keydown', { key: 'Escape' })
+    // The field goes with the cancel, and its blur reaches the view after.
+    await field.trigger('blur')
+    await settle()
+
+    expect(tabs.tabs[0]?.title).toBe(tab.title)
+  })
+
+  it('starts an edit of the tab that stands open', async () => {
+    const wrapper = mountWithPlugins(QueryTabs)
+    const tabs = useTabsStore()
+    tabs.add()
+    await settle()
+    ;(wrapper.vm as unknown as { renameActiveTab: () => void }).renameActiveTab()
+    await settle()
+
+    expect(wrapper.find('[data-test="tab-title-field"]').exists()).toBe(true)
+  })
+
+  it('starts no edit while no tab is open', async () => {
+    const wrapper = mountWithPlugins(QueryTabs)
+    await settle()
+    ;(wrapper.vm as unknown as { renameActiveTab: () => void }).renameActiveTab()
+    await settle()
+
+    expect(wrapper.find('[data-test="tab-title-field"]').exists()).toBe(false)
+  })
+})
+
 describe('QueryTabs asking before it loses work', () => {
   it('closes a tab that holds no change without a question', async () => {
     const wrapper = mountWithPlugins(QueryTabs)
