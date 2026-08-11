@@ -1,4 +1,9 @@
-import * as monaco from 'monaco-editor'
+// The root entry of `monaco-editor` bundles every language and the CSS, HTML,
+// JSON and TypeScript services. The editor here only shows SQL, so the import
+// takes the editor core with its features and the SQL tokenizer alone.
+import 'monaco-editor/esm/vs/editor/edcore.main.js'
+import 'monaco-editor/esm/vs/basic-languages/sql/sql.contribution.js'
+import * as monaco from 'monaco-editor/esm/vs/editor/editor.api.js'
 import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker'
 import { language as sqlLanguage } from 'monaco-editor/esm/vs/basic-languages/sql/sql'
 import { rootWithParameters } from '@/lib/sqlTokens'
