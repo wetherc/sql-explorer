@@ -236,6 +236,16 @@
                 />
               </div>
 
+              <v-text-field
+                v-model.number="draft.options.maxSessions"
+                label="Max sessions"
+                type="number"
+                min="1"
+                hint="The largest number of tabs that hold a session on this server at one time."
+                persistent-hint
+                data-test="max-sessions-field"
+              />
+
               <v-switch v-model="draft.options.readOnly" label="Open a read-only session" />
 
               <v-text-field

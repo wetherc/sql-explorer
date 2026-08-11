@@ -161,9 +161,21 @@ of the old session are gone with it.
 
 The time limit works the same way on every engine, because a statement that
 passes the limit is dropped in the middle of the exchange whatever the engine.
-A statement that waits for the same connection while the application replaces
-it still runs on the old session and fails. Its tab can run again at once,
-because the next statement takes the new connection.
+A replacement touches one session alone: the tab that lost its session takes
+a new one at once, and the sessions of the other tabs run on.
+
+## The sessions of the tabs
+
+Each tab holds one server session, up to the limit in the options of the
+connection. A tab past the limit gets a message at once and runs after
+another tab closes, or after the user raises the limit. A local temporary
+table belongs to one session, so a `#table` of one tab is not visible in
+another tab; a global `##table` of MS SQL Server is. SQLite holds one writer
+at a time, so the statements of two tabs that both write contend for the
+file. A SQLite database that lives in memory allows one session, because a
+second connection to it opens a separate empty database; every tab of such a
+connection shares one session. Athena holds no session state at all, so its
+sessions are plain request channels.
 
 ## Athena takes no bound parameters
 

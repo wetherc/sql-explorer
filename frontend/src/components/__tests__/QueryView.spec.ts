@@ -1144,6 +1144,16 @@ describe('QueryView edge paths', () => {
     expect(useUiStore().notices.some((notice) => notice.level === 'warning')).toBe(true)
   })
 
+  it('asks for a run before it exports the whole result', async () => {
+    const wrapper = await mountView()
+    await settle()
+    await (wrapper.vm as unknown as { onExportAll: (f: 'csv') => Promise<void> }).onExportAll('csv')
+    expect(apiStub.exportQuery).not.toHaveBeenCalled()
+    expect(
+      useUiStore().notices.some((notice) => notice.message.includes('Run the statement first')),
+    ).toBe(true)
+  })
+
   it('writes no whole export when the user closes the save dialog', async () => {
     apiStub.exportQuery.mockResolvedValue(null)
     const wrapper = await mountedWithResult()

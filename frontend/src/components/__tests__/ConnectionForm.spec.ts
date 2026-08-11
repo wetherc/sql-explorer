@@ -306,9 +306,9 @@ describe('ConnectionForm advanced options', () => {
     const wrapper = await openAdvanced(await mountForm())
 
     const numbers = wrapper.findAll('input[type="number"]')
-    await numbers[numbers.length - 3]!.setValue('30')
-    await numbers[numbers.length - 2]!.setValue('60')
-    await numbers[numbers.length - 1]!.setValue('500')
+    await numbers[numbers.length - 4]!.setValue('30')
+    await numbers[numbers.length - 3]!.setValue('60')
+    await numbers[numbers.length - 2]!.setValue('500')
 
     await wrapper.find('[data-test="save-button"]').trigger('click')
     await settle()
@@ -320,6 +320,21 @@ describe('ConnectionForm advanced options', () => {
           queryTimeoutSecs: 60,
           maxRows: 500,
         }),
+      }),
+    )
+  })
+
+  it('keeps the session limit', async () => {
+    apiStub.saveConnection.mockResolvedValue(undefined)
+    const wrapper = await openAdvanced(await mountForm())
+
+    await wrapper.find('[data-test="max-sessions-field"] input').setValue('3')
+    await wrapper.find('[data-test="save-button"]').trigger('click')
+    await settle()
+
+    expect(apiStub.saveConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        options: expect.objectContaining({ maxSessions: 3 }),
       }),
     )
   })

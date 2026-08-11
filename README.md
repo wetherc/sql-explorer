@@ -26,6 +26,10 @@ The application is built with Vue 3, Vuetify and [Tauri 2](https://tauri.app/).
   the user gives, which costs nothing because the engine scans no data.
 - Timeouts for the connection and for a statement, a row limit, a read-only
   session, an application name, folders and colours.
+- One server session for each tab, so the statements of two tabs run at the
+  same time. The temporary tables, the `SET` options and the transactions of
+  a tab stay with the session of that tab. A session limit in the options of
+  the connection bounds the sessions of one server, with six as the default.
 - Passwords go into the keychain of the operating system. The settings file
   holds no password.
 - A connection that stops answering is opened again, and the interface shows
@@ -211,9 +215,8 @@ docs/             The state of the work and the limits of the application
 ## What it does not do
 
 - The interface holds no transaction control and no edit of a row in the grid.
-  Three parts come first: one session for each tab, a session generation that
-  the reconnection path checks, and an attention packet for MS SQL Server, which
-  today keeps a stopped statement and its locks.
+  One part comes first: a session generation that the reconnection path
+  checks.
 - `docs/LIMITATIONS.md` records every other limit, with its cause. Read it
   before you report a defect. It covers the copy of `tiberius` that the build
   holds, the `PRINT` text of MS SQL Server, the ciphers that `rustls` refuses,
