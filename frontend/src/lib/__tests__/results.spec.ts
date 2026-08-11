@@ -399,6 +399,25 @@ describe('the reader of the chunks', () => {
     expect(built).toBe(3)
   })
 
+  it('refuses a code that names no text of the dictionary', () => {
+    const writer = new Writer()
+    writer.u8(FRAME_BEGIN_SET).u32(0).u32(1).text('state').text('text')
+    writer.u8(FRAME_CHUNK).u32(0).u32(2).u32(1)
+    writer.u8(6)
+    writer.u8(0).pad(4)
+    const bytes = [...new TextEncoder().encode('open')]
+    writer.u32(1).u32(bytes.length).u32(bytes.length).raw(bytes)
+    writer.pad(4)
+    writer.u32(0).u32(5)
+    writer.u8(FRAME_END_SET).u32(0).u8(0)
+
+    const { stream, sets } = collect()
+    stream.feed(writer.buffer())
+    const table = sets[0]!
+    expect(table.cell(0, 0)).toBe('open')
+    expect(() => table.cell(1, 0)).toThrow(/name the text 5 of a dictionary of 1/)
+  })
+
   it('gives no value for a column that the chunk does not hold', () => {
     const { stream, sets } = collect()
     stream.feed(intSetMessage([1]))

@@ -198,6 +198,9 @@ function dictValue(column: Extract<SegmentColumn, { kind: 'dict' }>, row: number
     return null
   }
   const code = column.codes[row] ?? 0
+  if (code >= column.ends.length) {
+    throw new Error(`The rows name the text ${code} of a dictionary of ${column.ends.length}.`)
+  }
   const held = column.cache[code]
   if (held !== undefined) {
     return held

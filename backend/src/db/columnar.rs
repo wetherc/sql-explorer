@@ -18,7 +18,6 @@ use crate::error::{Error, Result};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use tauri::ipc::{Channel, InvokeResponseBody};
 
 /// The kind byte of each frame.
@@ -51,23 +50,41 @@ pub enum ColumnEncoding {
 /// holds few bytes of text, so the dictionary would save little.
 const DICT_MIN_ROWS: usize = 64;
 
+/// The largest whole number that a double holds with every digit. A whole
+/// number past this bound travels as its digits, so no digit is lost.
+const MAX_EXACT_WHOLE: u64 = 1 << 53;
+
+/// The encoding of one column of one chunk. A column of text that repeats its
+/// values carries its dictionary, so the writer does not read the texts again.
+enum ColumnShape {
+    Plain(ColumnEncoding),
+    Dict(DictColumn),
+}
+
+/// The dictionary of one column: the end of each text in `bytes`, the bytes
+/// of the texts, and the place of the text of each row.
+struct DictColumn {
+    ends: Vec<u32>,
+    bytes: Vec<u8>,
+    codes: Vec<u32>,
+}
+
 /// Picks the encoding of one column from the values of one chunk. The values
 /// arrive as JSON, so a column can hold anything, and the encoding therefore
 /// belongs to the chunk and not to the column of the result.
-pub fn pick_encoding<'a>(values: impl Iterator<Item = &'a JsonValue> + Clone) -> ColumnEncoding {
-    let mut present = values.clone().filter(|value| !value.is_null()).peekable();
-    if present.peek().is_none() {
-        return ColumnEncoding::Null;
-    }
-    let rows = values.clone().count();
-    let present = values.clone().filter(|value| !value.is_null());
+fn shape_column(rows: &[Vec<JsonValue>], index: usize) -> ColumnShape {
+    let mut present = 0usize;
     let mut all_bool = true;
     let mut all_int32 = true;
     let mut all_number = true;
     let mut all_text = true;
-    let mut present_count = 0usize;
-    for value in present {
-        present_count += 1;
+    let mut exact = true;
+    for row in rows {
+        let value = cell(row, index);
+        if value.is_null() {
+            continue;
+        }
+        present += 1;
         match value {
             JsonValue::Bool(_) => {
                 all_int32 = false;
@@ -82,8 +99,18 @@ pub fn pick_encoding<'a>(values: impl Iterator<Item = &'a JsonValue> + Clone) ->
                         if i32::try_from(whole).is_err() {
                             all_int32 = false;
                         }
+                        if whole.unsigned_abs() > MAX_EXACT_WHOLE {
+                            exact = false;
+                        }
                     }
-                    None => all_int32 = false,
+                    None => {
+                        all_int32 = false;
+                        if number.as_u64().is_some() {
+                            // A whole number that is not an i64 is past the
+                            // reach of a double.
+                            exact = false;
+                        }
+                    }
                 }
                 if number.as_f64().is_none() {
                     all_number = false;
@@ -102,44 +129,60 @@ pub fn pick_encoding<'a>(values: impl Iterator<Item = &'a JsonValue> + Clone) ->
             }
         }
     }
+    if present == 0 {
+        return ColumnShape::Plain(ColumnEncoding::Null);
+    }
     if all_bool {
-        ColumnEncoding::Bool
+        ColumnShape::Plain(ColumnEncoding::Bool)
     } else if all_int32 {
-        ColumnEncoding::Int32
+        ColumnShape::Plain(ColumnEncoding::Int32)
+    } else if all_number && exact {
+        ColumnShape::Plain(ColumnEncoding::Float64)
     } else if all_number {
-        ColumnEncoding::Float64
+        // A whole number past the reach of a double travels as its digits.
+        ColumnShape::Plain(ColumnEncoding::Text)
     } else if all_text {
-        match repeats_enough(values, rows, present_count) {
-            true => ColumnEncoding::Dict,
-            false => ColumnEncoding::Text,
+        match build_dict(rows, index, present) {
+            Some(dict) => ColumnShape::Dict(dict),
+            None => ColumnShape::Plain(ColumnEncoding::Text),
         }
     } else {
-        ColumnEncoding::Json
+        ColumnShape::Plain(ColumnEncoding::Json)
     }
 }
 
-/// True when the texts of a column repeat enough for the dictionary encoding.
-/// The test stops as soon as the column holds too many different texts, so a
-/// column of keys costs one pass and one small set.
-fn repeats_enough<'a>(
-    values: impl Iterator<Item = &'a JsonValue>,
-    rows: usize,
-    present: usize,
-) -> bool {
-    if rows < DICT_MIN_ROWS {
-        return false;
+/// Builds the dictionary of a column of text. It gives nothing when the chunk
+/// is short, or as soon as the column holds too many different texts, so a
+/// column of keys costs one bounded pass.
+fn build_dict(rows: &[Vec<JsonValue>], index: usize, present: usize) -> Option<DictColumn> {
+    if rows.len() < DICT_MIN_ROWS {
+        return None;
     }
     let limit = present / 2;
-    let mut seen: HashSet<&str> = HashSet::new();
-    for value in values {
-        if let JsonValue::String(text) = value {
-            seen.insert(text.as_str());
-            if seen.len() > limit {
-                return false;
-            }
-        }
+    let mut places: HashMap<&str, u32> = HashMap::new();
+    let mut ends: Vec<u32> = Vec::new();
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut codes: Vec<u32> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let code = match cell(row, index) {
+            JsonValue::String(text) => match places.get(text.as_str()) {
+                Some(code) => *code,
+                None => {
+                    if ends.len() >= limit {
+                        return None;
+                    }
+                    let code = ends.len() as u32;
+                    bytes.extend_from_slice(text.as_bytes());
+                    ends.push(bytes.len() as u32);
+                    places.insert(text.as_str(), code);
+                    code
+                }
+            },
+            _ => 0,
+        };
+        codes.push(code);
     }
-    true
+    Some(DictColumn { ends, bytes, codes })
 }
 
 /// Writes the frame that opens one result set.
@@ -168,23 +211,31 @@ pub fn write_end(buffer: &mut Vec<u8>, summary_json: &str) {
 }
 
 /// Writes one chunk of rows, column by column. Every row of the chunk must
-/// hold one value for each column.
+/// hold one value for each column. The buffer must start at the first byte of
+/// the message, because the reader and the writer both measure the padding of
+/// a column from the start of the message.
 pub fn write_chunk(buffer: &mut Vec<u8>, set: u32, columns: usize, rows: &[Vec<JsonValue>]) {
     buffer.push(FRAME_CHUNK);
     buffer.extend_from_slice(&set.to_le_bytes());
     buffer.extend_from_slice(&(rows.len() as u32).to_le_bytes());
     buffer.extend_from_slice(&(columns as u32).to_le_bytes());
     for index in 0..columns {
-        let encoding = pick_encoding(rows.iter().map(|row| cell(row, index)));
-        buffer.push(encoding as u8);
-        match encoding {
-            ColumnEncoding::Null => {}
-            ColumnEncoding::Bool => write_bool_column(buffer, rows, index),
-            ColumnEncoding::Int32 => write_int32_column(buffer, rows, index),
-            ColumnEncoding::Float64 => write_float64_column(buffer, rows, index),
-            ColumnEncoding::Text => write_text_column(buffer, rows, index, false),
-            ColumnEncoding::Json => write_text_column(buffer, rows, index, true),
-            ColumnEncoding::Dict => write_dict_column(buffer, rows, index),
+        match shape_column(rows, index) {
+            ColumnShape::Dict(dict) => {
+                buffer.push(ColumnEncoding::Dict as u8);
+                write_dict_column(buffer, rows, index, &dict);
+            }
+            ColumnShape::Plain(encoding) => {
+                buffer.push(encoding as u8);
+                match encoding {
+                    ColumnEncoding::Bool => write_bool_column(buffer, rows, index),
+                    ColumnEncoding::Int32 => write_int32_column(buffer, rows, index),
+                    ColumnEncoding::Float64 => write_float64_column(buffer, rows, index),
+                    ColumnEncoding::Text => write_text_column(buffer, rows, index, false),
+                    ColumnEncoding::Json => write_text_column(buffer, rows, index, true),
+                    ColumnEncoding::Null | ColumnEncoding::Dict => {}
+                }
+            }
         }
     }
 }
@@ -225,7 +276,8 @@ fn write_bits(buffer: &mut Vec<u8>, rows: &[Vec<JsonValue>], set: impl Fn(&[Json
 
 /// Adds bytes until the length of the buffer divides by the width. The
 /// frontend builds a typed array over the buffer of the message, and such an
-/// array needs a start that the width divides.
+/// array needs a start that the width divides. The count starts at the first
+/// byte of the message, so the buffer must hold the whole message.
 fn pad_to(buffer: &mut Vec<u8>, width: usize) {
     while buffer.len() % width != 0 {
         buffer.push(0);
@@ -285,37 +337,22 @@ fn write_text_column(buffer: &mut Vec<u8>, rows: &[Vec<JsonValue>], index: usize
 /// Writes each text of the column once, and then a number for each row that
 /// names the text of that row. A null holds the number zero, and the mask of
 /// the nulls tells the reader to give null for that row.
-fn write_dict_column(buffer: &mut Vec<u8>, rows: &[Vec<JsonValue>], index: usize) {
+fn write_dict_column(
+    buffer: &mut Vec<u8>,
+    rows: &[Vec<JsonValue>],
+    index: usize,
+    dict: &DictColumn,
+) {
     write_null_mask(buffer, rows, index);
     pad_to(buffer, 4);
-    let mut places: HashMap<&str, u32> = HashMap::new();
-    let mut ends: Vec<u32> = Vec::new();
-    let mut bytes: Vec<u8> = Vec::new();
-    let mut codes: Vec<u32> = Vec::with_capacity(rows.len());
-    for row in rows {
-        let code = match cell(row, index) {
-            JsonValue::String(text) => match places.get(text.as_str()) {
-                Some(code) => *code,
-                None => {
-                    let code = ends.len() as u32;
-                    bytes.extend_from_slice(text.as_bytes());
-                    ends.push(bytes.len() as u32);
-                    places.insert(text.as_str(), code);
-                    code
-                }
-            },
-            _ => 0,
-        };
-        codes.push(code);
-    }
-    buffer.extend_from_slice(&(ends.len() as u32).to_le_bytes());
-    for end in ends {
+    buffer.extend_from_slice(&(dict.ends.len() as u32).to_le_bytes());
+    for end in &dict.ends {
         buffer.extend_from_slice(&end.to_le_bytes());
     }
-    buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-    buffer.extend_from_slice(&bytes);
+    buffer.extend_from_slice(&(dict.bytes.len() as u32).to_le_bytes());
+    buffer.extend_from_slice(&dict.bytes);
     pad_to(buffer, 4);
-    for code in codes {
+    for code in &dict.codes {
         buffer.extend_from_slice(&code.to_le_bytes());
     }
 }
@@ -324,6 +361,29 @@ fn write_dict_column(buffer: &mut Vec<u8>, rows: &[Vec<JsonValue>], index: usize
 /// keep the cost of a message small beside the rows it carries, and few enough
 /// that the memory of one chunk stays small.
 pub const CHUNK_ROWS: usize = 1000;
+
+/// The most bytes one chunk gathers before the sink sends it. The lengths of
+/// the form hold four bytes, so a chunk must stay far below four gigabytes.
+/// This bound also keeps the memory of a chunk of wide rows small.
+pub const CHUNK_BYTES: usize = 4 * 1024 * 1024;
+
+/// A measure of the bytes one value adds to a chunk. The measure counts the
+/// bytes of the texts and a small charge for each other value, so the sink can
+/// bound the size of a chunk without a second read of the rows.
+fn value_weight(value: &JsonValue) -> usize {
+    match value {
+        JsonValue::Null | JsonValue::Bool(_) => 8,
+        JsonValue::Number(_) => 24,
+        JsonValue::String(text) => text.len() + 8,
+        JsonValue::Array(items) => 8 + items.iter().map(value_weight).sum::<usize>(),
+        JsonValue::Object(fields) => {
+            8 + fields
+                .iter()
+                .map(|(key, value)| key.len() + 8 + value_weight(value))
+                .sum::<usize>()
+        }
+    }
+}
 
 /// What the run reports once every set has ended.
 #[derive(Debug, Serialize)]
@@ -348,6 +408,8 @@ pub struct ChunkSink {
     columns: usize,
     rows_in_set: usize,
     batch: Vec<Vec<JsonValue>>,
+    /// The measure of the bytes of the batch, against `CHUNK_BYTES`.
+    batch_weight: usize,
     truncated: bool,
     messages: Vec<Message>,
 }
@@ -362,6 +424,7 @@ impl ChunkSink {
             columns: 0,
             rows_in_set: 0,
             batch: Vec::new(),
+            batch_weight: 0,
             truncated: false,
             messages: Vec::new(),
         }
@@ -375,6 +438,7 @@ impl ChunkSink {
         let mut buffer = Vec::new();
         write_chunk(&mut buffer, self.set, self.columns, &self.batch);
         self.batch.clear();
+        self.batch_weight = 0;
         self.send(buffer)
     }
 
@@ -424,9 +488,10 @@ impl RowSink for ChunkSink {
             self.truncated = true;
             return Ok(SinkControl::Stop);
         }
+        self.batch_weight += row.iter().map(value_weight).sum::<usize>();
         self.batch.push(row);
         self.rows_in_set += 1;
-        if self.batch.len() >= CHUNK_ROWS {
+        if self.batch.len() >= CHUNK_ROWS || self.batch_weight >= CHUNK_BYTES {
             self.flush()?;
         }
         Ok(SinkControl::Continue)
@@ -841,10 +906,36 @@ mod tests {
     }
 
     #[test]
-    fn a_number_that_no_double_holds_becomes_its_json() {
-        // A number of more than eighteen digits does not fit a double, and
-        // serde keeps it as text of its own.
-        let rows = vec![vec![json!(u64::MAX)]];
+    fn a_whole_number_past_the_reach_of_a_double_travels_as_its_digits() {
+        // A double drops the low digits of such a number, so the column
+        // travels as text and every digit arrives.
+        let big = (1i64 << 53) + 1;
+        let rows = vec![vec![json!(big)], vec![json!(u64::MAX)], vec![json!(7)]];
+        let mut buffer = Vec::new();
+        write_chunk(&mut buffer, 0, 1, &rows);
+        let frames = Reader::new(&buffer).frames();
+        let Frame::Chunk {
+            encodings,
+            rows: read,
+            ..
+        } = &frames[0]
+        else {
+            panic!("the frame is not a chunk");
+        };
+        assert_eq!(*encodings, vec![ColumnEncoding::Text]);
+        assert_eq!(
+            *read,
+            vec![
+                vec![json!(big.to_string())],
+                vec![json!(u64::MAX.to_string())],
+                vec![json!("7")],
+            ]
+        );
+    }
+
+    #[test]
+    fn the_last_whole_number_of_a_double_keeps_the_double_encoding() {
+        let rows = vec![vec![json!(1i64 << 53)], vec![json!(-(1i64 << 53))]];
         let mut buffer = Vec::new();
         write_chunk(&mut buffer, 0, 1, &rows);
         let frames = Reader::new(&buffer).frames();
@@ -1057,6 +1148,41 @@ mod tests {
         assert_eq!(first.len(), CHUNK_ROWS);
         assert_eq!(second.len(), 1);
         assert_eq!(second[0], vec![json!(CHUNK_ROWS as i64)]);
+    }
+
+    #[test]
+    fn the_weight_of_a_value_counts_the_bytes_of_its_texts() {
+        assert_eq!(value_weight(&JsonValue::Null), 8);
+        assert_eq!(value_weight(&json!(true)), 8);
+        assert_eq!(value_weight(&json!(1.5)), 24);
+        assert_eq!(value_weight(&json!("abc")), 11);
+        assert_eq!(value_weight(&json!(["abc"])), 19);
+        assert_eq!(value_weight(&json!({ "k": "abc" })), 28);
+    }
+
+    #[test]
+    fn the_sink_sends_a_chunk_when_the_rows_weigh_enough() {
+        let (channel, messages) = collecting_channel();
+        let mut sink = ChunkSink::new(channel, 10_000);
+        sink.begin_set(vec![ColumnInfo::new("blob", "text")])
+            .unwrap();
+        // Each row weighs a little more than half of the bound, so every
+        // second row fills a chunk.
+        let text = "x".repeat(CHUNK_BYTES / 2);
+        for _ in 0..4 {
+            sink.row(vec![json!(text.clone())]).unwrap();
+        }
+        sink.end_set(false).unwrap();
+
+        let frames = frames_of(&messages.lock().unwrap());
+        let sizes: Vec<usize> = frames
+            .iter()
+            .filter_map(|frame| match frame {
+                Frame::Chunk { rows, .. } => Some(rows.len()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sizes, vec![2, 2]);
     }
 
     #[test]
