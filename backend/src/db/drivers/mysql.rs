@@ -731,6 +731,8 @@ mod tests {
             user: Some("root".into()),
             database: Some("shop".into()),
             password: Some("p@ss:word/with?chars".into()),
+            aws_secret_access_key: None,
+            aws_session_token: None,
             options: ConnectionOptions::default(),
             color: None,
             group: None,

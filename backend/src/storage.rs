@@ -69,6 +69,18 @@ impl TlsMode {
     }
 }
 
+/// Where an Athena connection takes its AWS credentials from.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AwsCredentialSource {
+    /// The default chain of the AWS tools: the environment, the files of
+    /// the user, and the metadata of the instance.
+    #[default]
+    Chain,
+    /// The keys that the user typed into the form.
+    Keys,
+}
+
 /// How a MS SQL Server connection proves who the user is.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -130,6 +142,15 @@ pub struct ConnectionOptions {
 
     pub aws_region: Option<String>,
     pub aws_profile: Option<String>,
+    /// Where the connection takes its AWS credentials from.
+    pub aws_credential_source: AwsCredentialSource,
+    /// The access key ID, which names the key and is no secret. The secret
+    /// access key and the session token stay in the keychain.
+    pub aws_access_key_id: Option<String>,
+    /// True when the keychain holds a session token for this connection.
+    /// The form reads the flag to tell an empty field that keeps the stored
+    /// token from a connection that carries none.
+    pub aws_session_token_set: bool,
     pub athena_workgroup: Option<String>,
     /// The S3 location that Athena writes the results to.
     pub athena_output_location: Option<String>,
@@ -164,6 +185,9 @@ impl Default for ConnectionOptions {
             file_path: None,
             aws_region: None,
             aws_profile: None,
+            aws_credential_source: AwsCredentialSource::default(),
+            aws_access_key_id: None,
+            aws_session_token_set: false,
             athena_workgroup: None,
             athena_output_location: None,
             athena_catalog: None,
@@ -194,6 +218,15 @@ pub struct SavedConnection {
     /// flight. The record that reaches the settings file has `None` here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+    /// The secret access key of an Athena connection. It follows the rule
+    /// of the password: the keychain holds it, and the record that reaches
+    /// the settings file has `None` here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws_secret_access_key: Option<String>,
+    /// The session token of an Athena connection, under the rule of the
+    /// password as well.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws_session_token: Option<String>,
     #[serde(default)]
     pub options: ConnectionOptions,
     /// A colour that marks the connection in the list, for example to
@@ -221,10 +254,13 @@ impl SavedConnection {
         }
     }
 
-    /// Returns a copy without the password, for the settings file.
-    pub fn without_password(&self) -> Self {
+    /// Returns a copy without any secret, for the settings file. Every
+    /// secret of a connection belongs in the keychain.
+    pub fn without_secrets(&self) -> Self {
         Self {
             password: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
             ..self.clone()
         }
     }
@@ -319,6 +355,8 @@ mod tests {
             user: Some("sa".into()),
             database: Some("master".into()),
             password: Some("secret".into()),
+            aws_secret_access_key: None,
+            aws_session_token: None,
             options: ConnectionOptions::default(),
             color: None,
             group: None,
@@ -397,13 +435,40 @@ mod tests {
     }
 
     #[test]
-    fn the_record_for_the_settings_file_holds_no_password() {
-        let connection = base(DbType::Mssql);
-        let stripped = connection.without_password();
+    fn the_record_for_the_settings_file_holds_no_secret() {
+        let mut connection = base(DbType::Athena);
+        connection.aws_secret_access_key = Some("the-secret-key".into());
+        connection.aws_session_token = Some("the-session-token".into());
+        connection.options.aws_credential_source = AwsCredentialSource::Keys;
+        connection.options.aws_access_key_id = Some("AKIAEXAMPLE".into());
+
+        let stripped = connection.without_secrets();
         assert_eq!(stripped.password, None);
+        assert_eq!(stripped.aws_secret_access_key, None);
+        assert_eq!(stripped.aws_session_token, None);
         assert_eq!(stripped.name, connection.name);
+
         let text = serde_json::to_string(&stripped).unwrap();
         assert!(!text.contains("password"));
+        assert!(!text.contains("awsSecretAccessKey"));
+        assert!(!text.contains("awsSessionToken\""));
+        assert!(!text.contains("the-secret-key"));
+        assert!(!text.contains("the-session-token"));
+        // The access key ID names a key and is no secret, so it stays.
+        assert!(text.contains("AKIAEXAMPLE"));
+    }
+
+    #[test]
+    fn a_record_of_a_former_release_takes_the_default_source_of_the_keys() {
+        let text = r#"{"id":"a","name":"n","dbType":"athena","options":{}}"#;
+        let connection: SavedConnection = serde_json::from_str(text).unwrap();
+        assert_eq!(
+            connection.options.aws_credential_source,
+            AwsCredentialSource::Chain
+        );
+        assert_eq!(connection.options.aws_access_key_id, None);
+        assert!(!connection.options.aws_session_token_set);
+        assert_eq!(connection.aws_secret_access_key, None);
     }
 
     #[test]

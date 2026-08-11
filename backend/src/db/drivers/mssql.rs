@@ -1592,6 +1592,8 @@ mod tests {
             user: Some("sa".into()),
             database: Some("Sales".into()),
             password: Some("p;a{s}s".into()),
+            aws_secret_access_key: None,
+            aws_session_token: None,
             options: ConnectionOptions::default(),
             color: None,
             group: None,

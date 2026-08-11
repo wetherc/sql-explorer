@@ -1217,6 +1217,8 @@ mod tests {
             user: Some("app".into()),
             database: Some("shop".into()),
             password: Some("p@ss word".into()),
+            aws_secret_access_key: None,
+            aws_session_token: None,
             options: ConnectionOptions::default(),
             color: None,
             group: None,

@@ -14,6 +14,7 @@ use crate::error::{Error, Result};
 use crate::files;
 use crate::history::{HistoryEntry, SavedQuery};
 use crate::script::{self, ScriptKind};
+use crate::secrets;
 use crate::session::{Session, DEFAULT_SESSION};
 use crate::sql::ParamValues;
 use crate::state::{
@@ -56,13 +57,44 @@ fn announce<R: Runtime>(
     }
 }
 
-/// Fills the password of a record from the secret store, unless the caller
-/// already gave one.
-fn with_password(state: &AppState, mut connection: SavedConnection) -> Result<SavedConnection> {
+/// Fills the secrets of a record from the secret store, unless the caller
+/// already gave them. A connection holds a password and, for Athena, a
+/// secret access key and a session token.
+fn with_secrets(state: &AppState, mut connection: SavedConnection) -> Result<SavedConnection> {
     if connection.password.is_none() {
         connection.password = state.secrets.get(&connection.id)?;
     }
+    if connection.aws_secret_access_key.is_none() {
+        connection.aws_secret_access_key = state
+            .secrets
+            .get(&secrets::aws_secret_key(&connection.id))?;
+    }
+    if connection.aws_session_token.is_none() {
+        connection.aws_session_token =
+            state.secrets.get(&secrets::aws_token_key(&connection.id))?;
+    }
     Ok(connection)
+}
+
+/// Writes one secret of a connection, or takes it away.
+///
+/// The three fields follow one rule: a text keeps the secret, an empty text
+/// takes it away, and an absent field leaves the store as it stands. The
+/// form sends an absent field when the user did not touch it, so a saved
+/// secret survives an edit of the other fields. Returns true when the store
+/// holds the secret after the call.
+fn store_secret(state: &AppState, key: &str, value: Option<&str>) -> Result<bool> {
+    match value {
+        Some(text) if !text.is_empty() => {
+            state.secrets.set(key, text)?;
+            Ok(true)
+        }
+        Some(_) => {
+            state.secrets.delete(key)?;
+            Ok(false)
+        }
+        None => Ok(state.secrets.get(key)?.is_some()),
+    }
 }
 
 #[tauri::command]
@@ -72,7 +104,7 @@ pub async fn connect<R: Runtime>(
     state: tauri::State<'_, AppState>,
 ) -> Result<ConnectionInfo> {
     let id = connection.id.clone();
-    let full = with_password(&state, connection)?;
+    let full = with_secrets(&state, connection)?;
 
     match open_driver(&full).await {
         Ok(driver) => {
@@ -99,7 +131,7 @@ pub async fn test_connection(
     connection: SavedConnection,
     state: tauri::State<'_, AppState>,
 ) -> Result<String> {
-    let full = with_password(&state, connection)?;
+    let full = with_secrets(&state, connection)?;
     let mut driver = open_driver(&full).await?;
     driver.ping().await?;
     Ok("The connection works.".to_string())
@@ -187,7 +219,7 @@ async fn session_for<R: Runtime>(
         )));
     }
 
-    let full = with_password(state, open.descriptor.clone())?;
+    let full = with_secrets(state, open.descriptor.clone())?;
     let driver = open_driver(&full).await?;
     let session = pool.insert(&key, Session::new(driver)).await;
     Ok((open, session, key))
@@ -233,7 +265,7 @@ async fn ensure_session_healthy<R: Runtime>(
     announce(app, connection_id, ConnectionHealth::Reconnecting, None);
     log::warn!("A session of '{connection_id}' stopped answering. Opening it again.");
 
-    let full = with_password(state, open.descriptor.clone())?;
+    let full = with_secrets(state, open.descriptor.clone())?;
     match open_driver(&full).await {
         Ok(driver) => {
             let replacement = open.sessions.insert(key, Session::new(driver)).await;
@@ -604,7 +636,7 @@ async fn reopen_after_stop<R: Runtime>(
 ) {
     announce(app, connection_id, ConnectionHealth::Reconnecting, None);
 
-    let full = match with_password(state, open.descriptor.clone()) {
+    let full = match with_secrets(state, open.descriptor.clone()) {
         Ok(full) => full,
         Err(secret_error) => {
             log::warn!("The password of '{connection_id}' could not be read: {secret_error}");
@@ -916,7 +948,7 @@ async fn background_driver(
         );
         state.clear_background(connection_id).await;
     }
-    let full = match with_password(state, open.descriptor.clone()) {
+    let full = match with_secrets(state, open.descriptor.clone()) {
         Ok(full) => full,
         Err(error) => {
             log::warn!("The password of '{connection_id}' could not be read: {error}");
@@ -1121,15 +1153,23 @@ pub async fn save_connection<R: Runtime>(
 ) -> Result<()> {
     connection.validate().map_err(Error::Configuration)?;
 
-    match connection.password.as_deref() {
-        Some(password) if !password.is_empty() => {
-            state.secrets.set(&connection.id, password)?;
-        }
-        Some(_) => state.secrets.delete(&connection.id)?,
-        None => {}
-    }
+    store_secret(&state, &connection.id, connection.password.as_deref())?;
+    store_secret(
+        &state,
+        &secrets::aws_secret_key(&connection.id),
+        connection.aws_secret_access_key.as_deref(),
+    )?;
+    let token_held = store_secret(
+        &state,
+        &secrets::aws_token_key(&connection.id),
+        connection.aws_session_token.as_deref(),
+    )?;
 
-    store::write_connection(&app, &connection.without_password())
+    // The flag of the record follows the store, so the form always sees
+    // what the keychain holds.
+    let mut record = connection.without_secrets();
+    record.options.aws_session_token_set = token_held;
+    store::write_connection(&app, &record)
 }
 
 #[tauri::command]
@@ -1139,7 +1179,11 @@ pub async fn delete_connection<R: Runtime>(
     state: tauri::State<'_, AppState>,
 ) -> Result<()> {
     state.remove(&id).await;
+    // Every key of the connection goes, or a removed connection leaves its
+    // secrets in the keychain.
     let _ = state.secrets.delete(&id);
+    let _ = state.secrets.delete(&secrets::aws_secret_key(&id));
+    let _ = state.secrets.delete(&secrets::aws_token_key(&id));
     store::delete_connection(&app, &id)
 }
 
@@ -2157,6 +2201,8 @@ mod tests {
             user: None,
             database: None,
             password: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
             options: ConnectionOptions {
                 file_path: Some(path.to_string()),
                 ..ConnectionOptions::default()
@@ -2189,20 +2235,65 @@ mod tests {
         let state = state();
         state.secrets.set("s1", "from-the-store").unwrap();
 
-        let filled = with_password(&state, sqlite_connection("/tmp/a.db")).unwrap();
+        let filled = with_secrets(&state, sqlite_connection("/tmp/a.db")).unwrap();
         assert_eq!(filled.password.as_deref(), Some("from-the-store"));
 
         let mut given = sqlite_connection("/tmp/a.db");
         given.password = Some("typed".into());
-        let kept = with_password(&state, given).unwrap();
+        let kept = with_secrets(&state, given).unwrap();
         assert_eq!(kept.password.as_deref(), Some("typed"));
     }
 
     #[tokio::test]
     async fn a_password_that_is_absent_stays_absent() {
         let state = state();
-        let filled = with_password(&state, sqlite_connection("/tmp/a.db")).unwrap();
+        let filled = with_secrets(&state, sqlite_connection("/tmp/a.db")).unwrap();
         assert_eq!(filled.password, None);
+    }
+
+    #[tokio::test]
+    async fn the_keys_of_aws_come_from_the_secret_store() {
+        let state = state();
+        state
+            .secrets
+            .set(&secrets::aws_secret_key("s1"), "the-secret")
+            .unwrap();
+        state
+            .secrets
+            .set(&secrets::aws_token_key("s1"), "the-token")
+            .unwrap();
+
+        let filled = with_secrets(&state, sqlite_connection("/tmp/a.db")).unwrap();
+        assert_eq!(filled.aws_secret_access_key.as_deref(), Some("the-secret"));
+        assert_eq!(filled.aws_session_token.as_deref(), Some("the-token"));
+
+        // A key that the caller gave stays as it is.
+        let mut given = sqlite_connection("/tmp/a.db");
+        given.aws_secret_access_key = Some("typed".into());
+        given.aws_session_token = Some("typed-token".into());
+        let kept = with_secrets(&state, given).unwrap();
+        assert_eq!(kept.aws_secret_access_key.as_deref(), Some("typed"));
+        assert_eq!(kept.aws_session_token.as_deref(), Some("typed-token"));
+    }
+
+    #[tokio::test]
+    async fn a_secret_is_written_kept_or_taken_away() {
+        let state = state();
+
+        // A text writes the secret, and the store then holds it.
+        assert!(store_secret(&state, "k1", Some("first")).unwrap());
+        assert_eq!(state.secrets.get("k1").unwrap().as_deref(), Some("first"));
+
+        // An absent field leaves the store as it stands.
+        assert!(store_secret(&state, "k1", None).unwrap());
+        assert_eq!(state.secrets.get("k1").unwrap().as_deref(), Some("first"));
+
+        // An empty text takes the secret away.
+        assert!(!store_secret(&state, "k1", Some("")).unwrap());
+        assert_eq!(state.secrets.get("k1").unwrap(), None);
+
+        // An absent field over an empty store reports no secret.
+        assert!(!store_secret(&state, "k1", None).unwrap());
     }
     #[test]
     fn base64_gives_bytes_and_damaged_content_is_refused() {

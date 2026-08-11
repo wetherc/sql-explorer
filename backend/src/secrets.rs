@@ -9,6 +9,18 @@ use crate::error::Result;
 /// The name under which the application registers its entries.
 pub const SERVICE: &str = "com.c-wetherill.sql-explorer";
 
+/// The key of the secret access key of an Athena connection. A connection
+/// holds more than one secret, so each secret takes a key of its own under
+/// the identifier of the connection.
+pub fn aws_secret_key(id: &str) -> String {
+    format!("{id}:aws-secret-access-key")
+}
+
+/// The key of the session token of an Athena connection.
+pub fn aws_token_key(id: &str) -> String {
+    format!("{id}:aws-session-token")
+}
+
 /// The operations the command layer needs from a password store. The trait
 /// exists so that the tests can run without a keychain.
 pub trait SecretStore: Send + Sync {
@@ -103,6 +115,15 @@ pub fn build_store() -> Box<dyn SecretStore> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_secret_of_a_connection_takes_a_key_of_its_own() {
+        assert_eq!(aws_secret_key("c1"), "c1:aws-secret-access-key");
+        assert_eq!(aws_token_key("c1"), "c1:aws-session-token");
+        // The three keys of one connection differ from each other.
+        assert_ne!(aws_secret_key("c1"), aws_token_key("c1"));
+        assert_ne!(aws_secret_key("c1"), "c1");
+    }
 
     #[test]
     fn the_store_in_memory_holds_and_removes_a_password() {

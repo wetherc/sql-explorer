@@ -72,7 +72,7 @@ impl OpenConnection {
             Session::new(driver),
         ));
         Self {
-            descriptor: descriptor.without_password(),
+            descriptor: descriptor.without_secrets(),
             sessions,
             capabilities,
             dialect,
@@ -409,6 +409,8 @@ mod tests {
             user: Some("sa".into()),
             database: None,
             password: Some("secret".into()),
+            aws_secret_access_key: None,
+            aws_session_token: None,
             options: ConnectionOptions::default(),
             color: None,
             group: None,

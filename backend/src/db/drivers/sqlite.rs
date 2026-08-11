@@ -608,6 +608,8 @@ mod tests {
             user: None,
             database: None,
             password: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
             options: ConnectionOptions {
                 file_path: Some(path.to_string()),
                 ..ConnectionOptions::default()

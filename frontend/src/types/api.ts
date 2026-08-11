@@ -35,6 +35,15 @@ export const MssqlAuth = {
 } as const
 export type MssqlAuth = (typeof MssqlAuth)[keyof typeof MssqlAuth]
 
+/** Where an Athena connection takes its AWS credentials from. */
+export const AwsCredentialSource = {
+  /** The default chain of the AWS tools. */
+  Chain: 'chain',
+  /** The keys that the user typed into the form. */
+  Keys: 'keys',
+} as const
+export type AwsCredentialSource = (typeof AwsCredentialSource)[keyof typeof AwsCredentialSource]
+
 export interface ConnectionOptions {
   tlsMode: TlsMode
   caCertPath: string | null
@@ -54,6 +63,12 @@ export interface ConnectionOptions {
   filePath: string | null
   awsRegion: string | null
   awsProfile: string | null
+  /** Where the connection takes its AWS credentials from. */
+  awsCredentialSource: AwsCredentialSource
+  /** The access key ID, which names the key and is no secret. */
+  awsAccessKeyId: string | null
+  /** True when the keychain holds a session token for this connection. */
+  awsSessionTokenSet: boolean
   athenaWorkgroup: string | null
   athenaOutputLocation: string | null
   athenaCatalog: string | null
@@ -73,6 +88,12 @@ export interface SavedConnection {
   user: string | null
   database: string | null
   password?: string | null
+  /** The secret access key of an Athena connection. It follows the rule of
+   *  the password: an absent field keeps the stored secret, and an empty
+   *  text takes it away. */
+  awsSecretAccessKey?: string | null
+  /** The session token of an Athena connection, under the same rule. */
+  awsSessionToken?: string | null
   options: ConnectionOptions
   color: string | null
   group: string | null
@@ -431,6 +452,9 @@ export function defaultConnectionOptions(): ConnectionOptions {
     filePath: null,
     awsRegion: null,
     awsProfile: null,
+    awsCredentialSource: AwsCredentialSource.Chain,
+    awsAccessKeyId: null,
+    awsSessionTokenSet: false,
     athenaWorkgroup: null,
     athenaOutputLocation: null,
     athenaCatalog: null,

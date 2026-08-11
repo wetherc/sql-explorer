@@ -1132,6 +1132,8 @@ mod tests {
             user: None,
             database: None,
             password: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
             options: crate::storage::ConnectionOptions::default(),
             color: None,
             group: None,
