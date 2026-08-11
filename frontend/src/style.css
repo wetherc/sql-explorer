@@ -6,6 +6,16 @@ body,
   overflow: hidden;
 }
 
+/* The library gives the wrap of the application a smallest height and no
+   largest one, so the wrap grows with the content inside it. The page does
+   not scroll, so the growth pushed the lower part of the window out of
+   sight. The wrap now holds the height of the window, and the views inside
+   it size themselves against that height. */
+.v-application__wrap {
+  height: 100dvh;
+  min-height: 0;
+}
+
 /* The design tokens of the application. Each component takes its text
    sizes, its monospace font, and its dividers from this list. One change
    here changes every place that uses the token. */
