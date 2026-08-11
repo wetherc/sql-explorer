@@ -166,3 +166,22 @@ statements that follow. A script that carries a parameter is also sent whole
 and not one statement at a time, because the numbers of the placeholders belong
 to the whole text. The same script without a parameter is split and each part
 holds its own effect.
+
+## The Excel export builds the whole sheet in memory
+
+The Excel export in `frontend/src/lib/xlsx.ts` builds the sheet as one
+string and compresses it on the main thread of the interface, so its
+memory cost grows with the number of rows in the grid. The row limit of
+the view bounds that number. The CSV and JSON exports run the statement
+again in the backend and write one row at a time, so a large export goes
+through those forms. A fix moves the Excel export to the backend as a
+sink; no case has needed it yet.
+
+## A PostgreSQL script without parameters is gathered by the library
+
+A script without parameters goes to PostgreSQL through the simple
+protocol, and `tokio-postgres` gathers the whole answer of a simple query
+before it returns it. The library gives no streaming form of the simple
+query, so the memory cost of such a script grows with the size of its
+answer until the row limit applies. A statement with parameters streams
+one row at a time.

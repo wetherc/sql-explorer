@@ -1172,12 +1172,11 @@ fn decode_base64(text: &str) -> Result<Vec<u8>> {
 }
 
 /// Runs a statement again with a higher row limit and writes the rows
-/// straight to a file. A large result therefore never passes through the
-/// user interface.
+/// straight to a file as they arrive. A large result therefore never
+/// passes through the user interface, and the backend holds one row at a
+/// time.
 ///
 /// The statement must only read, because an export runs it a second time.
-/// The rows still gather in the memory of the backend, because a driver
-/// gives the whole result set at once.
 #[tauri::command]
 pub async fn export_query<R: Runtime>(
     app: AppHandle<R>,
@@ -1217,11 +1216,15 @@ pub async fn export_query<R: Runtime>(
     let (query, bound) = prepare_parameters(&query, open.dialect, query_params.as_ref())?;
     let token = state.start_request(&request_id).await;
 
+    // The sink writes to a temporary path. An error, a stop or a time limit
+    // leaves the run before `finish`, and the drop of the sink then removes
+    // the part that was written.
+    let mut sink = FileSink::create(&path, format)?;
     let outcome = {
         let driver = open.driver.clone();
         let mut guard = driver.lock().await;
         run_bounded(
-            guard.execute_query(&query, bound.as_ref(), &options),
+            guard.execute_stream(&query, bound.as_ref(), &options, &mut sink),
             &token,
             options.timeout_secs,
             stop_grace(&open),
@@ -1229,72 +1232,171 @@ pub async fn export_query<R: Runtime>(
         .await
     };
     state.end_request(&request_id).await;
-    let response = finish_run(&app, &state, &connection_id, &open, outcome).await?;
+    finish_run(&app, &state, &connection_id, &open, outcome).await?;
 
-    let result =
-        response.results.into_iter().next().ok_or_else(|| {
-            Error::Unsupported("The statement returned no result set.".to_string())
-        })?;
-
-    let rows = result.rows.len();
-    let truncated = result.truncated;
-    write_result_file(&path, &result, format)?;
-    let path = path.to_string_lossy().to_string();
-    log::info!("Wrote {rows} rows to the file '{path}'.");
-    Ok(Some(ExportSummary {
-        rows,
-        truncated,
-        path,
-    }))
+    if !sink.saw_set {
+        return Err(Error::Unsupported(
+            "The statement returned no result set.".to_string(),
+        ));
+    }
+    let summary = sink.finish()?;
+    log::info!(
+        "Wrote {} rows to the file '{}'.",
+        summary.rows,
+        summary.path
+    );
+    Ok(Some(summary))
 }
 
-/// Writes one result set to a file, one row at a time.
-fn write_result_file(
-    path: &std::path::Path,
-    result: &crate::db::ResultSet,
+/// A sink that writes the rows of the first result set to a file as they
+/// arrive. It writes to a temporary path beside the file and renames it at
+/// a successful end, so a run that fails or stops leaves no file. It
+/// answers `Stop` for a row of a second set, because the export writes one
+/// file.
+struct FileSink {
     format: ExportFormat,
-) -> Result<()> {
-    use std::io::Write;
-    let file = std::fs::File::create(path)?;
-    let mut out = std::io::BufWriter::new(file);
+    final_path: std::path::PathBuf,
+    temp_path: std::path::PathBuf,
+    out: Option<std::io::BufWriter<std::fs::File>>,
+    /// The unique column names of the set, for the JSON objects.
+    names: Vec<String>,
+    rows: usize,
+    truncated: bool,
+    /// True once the first set began.
+    saw_set: bool,
+    /// True once the first set ended.
+    set_done: bool,
+    /// True once the file reached its final path.
+    finished: bool,
+}
 
-    match format {
-        ExportFormat::Csv => {
-            let names: Vec<String> = result
-                .columns
-                .iter()
-                .map(|column| csv_field(&serde_json::Value::String(column.name.clone())))
-                .collect();
-            writeln!(out, "{}", names.join(","))?;
-            for row in &result.rows {
-                let fields: Vec<String> = row.iter().map(csv_field).collect();
-                writeln!(out, "{}", fields.join(","))?;
+impl FileSink {
+    fn create(path: &std::path::Path, format: ExportFormat) -> Result<Self> {
+        let mut name = path.as_os_str().to_owned();
+        name.push(".part");
+        let temp_path = std::path::PathBuf::from(name);
+        let file = std::fs::File::create(&temp_path)?;
+        Ok(Self {
+            format,
+            final_path: path.to_path_buf(),
+            temp_path,
+            out: Some(std::io::BufWriter::new(file)),
+            names: Vec::new(),
+            rows: 0,
+            truncated: false,
+            saw_set: false,
+            set_done: false,
+            finished: false,
+        })
+    }
+
+    fn writer(&mut self) -> Result<&mut std::io::BufWriter<std::fs::File>> {
+        self.out
+            .as_mut()
+            .ok_or_else(|| Error::Anyhow(anyhow::anyhow!("The export file is closed.")))
+    }
+
+    /// Closes the file and renames it onto the path the user chose.
+    fn finish(mut self) -> Result<ExportSummary> {
+        use std::io::Write;
+        if self.saw_set {
+            if let ExportFormat::Json = self.format {
+                let rows = self.rows;
+                let out = self.writer()?;
+                if rows == 0 {
+                    writeln!(out, "]")?;
+                } else {
+                    writeln!(out, "\n]")?;
+                }
             }
         }
-        ExportFormat::Json => {
-            let names = crate::db::unique_column_names(&result.columns);
-            writeln!(out, "[")?;
-            for (index, row) in result.rows.iter().enumerate() {
+        let mut out = self.out.take().expect("the file is open until here");
+        out.flush()?;
+        drop(out);
+        std::fs::rename(&self.temp_path, &self.final_path)?;
+        self.finished = true;
+        Ok(ExportSummary {
+            rows: self.rows,
+            truncated: self.truncated,
+            path: self.final_path.to_string_lossy().to_string(),
+        })
+    }
+}
+
+impl Drop for FileSink {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.out.take();
+            let _ = std::fs::remove_file(&self.temp_path);
+        }
+    }
+}
+
+impl crate::db::sink::RowSink for FileSink {
+    fn begin_set(&mut self, columns: Vec<crate::db::ColumnInfo>) -> Result<()> {
+        use std::io::Write;
+        if self.saw_set {
+            return Ok(());
+        }
+        self.saw_set = true;
+        match self.format {
+            ExportFormat::Csv => {
+                let names: Vec<String> = columns
+                    .iter()
+                    .map(|column| csv_field(&serde_json::Value::String(column.name.clone())))
+                    .collect();
+                writeln!(self.writer()?, "{}", names.join(","))?;
+            }
+            ExportFormat::Json => {
+                self.names = crate::db::unique_column_names(&columns);
+                writeln!(self.writer()?, "[")?;
+            }
+        }
+        Ok(())
+    }
+
+    fn row(&mut self, row: Vec<serde_json::Value>) -> Result<crate::db::sink::SinkControl> {
+        use std::io::Write;
+        if self.set_done {
+            return Ok(crate::db::sink::SinkControl::Stop);
+        }
+        match self.format {
+            ExportFormat::Csv => {
+                let fields: Vec<String> = row.iter().map(csv_field).collect();
+                writeln!(self.writer()?, "{}", fields.join(","))?;
+            }
+            ExportFormat::Json => {
                 let mut object = serde_json::Map::new();
-                for (position, name) in names.iter().enumerate() {
+                for (position, name) in self.names.iter().enumerate() {
                     let value = row
                         .get(position)
                         .cloned()
                         .unwrap_or(serde_json::Value::Null);
                     object.insert(name.clone(), value);
                 }
-                let comma = if index + 1 == result.rows.len() {
-                    ""
-                } else {
-                    ","
-                };
-                writeln!(out, "  {}{comma}", serde_json::Value::Object(object))?;
+                let text = serde_json::Value::Object(object).to_string();
+                let rows = self.rows;
+                let out = self.writer()?;
+                if rows > 0 {
+                    writeln!(out, ",")?;
+                }
+                write!(out, "  {text}")?;
             }
-            writeln!(out, "]")?;
         }
+        self.rows += 1;
+        Ok(crate::db::sink::SinkControl::Continue)
     }
-    out.flush()?;
-    Ok(())
+
+    fn end_set(&mut self, truncated: bool) -> Result<()> {
+        if self.set_done {
+            return Ok(());
+        }
+        self.truncated = self.truncated || truncated;
+        self.set_done = true;
+        Ok(())
+    }
+
+    fn message(&mut self, _message: crate::db::Message) {}
 }
 
 /// Writes one field of a comma separated file.
@@ -1795,30 +1897,101 @@ mod tests {
 
     #[test]
     fn a_result_reaches_a_file_in_both_forms() {
-        use crate::db::{ColumnInfo, ResultSet};
-        let mut result = ResultSet::new(vec![
+        use crate::db::sink::{RowSink, SinkControl};
+        use crate::db::ColumnInfo;
+        let columns = vec![
             ColumnInfo::new("id", "int"),
             ColumnInfo::new("name", "text"),
-        ]);
-        result.rows = vec![
+        ];
+        let rows = [
             vec![serde_json::json!(1), serde_json::json!("Ada")],
             vec![serde_json::json!(2), serde_json::json!(null)],
         ];
 
         let folder = tempfile::tempdir().unwrap();
         let csv = folder.path().join("out.csv");
-        write_result_file(&csv, &result, ExportFormat::Csv).unwrap();
+        let mut sink = FileSink::create(&csv, ExportFormat::Csv).unwrap();
+        sink.begin_set(columns.clone()).unwrap();
+        for row in &rows {
+            assert_eq!(sink.row(row.clone()).unwrap(), SinkControl::Continue);
+        }
+        sink.end_set(false).unwrap();
+        let summary = sink.finish().unwrap();
+        assert_eq!(summary.rows, 2);
+        assert!(!summary.truncated);
         assert_eq!(
             std::fs::read_to_string(&csv).unwrap(),
             "id,name\n1,Ada\n2,\n"
         );
+        // The temporary file is gone after the rename.
+        assert!(!folder.path().join("out.csv.part").exists());
 
         let json = folder.path().join("out.json");
-        write_result_file(&json, &result, ExportFormat::Json).unwrap();
-        let text = std::fs::read_to_string(&json).unwrap();
-        assert!(text.starts_with("[\n"));
-        assert!(text.contains("{\"id\":1,\"name\":\"Ada\"},"));
-        assert!(text.trim_end().ends_with("]"));
+        let mut sink = FileSink::create(&json, ExportFormat::Json).unwrap();
+        sink.begin_set(columns).unwrap();
+        for row in &rows {
+            sink.row(row.clone()).unwrap();
+        }
+        sink.end_set(true).unwrap();
+        let summary = sink.finish().unwrap();
+        assert!(summary.truncated);
+        assert_eq!(
+            std::fs::read_to_string(&json).unwrap(),
+            "[\n  {\"id\":1,\"name\":\"Ada\"},\n  {\"id\":2,\"name\":null}\n]\n"
+        );
+    }
+
+    #[test]
+    fn a_stopped_export_leaves_no_file() {
+        use crate::db::sink::RowSink;
+        use crate::db::ColumnInfo;
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("part.csv");
+        let mut sink = FileSink::create(&path, ExportFormat::Csv).unwrap();
+        sink.begin_set(vec![ColumnInfo::new("id", "int")]).unwrap();
+        sink.row(vec![serde_json::json!(1)]).unwrap();
+        drop(sink);
+        assert!(!path.exists());
+        assert!(std::fs::read_dir(folder.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn an_export_writes_the_first_set_alone() {
+        use crate::db::sink::{RowSink, SinkControl};
+        use crate::db::ColumnInfo;
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("first.csv");
+        let mut sink = FileSink::create(&path, ExportFormat::Csv).unwrap();
+        sink.begin_set(vec![ColumnInfo::new("id", "int")]).unwrap();
+        sink.row(vec![serde_json::json!(1)]).unwrap();
+        sink.end_set(false).unwrap();
+
+        // The second set is not written, and its rows stop the run.
+        sink.begin_set(vec![ColumnInfo::new("other", "int")])
+            .unwrap();
+        assert_eq!(
+            sink.row(vec![serde_json::json!(9)]).unwrap(),
+            SinkControl::Stop
+        );
+        sink.end_set(false).unwrap();
+
+        let summary = sink.finish().unwrap();
+        assert_eq!(summary.rows, 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "id\n1\n");
+    }
+
+    #[test]
+    fn an_empty_json_export_is_a_valid_list() {
+        use crate::db::sink::RowSink;
+        use crate::db::ColumnInfo;
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("empty.json");
+        let mut sink = FileSink::create(&path, ExportFormat::Json).unwrap();
+        sink.begin_set(vec![ColumnInfo::new("id", "int")]).unwrap();
+        sink.end_set(false).unwrap();
+        let summary = sink.finish().unwrap();
+        assert_eq!(summary.rows, 0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[\n]\n");
     }
 
     #[tokio::test]

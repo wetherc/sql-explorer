@@ -1,124 +1,21 @@
 # Future work
 
-This document holds the designs for two known weaknesses that the current
-code does not correct. Each section gives the problem, the design of the
-correction, the order of the work, and the risks. The claims about the code
-were examined against the source on 2026-08-10, and the errors of the first
-version are corrected here.
+This document holds the design for one known weakness that the current
+code does not correct. The section gives the problem, the design of the
+correction, the order of the work, and the risks. The claims about the
+code were examined against the source on 2026-08-10.
 
-The work runs in the order of the sections. Section 1 adds new commands,
-and those commands follow the request convention that
-`frontend/src/lib/api.ts` states above its `call` helper. Section 2 comes
-last.
+Two related notes stand in `docs/LIMITATIONS.md` instead of here: the
+Excel export builds its sheet in memory, and a PostgreSQL script without
+parameters is gathered by the library. Each note names the condition
+under which a fix becomes worth its cost. A backend cache with windowed
+reads for the grid is also set aside: the grid filters, sorts, selects
+and exports over the full set of rows on the client, the row limit
+already bounds what the grid holds, and such a cache needs backend sort
+and filter to keep those functions. Design it as its own effort when a
+measured case shows that the bound of `max_rows` is not enough.
 
-## 1. Stream the rows of a result instead of gathering them in memory
-
-### The problem
-
-Every driver returns a `QueryResponse` that holds every row as
-`Vec<Vec<serde_json::Value>>`. The whole response then crosses the Tauri
-bridge as one JSON body. Two costs follow:
-
-- A large result takes several times its raw size in memory, because each
-  cell is a `serde_json::Value`. The grid then holds about four more copies
-  of the rows (`sourceRows`, `rowTexts`, `filteredRows`, `sortedRows` in
-  `frontend/src/components/ResultsGrid.vue`).
-- The export command runs the statement again and still gathers every row
-  in memory before it writes the file (`export_query` in
-  `backend/src/commands.rs`).
-
-The first version of this document gave a third cost: the user sees no row
-until the last row arrives. The design below does not correct that cost.
-`execute_query` still returns one response when the run ends. A correction
-needs Tauri events that push blocks of rows to the interface during the run.
-That is a different design, and this document does not give it.
-
-### The design
-
-The sink interface lives in `backend/src/db/sink.rs`: `RowSink` receives
-`begin_set`, `row`, `end_set` and `message` as the driver reads, and the
-answer of `row` is a `SinkControl` that tells the driver to go on or to
-stop the whole run. `RunSummary` carries `rows_affected`, `elapsed_ms` and
-`stats`. `BufferSink` keeps the rows up to `max_rows` and builds the
-present `QueryResponse`.
-
-The trait `DatabaseDriver` holds the pair: `execute_stream` streams the
-rows into the sink, and `execute_query` has a default body that runs
-`execute_stream` into a `BufferSink`. Every driver is converted, and no
-driver holds its own `execute_query`:
-
-- **SQLite**: the blocking closure sends events through a bounded channel,
-  the async side drives the sink, and a `Stop` travels back through a
-  shared flag.
-- **PostgreSQL**: the path with parameters streams the rows through
-  `query_raw`. The path without parameters goes through `simple_query`,
-  whose library gathers the whole answer before it returns, so that path
-  feeds the sink from the vector and keeps its memory cost. The notices of
-  the server reach the messages in arrival order, after the rows; the old
-  code put them at the front.
-- **MySQL**: the driver reads one row at a time through `next().await`.
-  A set that passed the row limit or a stop drains one row at a time, so
-  the connection stays fit for the next set.
-- **MS SQL Server**: `stream_sets` walks the `QueryStream` and feeds the
-  sink. The whole stream is walked to its end even after a stop, because
-  a stream that is dropped in the middle leaves the connection in the
-  middle of a message. The plan reader of `explain` buffers through a
-  `BufferSink` and filters the plan sets as before.
-- **Athena**: the page loop feeds the sink. A `Stop` or the row limit
-  returns without a fetch of the pages that remain. The catalog helpers
-  buffer through a `BufferSink`.
-
-One sink remains to write:
-
-- `FileSink` writes each row to a CSV or JSON file as it arrives. The
-  export command uses it, and a large export then holds one row at a time
-  in memory. It writes the first result set and answers `Stop` at the end
-  of that set, because the export writes one file.
-
-### Paging for the grid
-
-The first version of this document gave a second step: a backend cache of
-the buffered rows, a command `fetch_rows(request_id, offset, count)`, and
-windowed reads for the grid. That step is not part of this design, for two
-reasons:
-
-- The grid filters, sorts, selects and exports over the full set of rows
-  on the client. Windowed reads remove those functions unless the backend
-  takes the sort and the filter as parameters, which doubles the scope of
-  the step.
-- The row limit already bounds what the grid holds. The cache moves the
-  memory from the interface to the backend and adds an owner problem; it
-  does not remove the memory.
-
-Do this step only when a measured case shows that the bound of `max_rows`
-is not enough, and then design it as its own effort with backend sort and
-filter.
-
-The Excel export builds the whole sheet as one string in
-`frontend/src/lib/xlsx.ts` and compresses it on the main thread. Windowed
-reads do not reduce that cost. When the Excel export becomes a problem,
-move it to the backend as an `XlsxSink`. Until then, record the memory
-bound in `LIMITATIONS.md`.
-
-### The order of the work
-
-1. Switch the export command to `FileSink` and delete the buffered export
-   path. Test that a stop in the middle of an export leaves no file, and
-   that the formula-mark escape of `csv_field` stays in place.
-
-### The risks
-
-- The sink crosses `await` points, so it needs `Send`. The bounded
-  capacity of the channel holds the backpressure of the SQLite bridge.
-- `run_bounded` in `backend/src/commands.rs` drops the driver future in
-  the middle of a message when the user stops the run or the time limit
-  ends it. The drop can land between `begin_set` and `end_set`.
-  `FileSink` must write to a temporary path, rename the file at a
-  successful end, and delete the temporary file when it drops without one.
-- A sink that stops the read early must leave the connection in a clean
-  state; on a wire protocol the driver must drain the rest of the stream.
-
-## 2. Report an Entra access token that has expired
+## 1. Report an Entra access token that has expired
 
 ### The problem
 
