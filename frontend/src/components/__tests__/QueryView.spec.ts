@@ -1126,6 +1126,32 @@ describe('QueryView edge paths', () => {
     expect(layout.layout.resultsCollapsed).toBe(false)
   })
 
+  it('takes away the mark of the browser on each step of a drag', async () => {
+    const wrapper = await mountView()
+    const removeAllRanges = vi.fn()
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      removeAllRanges,
+    } as unknown as Selection)
+
+    wrapper.findComponent({ name: 'splitpanes' }).vm.$emit('resize', [{ size: 55 }])
+    await wrapper.vm.$nextTick()
+
+    expect(removeAllRanges).toHaveBeenCalled()
+    vi.mocked(window.getSelection).mockRestore()
+  })
+
+  it('holds a drag that reports no selection of the browser', async () => {
+    const wrapper = await mountView()
+    const layout = useLayoutStore()
+    vi.spyOn(window, 'getSelection').mockReturnValue(null)
+
+    wrapper.findComponent({ name: 'splitpanes' }).vm.$emit('resize', [{ size: 55 }])
+    await wrapper.vm.$nextTick()
+
+    expect(layout.layout.editorSize).toBe(55)
+    vi.mocked(window.getSelection).mockRestore()
+  })
+
   it('leaves the split alone when the drag reports no pane', async () => {
     const wrapper = await mountView()
     const layout = useLayoutStore()

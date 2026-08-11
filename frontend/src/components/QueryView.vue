@@ -661,6 +661,10 @@ function onConnectionChange(value: string | null): void {
 }
 
 function onPaneResize(panes: Array<{ size: number }>): void {
+  // A mark that started before the drag grows with the pointer, and the
+  // library takes it away at the end of the drag alone. It goes on each step
+  // instead, so no text of the editor stands out under the pointer.
+  window.getSelection()?.removeAllRanges()
   if (panes[0]) {
     layout.setEditorSize(panes[0].size)
   }
@@ -963,10 +967,15 @@ defineExpose({ runStatement, runAll, formatStatement, readPlan })
   font-size: var(--app-text-sm);
 }
 
+/* The splitter marks no text of its own. The library sets the state of a
+   drag on the first move of the pointer, so a press on the splitter starts a
+   mark of the browser before the rule for a drag can stop one. That mark
+   then grows into the editor as the pointer moves. */
 :deep(.splitpanes__splitter) {
   background: rgb(var(--v-theme-surface-variant));
   min-height: 4px;
   min-width: 4px;
+  user-select: none;
 }
 
 /* The splitter has nothing to move while the results panel is away. */
