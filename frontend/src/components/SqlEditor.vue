@@ -4,7 +4,7 @@
 
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { monaco, registerMonacoThemes } from '@/plugins/monaco'
+import { monaco, registerMonacoThemes, registerSqlParameters } from '@/plugins/monaco'
 import { clearCompletionSource, installSqlCompletions, setCompletionSource } from '@/lib/completion'
 import { emptySchemaIndex, formatSql, statementAt, type SchemaIndex } from '@/lib/sql'
 import { Dialect } from '@/types/api'
@@ -113,6 +113,7 @@ function registerCompletions(): void {
 
 onMounted(() => {
   registerMonacoThemes()
+  registerSqlParameters()
   // The template above always draws the host element, so it is present by
   // the time this runs.
   const element = host.value as HTMLElement

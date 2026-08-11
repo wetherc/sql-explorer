@@ -59,6 +59,7 @@ vi.mock('@/plugins/monaco', () => {
   return {
     configureMonacoEnvironment: vi.fn(),
     registerMonacoThemes: vi.fn(),
+    registerSqlParameters: vi.fn(),
     monaco: {
       editor: {
         create: vi.fn(() => ({

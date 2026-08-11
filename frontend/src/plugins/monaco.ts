@@ -1,5 +1,7 @@
 import * as monaco from 'monaco-editor'
 import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker'
+import { language as sqlLanguage } from 'monaco-editor/esm/vs/basic-languages/sql/sql'
+import { rootWithParameters } from '@/lib/sqlTokens'
 import { sqlExplorerDark, sqlExplorerLight } from './vuetify'
 
 /**
@@ -10,6 +12,17 @@ export function configureMonacoEnvironment(): void {
   ;(self as unknown as { MonacoEnvironment: monaco.Environment }).MonacoEnvironment = {
     getWorker: () => new EditorWorker(),
   }
+}
+
+/** Marks `:name` in the editor with a colour of its own. */
+export function registerSqlParameters(): void {
+  monaco.languages.setMonarchTokensProvider('sql', {
+    ...sqlLanguage,
+    tokenizer: {
+      ...sqlLanguage.tokenizer,
+      root: rootWithParameters(sqlLanguage.tokenizer.root),
+    },
+  } as monaco.languages.IMonarchLanguage)
 }
 
 /** Registers the two themes that match the themes of the application. */
@@ -23,6 +36,7 @@ export function registerMonacoThemes(): void {
       { token: 'comment', foreground: '7f8a9b', fontStyle: 'italic' },
       { token: 'number', foreground: 'f2c14e' },
       { token: 'operator.sql', foreground: 'c792ea' },
+      { token: 'variable.sql', foreground: 'f78c6c', fontStyle: 'bold' },
     ],
     colors: {
       'editor.background': sqlExplorerDark.colors['editor-background'],
@@ -40,6 +54,7 @@ export function registerMonacoThemes(): void {
       { token: 'comment', foreground: '8892a0', fontStyle: 'italic' },
       { token: 'number', foreground: '9a6700' },
       { token: 'operator.sql', foreground: '8250df' },
+      { token: 'variable.sql', foreground: 'b3510e', fontStyle: 'bold' },
     ],
     colors: {
       'editor.background': sqlExplorerLight.colors['editor-background'],
