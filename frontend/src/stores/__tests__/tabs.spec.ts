@@ -190,6 +190,49 @@ describe('tabs store', () => {
     tabs.setConnection('missing', 'c3')
   })
 
+  it('releases the old session when a tab moves to another connection', async () => {
+    apiStub.releaseSession.mockResolvedValue(undefined)
+    const tabs = useTabsStore()
+    const tab = tabs.add({ connectionId: 'c1' })
+
+    tabs.setConnection(tab.id, 'c2')
+    await vi.waitFor(() => expect(apiStub.releaseSession).toHaveBeenCalledWith('c1', tab.id))
+
+    // The same connection again, and a tab without one, release nothing.
+    apiStub.releaseSession.mockClear()
+    tabs.setConnection(tab.id, 'c2')
+    const bare = tabs.add({ connectionId: null })
+    tabs.setConnection(bare.id, 'c1')
+    tabs.close(bare.id)
+    expect(apiStub.releaseSession).not.toHaveBeenCalledWith('c2', tab.id)
+  })
+
+  it('releases the session of a tab that closes', async () => {
+    apiStub.releaseSession.mockResolvedValue(undefined)
+    const tabs = useTabsStore()
+    const one = tabs.add({ connectionId: 'c1' })
+    const two = tabs.add({ connectionId: 'c2' })
+    const three = tabs.add({ connectionId: 'c3' })
+
+    tabs.close(one.id)
+    await vi.waitFor(() => expect(apiStub.releaseSession).toHaveBeenCalledWith('c1', one.id))
+
+    tabs.closeOthers(two.id)
+    await vi.waitFor(() => expect(apiStub.releaseSession).toHaveBeenCalledWith('c3', three.id))
+
+    tabs.closeAll()
+    await vi.waitFor(() => expect(apiStub.releaseSession).toHaveBeenCalledWith('c2', two.id))
+  })
+
+  it('leaves the session alone when the release fails', async () => {
+    apiStub.releaseSession.mockRejectedValue(new Error('gone'))
+    const tabs = useTabsStore()
+    const tab = tabs.add({ connectionId: 'c1' })
+    tabs.close(tab.id)
+    await vi.waitFor(() => expect(apiStub.releaseSession).toHaveBeenCalled())
+    // The failure stays quiet; the idle reap of the backend closes it.
+  })
+
   it('lets the results of a closed tab go', async () => {
     const { useQueryStore } = await import('@/stores/query')
     const tabs = useTabsStore()

@@ -86,11 +86,32 @@ export const useTabsStore = defineStore('tabs', () => {
     return tab
   }
 
-  function close(id: string): void {
-    const index = tabs.value.findIndex((tab) => tab.id === id)
-    if (index === -1) {
+  /**
+   * Gives the session of one tab back to the backend. A statement that
+   * still runs is stopped first, so the session does not run for a tab
+   * that is gone. The release itself is not awaited: a session that the
+   * call misses closes with the idle reap of the backend.
+   */
+  function releaseSession(tab: QueryTab, connectionId: string | null = tab.connectionId): void {
+    if (!connectionId) {
       return
     }
+    const queries = useQueryStore()
+    void queries
+      .cancel(tab.id)
+      .then(() => api.releaseSession(connectionId, tab.id))
+      .catch(() => {
+        // The idle reap of the backend closes the session instead.
+      })
+  }
+
+  function close(id: string): void {
+    const index = tabs.value.findIndex((tab) => tab.id === id)
+    const tab = tabs.value[index]
+    if (index === -1 || !tab) {
+      return
+    }
+    releaseSession(tab)
     tabs.value = tabs.value.filter((tab) => tab.id !== id)
     if (activeTabId.value === id) {
       const next = tabs.value[Math.max(0, index - 1)]
@@ -105,6 +126,7 @@ export const useTabsStore = defineStore('tabs', () => {
     const queries = useQueryStore()
     for (const tab of tabs.value) {
       if (tab.id !== id) {
+        releaseSession(tab)
         queries.clear(tab.id)
       }
     }
@@ -115,6 +137,7 @@ export const useTabsStore = defineStore('tabs', () => {
   function closeAll(): void {
     const queries = useQueryStore()
     for (const tab of tabs.value) {
+      releaseSession(tab)
       queries.clear(tab.id)
     }
     tabs.value = []
@@ -138,6 +161,11 @@ export const useTabsStore = defineStore('tabs', () => {
   function setConnection(id: string, connectionId: string | null): void {
     const tab = tabs.value.find((item) => item.id === id)
     if (tab) {
+      // The session on the old connection belongs to this tab alone, so it
+      // goes when the tab moves.
+      if (tab.connectionId && tab.connectionId !== connectionId) {
+        releaseSession(tab, tab.connectionId)
+      }
       tab.connectionId = connectionId
     }
   }

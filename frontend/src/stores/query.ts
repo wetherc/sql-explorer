@@ -257,7 +257,7 @@ export const useQueryStore = defineStore('query', () => {
       connectionId,
       text,
       (requestId, options) =>
-        api.executeQuery({ connectionId, requestId, query: text, queryParams, options }),
+        api.executeQuery({ connectionId, requestId, query: text, tabId, queryParams, options }),
       undefined,
       queryParams,
     )
@@ -285,6 +285,7 @@ export const useQueryStore = defineStore('query', () => {
           requestId,
           query: text,
           kind,
+          tabId,
           queryParams,
           options,
         }),

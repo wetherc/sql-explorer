@@ -169,6 +169,9 @@ export interface ExportRequest {
   format: 'csv' | 'json'
   /** The row limit of the export, which is higher than the one of the view. */
   maxRows: number
+  /** The tab that runs the export, so it sees the temporary tables of the
+   *  tab. */
+  tabId?: string
   /** The values of the named parameters of the statement. */
   queryParams?: Record<string, unknown>
 }

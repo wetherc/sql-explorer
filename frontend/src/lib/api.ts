@@ -77,6 +77,7 @@ export const api = {
     connectionId: string
     requestId: string
     query: string
+    tabId?: string
     queryParams?: Record<string, unknown>
     options?: ExecOptions
   }): Promise<QueryResponse> {
@@ -88,6 +89,7 @@ export const api = {
     requestId: string
     query: string
     kind: PlanKind
+    tabId?: string
     queryParams?: Record<string, unknown>
     options?: ExecOptions
   }): Promise<QueryResponse> {
@@ -101,6 +103,12 @@ export const api = {
 
   cancelQuery(connectionId: string, requestId: string): Promise<void> {
     return invoke('cancel_query', { connectionId, requestId })
+  },
+
+  /** Releases the session of one tab, when the tab closes or moves to
+   *  another connection. */
+  releaseSession(connectionId: string, tabId: string): Promise<void> {
+    return invoke('release_session', { connectionId, tabId })
   },
 
   listDatabases(connectionId: string): Promise<DatabaseRef[]> {

@@ -36,6 +36,9 @@ describe('api', () => {
     await api.cancelQuery('c1', 'r1')
     expect(invoke).toHaveBeenCalledWith('cancel_query', { connectionId: 'c1', requestId: 'r1' })
 
+    await api.releaseSession('c1', 't1')
+    expect(invoke).toHaveBeenCalledWith('release_session', { connectionId: 'c1', tabId: 't1' })
+
     await api.listDatabases('c1')
     expect(invoke).toHaveBeenCalledWith('list_databases', { connectionId: 'c1' })
 

@@ -699,6 +699,7 @@ async function onExportAll(format: 'csv' | 'json'): Promise<void> {
       defaultName: exportFileName(props.tab.title, format),
       format,
       maxRows: settings.settings.exportRowLimit,
+      tabId: props.tab.id,
       queryParams: lastRun.params,
     })
     if (!summary) {

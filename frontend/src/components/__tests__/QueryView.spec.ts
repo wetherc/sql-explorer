@@ -1129,6 +1129,7 @@ describe('QueryView edge paths', () => {
         defaultName: expect.stringContaining('.csv'),
         format: 'csv',
         maxRows: 1000000,
+        tabId: expect.any(String),
       }),
     )
     expect(useUiStore().notices.some((notice) => notice.level === 'success')).toBe(true)

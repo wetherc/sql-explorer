@@ -112,6 +112,8 @@ describe('query store', () => {
       connectionId: 'c1',
       requestId: expect.any(String),
       query: 'SELECT 1',
+      tabId: 't1',
+      queryParams: undefined,
       options: { maxRows: 25, timeoutSecs: 300 },
     })
 
@@ -223,6 +225,8 @@ describe('query store', () => {
       requestId: expect.any(String),
       query: 'SELECT 1',
       kind: 'estimated',
+      tabId: 't1',
+      queryParams: undefined,
       options: { maxRows: 10000, timeoutSecs: 300 },
     })
     expect(queries.stateFor('t1').panes[0]?.label).toBe('Estimated plan')
