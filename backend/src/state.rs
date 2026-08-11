@@ -142,7 +142,9 @@ pub struct AppState {
     /// A second driver for each connection that has asked for one. Background
     /// work runs there, so that it never waits behind a statement of the user
     /// and no statement of the user waits behind it.
-    pub background: Mutex<HashMap<String, BackgroundDriver>>,
+    /// The record of each one carries the moment of its last answer, so that
+    /// a read can confirm a driver that stood idle.
+    pub background: Mutex<HashMap<String, Arc<Session>>>,
     /// One record for each statement that runs, keyed by the identifier the
     /// user interface gave it.
     pub running: Mutex<HashMap<String, RunningRequest>>,
@@ -200,18 +202,18 @@ impl AppState {
         self.background.lock().await.remove(connection_id);
     }
 
-    /// Returns the background driver of a connection, when one is open.
-    pub async fn background_driver(&self, connection_id: &str) -> Option<BackgroundDriver> {
+    /// Returns the background session of a connection, when one is open.
+    pub async fn background_session(&self, connection_id: &str) -> Option<Arc<Session>> {
         self.background.lock().await.get(connection_id).cloned()
     }
 
-    /// Keeps a background driver for a connection and returns it.
+    /// Keeps a background driver for a connection and returns its session.
     pub async fn set_background_driver(
         &self,
         connection_id: &str,
         driver: Box<dyn DatabaseDriver>,
-    ) -> BackgroundDriver {
-        let held: BackgroundDriver = Arc::new(Mutex::new(driver));
+    ) -> Arc<Session> {
+        let held = Arc::new(Session::new(driver));
         self.background
             .lock()
             .await

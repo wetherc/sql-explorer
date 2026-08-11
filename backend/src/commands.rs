@@ -858,17 +858,44 @@ pub async fn schema_snapshot<R: Runtime>(
     guard.schema_snapshot(&request.database, limit).await
 }
 
+/// Confirms that a background driver that stood idle still answers. A driver
+/// that gives no answer must go, because the server closed its side.
+async fn background_answers(session: &Arc<Session>) -> bool {
+    if !session.needs_ping || !session.needs_check().await {
+        return true;
+    }
+    // One check at a time for each driver, so two reads send one ping.
+    let _guard = session.health.lock().await;
+    if !session.needs_check().await {
+        return true;
+    }
+    let healthy = {
+        let mut driver = session.driver.lock().await;
+        driver.ping().await.is_ok()
+    };
+    if healthy {
+        session.mark_ok().await;
+    }
+    healthy
+}
+
 /// Returns the background driver of a connection, and opens one when the
-/// connection has none. A driver that cannot open gives the driver of the
-/// default session, because a snapshot that waits is better than no
-/// completions.
+/// connection has none or when the one it has stopped answering. A driver
+/// that cannot open gives the driver of the default session, because a
+/// snapshot that waits is better than no completions.
 async fn background_driver(
     state: &AppState,
     connection_id: &str,
     open: &OpenConnection,
 ) -> Result<Arc<tokio::sync::Mutex<Box<dyn DatabaseDriver>>>> {
-    if let Some(driver) = state.background_driver(connection_id).await {
-        return Ok(driver);
+    if let Some(session) = state.background_session(connection_id).await {
+        if background_answers(&session).await {
+            return Ok(session.driver.clone());
+        }
+        log::warn!(
+            "The second connection of '{connection_id}' stopped answering. Opening it again."
+        );
+        state.clear_background(connection_id).await;
     }
     let full = match with_password(state, open.descriptor.clone()) {
         Ok(full) => full,
@@ -878,7 +905,11 @@ async fn background_driver(
         }
     };
     match open_driver(&full).await {
-        Ok(driver) => Ok(state.set_background_driver(connection_id, driver).await),
+        Ok(driver) => Ok(state
+            .set_background_driver(connection_id, driver)
+            .await
+            .driver
+            .clone()),
         Err(error) => {
             log::warn!(
                 "A second connection for '{connection_id}' could not open, so the schema is \
@@ -2569,6 +2600,109 @@ mod tests {
         assert!(!Arc::ptr_eq(&frail, &replaced));
         let default_after = open.default_session().await.unwrap();
         assert!(Arc::ptr_eq(&default_before, &default_after));
+    }
+
+    /// A driver for the tests of the background connection. It counts the
+    /// pings it answered and fails every ping when it is told to.
+    struct PingDriver {
+        pings: Arc<std::sync::atomic::AtomicUsize>,
+        answers: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl DatabaseDriver for PingDriver {
+        fn capabilities(&self) -> crate::db::DriverCapabilities {
+            crate::db::DriverCapabilities::default()
+        }
+        fn dialect(&self) -> Dialect {
+            Dialect::Sqlite
+        }
+        async fn ping(&mut self) -> Result<()> {
+            self.pings.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match self.answers {
+                true => Ok(()),
+                false => Err(Error::NotConnected("the second connection".into())),
+            }
+        }
+        async fn list_databases(&mut self) -> Result<Vec<Database>> {
+            Ok(Vec::new())
+        }
+        async fn list_schemas(&mut self, _database: &str) -> Result<Vec<Schema>> {
+            Ok(Vec::new())
+        }
+        async fn list_tables(
+            &mut self,
+            _database: &str,
+            _schema: Option<&str>,
+        ) -> Result<Vec<Table>> {
+            Ok(Vec::new())
+        }
+        async fn list_columns(
+            &mut self,
+            _database: &str,
+            _schema: Option<&str>,
+            _table: &str,
+        ) -> Result<Vec<AppColumn>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Puts a background driver into the state and gives back the count of
+    /// its pings, together with the session that holds it.
+    async fn background_stub(
+        state: &AppState,
+        answers: bool,
+    ) -> (Arc<Session>, Arc<std::sync::atomic::AtomicUsize>) {
+        let pings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let session = state
+            .set_background_driver(
+                "s1",
+                Box::new(PingDriver {
+                    pings: pings.clone(),
+                    answers,
+                }),
+            )
+            .await;
+        (session, pings)
+    }
+
+    #[tokio::test]
+    async fn a_background_driver_that_stood_idle_answers_a_ping_first() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (_app, state) = state_with_sqlite(descriptor).await;
+        let open = state.connection("s1").await.unwrap();
+        let (session, pings) = background_stub(&state, true).await;
+
+        // A driver that answered a moment ago goes out without a ping.
+        let fresh = background_driver(&state, "s1", &open).await.unwrap();
+        assert!(Arc::ptr_eq(&fresh, &session.driver));
+        assert_eq!(pings.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        session.age(crate::state::HEALTH_CHECK_AFTER).await;
+        let checked = background_driver(&state, "s1", &open).await.unwrap();
+        assert!(Arc::ptr_eq(&checked, &session.driver));
+        assert_eq!(pings.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // The ping moved the moment of the last answer, so the next read
+        // sends no second ping.
+        background_driver(&state, "s1", &open).await.unwrap();
+        assert_eq!(pings.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_background_driver_that_stopped_answering_opens_again() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (_app, state) = state_with_sqlite(descriptor).await;
+        let open = state.connection("s1").await.unwrap();
+        let (session, pings) = background_stub(&state, false).await;
+        session.age(crate::state::HEALTH_CHECK_AFTER).await;
+
+        let opened = background_driver(&state, "s1", &open).await.unwrap();
+
+        assert_eq!(pings.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(!Arc::ptr_eq(&opened, &session.driver));
+        // The new driver reaches the database.
+        opened.lock().await.ping().await.unwrap();
     }
 
     #[tokio::test]
