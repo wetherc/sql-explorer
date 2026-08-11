@@ -6,10 +6,11 @@ correction, the order of the work, and the risks. The claims about the code
 were examined against the source on 2026-08-10, and the errors of the first
 version are corrected here.
 
-The work runs in this order across the sections: section 2, then section 3,
-then section 1. Section 2 and section 3 are small and depend on nothing.
-Section 1 adds new commands, and those commands follow the request
-convention that `frontend/src/lib/api.ts` states above its `call` helper.
+The work runs in this order across the sections: section 3, then section 1,
+then section 2. Section 3 is a measurement and depends on nothing. Section 1
+adds new commands, and those commands follow the request convention that
+`frontend/src/lib/api.ts` states above its `call` helper. Section 2 comes
+last.
 
 ## 1. Stream the rows of a result instead of gathering them in memory
 
