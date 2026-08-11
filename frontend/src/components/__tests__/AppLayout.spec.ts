@@ -748,6 +748,7 @@ describe('AppLayout keys', () => {
         dirty: false,
         savedQueryId: null,
         params: [],
+        filePath: null,
       },
     ]
     tabs.activeTabId = 'key-tab'

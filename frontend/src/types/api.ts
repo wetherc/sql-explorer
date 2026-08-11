@@ -159,6 +159,13 @@ export interface QueryResponse {
   stats: QueryStats | null
 }
 
+/** What one entry of a folder is. */
+export interface FolderEntry {
+  name: string
+  path: string
+  kind: 'folder' | 'file'
+}
+
 /** What an export to a file needs to know. */
 export interface ExportRequest {
   connectionId: string

@@ -11,6 +11,7 @@ import type {
   ExecOptions,
   ExportRequest,
   ExportSummary,
+  FolderEntry,
   SaveFileRequest,
   HistoryEntry,
   IndexRef,
@@ -268,6 +269,33 @@ export const api = {
 
   saveWorkspace(workspace: unknown): Promise<void> {
     return invoke('save_workspace', { workspace })
+  },
+
+  /** Asks the user for a folder and records it. Gives back the path, or
+   *  null when the user closed the dialog. */
+  pickFolder(): Promise<string | null> {
+    return invoke('pick_folder')
+  },
+
+  /** Gives a folder of the last session back to the backend. Gives back
+   *  false when that folder is no longer a folder on the disk. */
+  restoreFolder(path: string): Promise<boolean> {
+    return invoke('restore_folder', { path })
+  },
+
+  /** Lists the entries of one folder that the user opened. */
+  listFolder(path: string): Promise<FolderEntry[]> {
+    return invoke('list_folder', { path })
+  },
+
+  /** Reads the text of one file inside a folder that the user opened. */
+  readTextFile(path: string): Promise<string> {
+    return invoke('read_text_file', { path })
+  },
+
+  /** Writes the text of one file inside a folder that the user opened. */
+  writeTextFile(path: string, contents: string): Promise<void> {
+    return invoke('write_text_file', { path, contents })
   },
 
   /** Asks the user for a path and writes text there. Gives back the path,

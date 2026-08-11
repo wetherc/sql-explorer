@@ -85,6 +85,7 @@ async function mountView(query = 'SELECT 1') {
         dirty: false,
         savedQueryId: null,
         params: [],
+        filePath: null,
       },
     },
   })
@@ -120,6 +121,7 @@ describe('QueryView', () => {
           dirty: false,
           savedQueryId: null,
           params: [],
+          filePath: null,
         },
       },
     })
@@ -626,6 +628,7 @@ describe('QueryView', () => {
           dirty: false,
           savedQueryId: null,
           params: [],
+          filePath: null,
         },
       },
     })
@@ -709,6 +712,7 @@ describe('QueryView', () => {
           dirty: false,
           savedQueryId: null,
           params: [],
+          filePath: null,
         },
       },
     })
@@ -731,6 +735,7 @@ describe('QueryView', () => {
         dirty: false,
         savedQueryId: null,
         params: [],
+        filePath: null,
       },
     ]
     await wrapper.findComponent({ name: 'SqlEditor' }).vm.$emit('update:modelValue', 'SELECT 2')
@@ -749,6 +754,7 @@ describe('QueryView', () => {
         dirty: false,
         savedQueryId: null,
         params: [],
+        filePath: null,
       },
     ]
     await wrapper.findComponent({ name: 'VSelect' }).vm.$emit('update:modelValue', 'c2')
@@ -841,6 +847,7 @@ describe('QueryView', () => {
         dirty: true,
         savedQueryId: null,
         params: [],
+        filePath: null,
       },
     ]
 
@@ -977,6 +984,7 @@ describe('QueryView', () => {
           dirty: false,
           savedQueryId: null,
           params: [],
+          filePath: null,
         },
       },
     })
@@ -1044,6 +1052,7 @@ describe('QueryView details', () => {
           dirty: false,
           savedQueryId: null,
           params: [],
+          filePath: null,
         },
       },
     })
@@ -1062,6 +1071,7 @@ describe('QueryView details', () => {
           dirty: false,
           savedQueryId: null,
           params: [],
+          filePath: null,
         },
       },
     })
@@ -1493,6 +1503,7 @@ describe('QueryView edge paths', () => {
           dirty: false,
           savedQueryId: null,
           params: [],
+          filePath: null,
         },
       },
     })

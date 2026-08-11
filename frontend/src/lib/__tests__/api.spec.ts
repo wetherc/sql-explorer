@@ -101,6 +101,24 @@ describe('api', () => {
     await api.saveWorkspace({ tabs: [] })
     expect(invoke).toHaveBeenCalledWith('save_workspace', { workspace: { tabs: [] } })
 
+    await api.pickFolder()
+    expect(invoke).toHaveBeenCalledWith('pick_folder')
+
+    await api.restoreFolder('/data')
+    expect(invoke).toHaveBeenCalledWith('restore_folder', { path: '/data' })
+
+    await api.listFolder('/data')
+    expect(invoke).toHaveBeenCalledWith('list_folder', { path: '/data' })
+
+    await api.readTextFile('/data/a.sql')
+    expect(invoke).toHaveBeenCalledWith('read_text_file', { path: '/data/a.sql' })
+
+    await api.writeTextFile('/data/a.sql', 'SELECT 1')
+    expect(invoke).toHaveBeenCalledWith('write_text_file', {
+      path: '/data/a.sql',
+      contents: 'SELECT 1',
+    })
+
     await api.saveTextFile({
       defaultName: 'a.csv',
       filterLabel: 'CSV',
