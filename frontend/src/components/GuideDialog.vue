@@ -52,12 +52,22 @@ function close(open: boolean): void {
 </script>
 
 <style scoped>
+/* The dialog holds one size, whatever the topic that stands open, so the
+   window does not jump as the reader moves from topic to topic. The text of
+   a long topic scrolls inside it. */
+.guide-card {
+  height: 70vh;
+}
+
 .guide-body {
-  min-height: 320px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .topic-list {
   flex: 0 0 200px;
+  overflow-y: auto;
   border-right: var(--app-divider-soft);
 }
 
