@@ -320,24 +320,40 @@ const sourceRows = computed(() =>
 
 /**
  * The text of every row in small letters, which the filter matches against.
- * A computed property runs only when it is read, so this text is built the
- * first time a filter is active and once for each result after that.
+ * The copy weighs as much as the result itself, so it lives only while a
+ * filter is active: it is built when the first filter arrives, kept between
+ * keystrokes, and released when the filter clears or the result changes.
  */
-const rowTexts = computed(() =>
-  props.result.rows.map((row) =>
-    row
-      .map((cell) => formatCell(cell))
-      .join(' ')
-      .toLowerCase(),
-  ),
-)
+let rowTexts: string[] | null = null
+let rowTextsSource: typeof props.result.rows | null = null
+
+function rowTextsFor(rows: typeof props.result.rows): string[] {
+  if (rowTexts === null || rowTextsSource !== rows) {
+    rowTexts = rows.map((row) =>
+      row
+        .map((cell) => formatCell(cell))
+        .join(' ')
+        .toLowerCase(),
+    )
+    rowTextsSource = rows
+  }
+  return rowTexts
+}
+
+watch(appliedSearch, (needle) => {
+  if (needle === '') {
+    rowTexts = null
+    rowTextsSource = null
+  }
+})
 
 const filteredRows = computed(() => {
   const needle = appliedSearch.value
   if (needle === '') {
     return sourceRows.value
   }
-  return sourceRows.value.filter((entry) => rowTexts.value[entry.sourceIndex]?.includes(needle))
+  const texts = rowTextsFor(props.result.rows)
+  return sourceRows.value.filter((entry) => texts[entry.sourceIndex]?.includes(needle))
 })
 
 const sortedRows = computed(() => {
