@@ -22,6 +22,10 @@ The application is built with Vue 3, Vuetify and [Tauri 2](https://tauri.app/).
   the user, Microsoft Entra ID through the Azure CLI, and an access token that
   the user gives. The account of the user reaches the server through SSPI on
   Windows and through Kerberos on macOS and Linux.
+- An Athena connection takes its credentials from the AWS tools of the machine,
+  with a profile name, or from an access key ID, a secret access key and an
+  optional session token that the user pastes into the form. The two secrets go
+  into the keychain of the operating system.
 - An Athena connection can reuse the result of an earlier run up to an age that
   the user gives, which costs nothing because the engine scans no data.
 - Timeouts for the connection and for a statement, a row limit, a read-only

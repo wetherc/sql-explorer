@@ -138,12 +138,45 @@
           placeholder="us-east-1"
           data-test="aws-region-field"
         />
+        <v-select
+          v-model="draft.options.awsCredentialSource"
+          :items="awsSourceItems"
+          item-title="title"
+          item-value="value"
+          label="Credentials"
+          data-test="aws-source-select"
+        />
         <v-text-field
+          v-if="draft.options.awsCredentialSource === AwsCredentialSource.Chain"
           v-model="draft.options.awsProfile"
           label="AWS profile"
           placeholder="default"
           data-test="aws-profile-field"
         />
+        <template v-else>
+          <v-text-field
+            v-model="draft.options.awsAccessKeyId"
+            label="Access key ID"
+            placeholder="AKIA..."
+            data-test="aws-access-key-field"
+          />
+          <v-text-field
+            v-model="awsSecretAccessKey"
+            label="Secret access key"
+            type="password"
+            :hint="awsSecretHint"
+            persistent-hint
+            data-test="aws-secret-field"
+          />
+          <v-text-field
+            v-model="awsSessionToken"
+            label="Session token"
+            type="password"
+            :hint="awsTokenHint"
+            persistent-hint
+            data-test="aws-token-field"
+          />
+        </template>
         <v-text-field
           v-model="draft.options.athenaWorkgroup"
           label="Workgroup"
@@ -319,7 +352,7 @@ import { computed, onMounted, nextTick, ref, watch } from 'vue'
 import { open as openFileDialog } from '@tauri-apps/plugin-dialog'
 import { useConnectionsStore, defaultPortFor, validateConnection } from '@/stores/connections'
 import { useUiStore } from '@/stores/ui'
-import { DbType, MssqlAuth, TlsMode, type SavedConnection } from '@/types/api'
+import { AwsCredentialSource, DbType, MssqlAuth, TlsMode, type SavedConnection } from '@/types/api'
 
 const props = defineProps<{
   connection: SavedConnection
@@ -334,6 +367,8 @@ const ui = useUiStore()
 
 const draft = ref<SavedConnection>(clone(props.connection))
 const password = ref(props.connection.password ?? '')
+const awsSecretAccessKey = ref(props.connection.awsSecretAccessKey ?? '')
+const awsSessionToken = ref(props.connection.awsSessionToken ?? '')
 const showPassword = ref(false)
 const tokenField = ref<{ focus: () => void } | null>(null)
 
@@ -350,6 +385,11 @@ const tlsItems = [
   { title: 'Encrypt, accept any certificate', value: TlsMode.Require },
   { title: 'Encrypt when the server offers it', value: TlsMode.Prefer },
   { title: 'No encryption', value: TlsMode.Disable },
+]
+
+const awsSourceItems = [
+  { title: 'The AWS tools of this machine', value: AwsCredentialSource.Chain },
+  { title: 'Keys that you paste here', value: AwsCredentialSource.Keys },
 ]
 
 const colorItems = [
@@ -414,14 +454,34 @@ const passwordHint = computed(() =>
     : 'Leave this empty to keep the password that is already stored.',
 )
 
-const problems = computed(() => validateConnection(withPassword()))
+const awsSecretHint = computed(() =>
+  props.isNew
+    ? 'The secret access key goes into the keychain of the operating system.'
+    : 'Leave this empty to keep the secret access key that is already stored.',
+)
+
+const awsTokenHint = computed(() => {
+  if (draft.value.options.awsSessionTokenSet) {
+    return 'Leave this empty to keep the stored token. A token lives for a limited time.'
+  }
+  return 'A permanent pair of keys needs no session token.'
+})
+
+const problems = computed(() => validateConnection(withSecrets()))
 
 function clone(connection: SavedConnection): SavedConnection {
   return { ...connection, options: { ...connection.options } }
 }
 
-function withPassword(): SavedConnection {
-  return { ...draft.value, options: { ...draft.value.options }, password: password.value }
+/** The draft with every secret that the user typed. */
+function withSecrets(): SavedConnection {
+  return {
+    ...draft.value,
+    options: { ...draft.value.options },
+    password: password.value,
+    awsSecretAccessKey: awsSecretAccessKey.value,
+    awsSessionToken: awsSessionToken.value,
+  }
 }
 
 function onEngineChange(value: DbType): void {
@@ -448,11 +508,11 @@ async function chooseFile(): Promise<void> {
 }
 
 async function test(): Promise<void> {
-  await connections.test(withPassword())
+  await connections.test(withSecrets())
 }
 
 async function saveConnection(): Promise<void> {
-  const record = withPassword()
+  const record = withSecrets()
   if (props.needsNewToken && needsAccessToken.value && password.value.trim() === '') {
     // The stored token is too old, so an empty box cannot mean "keep it".
     ui.warn('Paste a new access token, or choose another authentication method.')
@@ -461,6 +521,12 @@ async function saveConnection(): Promise<void> {
   if (!props.isNew && password.value === '') {
     // An empty box means that the stored password stays as it is.
     record.password = null
+  }
+  if (!props.isNew && awsSecretAccessKey.value === '') {
+    record.awsSecretAccessKey = null
+  }
+  if (!props.isNew && awsSessionToken.value === '') {
+    record.awsSessionToken = null
   }
   const saved = await connections.save(record)
   if (saved) {
@@ -474,6 +540,8 @@ watch(
   (value) => {
     draft.value = clone(value)
     password.value = value.password ?? ''
+    awsSecretAccessKey.value = value.awsSecretAccessKey ?? ''
+    awsSessionToken.value = value.awsSessionToken ?? ''
     showPassword.value = false
     void focusToken()
   },

@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { api } from '@/lib/api'
 import { useUiStore } from './ui'
 import {
+  AwsCredentialSource,
   ConnectionHealth,
   DbType,
   ErrorKind,
@@ -75,6 +76,15 @@ export function validateConnection(connection: SavedConnection): string[] {
         !connection.options.athenaOutputLocation?.trim()
       ) {
         problems.push('An Athena connection needs a workgroup or an output location.')
+      }
+      // The secret access key is not checked here, because the keychain can
+      // already hold it and the form then shows an empty box. The backend
+      // refuses an incomplete pair when the connection opens.
+      if (
+        connection.options.awsCredentialSource === AwsCredentialSource.Keys &&
+        !connection.options.awsAccessKeyId?.trim()
+      ) {
+        problems.push('An Athena connection with keys needs an access key ID.')
       }
       break
     default:

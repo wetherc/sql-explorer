@@ -14,7 +14,7 @@ const {
   validateConnection,
 } = await import('@/stores/connections')
 const { useUiStore } = await import('@/stores/ui')
-const { ConnectionHealth, DbType, MssqlAuth } = await import('@/types/api')
+const { AwsCredentialSource, ConnectionHealth, DbType, MssqlAuth } = await import('@/types/api')
 
 describe('newConnection', () => {
   it('starts a network connection on the local host with its default port', () => {
@@ -110,6 +110,22 @@ describe('validateConnection', () => {
 
     connection.options.athenaWorkgroup = null
     connection.options.athenaOutputLocation = 's3://bucket/'
+    expect(validateConnection(connection)).toEqual([])
+  })
+
+  it('needs an access key ID for Athena with keys', () => {
+    const connection = connectionFixture({ dbType: DbType.Athena })
+    connection.options.awsRegion = 'us-east-1'
+    connection.options.athenaWorkgroup = 'primary'
+    connection.options.awsCredentialSource = AwsCredentialSource.Keys
+
+    expect(validateConnection(connection)).toEqual([
+      'An Athena connection with keys needs an access key ID.',
+    ])
+
+    // The secret access key is not asked for here, because the keychain
+    // can already hold it.
+    connection.options.awsAccessKeyId = 'AKIAEXAMPLE'
     expect(validateConnection(connection)).toEqual([])
   })
 })

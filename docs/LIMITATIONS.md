@@ -248,3 +248,12 @@ script loses no result set. A single statement that answers with more than
 one result set, such as a call of a procedure, gives back no set after the
 one that reached the limit. The messages of the run say so. A higher row
 limit in the settings brings the later sets back.
+
+## A pasted AWS session token is not made fresh again
+
+An Athena connection that takes the keys of the form holds them as they were
+typed. A session token lives for a limited time, and the application makes
+no new one, so a token that is too old stops the connection until the user
+pastes a new one. The credentials of the AWS tools of the machine read a
+fresh token on each connection, so a profile is the durable choice for a
+credential that expires.

@@ -14,7 +14,7 @@ const ConnectionForm = (await import('@/components/ConnectionForm.vue')).default
 const { mountWithPlugins, settle } = await import('./mount')
 const { useConnectionsStore } = await import('@/stores/connections')
 const { useUiStore } = await import('@/stores/ui')
-const { DbType, MssqlAuth, TlsMode } = await import('@/types/api')
+const { AwsCredentialSource, DbType, MssqlAuth, TlsMode } = await import('@/types/api')
 type EngineInfo = import('@/types/api').EngineInfo
 
 const engines: EngineInfo[] = [
@@ -393,6 +393,106 @@ describe('ConnectionForm advanced options', () => {
         }),
       }),
     )
+  })
+
+  /** An Athena record whose credentials come from typed keys. */
+  function athenaWithKeys() {
+    const athena = connectionFixture({ dbType: DbType.Athena, host: null, port: null })
+    athena.options.awsRegion = 'us-east-1'
+    athena.options.athenaWorkgroup = 'primary'
+    athena.options.awsCredentialSource = AwsCredentialSource.Keys
+    return athena
+  }
+
+  it('shows the profile for the chain and the keys for the keys', async () => {
+    const wrapper = await mountForm(connectionFixture({ dbType: DbType.Athena }))
+    expect(wrapper.find('[data-test="aws-profile-field"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="aws-access-key-field"]').exists()).toBe(false)
+
+    await wrapper
+      .findComponent('[data-test="aws-source-select"]')
+      .setValue(AwsCredentialSource.Keys)
+    await settle()
+
+    // The profile belongs to the chain, so it goes when the keys arrive.
+    expect(wrapper.find('[data-test="aws-profile-field"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="aws-access-key-field"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="aws-secret-field"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="aws-token-field"]').exists()).toBe(true)
+  })
+
+  it('sends the keys that the user typed', async () => {
+    apiStub.saveConnection.mockResolvedValue(undefined)
+    const wrapper = await mountForm(athenaWithKeys())
+
+    await wrapper.find('[data-test="aws-access-key-field"] input').setValue('AKIAEXAMPLE')
+    await wrapper.find('[data-test="aws-secret-field"] input').setValue('the-secret')
+    await wrapper.find('[data-test="aws-token-field"] input').setValue('the-token')
+    await wrapper.find('[data-test="save-button"]').trigger('click')
+    await settle()
+
+    expect(apiStub.saveConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        awsSecretAccessKey: 'the-secret',
+        awsSessionToken: 'the-token',
+        options: expect.objectContaining({
+          awsAccessKeyId: 'AKIAEXAMPLE',
+          awsCredentialSource: AwsCredentialSource.Keys,
+        }),
+      }),
+    )
+  })
+
+  it('keeps a stored key when the box of a saved connection stays empty', async () => {
+    apiStub.saveConnection.mockResolvedValue(undefined)
+    const record = athenaWithKeys()
+    record.options.awsAccessKeyId = 'AKIAEXAMPLE'
+    const wrapper = await mountForm(record)
+
+    await wrapper.find('[data-test="save-button"]').trigger('click')
+    await settle()
+
+    // A null field tells the backend to keep the secret of the keychain.
+    expect(apiStub.saveConnection).toHaveBeenCalledWith(
+      expect.objectContaining({ awsSecretAccessKey: null, awsSessionToken: null }),
+    )
+  })
+
+  it('sends an empty key of a new connection, which stores nothing', async () => {
+    apiStub.saveConnection.mockResolvedValue(undefined)
+    const record = athenaWithKeys()
+    record.options.awsAccessKeyId = 'AKIAEXAMPLE'
+    const wrapper = await mountForm(record, true)
+
+    await wrapper.find('[data-test="save-button"]').trigger('click')
+    await settle()
+
+    expect(apiStub.saveConnection).toHaveBeenCalledWith(
+      expect.objectContaining({ awsSecretAccessKey: '', awsSessionToken: '' }),
+    )
+  })
+
+  it('asks for an access key ID before it saves a connection with keys', async () => {
+    const wrapper = await mountForm(athenaWithKeys())
+
+    await wrapper.find('[data-test="save-button"]').trigger('click')
+    await settle()
+
+    expect(apiStub.saveConnection).not.toHaveBeenCalled()
+    expect(
+      useUiStore().notices.some((notice) => notice.message.includes('needs an access key ID')),
+    ).toBe(true)
+  })
+
+  it('names the stored session token in the hint of its field', async () => {
+    const record = athenaWithKeys()
+    record.options.awsSessionTokenSet = true
+    const wrapper = await mountForm(record)
+    expect(wrapper.find('[data-test="aws-token-field"]').text()).toContain('keep the stored token')
+
+    const fresh = athenaWithKeys()
+    const other = await mountForm(fresh)
+    expect(other.find('[data-test="aws-token-field"]').text()).toContain('needs no session token')
   })
 })
 
