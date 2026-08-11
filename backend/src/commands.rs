@@ -365,7 +365,9 @@ pub async fn execute_query<R: Runtime>(
     let open = ensure_healthy(&app, &state, &connection_id).await?;
     let options = options.unwrap_or_else(|| open.descriptor.exec_options());
     let (query, bound) = prepare_parameters(&query, open.dialect, query_params.as_ref())?;
-    let token = state.start_request(&request_id).await;
+    let token = state
+        .start_request(&request_id, open.cancel_handle.clone())
+        .await;
 
     let outcome = {
         let driver = open.driver.clone();
@@ -417,7 +419,9 @@ pub async fn explain_query<R: Runtime>(
     // A plan needs the values of the parameters, because the plan of a
     // statement depends on the values it holds.
     let (query, bound) = prepare_parameters(&query, open.dialect, query_params.as_ref())?;
-    let token = state.start_request(&request_id).await;
+    let token = state
+        .start_request(&request_id, open.cancel_handle.clone())
+        .await;
 
     let outcome = {
         let driver = open.driver.clone();
@@ -527,22 +531,27 @@ async fn reopen_after_stop<R: Runtime>(
 }
 
 /// Asks the server to stop a statement, and stops waiting for it.
+///
+/// The record of the statement carries the handle of the session that runs
+/// it, so the stop reaches the correct session. The identifier of the
+/// connection stays in the call for older callers, but the lookup does not
+/// need it.
 #[tauri::command]
 pub async fn cancel_query(
-    connection_id: String,
+    #[allow(unused_variables)] connection_id: String,
     request_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<()> {
-    // The handle does not need the lock of the driver, so it works while
-    // the statement runs.
-    if let Ok(open) = state.connection(&connection_id).await {
-        if let Some(handle) = open.cancel_handle.clone() {
+    if let Some(request) = state.take_request(&request_id).await {
+        // The handle does not need the lock of the driver, so it works
+        // while the statement runs.
+        if let Some(handle) = request.cancel_handle {
             if let Err(error) = handle.cancel().await {
                 log::warn!("The server did not stop the statement: {error}");
             }
         }
+        request.token.cancel();
     }
-    state.cancel_request(&request_id).await;
     Ok(())
 }
 
@@ -1214,7 +1223,9 @@ pub async fn export_query<R: Runtime>(
         timeout_secs: open.descriptor.exec_options().timeout_secs,
     };
     let (query, bound) = prepare_parameters(&query, open.dialect, query_params.as_ref())?;
-    let token = state.start_request(&request_id).await;
+    let token = state
+        .start_request(&request_id, open.cancel_handle.clone())
+        .await;
 
     // The sink writes to a temporary path. An error, a stop or a time limit
     // leaves the run before `finish`, and the drop of the sink then removes

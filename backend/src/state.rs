@@ -105,6 +105,14 @@ pub struct ConnectionInfo {
 /// A driver that only background work uses.
 pub type BackgroundDriver = Arc<Mutex<Box<dyn DatabaseDriver>>>;
 
+/// One statement that runs, with the means to stop it.
+pub struct RunningRequest {
+    /// Ends the wait for the statement.
+    pub token: CancellationToken,
+    /// Asks the server to stop the statement, on the session that runs it.
+    pub cancel_handle: Option<Arc<dyn CancelHandle>>,
+}
+
 /// The state that every command shares.
 pub struct AppState {
     pub connections: Mutex<HashMap<String, OpenConnection>>,
@@ -112,9 +120,9 @@ pub struct AppState {
     /// work runs there, so that it never waits behind a statement of the user
     /// and no statement of the user waits behind it.
     pub background: Mutex<HashMap<String, BackgroundDriver>>,
-    /// One token for each statement that runs, keyed by the identifier the
+    /// One record for each statement that runs, keyed by the identifier the
     /// user interface gave it.
-    pub running: Mutex<HashMap<String, CancellationToken>>,
+    pub running: Mutex<HashMap<String, RunningRequest>>,
     /// One lock for each connection, so that two commands that find the
     /// same idle connection do not both check it and open it again.
     pub health_checks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
@@ -203,31 +211,33 @@ impl AppState {
             .is_some()
     }
 
-    /// Registers a statement that runs and returns its token.
-    pub async fn start_request(&self, request_id: &str) -> CancellationToken {
+    /// Registers a statement that runs, together with the handle that stops
+    /// it on its own session, and returns its token.
+    pub async fn start_request(
+        &self,
+        request_id: &str,
+        cancel_handle: Option<Arc<dyn CancelHandle>>,
+    ) -> CancellationToken {
         let token = CancellationToken::new();
-        self.running
-            .lock()
-            .await
-            .insert(request_id.to_string(), token.clone());
+        self.running.lock().await.insert(
+            request_id.to_string(),
+            RunningRequest {
+                token: token.clone(),
+                cancel_handle,
+            },
+        );
         token
     }
 
-    /// Removes the token of a statement that ended.
+    /// Removes the record of a statement that ended.
     pub async fn end_request(&self, request_id: &str) {
         self.running.lock().await.remove(request_id);
     }
 
-    /// Cancels a statement that runs. Returns true when the identifier
-    /// belonged to a statement.
-    pub async fn cancel_request(&self, request_id: &str) -> bool {
-        match self.running.lock().await.remove(request_id) {
-            Some(token) => {
-                token.cancel();
-                true
-            }
-            None => false,
-        }
+    /// Takes the record of a statement that runs, so that the caller can
+    /// stop it. Returns `None` when the identifier belongs to no statement.
+    pub async fn take_request(&self, request_id: &str) -> Option<RunningRequest> {
+        self.running.lock().await.remove(request_id)
     }
 }
 
@@ -370,22 +380,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_statement_can_be_registered_and_cancelled() {
+    async fn a_statement_can_be_registered_and_taken() {
         let state = state();
-        let token = state.start_request("r1").await;
+        let token = state.start_request("r1", None).await;
         assert!(!token.is_cancelled());
 
-        assert!(state.cancel_request("r1").await);
+        let request = state.take_request("r1").await.expect("the statement runs");
+        assert!(request.cancel_handle.is_none());
+        request.token.cancel();
         assert!(token.is_cancelled());
-        assert!(!state.cancel_request("r1").await);
+        assert!(state.take_request("r1").await.is_none());
     }
 
     #[tokio::test]
-    async fn a_statement_that_ended_leaves_no_token() {
+    async fn a_statement_keeps_the_handle_of_its_session() {
+        struct NoopCancel;
+        #[async_trait]
+        impl crate::db::drivers::CancelHandle for NoopCancel {
+            async fn cancel(&self) -> Result<()> {
+                Ok(())
+            }
+        }
+
         let state = state();
-        state.start_request("r2").await;
+        state.start_request("r1", Some(Arc::new(NoopCancel))).await;
+        let request = state.take_request("r1").await.expect("the statement runs");
+        assert!(request.cancel_handle.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_statement_that_ended_leaves_no_record() {
+        let state = state();
+        state.start_request("r2", None).await;
         state.end_request("r2").await;
-        assert!(!state.cancel_request("r2").await);
+        assert!(state.take_request("r2").await.is_none());
     }
 
     #[test]
