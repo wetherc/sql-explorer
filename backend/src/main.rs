@@ -9,6 +9,7 @@ mod error;
 mod history;
 mod script;
 mod secrets;
+mod session;
 mod sql;
 mod state;
 mod storage;
