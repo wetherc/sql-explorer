@@ -12,6 +12,7 @@ use crate::db::{
 use crate::error::{Error, Result};
 use crate::history::{HistoryEntry, SavedQuery};
 use crate::script::{self, ScriptKind};
+use crate::session::{Session, DEFAULT_SESSION};
 use crate::sql::ParamValues;
 use crate::state::{
     AppState, ConnectionHealth, ConnectionInfo, ConnectionStatusEvent, OpenConnection,
@@ -129,45 +130,72 @@ pub async fn list_active_connections(
         .collect())
 }
 
-/// Confirms that a connection that stood idle still answers, and opens it
-/// again when it does not.
-async fn ensure_healthy<R: Runtime>(
+/// Returns one healthy session of a connection, under the given key.
+///
+/// A key that the pool holds gives its session back after a health check. A
+/// key that the pool does not hold gives the error of a lost connection; the
+/// caller that may open new sessions asks the pool for that first.
+async fn session_for<R: Runtime>(
     app: &AppHandle<R>,
     state: &AppState,
     connection_id: &str,
-) -> Result<OpenConnection> {
+    key: &str,
+) -> Result<(OpenConnection, Arc<Session>)> {
     let open = state.connection(connection_id).await?;
-    if !open.needs_ping || !open.needs_check().await {
-        return Ok(open);
+    let session = match open.sessions.get(key).await {
+        Some(session) => session,
+        None => {
+            return Err(Error::NotConnected(connection_id.to_string()));
+        }
+    };
+    let session = ensure_session_healthy(app, state, connection_id, &open, key, session).await?;
+    Ok((open, session))
+}
+
+/// Confirms that a session that stood idle still answers, and opens a new
+/// one in its place when it does not.
+async fn ensure_session_healthy<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    connection_id: &str,
+    open: &OpenConnection,
+    key: &str,
+    session: Arc<Session>,
+) -> Result<Arc<Session>> {
+    if !session.needs_ping || !session.needs_check().await {
+        return Ok(session);
     }
 
-    // One check at a time for each connection. A command that waited here
-    // takes the connection that the first check left behind, so two
-    // commands never open the same connection twice.
-    let lock = state.health_check_lock(connection_id).await;
-    let _guard = lock.lock().await;
-    let open = state.connection(connection_id).await?;
-    if !open.needs_check().await {
-        return Ok(open);
+    // One check at a time for each session. A command that waited here may
+    // find that the first check put a new session into the slot, and then
+    // takes that one, so two commands never open the same session twice.
+    let health = session.clone();
+    let _guard = health.health.lock().await;
+    if let Some(current) = open.sessions.get(key).await {
+        if !Arc::ptr_eq(&current, &session) {
+            return Ok(current);
+        }
+    }
+    if !session.needs_check().await {
+        return Ok(session);
     }
 
     let healthy = {
-        let mut driver = open.driver.lock().await;
+        let mut driver = session.driver.lock().await;
         driver.ping().await.is_ok()
     };
     if healthy {
-        open.mark_ok().await;
-        return Ok(open);
+        session.mark_ok().await;
+        return Ok(session);
     }
 
     announce(app, connection_id, ConnectionHealth::Reconnecting, None);
-    log::warn!("The connection '{connection_id}' stopped answering. Opening it again.");
+    log::warn!("A session of '{connection_id}' stopped answering. Opening it again.");
 
     let full = with_password(state, open.descriptor.clone())?;
     match open_driver(&full).await {
         Ok(driver) => {
-            let replacement = OpenConnection::new(full, driver);
-            state.insert(connection_id, replacement.clone()).await;
+            let replacement = open.sessions.insert(key, Session::new(driver)).await;
             // The background driver shares the fate of the session that
             // stopped answering, so the next metadata read opens a new one.
             state.clear_background(connection_id).await;
@@ -175,7 +203,10 @@ async fn ensure_healthy<R: Runtime>(
             Ok(replacement)
         }
         Err(error) => {
-            state.remove(connection_id).await;
+            open.sessions.release(key).await;
+            if open.sessions.is_empty().await {
+                state.remove(connection_id).await;
+            }
             announce(
                 app,
                 connection_id,
@@ -187,6 +218,17 @@ async fn ensure_healthy<R: Runtime>(
     }
 }
 
+/// Confirms that the default session of a connection still answers. The
+/// commands that read metadata call this before they lend a driver out.
+async fn ensure_healthy<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    connection_id: &str,
+) -> Result<OpenConnection> {
+    let (open, _session) = session_for(app, state, connection_id, DEFAULT_SESSION).await?;
+    Ok(open)
+}
+
 /// Returns the driver that a metadata read runs on. The read goes to a
 /// second connection when one can open, so that the tree of the explorer
 /// does not wait behind a statement of the user.
@@ -196,7 +238,7 @@ async fn metadata_driver<R: Runtime>(
     connection_id: &str,
 ) -> Result<crate::state::BackgroundDriver> {
     let open = ensure_healthy(app, state, connection_id).await?;
-    Ok(background_driver(state, connection_id, &open).await)
+    background_driver(state, connection_id, &open).await
 }
 
 /// Waits for the number of seconds, or forever when the number is zero.
@@ -221,11 +263,11 @@ pub enum Bounded<T> {
 /// statement then fails through the connection in the time of one round trip.
 pub const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// The time the Stop button gives one connection to report the failure that
-/// the server sends it. A connection with no way to ask the server to stop
+/// The time the Stop button gives one session to report the failure that
+/// the server sends it. A session with no way to ask the server to stop
 /// gets none, because no such failure is coming.
-fn stop_grace(open: &OpenConnection) -> std::time::Duration {
-    if open.cancel_handle.is_some() {
+fn stop_grace(session: &Session) -> std::time::Duration {
+    if session.cancel_handle.is_some() {
         STOP_GRACE
     } else {
         std::time::Duration::ZERO
@@ -362,27 +404,35 @@ pub async fn execute_query<R: Runtime>(
         query_params,
         options,
     } = request;
-    let open = ensure_healthy(&app, &state, &connection_id).await?;
+    let (open, session) = session_for(&app, &state, &connection_id, DEFAULT_SESSION).await?;
     let options = options.unwrap_or_else(|| open.descriptor.exec_options());
     let (query, bound) = prepare_parameters(&query, open.dialect, query_params.as_ref())?;
     let token = state
-        .start_request(&request_id, open.cancel_handle.clone())
+        .start_request(&request_id, session.cancel_handle.clone())
         .await;
 
     let outcome = {
-        let driver = open.driver.clone();
-        let mut guard = driver.lock().await;
+        let mut guard = session.driver.lock().await;
         run_bounded(
             guard.execute_query(&query, bound.as_ref(), &options),
             &token,
             options.timeout_secs,
-            stop_grace(&open),
+            stop_grace(&session),
         )
         .await
     };
 
     state.end_request(&request_id).await;
-    finish_run(&app, &state, &connection_id, &open, outcome).await
+    finish_run(
+        &app,
+        &state,
+        &connection_id,
+        &open,
+        DEFAULT_SESSION,
+        &session,
+        outcome,
+    )
+    .await
 }
 
 /// What one request for a plan carries.
@@ -414,44 +464,54 @@ pub async fn explain_query<R: Runtime>(
         query_params,
         options,
     } = request;
-    let open = ensure_healthy(&app, &state, &connection_id).await?;
+    let (open, session) = session_for(&app, &state, &connection_id, DEFAULT_SESSION).await?;
     let options = options.unwrap_or_else(|| open.descriptor.exec_options());
     // A plan needs the values of the parameters, because the plan of a
     // statement depends on the values it holds.
     let (query, bound) = prepare_parameters(&query, open.dialect, query_params.as_ref())?;
     let token = state
-        .start_request(&request_id, open.cancel_handle.clone())
+        .start_request(&request_id, session.cancel_handle.clone())
         .await;
 
     let outcome = {
-        let driver = open.driver.clone();
-        let mut guard = driver.lock().await;
+        let mut guard = session.driver.lock().await;
         run_bounded(
             guard.explain(&query, bound.as_ref(), kind, &options),
             &token,
             options.timeout_secs,
-            stop_grace(&open),
+            stop_grace(&session),
         )
         .await
     };
 
     state.end_request(&request_id).await;
-    finish_run(&app, &state, &connection_id, &open, outcome).await
+    finish_run(
+        &app,
+        &state,
+        &connection_id,
+        &open,
+        DEFAULT_SESSION,
+        &session,
+        outcome,
+    )
+    .await
 }
 
 /// Closes the accounts of one exchange. A limit that ended the exchange asks
-/// the server to stop the statement, and the connection then goes unless the
+/// the server to stop the statement, and the session then goes unless the
 /// driver reports that it stays fit for use.
 async fn finish_run<R: Runtime, T>(
     app: &AppHandle<R>,
     state: &AppState,
     connection_id: &str,
     open: &OpenConnection,
+    session_key: &str,
+    session: &Arc<Session>,
     outcome: Bounded<T>,
 ) -> Result<T> {
     match outcome {
         Bounded::Answered(Ok(value)) => {
-            open.mark_ok().await;
+            session.mark_ok().await;
             Ok(value)
         }
         Bounded::Answered(Err(error)) => Err(error),
@@ -459,25 +519,26 @@ async fn finish_run<R: Runtime, T>(
             // The wait ended, but the server may still run the statement.
             // The handle asks the server to stop it. A second request for a
             // statement that already stopped does no harm.
-            if let Some(handle) = open.cancel_handle.clone() {
+            if let Some(handle) = session.cancel_handle.clone() {
                 if let Err(stop_error) = handle.cancel().await {
                     log::warn!("The server did not stop the statement: {stop_error}");
                 }
             }
-            if open.keeps_connection_after_stop {
+            if session.keeps_connection_after_stop {
                 return Err(error);
             }
             // The exchange was dropped in the middle of a message, so nothing
-            // can be sent on this connection again. A new one goes in its
-            // place at once, so the user is not left with a tab that cannot
-            // run anything.
-            reopen_after_stop(app, state, connection_id, open, &error).await;
+            // can be sent on this session again. A new one goes in its place
+            // at once, so the user is not left with a tab that cannot run
+            // anything. The other sessions of the connection stay as they
+            // are, because the server itself is healthy.
+            reopen_after_stop(app, state, connection_id, open, session_key, &error).await;
             Err(error)
         }
     }
 }
 
-/// Puts a new connection in the place of one that a limit left unusable.
+/// Puts a new session in the place of one that a limit left unusable.
 ///
 /// The session is a new one. Whatever the old session held, such as a
 /// temporary table, an open transaction or a `SET` of its own, is gone with
@@ -488,6 +549,7 @@ async fn reopen_after_stop<R: Runtime>(
     state: &AppState,
     connection_id: &str,
     open: &OpenConnection,
+    session_key: &str,
     error: &Error,
 ) {
     announce(app, connection_id, ConnectionHealth::Reconnecting, None);
@@ -509,17 +571,17 @@ async fn reopen_after_stop<R: Runtime>(
 
     match open_driver(&full).await {
         Ok(driver) => {
-            state
-                .insert(connection_id, OpenConnection::new(full, driver))
+            open.sessions
+                .insert(session_key, Session::new(driver))
                 .await;
-            // The background driver shared the session that has gone, so the
-            // next metadata read opens one of its own.
-            state.clear_background(connection_id).await;
             announce(app, connection_id, ConnectionHealth::Connected, None);
-            log::info!("The connection '{connection_id}' was opened again after a stop.");
+            log::info!("A session of '{connection_id}' was opened again after a stop.");
         }
         Err(open_error) => {
-            state.remove(connection_id).await;
+            open.sessions.release(session_key).await;
+            if open.sessions.is_empty().await {
+                state.remove(connection_id).await;
+            }
             announce(
                 app,
                 connection_id,
@@ -757,8 +819,8 @@ pub async fn schema_snapshot<R: Runtime>(
         .max(1);
 
     let driver = match request.own_connection.unwrap_or(true) {
-        true => background_driver(&state, &request.connection_id, &open).await,
-        false => open.driver.clone(),
+        true => background_driver(&state, &request.connection_id, &open).await?,
+        false => open.default_session().await?.driver.clone(),
     };
 
     let mut guard = driver.lock().await;
@@ -767,30 +829,31 @@ pub async fn schema_snapshot<R: Runtime>(
 
 /// Returns the background driver of a connection, and opens one when the
 /// connection has none. A driver that cannot open gives the driver of the
-/// user, because a snapshot that waits is better than no completions.
+/// default session, because a snapshot that waits is better than no
+/// completions.
 async fn background_driver(
     state: &AppState,
     connection_id: &str,
     open: &OpenConnection,
-) -> Arc<tokio::sync::Mutex<Box<dyn DatabaseDriver>>> {
+) -> Result<Arc<tokio::sync::Mutex<Box<dyn DatabaseDriver>>>> {
     if let Some(driver) = state.background_driver(connection_id).await {
-        return driver;
+        return Ok(driver);
     }
     let full = match with_password(state, open.descriptor.clone()) {
         Ok(full) => full,
         Err(error) => {
             log::warn!("The password of '{connection_id}' could not be read: {error}");
-            return open.driver.clone();
+            return Ok(open.default_session().await?.driver.clone());
         }
     };
     match open_driver(&full).await {
-        Ok(driver) => state.set_background_driver(connection_id, driver).await,
+        Ok(driver) => Ok(state.set_background_driver(connection_id, driver).await),
         Err(error) => {
             log::warn!(
                 "A second connection for '{connection_id}' could not open, so the schema is \
-                 read on the connection of the user: {error}"
+                 read on the session of the user: {error}"
             );
-            open.driver.clone()
+            Ok(open.default_session().await?.driver.clone())
         }
     }
 }
@@ -820,7 +883,10 @@ pub async fn script_object<R: Runtime>(
     let dialect = open.dialect;
     let name = dialect.qualified_name(database.as_deref(), schema_name.as_deref(), &table_name);
 
-    let mut guard = open.driver.lock().await;
+    // The work only reads the catalog, so it runs on the driver of the
+    // metadata reads and leaves the sessions of the tabs free.
+    let driver = background_driver(&state, &connection_id, &open).await?;
+    let mut guard = driver.lock().await;
     let columns = guard
         .list_columns(
             database.as_deref().unwrap_or_default(),
@@ -848,9 +914,7 @@ pub async fn script_object<R: Runtime>(
     };
 
     drop(guard);
-    let text = script_text(dialect, &name, script_kind, &columns, from_engine)?;
-    open.mark_ok().await;
-    Ok(text)
+    script_text(dialect, &name, script_kind, &columns, from_engine)
 }
 
 /// What the user interface asks for when it wants the text of one object.
@@ -1210,7 +1274,7 @@ pub async fn export_query<R: Runtime>(
         return Ok(None);
     };
 
-    let open = ensure_healthy(&app, &state, &connection_id).await?;
+    let (open, session) = session_for(&app, &state, &connection_id, DEFAULT_SESSION).await?;
     if !crate::sql::only_reads(&query, open.dialect) {
         return Err(Error::Unsupported(
             "An export to a file runs the statement again, so it accepts a statement that only reads."
@@ -1224,7 +1288,7 @@ pub async fn export_query<R: Runtime>(
     };
     let (query, bound) = prepare_parameters(&query, open.dialect, query_params.as_ref())?;
     let token = state
-        .start_request(&request_id, open.cancel_handle.clone())
+        .start_request(&request_id, session.cancel_handle.clone())
         .await;
 
     // The sink writes to a temporary path. An error, a stop or a time limit
@@ -1232,18 +1296,26 @@ pub async fn export_query<R: Runtime>(
     // the part that was written.
     let mut sink = FileSink::create(&path, format)?;
     let outcome = {
-        let driver = open.driver.clone();
-        let mut guard = driver.lock().await;
+        let mut guard = session.driver.lock().await;
         run_bounded(
             guard.execute_stream(&query, bound.as_ref(), &options, &mut sink),
             &token,
             options.timeout_secs,
-            stop_grace(&open),
+            stop_grace(&session),
         )
         .await
     };
     state.end_request(&request_id).await;
-    finish_run(&app, &state, &connection_id, &open, outcome).await?;
+    finish_run(
+        &app,
+        &state,
+        &connection_id,
+        &open,
+        DEFAULT_SESSION,
+        &session,
+        outcome,
+    )
+    .await?;
 
     if !sink.saw_set {
         return Err(Error::Unsupported(

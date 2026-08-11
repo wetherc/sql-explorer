@@ -1,20 +1,21 @@
 //! The state the application holds while it runs.
 //!
-//! Each connection carries its own lock. A command takes a copy of that
-//! lock out of the map and releases the map at once, so a statement that
-//! runs for a long time on one connection leaves the other connections
-//! free.
+//! Each connection carries a pool of sessions. A command takes one session
+//! out of the pool and releases the maps at once, so a statement that runs
+//! for a long time on one session leaves the other sessions and the other
+//! connections free.
 
 use crate::db::drivers::{CancelHandle, DatabaseDriver};
 use crate::db::DriverCapabilities;
 use crate::error::{Error, Result};
 use crate::secrets::SecretStore;
+use crate::session::{Session, SessionPool, DEFAULT_SESSION};
 use crate::sql::Dialect;
 use crate::storage::SavedConnection;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -48,48 +49,36 @@ pub const CONNECTION_STATUS_EVENT: &str = "connection-status";
 pub struct OpenConnection {
     /// The record the connection came from, without the password.
     pub descriptor: SavedConnection,
-    pub driver: Arc<Mutex<Box<dyn DatabaseDriver>>>,
-    /// Stops a statement while the driver above is busy with it.
-    pub cancel_handle: Option<Arc<dyn CancelHandle>>,
+    /// The sessions of the connection, keyed by the tab that holds each one.
+    pub sessions: Arc<SessionPool>,
     pub capabilities: DriverCapabilities,
     pub dialect: Dialect,
-    /// True when an idle connection must be checked before it is used.
-    pub needs_ping: bool,
-    /// True when the connection stays fit for use after a limit stopped a
-    /// statement.
-    pub keeps_connection_after_stop: bool,
-    /// The moment the connection last answered.
-    pub last_ok: Arc<Mutex<Instant>>,
 }
 
 impl OpenConnection {
     pub fn new(descriptor: SavedConnection, driver: Box<dyn DatabaseDriver>) -> Self {
         let capabilities = driver.capabilities();
         let dialect = driver.dialect();
-        let cancel_handle = driver.cancel_handle();
-        let needs_ping = driver.needs_ping();
-        let keeps_connection_after_stop = driver.keeps_connection_after_stop();
+        let cap = descriptor.options.max_sessions.max(1);
+        let sessions = Arc::new(SessionPool::with_session(
+            cap,
+            DEFAULT_SESSION,
+            Session::new(driver),
+        ));
         Self {
             descriptor: descriptor.without_password(),
-            driver: Arc::new(Mutex::new(driver)),
-            cancel_handle,
+            sessions,
             capabilities,
             dialect,
-            needs_ping,
-            keeps_connection_after_stop,
-            last_ok: Arc::new(Mutex::new(Instant::now())),
         }
     }
 
-    /// Records that the connection answered.
-    pub async fn mark_ok(&self) {
-        *self.last_ok.lock().await = Instant::now();
-    }
-
-    /// True when the connection stood idle long enough that it should be
-    /// checked before it is used again.
-    pub async fn needs_check(&self) -> bool {
-        self.last_ok.lock().await.elapsed() >= HEALTH_CHECK_AFTER
+    /// Returns the session that a request without a tab uses.
+    pub async fn default_session(&self) -> Result<Arc<Session>> {
+        self.sessions
+            .get(DEFAULT_SESSION)
+            .await
+            .ok_or_else(|| Error::NotConnected(self.descriptor.id.clone()))
     }
 }
 
@@ -123,9 +112,6 @@ pub struct AppState {
     /// One record for each statement that runs, keyed by the identifier the
     /// user interface gave it.
     pub running: Mutex<HashMap<String, RunningRequest>>,
-    /// One lock for each connection, so that two commands that find the
-    /// same idle connection do not both check it and open it again.
-    pub health_checks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub secrets: Box<dyn SecretStore>,
 }
 
@@ -135,19 +121,8 @@ impl AppState {
             connections: Mutex::new(HashMap::new()),
             background: Mutex::new(HashMap::new()),
             running: Mutex::new(HashMap::new()),
-            health_checks: Mutex::new(HashMap::new()),
             secrets,
         }
-    }
-
-    /// Returns the lock that serialises the health checks of one connection.
-    pub async fn health_check_lock(&self, connection_id: &str) -> Arc<Mutex<()>> {
-        self.health_checks
-            .lock()
-            .await
-            .entry(connection_id.to_string())
-            .or_default()
-            .clone()
     }
 
     /// Drops the background driver of a connection, so that the next
@@ -199,11 +174,10 @@ impl AppState {
         info
     }
 
-    /// Removes an open connection, together with its background driver and
-    /// its health check lock. Returns true when one was present.
+    /// Removes an open connection, together with its sessions and its
+    /// background driver. Returns true when one was present.
     pub async fn remove(&self, connection_id: &str) -> bool {
         self.background.lock().await.remove(connection_id);
-        self.health_checks.lock().await.remove(connection_id);
         self.connections
             .lock()
             .await
@@ -325,8 +299,30 @@ mod tests {
         assert_eq!(open.descriptor.password, None);
         assert_eq!(open.dialect, Dialect::MsSql);
         assert!(open.capabilities.supports_schemas);
-        assert!(open.needs_ping);
-        assert!(!open.keeps_connection_after_stop);
+
+        let session = open.default_session().await.unwrap();
+        assert!(session.needs_ping);
+        assert!(!session.keeps_connection_after_stop);
+        assert_eq!(
+            open.sessions.cap(),
+            descriptor().options.max_sessions.max(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_connection_without_its_default_session_reports_the_loss() {
+        let open = OpenConnection::new(descriptor(), Box::new(StubDriver));
+        open.sessions.release(DEFAULT_SESSION).await;
+        let error = open.default_session().await.err().unwrap();
+        assert_eq!(error.kind(), crate::error::ErrorKind::NotConnected);
+    }
+
+    #[tokio::test]
+    async fn a_session_cap_below_one_becomes_one() {
+        let mut record = descriptor();
+        record.options.max_sessions = 0;
+        let open = OpenConnection::new(record, Box::new(StubDriver));
+        assert_eq!(open.sessions.cap(), 1);
     }
 
     #[tokio::test]
@@ -342,16 +338,6 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.kind(), crate::error::ErrorKind::Unsupported);
-    }
-
-    #[tokio::test]
-    async fn a_connection_that_just_answered_needs_no_check() {
-        let open = OpenConnection::new(descriptor(), Box::new(StubDriver));
-        assert!(!open.needs_check().await);
-        *open.last_ok.lock().await = Instant::now() - HEALTH_CHECK_AFTER;
-        assert!(open.needs_check().await);
-        open.mark_ok().await;
-        assert!(!open.needs_check().await);
     }
 
     #[tokio::test]

@@ -98,6 +98,18 @@ impl SessionPool {
         }
     }
 
+    /// Builds a pool that already holds one session. The connect command
+    /// uses this form, because the connection opens with one driver.
+    pub fn with_session(cap: usize, key: &str, session: Session) -> Self {
+        let mut sessions = HashMap::new();
+        sessions.insert(key.to_string(), Arc::new(session));
+        Self {
+            sessions: Mutex::new(sessions),
+            open_lock: Mutex::new(()),
+            cap,
+        }
+    }
+
     /// The largest number of tab sessions this pool opens.
     pub fn cap(&self) -> usize {
         self.cap
@@ -408,6 +420,18 @@ mod tests {
         assert!(pool.get("busy").await.is_some());
         pool.reap_idle().await;
         assert!(pool.get("busy").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_pool_can_start_with_one_session() {
+        let pool = SessionPool::with_session(
+            2,
+            DEFAULT_SESSION,
+            Session::new(Box::new(StubDriver::plain())),
+        );
+        assert!(pool.get(DEFAULT_SESSION).await.is_some());
+        assert_eq!(pool.tab_count().await, 0);
+        assert_eq!(pool.cap(), 2);
     }
 
     #[tokio::test]
