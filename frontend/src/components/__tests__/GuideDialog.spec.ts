@@ -37,7 +37,15 @@ describe('GuideDialog', () => {
 
     const body = document.querySelector('[data-test="guide-content"]')?.textContent
     expect(body).toContain(last.title)
-    expect(body).toContain(last.body.slice(0, 20))
+  })
+
+  it('draws the text of a topic as HTML and not as Markdown', async () => {
+    await mountGuide()
+
+    const text = document.querySelector('.topic-text')
+    expect(text?.innerHTML).toContain('<p>')
+    // The marks of Markdown are gone from the text that the reader sees.
+    expect(text?.textContent).not.toContain('**')
   })
 
   it('reports that the reader closed it', async () => {
