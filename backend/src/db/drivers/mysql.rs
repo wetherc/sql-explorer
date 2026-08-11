@@ -145,6 +145,12 @@ pub fn bind_params(params: Option<&QueryParams>) -> Result<mysql_async::Params> 
 /// it. A set that passed the row limit or a stop of the sink drains one row
 /// at a time, so the connection stays fit for the next set.
 ///
+/// MySQL holds no packet that ends a statement on the connection that runs
+/// it. Its stop runs `KILL QUERY` from a second connection, which ends the
+/// statement with a fault of the server and leaves the session unfit for the
+/// next statement, so the drain covers the whole rest of a large result.
+/// `docs/LIMITATIONS.md` records the cost of that walk.
+///
 /// The flag `stopped` carries a stop of the sink back to the caller, and a
 /// run that arrives with the flag set drains its sets without a feed.
 async fn stream_statement(

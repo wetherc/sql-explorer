@@ -141,6 +141,13 @@ const EXPIRED_TOKEN_MESSAGE: &str = "The access token has expired. Paste a new o
                                      Azure CLI method, which reads a fresh token on each \
                                      connection.";
 
+/// The words that report a statement which the row limit ended. The server
+/// stops the whole batch, so a script gives back no set after the one that
+/// reached the limit.
+const ENDED_AT_THE_LIMIT_MESSAGE: &str =
+    "The read reached the row limit, so the statement was ended on the server. A script gives \
+     back no result set after this one. Raise the row limit in the settings to read further.";
+
 /// True when the token names a moment that is more than the allowance in the
 /// past. A token that cannot be read is not refused here.
 fn token_has_expired(token: &str, now: SystemTime) -> bool {
@@ -283,10 +290,15 @@ impl MssqlDriver {
     }
 
     /// Runs one statement through the path that keeps rows, and feeds each
-    /// result set to the sink as it arrives. The whole stream is walked to
-    /// its end even past the row limit or a stop of the sink, because a
-    /// stream that is dropped in the middle leaves the connection in the
-    /// middle of a message.
+    /// result set to the sink as it arrives.
+    ///
+    /// A stream that is dropped in the middle leaves the connection in the
+    /// middle of a message, so the stream is always walked to its end. Once
+    /// the read reaches the row limit, or the sink stops, the attention
+    /// packet goes to the server. The server ends the statement, the stream
+    /// ends with the cancel error of `tiberius`, and the walk then covers
+    /// the rows in flight alone. The next statement of the session waits for
+    /// the acknowledgement of the attention packet before it starts.
     ///
     /// Returns true when the sink stopped the run.
     async fn stream_sets(
@@ -296,13 +308,27 @@ impl MssqlDriver {
         options: &ExecOptions,
         sink: &mut dyn RowSink,
     ) -> Result<bool> {
+        // The handle is taken before the stream, because the stream holds
+        // the client while it lives.
+        let attention = self.client.attention_handle();
         let mut stream = self.client.query(statement, params).await?;
         let mut open = false;
         let mut count = 0usize;
         let mut truncated = false;
         let mut stopped = false;
+        let mut asked_to_end = false;
+        // True when the row limit brought the end, and not the sink.
+        let mut ended_at_limit = false;
 
-        while let Some(item) = stream.try_next().await? {
+        loop {
+            let item = match stream.try_next().await {
+                Ok(Some(item)) => item,
+                Ok(None) => break,
+                // The end that the attention packet brings is the wanted
+                // end, so it carries no fault to the user.
+                Err(tiberius::error::Error::Canceled) if asked_to_end => break,
+                Err(error) => return Err(error.into()),
+            };
             match item {
                 QueryItem::Metadata(metadata) => {
                     if open {
@@ -333,11 +359,20 @@ impl MssqlDriver {
                     }
                     if count >= options.max_rows {
                         truncated = true;
+                        if !asked_to_end {
+                            attention.signal();
+                            asked_to_end = true;
+                            ended_at_limit = true;
+                        }
                         continue;
                     }
                     if sink.row(row_to_json(&row))? == SinkControl::Stop {
                         truncated = true;
                         stopped = true;
+                        if !asked_to_end {
+                            attention.signal();
+                            asked_to_end = true;
+                        }
                         continue;
                     }
                     count += 1;
@@ -347,6 +382,9 @@ impl MssqlDriver {
         if open {
             sink.message(rows_returned_message(count, truncated));
             sink.end_set(truncated)?;
+        }
+        if ended_at_limit {
+            sink.message(Message::info(ENDED_AT_THE_LIMIT_MESSAGE.to_string()));
         }
         Ok(stopped)
     }
@@ -1195,6 +1233,209 @@ fn read<T>(result: tiberius::Result<Option<T>>) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// The kinds of packet that the test reads from the client.
+    const PACKET_SQL_BATCH: u8 = 1;
+    const PACKET_RPC: u8 = 3;
+    const PACKET_ATTENTION: u8 = 6;
+    /// The `Attention` flag of a `DONE` token.
+    const DONE_ATTENTION: u16 = 1 << 5;
+    /// The flag of a packet that ends its message.
+    const END_OF_MESSAGE: u8 = 1;
+
+    /// Reads one message of the client and gives back the kind of its first
+    /// packet. A message can arrive in several packets, and the last of them
+    /// carries the end flag.
+    async fn read_message(server: &mut tokio::net::TcpStream) -> u8 {
+        let mut kind = None;
+        loop {
+            let mut header = [0u8; 8];
+            server.read_exact(&mut header).await.unwrap();
+            let length = u16::from_be_bytes([header[2], header[3]]) as usize;
+            let mut body = vec![0u8; length - 8];
+            server.read_exact(&mut body).await.unwrap();
+            kind.get_or_insert(header[0]);
+            if header[1] & END_OF_MESSAGE == END_OF_MESSAGE {
+                return kind.unwrap();
+            }
+        }
+    }
+
+    /// Writes one packet of the server, with the kind `TabularResult`.
+    async fn write_packet(server: &mut tokio::net::TcpStream, status: u8, payload: &[u8]) {
+        let length = (payload.len() + 8) as u16;
+        let mut packet = vec![4, status];
+        packet.extend_from_slice(&length.to_be_bytes());
+        packet.extend_from_slice(&[0, 0, 0, 0]);
+        packet.extend_from_slice(payload);
+        server.write_all(&packet).await.unwrap();
+    }
+
+    /// A `DONE` token with the given flags and count of rows.
+    fn done_token(status: u16, rows: u64) -> Vec<u8> {
+        let mut token = vec![0xFD];
+        token.extend_from_slice(&status.to_le_bytes());
+        token.extend_from_slice(&0u16.to_le_bytes());
+        token.extend_from_slice(&rows.to_le_bytes());
+        token
+    }
+
+    /// A `COLMETADATA` token of one `int` column with the name `a`.
+    fn int_metadata() -> Vec<u8> {
+        let mut token = vec![0x81];
+        token.extend_from_slice(&1u16.to_le_bytes());
+        token.extend_from_slice(&0u32.to_le_bytes());
+        token.extend_from_slice(&0u16.to_le_bytes());
+        token.push(0x38);
+        token.push(1);
+        token.extend_from_slice(&('a' as u16).to_le_bytes());
+        token
+    }
+
+    /// A `ROW` token that carries one `int`.
+    fn int_row(value: i32) -> Vec<u8> {
+        let mut token = vec![0xD1];
+        token.extend_from_slice(&value.to_le_bytes());
+        token
+    }
+
+    /// Answers the prelogin and the login of a client that connects. The
+    /// answer to the prelogin holds the terminator alone, which leaves the
+    /// connection without encryption.
+    async fn accept_login(server: &mut tokio::net::TcpStream) {
+        read_message(server).await;
+        write_packet(server, END_OF_MESSAGE, &[0xFF]).await;
+        read_message(server).await;
+        write_packet(server, END_OF_MESSAGE, &done_token(0, 0)).await;
+    }
+
+    /// The configuration of a client that speaks to the fake server.
+    fn test_config() -> Config {
+        let mut config = Config::new();
+        config.authentication(AuthMethod::sql_server("user", "password"));
+        config.encryption(EncryptionLevel::NotSupported);
+        config
+    }
+
+    /// A server that answers one statement with five rows and keeps the
+    /// statement running. It then waits for the attention packet, ends the
+    /// statement with the acknowledgement, and answers one more statement.
+    /// A test that never signals waits here for ever, so the wait itself
+    /// proves that the driver asks the server to stop.
+    async fn serve_rows_until_attention(listener: TcpListener) {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        accept_login(&mut socket).await;
+
+        let kind = read_message(&mut socket).await;
+        assert!(kind == PACKET_RPC || kind == PACKET_SQL_BATCH);
+        let mut answer = int_metadata();
+        for value in 0..5 {
+            answer.extend_from_slice(&int_row(value));
+        }
+        write_packet(&mut socket, 0, &answer).await;
+
+        assert_eq!(read_message(&mut socket).await, PACKET_ATTENTION);
+        write_packet(&mut socket, END_OF_MESSAGE, &done_token(DONE_ATTENTION, 0)).await;
+
+        // The connection takes the next statement of the session.
+        let kind = read_message(&mut socket).await;
+        assert!(kind == PACKET_RPC || kind == PACKET_SQL_BATCH);
+        write_packet(&mut socket, END_OF_MESSAGE, &done_token(0, 0)).await;
+    }
+
+    #[tokio::test]
+    async fn the_row_limit_ends_the_statement_and_keeps_the_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_rows_until_attention(listener));
+
+        let tcp = TcpStream::connect(address).await.unwrap();
+        let client = Client::connect(test_config(), tcp.compat_write())
+            .await
+            .unwrap();
+        let mut driver = MssqlDriver { client };
+
+        let options = ExecOptions {
+            max_rows: 2,
+            timeout_secs: 30,
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        let stopped = driver
+            .stream_sets("SELECT a FROM b", &[], &options, &mut sink)
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        assert!(!stopped);
+        // The set holds the rows of the limit and no more, and it reports
+        // that the limit stopped the read.
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].rows.len(), 2);
+        assert!(response.results[0].truncated);
+        let messages: Vec<&str> = response
+            .messages
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect();
+        assert!(messages
+            .iter()
+            .any(|text| text.contains("The row limit stopped the read")));
+        assert!(messages.contains(&ENDED_AT_THE_LIMIT_MESSAGE));
+
+        // The session runs a second statement on the same connection.
+        let mut next = BufferSink::new(options.max_rows);
+        driver
+            .stream_sets("SELECT 1", &[], &options, &mut next)
+            .await
+            .unwrap();
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_sink_that_stops_ends_the_statement_as_well() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_rows_until_attention(listener));
+
+        let tcp = TcpStream::connect(address).await.unwrap();
+        let client = Client::connect(test_config(), tcp.compat_write())
+            .await
+            .unwrap();
+        let mut driver = MssqlDriver { client };
+
+        // The limit of the sink is below the limit of the run, so the sink
+        // stops the read before the driver reaches its own limit.
+        let options = ExecOptions {
+            max_rows: 10,
+            timeout_secs: 30,
+        };
+        let mut sink = BufferSink::new(2);
+        let stopped = driver
+            .stream_sets("SELECT a FROM b", &[], &options, &mut sink)
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        assert!(stopped);
+        assert_eq!(response.results[0].rows.len(), 2);
+        assert!(response.results[0].truncated);
+        // The words of the row limit belong to the limit of the run alone.
+        assert!(!response
+            .messages
+            .iter()
+            .any(|message| message.text == ENDED_AT_THE_LIMIT_MESSAGE));
+
+        let mut next = BufferSink::new(options.max_rows);
+        driver
+            .stream_sets("SELECT 1", &[], &options, &mut next)
+            .await
+            .unwrap();
+
+        server.await.unwrap();
+    }
 
     #[tokio::test]
     async fn the_cancel_handle_signals_and_reports_no_fault() {

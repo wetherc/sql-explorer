@@ -232,3 +232,23 @@ writes keeps its old text in the panel and in a tab that shows it. A save
 from a tab writes the whole file, so the last write wins and a change that
 came from outside is lost. A refresh of the folder, or a second open of the
 file, brings the text of the disk back.
+
+## MySQL walks the rest of a result that passes the row limit
+
+The MS SQL Server driver sends an attention packet when the read reaches
+the row limit, so the server ends the statement and the walk covers the
+rows in flight alone. MySQL offers no such packet. Its stop runs `KILL
+QUERY` from a second connection, which ends the statement with a fault of
+the server instead of a clean end and leaves the session of the pool unfit
+for the next statement. The driver therefore reads the rest of a large
+result and drops the rows past the limit. The time of that walk counts
+against the time budget of the run, so a result of many millions of rows
+can still end with the timeout message.
+
+## The row limit ends a whole batch on MS SQL Server
+
+The attention packet ends the whole batch, not one result set of it. A
+script whose first statement passes the row limit therefore gives back no
+set for the statements after it. The messages of the run say so. A higher
+row limit in the settings, or a smaller first statement, brings the later
+sets back.
