@@ -218,15 +218,6 @@ An Excel sheet holds 1048576 rows, the row of the column names among them.
 An export of more rows than that stops at the bound and reports the result
 as truncated. The CSV and the JSON forms have no such bound.
 
-## A PostgreSQL script without parameters is gathered by the library
-
-A script without parameters goes to PostgreSQL through the simple
-protocol, and `tokio-postgres` gathers the whole answer of a simple query
-before it returns it. The library gives no streaming form of the simple
-query, so the memory cost of such a script grows with the size of its
-answer until the row limit applies. A statement with parameters streams
-one row at a time.
-
 ## The files panel does not watch the disk
 
 The panel reads a folder when the user opens it and when the user asks for

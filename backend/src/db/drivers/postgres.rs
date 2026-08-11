@@ -340,9 +340,8 @@ impl DatabaseDriver for PostgresDriver {
 
     /// Runs a script and feeds the sink. The path with parameters streams
     /// the rows through `query_raw`. The path without parameters goes
-    /// through the simple protocol, whose library gathers the whole answer
-    /// before it returns, so that path feeds the sink from a vector and
-    /// keeps its memory cost.
+    /// through the simple protocol, which carries the whole script in one
+    /// exchange and streams the messages of that exchange one at a time.
     ///
     /// The notices of the server reach the sink after the run, in their
     /// arrival order.
@@ -684,23 +683,29 @@ impl CancelHandle for PostgresCancel {
 }
 
 impl PostgresDriver {
-    /// Runs a script through the simple protocol and feeds the sink. The
-    /// library gathers the whole answer of a simple query before it
-    /// returns, so the memory cost of this path stays.
+    /// Runs a script through the simple protocol and feeds the sink one
+    /// message at a time.
+    ///
+    /// The walk goes on past the row limit, because the simple protocol
+    /// carries every statement of the script in one exchange and the later
+    /// command tags hold the counts of the rows those statements changed.
+    /// The driver holds one message while it walks, so the memory cost does
+    /// not grow with the size of the answer.
     async fn stream_simple(
         &mut self,
         query: &str,
         options: &ExecOptions,
         sink: &mut dyn RowSink,
     ) -> Result<Option<u64>> {
-        let messages = self.client.simple_query(query).await?;
+        let messages = self.client.simple_query_raw(query).await?;
+        pin_mut!(messages);
         let mut rows_affected: Option<u64> = None;
         let mut open = false;
         let mut count = 0usize;
         let mut truncated = false;
         let mut stopped = false;
 
-        for message in messages {
+        while let Some(message) = messages.try_next().await? {
             match message {
                 SimpleQueryMessage::RowDescription(columns) => {
                     if open {
@@ -951,6 +956,197 @@ fn get<'a, T: tokio_postgres::types::FromSql<'a>>(row: &'a Row, index: usize) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::sink::BufferSink;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+
+    /// Wraps a body of a message with its kind and its length. The length
+    /// counts itself and the body, and never the byte of the kind.
+    fn message(kind: u8, body: &[u8]) -> Vec<u8> {
+        let mut out = vec![kind];
+        out.extend_from_slice(&((body.len() + 4) as i32).to_be_bytes());
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// The answer of a server that asks for no password.
+    fn authentication_ok() -> Vec<u8> {
+        message(b'R', &0i32.to_be_bytes())
+    }
+
+    /// The message that says the server waits for a statement.
+    fn ready_for_query() -> Vec<u8> {
+        message(b'Z', b"I")
+    }
+
+    /// Names the columns of a result set. Each column takes the type of a
+    /// text value, which the simple protocol always sends.
+    fn row_description(names: &[&str]) -> Vec<u8> {
+        let mut body = (names.len() as i16).to_be_bytes().to_vec();
+        for (index, name) in names.iter().enumerate() {
+            body.extend_from_slice(name.as_bytes());
+            body.push(0);
+            body.extend_from_slice(&0i32.to_be_bytes());
+            body.extend_from_slice(&(index as i16 + 1).to_be_bytes());
+            body.extend_from_slice(&25i32.to_be_bytes());
+            body.extend_from_slice(&(-1i16).to_be_bytes());
+            body.extend_from_slice(&(-1i32).to_be_bytes());
+            body.extend_from_slice(&0i16.to_be_bytes());
+        }
+        message(b'T', &body)
+    }
+
+    /// One row of a result set. A column without a value carries the length
+    /// of minus one.
+    fn data_row(values: &[Option<&str>]) -> Vec<u8> {
+        let mut body = (values.len() as i16).to_be_bytes().to_vec();
+        for value in values {
+            match value {
+                Some(text) => {
+                    body.extend_from_slice(&(text.len() as i32).to_be_bytes());
+                    body.extend_from_slice(text.as_bytes());
+                }
+                None => body.extend_from_slice(&(-1i32).to_be_bytes()),
+            }
+        }
+        message(b'D', &body)
+    }
+
+    /// The tag that ends one statement of the script.
+    fn command_complete(tag: &str) -> Vec<u8> {
+        let mut body = tag.as_bytes().to_vec();
+        body.push(0);
+        message(b'C', &body)
+    }
+
+    /// Answers the startup message of a client that connects.
+    async fn accept_startup(server: &mut DuplexStream) {
+        // The startup message carries a length and no byte of a kind.
+        let mut length = [0u8; 4];
+        server.read_exact(&mut length).await.unwrap();
+        let rest = i32::from_be_bytes(length) as usize - 4;
+        let mut body = vec![0u8; rest];
+        server.read_exact(&mut body).await.unwrap();
+        server.write_all(&authentication_ok()).await.unwrap();
+        server.write_all(&ready_for_query()).await.unwrap();
+    }
+
+    /// Reads one simple query of the client and gives its text back.
+    async fn read_query(server: &mut DuplexStream) -> String {
+        let mut kind = [0u8; 1];
+        server.read_exact(&mut kind).await.unwrap();
+        assert_eq!(kind[0], b'Q');
+        let mut length = [0u8; 4];
+        server.read_exact(&mut length).await.unwrap();
+        let mut body = vec![0u8; i32::from_be_bytes(length) as usize - 4];
+        server.read_exact(&mut body).await.unwrap();
+        body.pop();
+        String::from_utf8(body).unwrap()
+    }
+
+    /// Builds a driver that speaks to a fake server on a pipe.
+    async fn driver_on(client_end: DuplexStream) -> PostgresDriver {
+        let mut config = PgConfig::new();
+        config.user("tester").dbname("test");
+        let (client, connection) = config
+            .connect_raw(client_end, tokio_postgres::NoTls)
+            .await
+            .unwrap();
+        tokio::spawn(connection);
+        PostgresDriver {
+            client,
+            notices: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_script_of_several_statements_keeps_each_set_and_each_count() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            let query = read_query(&mut server).await;
+            assert!(query.contains("SELECT"));
+
+            let mut answer = row_description(&["id", "name"]);
+            answer.extend_from_slice(&data_row(&[Some("1"), Some("Ada")]));
+            answer.extend_from_slice(&data_row(&[Some("2"), None]));
+            answer.extend_from_slice(&command_complete("SELECT 2"));
+            answer.extend_from_slice(&command_complete("UPDATE 3"));
+            answer.extend_from_slice(&row_description(&["n"]));
+            answer.extend_from_slice(&data_row(&[Some("7")]));
+            answer.extend_from_slice(&command_complete("SELECT 1"));
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
+        });
+
+        let mut driver = driver_on(client_end).await;
+        let options = ExecOptions {
+            max_rows: 100,
+            timeout_secs: 30,
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        let rows_affected = driver
+            .stream_simple(
+                "SELECT 1; UPDATE t SET a = 1; SELECT 7",
+                &options,
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        // The count of the statement between the two sets is kept, so the
+        // walk went past the first set.
+        assert_eq!(rows_affected, Some(3));
+        assert_eq!(response.results.len(), 2);
+        assert_eq!(response.results[0].rows.len(), 2);
+        assert_eq!(response.results[0].rows[1][1], JsonValue::Null);
+        assert_eq!(response.results[1].rows.len(), 1);
+        assert!(!response.results[0].truncated);
+
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_set_that_passes_the_row_limit_is_cut_and_the_walk_goes_on() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            read_query(&mut server).await;
+
+            let mut answer = row_description(&["id"]);
+            for value in ["1", "2", "3"] {
+                answer.extend_from_slice(&data_row(&[Some(value)]));
+            }
+            answer.extend_from_slice(&command_complete("SELECT 3"));
+            answer.extend_from_slice(&command_complete("DELETE 5"));
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
+        });
+
+        let mut driver = driver_on(client_end).await;
+        let options = ExecOptions {
+            max_rows: 1,
+            timeout_secs: 30,
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        let rows_affected = driver
+            .stream_simple("SELECT id FROM t; DELETE FROM t", &options, &mut sink)
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].rows.len(), 1);
+        assert!(response.results[0].truncated);
+        assert!(response
+            .messages
+            .iter()
+            .any(|message| message.text.contains("The row limit stopped the read")));
+        // The tag of the statement after the set still reaches the summary.
+        assert_eq!(rows_affected, Some(5));
+
+        task.await.unwrap();
+    }
 
     #[test]
     fn the_plan_keyword_names_the_form_of_the_answer() {
