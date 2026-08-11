@@ -9,7 +9,7 @@ use crate::db::drivers::{CancelHandle, DatabaseDriver};
 use crate::db::DriverCapabilities;
 use crate::error::{Error, Result};
 use crate::secrets::SecretStore;
-use crate::session::{Session, SessionPool, DEFAULT_SESSION};
+use crate::session::{Session, SessionPool, DEFAULT_SESSION, SESSION_IDLE_REAP};
 use crate::sql::Dialect;
 use crate::storage::SavedConnection;
 use serde::Serialize;
@@ -181,8 +181,9 @@ impl AppState {
     }
 
     /// Closes the tab sessions of every open connection that stood idle past
-    /// the limit. The map of the connections is free again before the sweep
-    /// starts, so the sweep holds no lock that a command needs.
+    /// the limit, and the background drivers that stood idle that long. The
+    /// maps are free again before the sweep starts, so the sweep holds no
+    /// lock that a command needs.
     pub async fn reap_idle_sessions(&self) {
         let pools: Vec<Arc<SessionPool>> = self
             .connections
@@ -193,6 +194,37 @@ impl AppState {
             .collect();
         for pool in pools {
             pool.reap_idle().await;
+        }
+        self.reap_idle_background().await;
+    }
+
+    /// Closes each background driver that stood idle past the limit. The next
+    /// metadata read of that connection opens a new second connection. A
+    /// driver that is busy stays, because a read still runs on it.
+    async fn reap_idle_background(&self) {
+        let held: Vec<(String, Arc<Session>)> = self
+            .background
+            .lock()
+            .await
+            .iter()
+            .map(|(id, session)| (id.clone(), session.clone()))
+            .collect();
+        let mut gone: Vec<(String, Arc<Session>)> = Vec::new();
+        for (id, session) in held {
+            if session.idle_past(SESSION_IDLE_REAP).await && session.driver.try_lock().is_ok() {
+                gone.push((id, session));
+            }
+        }
+        let mut background = self.background.lock().await;
+        for (id, session) in gone {
+            // A read that ran during the sweep can have put a new driver in
+            // the slot, and that one stays.
+            if background
+                .get(&id)
+                .is_some_and(|current| Arc::ptr_eq(current, &session))
+            {
+                background.remove(&id);
+            }
         }
     }
 
@@ -579,6 +611,56 @@ mod tests {
         // The default session of each connection stays, because the health
         // check covers it.
         assert!(first.sessions.get(DEFAULT_SESSION).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_sweep_closes_a_background_driver_that_stood_idle() {
+        let state = state();
+        let idle = state
+            .set_background_driver("c1", Box::new(StubDriver))
+            .await;
+        let fresh = state
+            .set_background_driver("c2", Box::new(StubDriver))
+            .await;
+        idle.age(SESSION_IDLE_REAP).await;
+
+        state.reap_idle_sessions().await;
+
+        assert!(state.background_session("c1").await.is_none());
+        let kept = state.background_session("c2").await.unwrap();
+        assert!(Arc::ptr_eq(&kept, &fresh));
+    }
+
+    #[tokio::test]
+    async fn a_sweep_keeps_a_background_driver_that_a_read_holds() {
+        let state = state();
+        let busy = state
+            .set_background_driver("c1", Box::new(StubDriver))
+            .await;
+        busy.age(SESSION_IDLE_REAP).await;
+        let _reading = busy.driver.lock().await;
+
+        state.reap_idle_sessions().await;
+
+        assert!(state.background_session("c1").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_sweep_leaves_the_background_driver_that_a_read_opened_during_it() {
+        let state = state();
+        let idle = state
+            .set_background_driver("c1", Box::new(StubDriver))
+            .await;
+        idle.age(SESSION_IDLE_REAP).await;
+        // The read opens a new driver while the sweep looks at the old one.
+        let opened = state
+            .set_background_driver("c1", Box::new(StubDriver))
+            .await;
+
+        state.reap_idle_sessions().await;
+
+        let kept = state.background_session("c1").await.unwrap();
+        assert!(Arc::ptr_eq(&kept, &opened));
     }
 
     #[tokio::test]

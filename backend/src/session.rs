@@ -72,7 +72,7 @@ impl Session {
     }
 
     /// True when the session gave no answer within the given time.
-    async fn idle_past(&self, threshold: Duration) -> bool {
+    pub async fn idle_past(&self, threshold: Duration) -> bool {
         self.last_ok.lock().await.elapsed() >= threshold
     }
 }
