@@ -145,3 +145,35 @@ body.app-resizing .v-main {
 .v-menu > .v-overlay__content .v-icon {
   font-size: 18px;
 }
+
+/* The controls of the application stand one step below the compact density
+   of the component library. That density builds a row of 40 pixels with text
+   of 16, beside body text of 13 everywhere else, so a form of many fields and
+   a toolbar of several controls both read as heavy. The height and the text
+   below hold the controls to the scale of the rest of the application. */
+.v-input--density-compact {
+  --v-input-control-height: 32px;
+  --v-input-padding-top: 4px;
+}
+
+.v-input--density-compact .v-field__input,
+.v-input--density-compact .v-field__input input,
+.v-input--density-compact .v-label,
+.v-input--density-compact .v-select__selection-text {
+  font-size: var(--app-text-md);
+}
+
+/* The hint and the message of a field carry the smallest text, as the
+   subtitle of a menu row does. */
+.v-input--density-compact .v-input__details {
+  font-size: var(--app-text-sm);
+  padding-top: 2px;
+  min-height: 0;
+}
+
+/* The mark that opens a select, and any icon inside a field, follow the
+   height of the row. */
+.v-input--density-compact .v-field__append-inner .v-icon,
+.v-input--density-compact .v-field__prepend-inner .v-icon {
+  font-size: 18px;
+}
