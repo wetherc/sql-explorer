@@ -92,10 +92,12 @@
 
       <v-text-field
         v-if="needsAccessToken"
+        ref="tokenField"
         v-model="password"
         label="Access token"
         :type="showPassword ? 'text' : 'password'"
-        hint="The token is a credential. It goes to the keychain, never to a settings file."
+        :hint="tokenHint"
+        :error="needsNewToken && password.trim() === ''"
         persistent-hint
         data-test="access-token-field"
       >
@@ -313,13 +315,18 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, nextTick, ref, watch } from 'vue'
 import { open as openFileDialog } from '@tauri-apps/plugin-dialog'
 import { useConnectionsStore, defaultPortFor, validateConnection } from '@/stores/connections'
 import { useUiStore } from '@/stores/ui'
 import { DbType, MssqlAuth, TlsMode, type SavedConnection } from '@/types/api'
 
-const props = defineProps<{ connection: SavedConnection; isNew: boolean }>()
+const props = defineProps<{
+  connection: SavedConnection
+  isNew: boolean
+  /** True when the stored token is too old and the user must paste a new one. */
+  needsNewToken?: boolean
+}>()
 const emit = defineEmits<{ (event: 'close'): void; (event: 'saved', id: string): void }>()
 
 const connections = useConnectionsStore()
@@ -328,6 +335,7 @@ const ui = useUiStore()
 const draft = ref<SavedConnection>(clone(props.connection))
 const password = ref(props.connection.password ?? '')
 const showPassword = ref(false)
+const tokenField = ref<{ focus: () => void } | null>(null)
 
 const engineItems = computed(() =>
   connections.engines.map((engine) => ({ title: engine.label, value: engine.dbType })),
@@ -394,6 +402,12 @@ const authHint = computed(() => {
   }
 })
 
+const tokenHint = computed(() =>
+  props.needsNewToken
+    ? 'The stored token is too old. Paste a new token for https://database.windows.net/.'
+    : 'The token is a credential. It goes to the keychain, never to a settings file.',
+)
+
 const passwordHint = computed(() =>
   props.isNew
     ? 'The password goes into the keychain of the operating system.'
@@ -439,6 +453,11 @@ async function test(): Promise<void> {
 
 async function saveConnection(): Promise<void> {
   const record = withPassword()
+  if (props.needsNewToken && needsAccessToken.value && password.value.trim() === '') {
+    // The stored token is too old, so an empty box cannot mean "keep it".
+    ui.warn('Paste a new access token, or choose another authentication method.')
+    return
+  }
   if (!props.isNew && password.value === '') {
     // An empty box means that the stored password stays as it is.
     record.password = null
@@ -456,8 +475,22 @@ watch(
     draft.value = clone(value)
     password.value = value.password ?? ''
     showPassword.value = false
+    void focusToken()
   },
 )
+
+onMounted(() => {
+  void focusToken()
+})
+
+/** Puts the pointer in the token box when the form asks for a new token. */
+async function focusToken(): Promise<void> {
+  if (!props.needsNewToken) {
+    return
+  }
+  await nextTick()
+  tokenField.value?.focus()
+}
 </script>
 
 <style scoped>

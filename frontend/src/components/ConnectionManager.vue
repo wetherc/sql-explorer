@@ -133,6 +133,7 @@
       <ConnectionForm
         :connection="draft"
         :is-new="isNew"
+        :needs-new-token="needsNewToken"
         @close="editing = false"
         @saved="onSaved"
       />
@@ -165,7 +166,7 @@
 
 <script setup lang="ts">
 import AppDialog from './AppDialog.vue'
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import ConnectionForm from './ConnectionForm.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import EmptyState from './EmptyState.vue'
@@ -186,6 +187,8 @@ const editing = ref(false)
 const isNew = ref(true)
 const draft = ref<SavedConnection | null>(null)
 const deleting = ref(false)
+/** True while the form asks for an access token that is fresh. */
+const needsNewToken = ref(false)
 const pendingDelete = ref<SavedConnection | null>(null)
 /** The connection that waits on an answer, while statements run on it. */
 const pendingDisconnect = ref<SavedConnection | null>(null)
@@ -233,20 +236,41 @@ function healthLabel(id: string): string {
 function startNew(): void {
   draft.value = newConnection()
   isNew.value = true
+  needsNewToken.value = false
   editing.value = true
 }
 
 function startEdit(connection: SavedConnection): void {
   draft.value = { ...connection, options: { ...connection.options }, password: '' }
   isNew.value = false
+  needsNewToken.value = false
   editing.value = true
 }
 
 function duplicate(connection: SavedConnection): void {
   draft.value = connections.duplicate(connection)
   isNew.value = true
+  needsNewToken.value = false
   editing.value = true
 }
+
+// A login that failed while the connection held a pasted token opens the
+// form, because the stored token cannot be made fresh again.
+watch(
+  () => connections.expiredTokenId,
+  (id) => {
+    if (!id) {
+      return
+    }
+    const connection = connections.byId(id)
+    connections.clearExpiredToken()
+    if (!connection) {
+      return
+    }
+    startEdit(connection)
+    needsNewToken.value = true
+  },
+)
 
 function askDelete(connection: SavedConnection): void {
   pendingDelete.value = connection

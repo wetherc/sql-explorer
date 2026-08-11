@@ -5,6 +5,8 @@ import { useUiStore } from './ui'
 import {
   ConnectionHealth,
   DbType,
+  ErrorKind,
+  MssqlAuth,
   defaultConnectionOptions,
   type ConnectionInfo,
   type ConnectionStatusEvent,
@@ -121,6 +123,12 @@ export const useConnectionsStore = defineStore('connections', () => {
   /** The connection whose objects the explorer shows. */
   const selectedId = ref<string | null>(null)
 
+  /**
+   * The connection that refused a login while it held a pasted access token.
+   * The view opens the form for this connection and asks for a new token.
+   */
+  const expiredTokenId = ref<string | null>(null)
+
   const hasActive = computed(() => Object.keys(active.value).length > 0)
   const activeList = computed(() =>
     saved.value.filter((connection) => Boolean(active.value[connection.id])),
@@ -235,7 +243,12 @@ export const useConnectionsStore = defineStore('connections', () => {
       selectedId.value = connection.id
       return true
     } catch (error) {
-      ui.reportError(error)
+      const payload = ui.reportError(error)
+      // A pasted access token lives for about one hour, and the stored one
+      // cannot be made fresh again. The view asks for a new token.
+      if (payload.kind === ErrorKind.Authentication && usesAccessToken(connection)) {
+        expiredTokenId.value = connection.id
+      }
       return false
     } finally {
       const rest = { ...connecting.value }
@@ -308,6 +321,19 @@ export const useConnectionsStore = defineStore('connections', () => {
     }
   }
 
+  /** True when the connection holds a token that the user pasted. */
+  function usesAccessToken(connection: SavedConnection): boolean {
+    return (
+      connection.dbType === DbType.Mssql &&
+      connection.options.mssqlAuth === MssqlAuth.EntraAccessToken
+    )
+  }
+
+  /** Takes the request for a new token away, once the view has acted on it. */
+  function clearExpiredToken(): void {
+    expiredTokenId.value = null
+  }
+
   /** Builds a copy of a connection under a new name. */
   function duplicate(connection: SavedConnection): SavedConnection {
     return {
@@ -328,6 +354,7 @@ export const useConnectionsStore = defineStore('connections', () => {
     connecting,
     testing,
     selectedId,
+    expiredTokenId,
     hasActive,
     activeList,
     selected,
@@ -346,5 +373,6 @@ export const useConnectionsStore = defineStore('connections', () => {
     select,
     applyStatus,
     duplicate,
+    clearExpiredToken,
   }
 })

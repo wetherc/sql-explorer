@@ -87,6 +87,18 @@ host name.
 `backend/examples/mssql_probe.rs` opens one connection with this method and
 prints the trace of each step, for a connection that does not work.
 
+## A pasted access token is not made fresh again
+
+A connection with the method "Microsoft Entra ID with an access token" keeps
+the token that the user pasted. Such a token is valid for about one hour, and
+the application cannot get another one for it.
+
+The driver reads the date in the token before it opens a socket, and it
+refuses a token that is more than 60 seconds past that date. The connection
+form then asks for a new token. A connection that must stay open for longer
+than one hour uses the method "Microsoft Entra ID with the Azure CLI", which
+reads a fresh token on each connection.
+
 ## Athena and the catalog of Glue
 
 The metadata API of Athena returns the parameters of a table as a map, and a

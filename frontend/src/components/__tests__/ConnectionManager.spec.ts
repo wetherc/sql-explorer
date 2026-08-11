@@ -10,7 +10,7 @@ const { mountWithPlugins, settle } = await import('./mount')
 const { useConnectionsStore } = await import('@/stores/connections')
 const { useExplorerStore } = await import('@/stores/explorer')
 const { useQueryStore } = await import('@/stores/query')
-const { ConnectionHealth, DbType } = await import('@/types/api')
+const { ConnectionHealth, DbType, MssqlAuth } = await import('@/types/api')
 type EngineInfo = import('@/types/api').EngineInfo
 
 const engines: EngineInfo[] = [
@@ -160,6 +160,37 @@ describe('ConnectionManager', () => {
       '[data-test="password-field"] input',
     ) as HTMLInputElement
     expect(password.value).toBe('')
+  })
+
+  it('opens the form when a pasted token is too old', async () => {
+    const wrapper = await mountManager([
+      connectionFixture({
+        options: { ...connectionFixture().options, mssqlAuth: MssqlAuth.EntraAccessToken },
+      }),
+    ])
+    const connections = useConnectionsStore()
+
+    connections.expiredTokenId = 'c1'
+    await settle()
+
+    expect(document.body.textContent).toContain('Edit Server')
+    expect(document.body.textContent).toContain('The stored token is too old')
+    expect(connections.expiredTokenId).toBeNull()
+    expect(wrapper.findComponent({ name: 'ConnectionForm' }).props('needsNewToken')).toBe(true)
+  })
+
+  it('opens no form for a token of a record that is gone', async () => {
+    await mountManager()
+    const connections = useConnectionsStore()
+
+    connections.expiredTokenId = 'gone'
+    await settle()
+    expect(document.body.textContent).not.toContain('Edit Server')
+
+    // A value that is taken away opens no form either.
+    connections.expiredTokenId = null
+    await settle()
+    expect(document.body.textContent).not.toContain('Edit Server')
   })
 
   it('opens the form for a copy of a record', async () => {

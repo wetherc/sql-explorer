@@ -644,6 +644,81 @@ describe('ConnectionForm with every field filled', () => {
   })
 })
 
+describe('ConnectionForm with a token that is too old', () => {
+  const stale = () =>
+    connectionFixture({
+      password: '',
+      options: { ...connectionFixture().options, mssqlAuth: MssqlAuth.EntraAccessToken },
+    })
+
+  async function mountStale() {
+    const wrapper = mountWithPlugins(ConnectionForm, {
+      props: { connection: stale(), isNew: false, needsNewToken: true },
+    })
+    useConnectionsStore().engines = engines
+    await settle()
+    return wrapper
+  }
+
+  beforeEach(() => {
+    Object.values(apiStub).forEach((fn) => fn.mockReset())
+    apiStub.getConnections.mockResolvedValue([])
+    apiStub.listActiveConnections.mockResolvedValue([])
+    apiStub.saveConnection.mockResolvedValue(undefined)
+  })
+
+  it('marks the box, names the reason, and takes the pointer', async () => {
+    const wrapper = await mountStale()
+    const field = wrapper
+      .findAllComponents({ name: 'VTextField' })
+      .find((item) => item.attributes('data-test') === 'access-token-field')
+    expect(field!.props('error')).toBe(true)
+    expect(wrapper.text()).toContain('The stored token is too old')
+    expect(document.activeElement).toBe(
+      wrapper.find('[data-test="access-token-field"] input').element,
+    )
+    wrapper.unmount()
+  })
+
+  it('refuses a save that would keep the stored token', async () => {
+    const wrapper = await mountStale()
+    await wrapper.find('[data-test="save-button"]').trigger('click')
+    await settle()
+    expect(apiStub.saveConnection).not.toHaveBeenCalled()
+    const notices = useUiStore().notices
+    expect(notices[notices.length - 1]?.message).toContain('Paste a new access token')
+
+    await wrapper.find('[data-test="access-token-field"] input').setValue('a-fresh-token')
+    await wrapper.find('[data-test="save-button"]').trigger('click')
+    await settle()
+    expect(apiStub.saveConnection).toHaveBeenCalledWith(
+      expect.objectContaining({ password: 'a-fresh-token' }),
+    )
+    wrapper.unmount()
+  })
+
+  it('saves without a token once another method is chosen', async () => {
+    const wrapper = await mountStale()
+    const select = wrapper
+      .findAllComponents({ name: 'VSelect' })
+      .find((item) => item.attributes('data-test') === 'auth-select')
+    await select!.vm.$emit('update:modelValue', MssqlAuth.EntraAzureCli)
+    await wrapper.vm.$nextTick()
+
+    await wrapper.find('[data-test="save-button"]').trigger('click')
+    await settle()
+    expect(apiStub.saveConnection).toHaveBeenCalledWith(expect.objectContaining({ password: null }))
+    wrapper.unmount()
+  })
+
+  it('keeps the pointer where it is for a form that asks for no token', async () => {
+    const wrapper = await mountForm()
+    await wrapper.setProps({ connection: connectionFixture({ id: 'c3' }) })
+    await settle()
+    expect(document.activeElement).toBe(document.body)
+  })
+})
+
 describe('ConnectionForm without a stored password', () => {
   beforeEach(() => {
     Object.values(apiStub).forEach((fn) => fn.mockReset())

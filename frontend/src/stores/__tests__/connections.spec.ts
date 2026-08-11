@@ -14,7 +14,7 @@ const {
   validateConnection,
 } = await import('@/stores/connections')
 const { useUiStore } = await import('@/stores/ui')
-const { ConnectionHealth, DbType } = await import('@/types/api')
+const { ConnectionHealth, DbType, MssqlAuth } = await import('@/types/api')
 
 describe('newConnection', () => {
   it('starts a network connection on the local host with its default port', () => {
@@ -261,6 +261,50 @@ describe('connections store', () => {
     const connections = useConnectionsStore()
     expect(await connections.connect(connectionFixture())).toBe(false)
     expect(connections.isActive('c1')).toBe(false)
+  })
+
+  it('keeps the state of a connection that a new read finds again', async () => {
+    apiStub.getConnections.mockResolvedValue([connectionFixture()])
+    apiStub.listActiveConnections.mockResolvedValue([])
+    apiStub.disconnect.mockResolvedValue(undefined)
+    const connections = useConnectionsStore()
+    await connections.load()
+    await connections.disconnect('c1')
+    expect(connections.health.c1).toBe(ConnectionHealth.Disconnected)
+
+    await connections.load()
+    expect(connections.health.c1).toBe(ConnectionHealth.Disconnected)
+  })
+
+  it('asks for a new token when a pasted one is refused', async () => {
+    apiStub.connect.mockRejectedValue({ kind: 'authentication', message: 'old', detail: null })
+    const connections = useConnectionsStore()
+    const withToken = connectionFixture({
+      options: { ...connectionFixture().options, mssqlAuth: MssqlAuth.EntraAccessToken },
+    })
+
+    expect(await connections.connect(withToken)).toBe(false)
+    expect(connections.expiredTokenId).toBe('c1')
+
+    connections.clearExpiredToken()
+    expect(connections.expiredTokenId).toBeNull()
+  })
+
+  it('asks for no token for another method or another kind of failure', async () => {
+    const connections = useConnectionsStore()
+    const withToken = connectionFixture({
+      options: { ...connectionFixture().options, mssqlAuth: MssqlAuth.EntraAccessToken },
+    })
+
+    // The method holds a token, but the server was not reached.
+    apiStub.connect.mockRejectedValue({ kind: 'connection', message: 'refused', detail: null })
+    await connections.connect(withToken)
+    expect(connections.expiredTokenId).toBeNull()
+
+    // The login failed, and the method holds a password.
+    apiStub.connect.mockRejectedValue({ kind: 'authentication', message: 'no', detail: null })
+    await connections.connect(connectionFixture())
+    expect(connections.expiredTokenId).toBeNull()
   })
 
   it('closes a connection and moves the selection to another open one', async () => {
