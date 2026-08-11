@@ -522,6 +522,44 @@ describe('explorer store', () => {
     ])
   })
 
+  it('rebuilds the index of a large schema and reports the time', async () => {
+    const relations = Array.from({ length: 200 }, (_, table) => ({
+      name: `table_${table}`,
+      schema: 'dbo',
+      kind: TableKind.Table,
+      columns: Array.from({ length: 100 }, (_, column) => ({
+        name: `column_${table}_${column}`,
+        dataType: 'int',
+      })),
+    }))
+    apiStub.schemaSnapshot.mockResolvedValue({
+      database: 'Sales',
+      relations,
+      columnCount: 20_000,
+      complete: true,
+    })
+    const explorer = await readyStore()
+    await explorer.readSnapshot('c1', 'Sales', { maxColumns: 20_000, ownConnection: true })
+
+    const firstStart = performance.now()
+    expect(explorer.schemaIndex.columns).toHaveLength(20_000)
+    const fromSnapshot = performance.now() - firstStart
+
+    // A new root invalidates the index, so the next read walks the tree
+    // and the snapshot again.
+    explorer.addRoot('c1')
+    const secondStart = performance.now()
+    expect(explorer.schemaIndex.tables).toHaveLength(200)
+    const afterTreeChange = performance.now() - secondStart
+
+    console.warn(
+      `schemaIndex with 20000 columns: ${fromSnapshot.toFixed(1)} ms from the snapshot, ` +
+        `${afterTreeChange.toFixed(1)} ms after a change of the tree`,
+    )
+    expect(explorer.schemaIndex.databases).toEqual(['Sales'])
+    expect(explorer.schemaIndex.schemas).toEqual(['dbo'])
+  })
+
   it('warns when the bound stopped the read of a schema', async () => {
     apiStub.schemaSnapshot.mockResolvedValue({ ...snapshotFixture(), complete: false })
     const explorer = await readyStore()
