@@ -6,32 +6,6 @@
         SQL Explorer
       </v-app-bar-title>
 
-      <!-- The menu runs the same commands as the keys, so a command holds
-           one path whichever way the user reaches it. -->
-      <v-menu>
-        <template #activator="{ props: menu }">
-          <v-btn v-bind="menu" size="small" text="File" data-test="file-menu" />
-        </template>
-        <v-list density="compact">
-          <v-list-item
-            v-for="entry of fileMenu"
-            :key="entry.id"
-            :title="entry.title"
-            :disabled="!commandEnabled(entry)"
-            :data-test="`file-menu-${entry.id}`"
-            @click="entry.run()"
-          >
-            <template #append>
-              <span v-if="entry.key" class="menu-key text-medium-emphasis">
-                {{ chordLabel(entry.key, apple) }}
-              </span>
-            </template>
-          </v-list-item>
-        </v-list>
-      </v-menu>
-
-      <v-spacer />
-
       <v-tooltip
         location="bottom"
         :text="settings.isDark ? 'Use the light theme' : 'Use the dark theme'"
@@ -388,6 +362,8 @@ function resetSettings(): void {
   settings.reset()
 }
 let unlisten: UnlistenFn | null = null
+/** The listener of the menu of the operating system. */
+let unlistenMenu: UnlistenFn | null = null
 /** Stops holding back the menu of the host, once the shell holds it back. */
 let unholdHostMenu: (() => void) | null = null
 
@@ -647,18 +623,16 @@ const commands: Command[] = [
 const commandsWithKeys = computed(() => commands.filter((command) => command.key !== null))
 
 /**
- * The commands the File menu holds, in the order a reader expects them: the
- * new one, the two that open, and the one that writes. The menu draws each
- * command from the same list the keys read, so a menu entry and a key can
- * never mean two different things.
+ * Runs the command that an identifier names. The menu of the operating
+ * system sends such an identifier, so a command reached from the menu and a
+ * command reached from a key follow one path.
  */
-const FILE_MENU_IDS = ['tab.new', 'file.open', 'file.openFolder', 'query.save'] as const
-
-const fileMenu = computed(() =>
-  FILE_MENU_IDS.map((id) => commands.find((command) => command.id === id)).filter(
-    (command): command is Command => command !== undefined,
-  ),
-)
+function runCommandById(id: string): void {
+  const command = commands.find((entry) => entry.id === id)
+  if (command && commandEnabled(command)) {
+    command.run()
+  }
+}
 
 function onKeyDown(event: KeyboardEvent): void {
   // A key of the application must not reach through a dialog, because the
@@ -704,6 +678,12 @@ onMounted(async () => {
     explorer.addRoot(info.connectionId)
   }
   try {
+    unlistenMenu = await api.onMenuCommand(runCommandById)
+  } catch (error) {
+    // The window still answers every key without the menu of the system.
+    ui.reportError(error)
+  }
+  try {
     unlisten = await api.onConnectionStatus((event) => connections.applyStatus(event))
   } catch (error) {
     // The application still runs without the reports of the backend. It then
@@ -721,6 +701,8 @@ onBeforeUnmount(() => {
   unwatchSystemTheme()
   unlisten?.()
   unlisten = null
+  unlistenMenu?.()
+  unlistenMenu = null
 })
 
 // The theme follows the choice of the user, and the theme of the host as well
@@ -767,16 +749,6 @@ onBeforeUnmount(() => {
 .app-title {
   font-size: var(--app-text-lg);
   font-weight: 600;
-  /* The title takes the width it needs and no more, so the menu beside it
-     stands next to the name and not at the far end of the bar. */
-  flex: 0 0 auto;
-}
-
-/* The key of a menu entry stands quietly at the end of the row, away from
-   the title of the entry. */
-.menu-key {
-  padding-left: 24px;
-  font-size: var(--app-text-sm);
 }
 
 /* A row of the rail holds an icon and no text. The library keeps a gap of 32

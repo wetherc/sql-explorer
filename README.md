@@ -69,6 +69,9 @@ The application is built with Vue 3, Vuetify and [Tauri 2](https://tauri.app/).
   pass through the interface.
 - A result tab can be pinned. It then holds its rows and the time of its run
   against the next statement, so two results stand beside each other.
+- The File menu of the operating system opens a query in a new tab, opens a
+  query from a file, opens a folder of queries, and writes the query that
+  stands open. The keys of a desktop reach the same four commands.
 - The status bar reports the rows and the time, and it counts the time up
   while a statement runs. For Athena it reports the data scanned with the cost
   at a rate the settings hold.

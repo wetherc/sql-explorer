@@ -257,3 +257,16 @@ no new one, so a token that is too old stops the connection until the user
 pastes a new one. The credentials of the AWS tools of the machine read a
 fresh token on each connection, so a profile is the durable choice for a
 credential that expires.
+
+## A command of the menu of the system is never greyed out
+
+The menu that the operating system draws holds the four commands of a file.
+Each item stays ready to click, whatever the state of the window, because the
+backend builds the menu once and the state of a command lives in the
+interface. A command that cannot run now, such as the write of a query while
+no tab stands open, therefore looks the same as one that can, and a click on
+it does nothing. The palette and the keys report the same state, so nothing
+runs that should not; the item alone reads wrongly.
+
+A fix sends the state of each command to the backend as it changes, and the
+backend then sets the item. No case has needed it yet.

@@ -4,9 +4,11 @@ The **+** button of the tab row opens a tab, and so do `Ctrl` or `Cmd` with
 `T` or with `N`. Each tab holds its own statement, its own connection and its
 own values of the parameters.
 
-The **File** menu of the top bar holds the four commands of a file: a new
-query, a query from a file, a folder of queries, and the write of the query
-that stands open. Each entry names its key.
+The **File** menu of the operating system holds the four commands of a file:
+a new query, a query from a file, a folder of queries, and the write of the
+query that stands open. Each entry names its key. macOS draws that menu in
+the bar at the top of the screen, and Windows and Linux draw it in the
+window.
 
 A double click on the name of a tab changes that name. The Enter key keeps the
 new name and the Escape key throws it away.

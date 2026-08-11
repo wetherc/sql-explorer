@@ -51,6 +51,7 @@ export function makeApiStub() {
     exportQuery: vi.fn(),
     supportedEngines: vi.fn(),
     onConnectionStatus: vi.fn(),
+    onMenuCommand: vi.fn(),
   }
 }
 

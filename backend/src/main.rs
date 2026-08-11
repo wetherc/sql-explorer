@@ -8,6 +8,7 @@ mod db;
 mod error;
 mod files;
 mod history;
+mod menu;
 mod script;
 mod secrets;
 mod session;
@@ -18,6 +19,7 @@ mod store;
 mod xlsx;
 
 use state::{spawn_session_reaper, AppState, SESSION_REAP_INTERVAL};
+use tauri::Emitter;
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -38,6 +40,20 @@ fn main() {
         .manage(AppState::new(secrets::build_store()))
         .setup(|app| {
             spawn_session_reaper(app.handle().clone(), SESSION_REAP_INTERVAL);
+
+            // The menu of the operating system holds the commands of a file
+            // beside the items the platform expects. A click sends the
+            // identifier of the command to the window, which runs it.
+            app.set_menu(menu::build(app.handle())?)?;
+            app.on_menu_event(|app, event| {
+                let id = event.id().as_ref();
+                if !menu::names_a_command(id) {
+                    return;
+                }
+                if let Err(error) = app.emit(menu::MENU_COMMAND_EVENT, id) {
+                    log::warn!("The menu command '{id}' did not reach the window: {error}");
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

@@ -41,6 +41,7 @@ describe('AppLayout', () => {
     apiStub.saveWorkspace.mockResolvedValue(undefined)
     apiStub.queryParameters.mockResolvedValue([])
     apiStub.onConnectionStatus.mockResolvedValue(() => {})
+    apiStub.onMenuCommand.mockResolvedValue(() => {})
   })
 
   it('reads everything it needs when it opens', async () => {
@@ -52,6 +53,57 @@ describe('AppLayout', () => {
     expect(apiStub.getHistory).toHaveBeenCalled()
     expect(apiStub.getWorkspace).toHaveBeenCalled()
     expect(apiStub.onConnectionStatus).toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('runs the command that the menu of the system names', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const tabs = useTabsStore()
+
+    const handler = apiStub.onMenuCommand.mock.calls[0]?.[0] as (id: string) => void
+    handler('tab.new')
+    await settle()
+    expect(tabs.tabs).toHaveLength(1)
+
+    // An identifier that no command holds does nothing, and so does a
+    // command that cannot run now.
+    handler('nothing.at.all')
+    await settle()
+    expect(tabs.tabs).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('holds a command of the menu that cannot run', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const actions = {
+      runStatement: vi.fn(),
+      runAll: vi.fn(),
+      cancel: vi.fn(),
+      format: vi.fn(),
+      save: vi.fn(),
+    }
+    registerTabActions('menu-tab', actions)
+
+    // No tab stands open, so the command that writes a file does nothing.
+    const handler = apiStub.onMenuCommand.mock.calls[0]?.[0] as (id: string) => void
+    handler('query.save')
+    await settle()
+    expect(actions.save).not.toHaveBeenCalled()
+
+    forgetTabActions('menu-tab')
+    wrapper.unmount()
+  })
+
+  it('reports a menu of the system that the window cannot hear', async () => {
+    apiStub.onMenuCommand.mockRejectedValue({ kind: 'internal', message: 'no', detail: null })
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+
+    // The window still answers every key, so the failure is a notice and
+    // not a stop.
+    expect(useUiStore().notices.some((notice) => notice.level === 'error')).toBe(true)
     wrapper.unmount()
   })
 
@@ -373,40 +425,6 @@ describe('AppLayout', () => {
     await wrapper.vm.$nextTick()
     expect(settings.settings.theme).toBe('sqlExplorerDark')
     wrapper.unmount()
-  })
-
-  it('holds the four commands of a file in the File menu', async () => {
-    const wrapper = mountWithPlugins(AppLayout)
-    await settle()
-
-    await wrapper.find('[data-test="file-menu"]').trigger('click')
-    await settle()
-
-    const titles = [...document.querySelectorAll('[data-test^="file-menu-"] .v-list-item-title')]
-    expect(titles.map((item) => item.textContent?.trim())).toEqual([
-      'New query',
-      'Open a query',
-      'Open a folder of queries',
-      'Save the query to a file',
-    ])
-  })
-
-  it('runs a command of the File menu, and holds the one that cannot run', async () => {
-    const wrapper = mountWithPlugins(AppLayout)
-    await settle()
-    const tabs = useTabsStore()
-
-    await wrapper.find('[data-test="file-menu"]').trigger('click')
-    await settle()
-
-    // No tab stands open, so the entry that writes a file cannot run.
-    const save = document.querySelector('[data-test="file-menu-query.save"]') as HTMLElement
-    expect(save.classList.contains('v-list-item--disabled')).toBe(true)
-
-    const newQuery = document.querySelector('[data-test="file-menu-tab.new"]') as HTMLElement
-    newQuery.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    await settle()
-    expect(tabs.tabs).toHaveLength(1)
   })
 
   it('asks before it puts every setting back to its default', async () => {

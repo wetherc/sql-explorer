@@ -34,6 +34,9 @@ import type {
 /** The name of the event that reports a change of connection state. */
 export const CONNECTION_STATUS_EVENT = 'connection-status'
 
+/** The name of the event that carries a command of the menu of the system. */
+export const MENU_COMMAND_EVENT = 'menu-command'
+
 /**
  * The convention for the shape of a command: a command with more than two
  * fields takes one `request` record, and a command with one or two plain
@@ -349,6 +352,12 @@ export const api = {
 
   onConnectionStatus(handler: (event: ConnectionStatusEvent) => void): Promise<UnlistenFn> {
     return listen<ConnectionStatusEvent>(CONNECTION_STATUS_EVENT, (event) => handler(event.payload))
+  },
+
+  /** Hears the menu of the operating system. The payload is the identifier
+   *  of the command that the user chose. */
+  onMenuCommand(handler: (id: string) => void): Promise<UnlistenFn> {
+    return listen<string>(MENU_COMMAND_EVENT, (event) => handler(event.payload))
   },
 }
 
