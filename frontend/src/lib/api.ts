@@ -80,13 +80,7 @@ export const api = {
     queryParams?: Record<string, unknown>
     options?: ExecOptions
   }): Promise<QueryResponse> {
-    return invoke('execute_query', {
-      connectionId: request.connectionId,
-      requestId: request.requestId,
-      query: request.query,
-      queryParams: request.queryParams ?? null,
-      options: request.options ?? null,
-    })
+    return call('execute_query', request)
   },
 
   explainQuery(request: {
@@ -97,16 +91,7 @@ export const api = {
     queryParams?: Record<string, unknown>
     options?: ExecOptions
   }): Promise<QueryResponse> {
-    return invoke('explain_query', {
-      request: {
-        connectionId: request.connectionId,
-        requestId: request.requestId,
-        query: request.query,
-        kind: request.kind,
-        queryParams: request.queryParams ?? null,
-        options: request.options ?? null,
-      },
-    })
+    return call('explain_query', request)
   },
 
   /** Lists the names of the parameters that a statement holds. */
@@ -201,12 +186,7 @@ export const api = {
     maxColumns: number
     ownConnection: boolean
   }): Promise<SchemaSnapshot> {
-    return invoke('schema_snapshot', {
-      connectionId: request.connectionId,
-      database: request.database,
-      maxColumns: request.maxColumns,
-      ownConnection: request.ownConnection,
-    })
+    return call('schema_snapshot', request)
   },
 
   /**
@@ -221,7 +201,7 @@ export const api = {
     kind: 'table' | 'view'
     scriptKind: ScriptKind
   }): Promise<string> {
-    return invoke('script_object', { request })
+    return call('script_object', request)
   },
 
   previewQuery(request: {
@@ -231,13 +211,7 @@ export const api = {
     tableName: string
     limit?: number
   }): Promise<string> {
-    return invoke('preview_query', {
-      connectionId: request.connectionId,
-      database: request.database,
-      schemaName: request.schemaName,
-      tableName: request.tableName,
-      limit: request.limit ?? null,
-    })
+    return call('preview_query', request)
   },
 
   quoteIdentifier(connectionId: string, name: string): Promise<string> {

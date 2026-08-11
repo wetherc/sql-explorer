@@ -336,16 +336,32 @@ pub fn query_parameters(query: String, dialect: crate::sql::Dialect) -> Vec<Stri
     crate::sql::find_parameters(&query, dialect)
 }
 
+/// What one execution carries.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecuteRequest {
+    pub connection_id: String,
+    pub request_id: String,
+    pub query: String,
+    #[serde(default)]
+    pub query_params: Option<ParamValues>,
+    #[serde(default)]
+    pub options: Option<ExecOptions>,
+}
+
 #[tauri::command]
 pub async fn execute_query<R: Runtime>(
     app: AppHandle<R>,
-    connection_id: String,
-    request_id: String,
-    query: String,
-    query_params: Option<ParamValues>,
-    options: Option<ExecOptions>,
+    request: ExecuteRequest,
     state: tauri::State<'_, AppState>,
 ) -> Result<QueryResponse> {
+    let ExecuteRequest {
+        connection_id,
+        request_id,
+        query,
+        query_params,
+        options,
+    } = request;
     let open = ensure_healthy(&app, &state, &connection_id).await?;
     let options = options.unwrap_or_else(|| open.descriptor.exec_options());
     let (query, bound) = prepare_parameters(&query, open.dialect, query_params.as_ref())?;
@@ -707,25 +723,37 @@ pub const DEFAULT_SNAPSHOT_COLUMNS: usize = 20_000;
 /// waits behind a statement of the user and no statement of the user waits
 /// behind it. A caller that asks for the one session, and a second driver
 /// that cannot open, put the read on the session of the user instead.
+/// What a read of one schema carries.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotRequest {
+    pub connection_id: String,
+    pub database: String,
+    #[serde(default)]
+    pub max_columns: Option<usize>,
+    #[serde(default)]
+    pub own_connection: Option<bool>,
+}
+
 #[tauri::command]
 pub async fn schema_snapshot<R: Runtime>(
     app: AppHandle<R>,
-    connection_id: String,
-    database: String,
-    max_columns: Option<usize>,
-    own_connection: Option<bool>,
+    request: SnapshotRequest,
     state: tauri::State<'_, AppState>,
 ) -> Result<SchemaSnapshot> {
-    let open = ensure_healthy(&app, &state, &connection_id).await?;
-    let limit = max_columns.unwrap_or(DEFAULT_SNAPSHOT_COLUMNS).max(1);
+    let open = ensure_healthy(&app, &state, &request.connection_id).await?;
+    let limit = request
+        .max_columns
+        .unwrap_or(DEFAULT_SNAPSHOT_COLUMNS)
+        .max(1);
 
-    let driver = match own_connection.unwrap_or(true) {
-        true => background_driver(&state, &connection_id, &open).await,
+    let driver = match request.own_connection.unwrap_or(true) {
+        true => background_driver(&state, &request.connection_id, &open).await,
         false => open.driver.clone(),
     };
 
     let mut guard = driver.lock().await;
-    guard.schema_snapshot(&database, limit).await
+    guard.schema_snapshot(&request.database, limit).await
 }
 
 /// Returns the background driver of a connection, and opens one when the
@@ -886,20 +914,30 @@ fn text_of_column(response: &QueryResponse, column: usize) -> Option<String> {
 /// backend builds it so that every name is quoted for the engine.
 #[tauri::command]
 pub async fn preview_query(
-    connection_id: String,
-    database: Option<String>,
-    schema_name: Option<String>,
-    table_name: String,
-    limit: Option<usize>,
+    request: PreviewRequest,
     state: tauri::State<'_, AppState>,
 ) -> Result<String> {
-    let open = state.connection(&connection_id).await?;
+    let open = state.connection(&request.connection_id).await?;
     Ok(open.dialect.preview_query(
-        database.as_deref(),
-        schema_name.as_deref(),
-        &table_name,
-        limit.unwrap_or(1000),
+        request.database.as_deref(),
+        request.schema_name.as_deref(),
+        &request.table_name,
+        request.limit.unwrap_or(1000),
     ))
+}
+
+/// What the preview of one relation carries.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewRequest {
+    pub connection_id: String,
+    #[serde(default)]
+    pub database: Option<String>,
+    #[serde(default)]
+    pub schema_name: Option<String>,
+    pub table_name: String,
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 /// Quotes a name for the engine of one connection, so that the user
@@ -1349,6 +1387,101 @@ mod tests {
                 .unwrap();
         assert_eq!(absent.schema_name, None);
         assert_eq!(absent.table_name, "t");
+    }
+
+    #[test]
+    fn an_execute_request_reads_a_full_request() {
+        let request: ExecuteRequest = serde_json::from_str(
+            r#"{"connectionId":"c1","requestId":"r1","query":"SELECT :id",
+                "queryParams":{"id":7},"options":{"maxRows":10,"timeoutSecs":5}}"#,
+        )
+        .unwrap();
+        assert_eq!(request.connection_id, "c1");
+        assert_eq!(request.request_id, "r1");
+        assert_eq!(request.query, "SELECT :id");
+        assert_eq!(
+            request.query_params.unwrap().get("id"),
+            Some(&serde_json::json!(7))
+        );
+        let options = request.options.unwrap();
+        assert_eq!(options.max_rows, 10);
+        assert_eq!(options.timeout_secs, 5);
+    }
+
+    #[test]
+    fn an_execute_request_takes_limits_that_are_null_or_absent() {
+        let with_null: ExecuteRequest = serde_json::from_str(
+            r#"{"connectionId":"c1","requestId":"r1","query":"SELECT 1",
+                "queryParams":null,"options":null}"#,
+        )
+        .unwrap();
+        assert!(with_null.query_params.is_none());
+        assert!(with_null.options.is_none());
+
+        let absent: ExecuteRequest =
+            serde_json::from_str(r#"{"connectionId":"c1","requestId":"r1","query":"SELECT 1"}"#)
+                .unwrap();
+        assert!(absent.query_params.is_none());
+        assert!(absent.options.is_none());
+    }
+
+    #[test]
+    fn a_snapshot_request_reads_a_full_request() {
+        let request: SnapshotRequest = serde_json::from_str(
+            r#"{"connectionId":"c1","database":"db","maxColumns":100,"ownConnection":false}"#,
+        )
+        .unwrap();
+        assert_eq!(request.connection_id, "c1");
+        assert_eq!(request.database, "db");
+        assert_eq!(request.max_columns, Some(100));
+        assert_eq!(request.own_connection, Some(false));
+    }
+
+    #[test]
+    fn a_snapshot_request_takes_bounds_that_are_null_or_absent() {
+        let with_null: SnapshotRequest = serde_json::from_str(
+            r#"{"connectionId":"c1","database":"db","maxColumns":null,"ownConnection":null}"#,
+        )
+        .unwrap();
+        assert_eq!(with_null.max_columns, None);
+        assert_eq!(with_null.own_connection, None);
+
+        let absent: SnapshotRequest =
+            serde_json::from_str(r#"{"connectionId":"c1","database":"db"}"#).unwrap();
+        assert_eq!(absent.max_columns, None);
+        assert_eq!(absent.own_connection, None);
+    }
+
+    #[test]
+    fn a_preview_request_reads_a_full_request() {
+        let request: PreviewRequest = serde_json::from_str(
+            r#"{"connectionId":"c1","database":"db","schemaName":"dbo",
+                "tableName":"t","limit":50}"#,
+        )
+        .unwrap();
+        assert_eq!(request.connection_id, "c1");
+        assert_eq!(request.database.as_deref(), Some("db"));
+        assert_eq!(request.schema_name.as_deref(), Some("dbo"));
+        assert_eq!(request.table_name, "t");
+        assert_eq!(request.limit, Some(50));
+    }
+
+    #[test]
+    fn a_preview_request_takes_names_that_are_null_or_absent() {
+        let with_null: PreviewRequest = serde_json::from_str(
+            r#"{"connectionId":"c1","database":null,"schemaName":null,
+                "tableName":"t","limit":null}"#,
+        )
+        .unwrap();
+        assert_eq!(with_null.database, None);
+        assert_eq!(with_null.schema_name, None);
+        assert_eq!(with_null.limit, None);
+
+        let absent: PreviewRequest =
+            serde_json::from_str(r#"{"connectionId":"c1","tableName":"t"}"#).unwrap();
+        assert_eq!(absent.database, None);
+        assert_eq!(absent.schema_name, None);
+        assert_eq!(absent.limit, None);
     }
 
     #[test]

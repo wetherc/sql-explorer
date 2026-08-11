@@ -159,17 +159,39 @@ describe('api', () => {
       options: { maxRows: 10, timeoutSecs: 5 },
     })
     expect(invoke).toHaveBeenCalledWith('execute_query', {
-      connectionId: 'c1',
-      requestId: 'r1',
-      query: 'SELECT 1',
-      queryParams: null,
-      options: { maxRows: 10, timeoutSecs: 5 },
+      request: {
+        connectionId: 'c1',
+        requestId: 'r1',
+        query: 'SELECT 1',
+        options: { maxRows: 10, timeoutSecs: 5 },
+      },
     })
   })
 
   it('leaves the limits out when none are given', async () => {
     await api.executeQuery({ connectionId: 'c1', requestId: 'r1', query: 'SELECT 1' })
-    expect(invoke).toHaveBeenCalledWith('execute_query', expect.objectContaining({ options: null }))
+    expect(invoke).toHaveBeenCalledWith('execute_query', {
+      request: { connectionId: 'c1', requestId: 'r1', query: 'SELECT 1' },
+    })
+  })
+
+  it('sends null for a field the caller set to undefined', async () => {
+    await api.executeQuery({
+      connectionId: 'c1',
+      requestId: 'r1',
+      query: 'SELECT 1',
+      queryParams: undefined,
+      options: undefined,
+    })
+    expect(invoke).toHaveBeenCalledWith('execute_query', {
+      request: {
+        connectionId: 'c1',
+        requestId: 'r1',
+        query: 'SELECT 1',
+        queryParams: null,
+        options: null,
+      },
+    })
   })
 
   it('asks for the plan of a statement, with and without limits', async () => {
@@ -186,7 +208,6 @@ describe('api', () => {
         requestId: 'r1',
         query: 'SELECT 1',
         kind: 'actual',
-        queryParams: null,
         options: { maxRows: 10, timeoutSecs: 5 },
       },
     })
@@ -198,7 +219,7 @@ describe('api', () => {
       kind: 'estimated',
     })
     expect(invoke).toHaveBeenCalledWith('explain_query', {
-      request: expect.objectContaining({ options: null, queryParams: null }),
+      request: { connectionId: 'c1', requestId: 'r1', query: 'SELECT 1', kind: 'estimated' },
     })
 
     await api.queryParameters('SELECT :id', Dialect.MsSql)
@@ -217,11 +238,13 @@ describe('api', () => {
       limit: 50,
     })
     expect(invoke).toHaveBeenCalledWith('preview_query', {
-      connectionId: 'c1',
-      database: 'db',
-      schemaName: 'dbo',
-      tableName: 't',
-      limit: 50,
+      request: {
+        connectionId: 'c1',
+        database: 'db',
+        schemaName: 'dbo',
+        tableName: 't',
+        limit: 50,
+      },
     })
 
     await api.previewQuery({
@@ -230,7 +253,9 @@ describe('api', () => {
       schemaName: null,
       tableName: 't',
     })
-    expect(invoke).toHaveBeenCalledWith('preview_query', expect.objectContaining({ limit: null }))
+    expect(invoke).toHaveBeenCalledWith('preview_query', {
+      request: { connectionId: 'c1', database: null, schemaName: null, tableName: 't' },
+    })
   })
 
   it('names the relation whose parts it reads', async () => {
@@ -260,10 +285,12 @@ describe('api', () => {
       ownConnection: false,
     })
     expect(invoke).toHaveBeenCalledWith('schema_snapshot', {
-      connectionId: 'c1',
-      database: 'db',
-      maxColumns: 100,
-      ownConnection: false,
+      request: {
+        connectionId: 'c1',
+        database: 'db',
+        maxColumns: 100,
+        ownConnection: false,
+      },
     })
   })
 
