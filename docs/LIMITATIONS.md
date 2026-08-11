@@ -205,15 +205,18 @@ and not one statement at a time, because the numbers of the placeholders belong
 to the whole text. The same script without a parameter is split and each part
 holds its own effect.
 
-## The Excel export builds the whole sheet in memory
+## The Excel export of the grid builds the whole sheet in memory
 
-The Excel export in `frontend/src/lib/xlsx.ts` builds the sheet as one
-string and compresses it on the main thread of the interface, so its
-memory cost grows with the number of rows in the grid. The row limit of
-the view bounds that number. The CSV and JSON exports run the statement
-again in the backend and write one row at a time, so a large export goes
-through those forms. A fix moves the Excel export to the backend as a
-sink; no case has needed it yet.
+The export of the rows that the grid shows goes through
+`frontend/src/lib/xlsx.ts`, which builds the sheet as one string and
+compresses it on the main thread of the interface. Its memory cost
+therefore grows with the number of rows in the grid, which the row limit of
+the view bounds. The export of every row writes from the backend one row at
+a time, so a large export goes through that entry of the menu.
+
+An Excel sheet holds 1048576 rows, the row of the column names among them.
+An export of more rows than that stops at the bound and reports the result
+as truncated. The CSV and the JSON forms have no such bound.
 
 ## A PostgreSQL script without parameters is gathered by the library
 

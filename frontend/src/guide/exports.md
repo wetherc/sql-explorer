@@ -10,7 +10,10 @@ The menu of the grid holds two kinds of export:
 - **Write every row** runs the statement again in the backend and writes each
   row to the file as it arrives, so the rows never reach the interface. These
   entries stand in the menu only when the row limit stopped the read, and they
-  offer a CSV file and a JSON file.
+  offer a CSV file, a JSON file and an Excel file.
+
+An Excel sheet holds 1048576 rows, the row of the column names among them, so
+an export of more rows than that stops there and reports the stop.
 
 ## The two limits
 

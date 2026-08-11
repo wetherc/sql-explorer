@@ -173,7 +173,7 @@ export interface ExportRequest {
   query: string
   /** The file name that the save dialog of the backend suggests. */
   defaultName: string
-  format: 'csv' | 'json'
+  format: 'csv' | 'json' | 'xlsx'
   /** The row limit of the export, which is higher than the one of the view. */
   maxRows: number
   /** The tab that runs the export, so it sees the temporary tables of the

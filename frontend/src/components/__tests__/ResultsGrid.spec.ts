@@ -200,7 +200,10 @@ describe('ResultsGrid', () => {
     document
       .querySelector('[data-test="grid-export-all-json"]')
       ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    expect(cut.emitted('export-all')).toEqual([['csv'], ['json']])
+    document
+      .querySelector('[data-test="grid-export-all-xlsx"]')
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    expect(cut.emitted('export-all')).toEqual([['csv'], ['json'], ['xlsx']])
   })
 
   it('names the export after the selection once rows are selected', async () => {

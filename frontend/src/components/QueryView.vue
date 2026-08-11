@@ -490,7 +490,7 @@ import { useTabsStore } from '@/stores/tabs'
 import { useUiStore } from '@/stores/ui'
 import { alignParams, needsAValue, paramChipLabel, paramProblem, paramsForRun } from '@/lib/params'
 import { Dialect, ParamKind, PlanKind, type ParamValue, type ResultSet } from '@/types/api'
-import type { ExportFormat } from './ResultsGrid.vue'
+import type { ExportAllFormat, ExportFormat } from './ResultsGrid.vue'
 import type { ResultPane } from '@/stores/query'
 import type { QueryTab } from '@/stores/tabs'
 
@@ -888,7 +888,7 @@ function confirmInsertExport(): void {
  * statement again with a higher row limit and writes the file itself, so a
  * large result never passes through the interface.
  */
-async function onExportAll(format: 'csv' | 'json'): Promise<void> {
+async function onExportAll(format: ExportAllFormat): Promise<void> {
   const connectionId = props.tab.connectionId
   if (!connectionId) {
     return

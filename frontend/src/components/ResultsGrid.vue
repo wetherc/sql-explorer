@@ -57,6 +57,12 @@
                 data-test="grid-export-all-json"
                 @click="emit('export-all', 'json')"
               />
+              <v-list-item
+                title="Write every row to an Excel file"
+                subtitle="Runs the statement again and writes from the server"
+                data-test="grid-export-all-xlsx"
+                @click="emit('export-all', 'xlsx')"
+              />
             </template>
             <v-divider v-if="hasSelection" />
             <v-list-item
@@ -214,10 +220,16 @@ import type { CellValue, ResultSet } from '@/types/api'
 /** The forms an export can take. */
 export type ExportFormat = 'csv' | 'json' | 'markdown' | 'insert' | 'xlsx'
 
+/**
+ * The forms the export of every row can take. The backend writes those
+ * files one row at a time, and it holds no writer for the other forms.
+ */
+export type ExportAllFormat = 'csv' | 'json' | 'xlsx'
+
 const props = withDefaults(defineProps<{ result: ResultSet; busy?: boolean }>(), { busy: false })
 const emit = defineEmits<{
   (event: 'export', format: ExportFormat, rows: ResultSet): void
-  (event: 'export-all', format: 'csv' | 'json'): void
+  (event: 'export-all', format: ExportAllFormat): void
   (event: 'copied', text: string): void
 }>()
 

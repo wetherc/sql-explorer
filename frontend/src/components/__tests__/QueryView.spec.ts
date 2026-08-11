@@ -1576,6 +1576,21 @@ describe('QueryView edge paths', () => {
     expect(useUiStore().notices.some((notice) => notice.level === 'success')).toBe(true)
   })
 
+  it('asks the backend for an Excel file of every row', async () => {
+    apiStub.exportQuery.mockResolvedValue({ rows: 40000, truncated: false, path: '/tmp/all.xlsx' })
+    const wrapper = await mountedWithResult()
+
+    await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export-all', 'xlsx')
+    await settle()
+
+    expect(apiStub.exportQuery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        format: 'xlsx',
+        defaultName: expect.stringContaining('.xlsx'),
+      }),
+    )
+  })
+
   it('warns when the export limit stopped the read as well', async () => {
     apiStub.exportQuery.mockResolvedValue({ rows: 1000000, truncated: true, path: '/tmp/all.json' })
     const wrapper = await mountedWithResult()
