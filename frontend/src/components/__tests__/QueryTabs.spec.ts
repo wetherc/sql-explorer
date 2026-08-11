@@ -102,6 +102,49 @@ describe('QueryTabs', () => {
     await wrapper.findComponent({ name: 'VTabs' }).vm.$emit('update:modelValue', first.id)
     expect(tabs.activeTabId).toBe(first.id)
   })
+
+  it('mounts a view for the tab the user opens and not for the others', async () => {
+    const wrapper = mountWithPlugins(QueryTabs)
+    const tabs = useTabsStore()
+    const first = tabs.add()
+    tabs.add()
+    await settle()
+
+    expect(wrapper.findAll('.query-view')).toHaveLength(1)
+    tabs.activate(first.id)
+    await settle()
+    expect(wrapper.findAll('.query-view')).toHaveLength(2)
+  })
+
+  it('keeps a view for the five tabs the user opened last', async () => {
+    const wrapper = mountWithPlugins(QueryTabs)
+    const tabs = useTabsStore()
+    const opened = Array.from({ length: 7 }, () => tabs.add())
+    for (const tab of opened) {
+      tabs.activate(tab.id)
+      await settle()
+    }
+
+    expect(wrapper.findAll('.query-view')).toHaveLength(5)
+  })
+
+  it('gives the place of a closed tab to another tab', async () => {
+    const wrapper = mountWithPlugins(QueryTabs)
+    const tabs = useTabsStore()
+    const opened = Array.from({ length: 6 }, () => tabs.add())
+    for (const tab of opened) {
+      tabs.activate(tab.id)
+      await settle()
+    }
+    expect(wrapper.findAll('.query-view')).toHaveLength(5)
+
+    // The tab that stands open closes, and the tab that lost its view early
+    // takes the place that the closed tab held.
+    tabs.close(opened[5]!.id)
+    tabs.activate(opened[0]!.id)
+    await settle()
+    expect(wrapper.findAll('.query-view')).toHaveLength(5)
+  })
 })
 
 describe('QueryTabs renaming a tab', () => {

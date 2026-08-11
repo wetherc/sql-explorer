@@ -282,11 +282,13 @@
           </div>
 
           <div class="results-body">
-            <!-- The grids stay mounted behind v-show, so the filter, the
-                 sort and the scroll place of a result survive a switch to
-                 another result and back. -->
+            <!-- The grids of the results the user opened last stay mounted
+                 behind v-show, so the filter, the sort and the scroll place
+                 of such a result survive a switch to another result and
+                 back. An older result builds its grid again. -->
             <template v-for="pane in state.panes" :key="pane.id">
               <ResultsGrid
+                v-if="livePaneIds.has(pane.id)"
                 v-show="state.activePaneId === pane.id"
                 :result="pane.result"
                 :busy="state.running"
@@ -587,6 +589,43 @@ const canRun = computed(() => {
  */
 const activePane = computed(
   () => state.value.panes.find((pane) => pane.id === state.value.activePaneId) ?? null,
+)
+
+/**
+ * The number of results that keep a grid. A grid holds the text of each cell
+ * it draws, so many grids of a wide result take much memory. The rows stay in
+ * the query store, and a result that loses its grid keeps them.
+ */
+const LIVE_PANE_LIMIT = 3
+
+/** The results the user opened, with the result opened last at the front. */
+const recentPaneIds = ref<string[]>([])
+
+/** The results that keep a grid. A result that is closed drops out. */
+const livePaneIds = computed(() => {
+  const open = new Set(state.value.panes.map((pane) => pane.id))
+  const live = new Set<string>()
+  for (const id of recentPaneIds.value) {
+    if (open.has(id)) {
+      live.add(id)
+    }
+    if (live.size === LIVE_PANE_LIMIT) {
+      break
+    }
+  }
+  return live
+})
+
+watch(
+  () => state.value.activePaneId,
+  (id) => {
+    if (id === null) {
+      return
+    }
+    const open = new Set(state.value.panes.map((pane) => pane.id))
+    recentPaneIds.value = [id, ...recentPaneIds.value.filter((old) => old !== id && open.has(old))]
+  },
+  { immediate: true },
 )
 
 /**

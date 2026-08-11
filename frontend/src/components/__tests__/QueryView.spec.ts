@@ -1495,6 +1495,52 @@ describe('QueryView edge paths', () => {
     expect(layout.layout.editorSize).toBe(before)
   })
 
+  it('keeps a grid for the three results the user opened last', async () => {
+    apiStub.executeQuery.mockResolvedValue({
+      ...response,
+      results: Array.from({ length: 5 }, () => response.results[0]!),
+    })
+    const wrapper = await mountView()
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+    await wrapper.vm.$nextTick()
+
+    const tabs = wrapper.findComponent({ name: 'VTabs' })
+    for (const pane of useQueryStore().stateFor('t1').panes) {
+      await tabs.vm.$emit('update:model-value', pane.id)
+      await wrapper.vm.$nextTick()
+    }
+
+    expect(wrapper.findAllComponents({ name: 'ResultsGrid' })).toHaveLength(3)
+  })
+
+  it('gives the place of a closed result to another result', async () => {
+    apiStub.executeQuery.mockResolvedValue({
+      ...response,
+      results: Array.from({ length: 4 }, () => response.results[0]!),
+    })
+    const wrapper = await mountView()
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+    await wrapper.vm.$nextTick()
+
+    const queries = useQueryStore()
+    const tabs = wrapper.findComponent({ name: 'VTabs' })
+    const panes = [...queries.stateFor('t1').panes]
+    for (const pane of panes) {
+      await tabs.vm.$emit('update:model-value', pane.id)
+      await wrapper.vm.$nextTick()
+    }
+    expect(wrapper.findAllComponents({ name: 'ResultsGrid' })).toHaveLength(3)
+
+    // The result that stands open closes, and the result that lost its grid
+    // first takes the place that the closed result held.
+    queries.closePane('t1', panes[3]!.id)
+    await tabs.vm.$emit('update:model-value', panes[0]!.id)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findAllComponents({ name: 'ResultsGrid' })).toHaveLength(3)
+  })
+
   it('hides the actions of a result while the messages stand open', async () => {
     const wrapper = await mountView()
 

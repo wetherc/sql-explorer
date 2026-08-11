@@ -67,14 +67,10 @@
 
     <div class="tab-body">
       <!-- A tab mounts its view, with its editor, the first time the user
-           opens it. A workspace with many tabs then starts with one editor
-           and not one for each tab. -->
+           opens it. Only the tabs the user opened last keep their view. A
+           workspace with many tabs then holds few editors. -->
       <template v-for="tab in tabs.tabs" :key="tab.id">
-        <QueryView
-          v-if="visitedTabIds.has(tab.id)"
-          v-show="tab.id === tabs.activeTabId"
-          :tab="tab"
-        />
+        <QueryView v-if="liveTabIds.has(tab.id)" v-show="tab.id === tabs.activeTabId" :tab="tab" />
       </template>
 
       <EmptyState
@@ -128,14 +124,41 @@ import { useTabsStore, type QueryTab } from '@/stores/tabs'
 const tabs = useTabsStore()
 const connections = useConnectionsStore()
 
-/** The tabs the user has opened at least once in this session. */
-const visitedTabIds = ref(new Set<string>())
+/**
+ * The number of tabs that keep their view. A view holds an editor and the
+ * grids of its results, which together take much memory. The text of a tab,
+ * its results and its messages stay in the stores, so a tab that loses its
+ * view keeps its work. The editor of such a tab loses the list of undo steps
+ * and the place of the cursor.
+ */
+const LIVE_TAB_LIMIT = 5
+
+/** The tabs the user opened, with the tab opened last at the front. */
+const recentTabIds = ref<string[]>([])
+
+/** The tabs that keep their view. A tab that is not open drops out. */
+const liveTabIds = computed(() => {
+  const open = new Set(tabs.tabs.map((tab) => tab.id))
+  const live = new Set<string>()
+  for (const id of recentTabIds.value) {
+    if (open.has(id)) {
+      live.add(id)
+    }
+    if (live.size === LIVE_TAB_LIMIT) {
+      break
+    }
+  }
+  return live
+})
+
 watch(
   () => tabs.activeTabId,
   (id) => {
-    if (id !== null && !visitedTabIds.value.has(id)) {
-      visitedTabIds.value = new Set(visitedTabIds.value).add(id)
+    if (id === null) {
+      return
     }
+    const open = new Set(tabs.tabs.map((tab) => tab.id))
+    recentTabIds.value = [id, ...recentTabIds.value.filter((old) => old !== id && open.has(old))]
   },
   { immediate: true },
 )
