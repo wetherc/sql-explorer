@@ -22,6 +22,8 @@ brings the panel back.
 
 ## The status bar
 
-The status bar reports the rows and the time of the last run. For Athena it
-also reports the data that the statement scanned, with the cost at the rate
-that the settings hold.
+The status bar reports the rows and the time of the last run. While a
+statement runs, the time that has passed stands in the same place, so the bar
+shows how long the statement has taken so far. For Athena the bar also
+reports the data that the statement scanned, with the cost at the rate that
+the settings hold.

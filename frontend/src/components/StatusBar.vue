@@ -11,6 +11,13 @@
          each change as it comes. -->
     <div role="status" aria-live="polite" data-test="status-state">{{ stateLabel }}</div>
 
+    <!-- While the statement runs, the time that has passed stands in the
+         place the final time takes later, so a reader watches one figure. -->
+    <template v-if="runningMs !== null">
+      <v-divider vertical />
+      <div data-test="status-running-elapsed">{{ formatDuration(runningMs) }}</div>
+    </template>
+
     <template v-if="state && !state.running && state.panes.length > 0">
       <v-divider vertical />
       <div data-test="status-rows">{{ formatRowCount(totalRows(resultsOf(state.panes))) }}</div>
@@ -43,7 +50,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { formatBytes, formatCost, formatDuration, formatRowCount, scanCost } from '@/lib/format'
 import { useConnectionsStore } from '@/stores/connections'
 import { useQueryStore } from '@/stores/query'
@@ -101,6 +108,52 @@ const stateLabel = computed(() => {
   }
   return 'Ready'
 })
+
+/**
+ * How often the time of a running statement is drawn again. A statement that
+ * runs for minutes needs no faster reading than this, and the bar draws
+ * itself alone.
+ */
+const RUNNING_TICK_MS = 100
+
+/** The moment the clock of a running statement last read. */
+const now = ref(Date.now())
+let ticker: ReturnType<typeof setInterval> | null = null
+
+/** The moment the statement of this tab started, or `null` when none runs. */
+const runningSince = computed(() => (state.value?.running ? (state.value.startedAt ?? null) : null))
+
+/** The time that has passed since the statement started. */
+const runningMs = computed(() => {
+  const since = runningSince.value
+  return since === null ? null : Math.max(0, now.value - since)
+})
+
+function stopTicker(): void {
+  if (ticker !== null) {
+    clearInterval(ticker)
+    ticker = null
+  }
+}
+
+// The clock runs only while a statement runs, so an idle window holds no
+// timer of its own.
+watch(
+  runningSince,
+  (since) => {
+    stopTicker()
+    if (since === null) {
+      return
+    }
+    now.value = Date.now()
+    ticker = setInterval(() => {
+      now.value = Date.now()
+    }, RUNNING_TICK_MS)
+  },
+  { immediate: true },
+)
+
+onBeforeUnmount(stopTicker)
 
 /** The bytes the last statement of this tab scanned, when it reported them. */
 const scannedBytes = computed(() => state.value?.stats?.scannedBytes ?? null)

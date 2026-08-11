@@ -69,8 +69,9 @@ The application is built with Vue 3, Vuetify and [Tauri 2](https://tauri.app/).
   pass through the interface.
 - A result tab can be pinned. It then holds its rows and the time of its run
   against the next statement, so two results stand beside each other.
-- The status bar reports the rows, the time, and for Athena the data scanned
-  with the cost at a rate the settings hold.
+- The status bar reports the rows and the time, and it counts the time up
+  while a statement runs. For Athena it reports the data scanned with the cost
+  at a rate the settings hold.
 - The history and the saved statements persist, and so do the open tabs with
   their parameter values.
 

@@ -86,6 +86,44 @@ describe('StatusBar', () => {
     expect(wrapper.find('[data-test="status-state"]').text()).toBe('Running…')
   })
 
+  it('counts the time while the statement runs', async () => {
+    vi.useFakeTimers()
+    const start = Date.now()
+    const wrapper = mountWithPlugins(StatusBar)
+    const tab = useTabsStore().add({ connectionId: 'c1' })
+    const state = useQueryStore().stateFor(tab.id)
+    state.running = true
+    state.startedAt = start
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('[data-test="status-running-elapsed"]').text()).toBe('0 ms')
+
+    vi.advanceTimersByTime(1500)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-test="status-running-elapsed"]').text()).toBe('1.50 s')
+
+    // The clock stops with the statement, and the final time takes its place.
+    state.running = false
+    state.startedAt = null
+    state.elapsedMs = 1500
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-test="status-running-elapsed"]').exists()).toBe(false)
+
+    vi.useRealTimers()
+    wrapper.unmount()
+  })
+
+  it('counts no time for a run that reports no start', async () => {
+    const wrapper = mountWithPlugins(StatusBar)
+    const tab = useTabsStore().add({ connectionId: 'c1' })
+    const state = useQueryStore().stateFor(tab.id)
+    state.running = true
+    state.startedAt = null
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('[data-test="status-running-elapsed"]').exists()).toBe(false)
+  })
+
   it('reports the kind of a failure', async () => {
     const wrapper = mountWithPlugins(StatusBar)
     const tab = useTabsStore().add({ connectionId: 'c1' })
