@@ -25,7 +25,7 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use futures_util::TryStreamExt;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tiberius::numeric::Numeric;
 use tiberius::{
     AttentionHandle, AuthMethod, Client, ColumnType, Config, EncryptionLevel, QueryItem, Row,
@@ -110,6 +110,48 @@ pub fn token_from_cli_output(output: &str) -> Result<String> {
         .ok_or_else(|| Error::Authentication("The Azure CLI gave no access token.".to_string()))
 }
 
+/// Reads the moment a JWT access token stops being valid.
+///
+/// The `exp` claim sits in the middle part of the token, which is base64url
+/// text without padding. No signature check is made. The client acts on a
+/// date that it reads for itself, and the server stays the judge of the
+/// token. A token that cannot be read gives `None`, so an answer of `None`
+/// means "ask the server".
+fn token_expiry(token: &str) -> Option<SystemTime> {
+    use base64::Engine;
+    let mut parts = token.split('.');
+    let (_header, payload, _signature) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let seconds = claims.get("exp")?.as_u64()?;
+    Some(UNIX_EPOCH + Duration::from_secs(seconds))
+}
+
+/// The time that a clock which runs early may gain. A token that expired
+/// inside this span still goes to the server.
+const TOKEN_CLOCK_ALLOWANCE: Duration = Duration::from_secs(60);
+
+/// The words that name an access token which is too old.
+const EXPIRED_TOKEN_MESSAGE: &str = "The access token has expired. Paste a new one, or use the \
+                                     Azure CLI method, which reads a fresh token on each \
+                                     connection.";
+
+/// True when the token names a moment that is more than the allowance in the
+/// past. A token that cannot be read is not refused here.
+fn token_has_expired(token: &str, now: SystemTime) -> bool {
+    match token_expiry(token) {
+        Some(expiry) => now
+            .duration_since(expiry)
+            .is_ok_and(|age| age > TOKEN_CLOCK_ALLOWANCE),
+        None => false,
+    }
+}
+
 /// Asks the Azure CLI for a token for the SQL database resource.
 ///
 /// The token lives for about one hour. The reconnection path builds the
@@ -180,6 +222,13 @@ async fn auth_method(connection: &SavedConnection) -> Result<AuthMethod> {
                         .to_string(),
                 )
             })?;
+            // A token lives for about one hour, and the reconnection path
+            // builds the configuration again with the stored token. The date
+            // in the token is read here, so that an old token is named as one
+            // before a socket opens.
+            if token_has_expired(token, SystemTime::now()) {
+                return Err(Error::Authentication(EXPIRED_TOKEN_MESSAGE.to_string()));
+            }
             Ok(AuthMethod::aad_token(token))
         }
         MssqlAuth::SqlLogin => Ok(AuthMethod::sql_server(
@@ -315,6 +364,16 @@ impl MssqlDriver {
 /// words that mean nothing to a user of a database, so the message says what
 /// to do instead.
 fn describe_login(error: tiberius::error::Error, auth: MssqlAuth) -> Error {
+    // A pasted token that the server refuses is old more often than it is
+    // wrong, and the date check before the login lets an unreadable token
+    // through.
+    if auth == MssqlAuth::EntraAccessToken {
+        let text = error.to_string();
+        if names_a_refused_login(&text) {
+            return Error::Authentication(format!("{EXPIRED_TOKEN_MESSAGE} {text}"));
+        }
+        return Error::from(error);
+    }
     if auth != MssqlAuth::Integrated {
         return Error::from(error);
     }
@@ -328,6 +387,14 @@ fn describe_login(error: tiberius::error::Error, auth: MssqlAuth) -> Error {
     } else {
         Error::from(error)
     }
+}
+
+/// True when the text of an error is the refusal of a login by the server.
+/// The server gives the number 18456 for such a refusal, and the text of the
+/// message names the login as well.
+fn names_a_refused_login(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("login failed") || lower.contains("18456")
 }
 
 /// True when the text of a failed login points at the ticket of the user.
@@ -1532,6 +1599,67 @@ mod tests {
         }
     }
 
+    /// Builds a token whose middle part holds the given claims.
+    fn token_with_claims(claims: &str) -> String {
+        use base64::Engine;
+        let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        format!(
+            "{}.{}.{}",
+            engine.encode(r#"{"alg":"RS256"}"#),
+            engine.encode(claims),
+            engine.encode("signature")
+        )
+    }
+
+    #[test]
+    fn the_date_of_a_token_is_read_from_its_middle_part() {
+        let token = token_with_claims(r#"{"exp":1735689600,"aud":"sql"}"#);
+        assert_eq!(
+            token_expiry(&token),
+            Some(UNIX_EPOCH + Duration::from_secs(1_735_689_600))
+        );
+    }
+
+    #[test]
+    fn a_token_the_reader_cannot_use_gives_no_date() {
+        for token in [
+            // No `exp` claim.
+            token_with_claims(r#"{"aud":"sql"}"#),
+            // The claim is not a number.
+            token_with_claims(r#"{"exp":"soon"}"#),
+            // The claim is a number that no date can hold.
+            token_with_claims(r#"{"exp":-1}"#),
+            // The middle part is not JSON.
+            token_with_claims("not json"),
+            // The middle part is not base64url text.
+            "a.!!.c".to_string(),
+            // Fewer than three parts.
+            "a.b".to_string(),
+            // More than three parts.
+            "a.b.c.d".to_string(),
+            // Not a token at all.
+            "a-token".to_string(),
+        ] {
+            assert_eq!(token_expiry(&token), None, "{token}");
+        }
+    }
+
+    #[test]
+    fn a_token_is_old_only_past_the_allowance() {
+        let expiry = UNIX_EPOCH + Duration::from_secs(2_000_000_000);
+        let token = token_with_claims(r#"{"exp":2000000000}"#);
+
+        assert!(!token_has_expired(&token, expiry - Duration::from_secs(1)));
+        assert!(!token_has_expired(&token, expiry + TOKEN_CLOCK_ALLOWANCE));
+        assert!(token_has_expired(
+            &token,
+            expiry + TOKEN_CLOCK_ALLOWANCE + Duration::from_secs(1)
+        ));
+
+        // A token that the reader cannot use goes to the server.
+        assert!(!token_has_expired("a-token", expiry));
+    }
+
     #[tokio::test]
     async fn a_token_that_the_user_gives_becomes_the_credential() {
         let mut input = connection();
@@ -1544,6 +1672,21 @@ mod tests {
             auth_method(&input).await.err().unwrap().kind(),
             crate::error::ErrorKind::Authentication
         );
+    }
+
+    #[tokio::test]
+    async fn a_token_with_a_date_in_the_past_is_refused_before_the_socket() {
+        let mut input = connection();
+        input.options.mssql_auth = MssqlAuth::EntraAccessToken;
+        input.password = Some(token_with_claims(r#"{"exp":1000000000}"#));
+
+        let error = auth_method(&input).await.err().unwrap();
+        assert_eq!(error.kind(), crate::error::ErrorKind::Authentication);
+        assert!(error.to_string().contains("has expired"));
+
+        // A date far ahead passes the check.
+        input.password = Some(token_with_claims(r#"{"exp":4000000000}"#));
+        assert!(auth_method(&input).await.is_ok());
     }
 
     #[tokio::test]
@@ -1607,6 +1750,29 @@ mod tests {
                 MssqlAuth::SqlLogin
             )
             .kind(),
+            crate::error::ErrorKind::Database
+        );
+    }
+
+    #[test]
+    fn a_server_that_refuses_a_pasted_token_points_at_the_date() {
+        use tiberius::error::Error as TiberiusError;
+
+        assert!(names_a_refused_login("Login failed for user 'sa'."));
+        assert!(names_a_refused_login("Msg 18456, Level 14"));
+        assert!(!names_a_refused_login("The stream ended."));
+
+        let error = describe_login(
+            TiberiusError::Protocol("Login failed for the user.".into()),
+            MssqlAuth::EntraAccessToken,
+        );
+        assert_eq!(error.kind(), crate::error::ErrorKind::Authentication);
+        assert!(error.to_string().contains("has expired"));
+
+        // Another fault keeps the error of the driver, because a token that
+        // is old is not its cause.
+        assert_eq!(
+            describe_login(TiberiusError::Utf8, MssqlAuth::EntraAccessToken).kind(),
             crate::error::ErrorKind::Database
         );
     }
