@@ -434,7 +434,7 @@ const needsAccessToken = computed(
 const authHint = computed(() => {
   switch (draft.value.options.mssqlAuth) {
     case MssqlAuth.Integrated:
-      return 'macOS and Linux use the user\'s Kerberos ticket, so you may need to run `kinit` first.'
+      return "macOS and Linux use the user's Kerberos ticket, so you may need to run `kinit` first."
     case MssqlAuth.EntraAzureCli:
       return 'The application asks the Azure CLI for a token. Run `az login` first.'
     case MssqlAuth.EntraAccessToken:
@@ -452,7 +452,7 @@ const tokenHint = computed(() =>
 
 const passwordHint = computed(() =>
   props.isNew
-    ? 'The password is stored in your operating system\'s keychain.'
+    ? "The password is stored in your operating system's keychain."
     : 'Leave this empty to keep the password that is already stored.',
 )
 

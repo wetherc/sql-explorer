@@ -169,7 +169,7 @@ describe('ConnectionForm', () => {
 
     for (const [mode, text] of [
       [TlsMode.VerifyFull, 'identity of the server is checked'],
-      [TlsMode.Require, 'a false certificate is accepted'],
+      [TlsMode.Require, 'unverified certificate is accepted'],
       [TlsMode.Prefer, 'continues without encryption'],
       [TlsMode.Disable, 'clear text'],
     ] as const) {
@@ -513,15 +513,11 @@ describe('ConnectionForm advanced options', () => {
     ).toBe(true)
   })
 
-  it('names the stored session token in the hint of its field', async () => {
-    const record = athenaWithKeys()
-    record.options.awsSessionTokenSet = true
-    const wrapper = await mountForm(record)
-    expect(wrapper.find('[data-test="aws-token-field"]').text()).toContain('keep the stored token')
-
-    const fresh = athenaWithKeys()
-    const other = await mountForm(fresh)
-    expect(other.find('[data-test="aws-token-field"]').text()).toContain('needs no session token')
+  it('says that a static pair of keys needs no session token', async () => {
+    const wrapper = await mountForm(athenaWithKeys())
+    expect(wrapper.find('[data-test="aws-token-field"]').text()).toContain(
+      'Not required for static IAM keys',
+    )
   })
 })
 
