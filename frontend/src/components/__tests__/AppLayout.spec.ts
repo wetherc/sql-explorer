@@ -289,6 +289,32 @@ describe('AppLayout', () => {
     wrapper.unmount()
   })
 
+  it('opens the guide from the rail and from the palette', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const ui = useUiStore()
+
+    await wrapper.find('[data-test="rail-guide"]').trigger('click')
+    await settle()
+    expect(ui.guideOpen).toBe(true)
+    expect(document.querySelector('[data-test="guide-content"]')).not.toBeNull()
+
+    // The dialog reports the close back to the store.
+    const close = document.querySelector('[data-test="guide-close"]') as HTMLElement
+    close.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+    expect(ui.guideOpen).toBe(false)
+
+    const guide = wrapper
+      .findComponent({ name: 'CommandPalette' })
+      .props('commands')
+      .find((command: { id: string }) => command.id === 'app.guide')
+    guide.run()
+    await settle()
+    expect(ui.guideOpen).toBe(true)
+    wrapper.unmount()
+  })
+
   it('starts the edit of the name of a tab from the palette', async () => {
     const wrapper = mountWithPlugins(AppLayout)
     await settle()

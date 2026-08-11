@@ -143,6 +143,29 @@ describe('ui store dialog count', () => {
   })
 })
 
+describe('ui store overlays', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  it('opens and closes the palette, the key list and the guide', () => {
+    const ui = useUiStore()
+    expect(ui.paletteOpen).toBe(false)
+    expect(ui.keyboardHelpOpen).toBe(false)
+    expect(ui.guideOpen).toBe(false)
+
+    ui.setPaletteOpen(true)
+    ui.setKeyboardHelpOpen(true)
+    ui.setGuideOpen(true)
+    expect(ui.paletteOpen).toBe(true)
+    expect(ui.keyboardHelpOpen).toBe(true)
+    expect(ui.guideOpen).toBe(true)
+
+    ui.setGuideOpen(false)
+    expect(ui.guideOpen).toBe(false)
+  })
+})
+
 describe('ui store holding the corner to a few notices', () => {
   beforeEach(() => {
     setActivePinia(createPinia())

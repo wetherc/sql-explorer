@@ -39,6 +39,8 @@ export const useUiStore = defineStore('ui', () => {
   const paletteOpen = ref(false)
   /** True while the list of the keys stands open. */
   const keyboardHelpOpen = ref(false)
+  /** True while the guide stands open. */
+  const guideOpen = ref(false)
   /**
    * The number of dialogs that stand open. Each dialog of the application
    * counts itself here as it opens and takes itself away as it closes, so the
@@ -145,6 +147,10 @@ export const useUiStore = defineStore('ui', () => {
     keyboardHelpOpen.value = open
   }
 
+  function setGuideOpen(open: boolean): void {
+    guideOpen.value = open
+  }
+
   function addDialog(): void {
     openDialogs.value += 1
   }
@@ -158,12 +164,14 @@ export const useUiStore = defineStore('ui', () => {
     openedNotice,
     paletteOpen,
     keyboardHelpOpen,
+    guideOpen,
     openDialogs,
     dialogOpen,
     addDialog,
     removeDialog,
     setPaletteOpen,
     setKeyboardHelpOpen,
+    setGuideOpen,
     push,
     dismiss,
     clear,

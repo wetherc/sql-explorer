@@ -52,6 +52,24 @@
           </template>
         </v-tooltip>
       </v-list>
+
+      <!-- The guide opens a dialog and joins no panel, because the side
+           panel is too narrow for prose. -->
+      <template #append>
+        <v-list density="compact" nav>
+          <v-tooltip location="right" text="Guide">
+            <template #activator="{ props: tip }">
+              <v-list-item
+                v-bind="tip"
+                prepend-icon="mdi-help-circle-outline"
+                aria-label="Guide"
+                data-test="rail-guide"
+                @click="ui.setGuideOpen(true)"
+              />
+            </template>
+          </v-tooltip>
+        </v-list>
+      </template>
     </v-navigation-drawer>
 
     <v-navigation-drawer
@@ -103,6 +121,8 @@
       :apple="apple"
       @update:open="ui.setPaletteOpen"
     />
+
+    <GuideDialog :open="ui.guideOpen" @update:open="ui.setGuideOpen" />
 
     <AppDialog
       :model-value="ui.keyboardHelpOpen"
@@ -284,6 +304,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useTheme } from 'vuetify'
 import CommandPalette from '@/components/CommandPalette.vue'
 import ConnectionManager from '@/components/ConnectionManager.vue'
+import GuideDialog from '@/components/GuideDialog.vue'
 import DbExplorer from '@/components/DbExplorer.vue'
 import HistoryPanel from '@/components/HistoryPanel.vue'
 import NoticeHost from '@/components/NoticeHost.vue'
@@ -550,6 +571,13 @@ const commands: Command[] = [
     group: 'Application',
     key: 'f1',
     run: () => ui.setKeyboardHelpOpen(true),
+  },
+  {
+    id: 'app.guide',
+    title: 'Open the guide',
+    group: 'Application',
+    key: null,
+    run: () => ui.setGuideOpen(true),
   },
 ]
 
