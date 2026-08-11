@@ -625,6 +625,21 @@ describe('AppLayout keys', () => {
     wrapper.unmount()
   })
 
+  it('shows and hides the results panel', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const layout = useLayoutStore()
+
+    press('KeyJ')
+    await settle()
+    expect(layout.layout.resultsCollapsed).toBe(true)
+
+    press('KeyJ')
+    await settle()
+    expect(layout.layout.resultsCollapsed).toBe(false)
+    wrapper.unmount()
+  })
+
   it('opens the settings, the palette and the key list', async () => {
     const wrapper = mountWithPlugins(AppLayout)
     await settle()

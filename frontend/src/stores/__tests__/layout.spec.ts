@@ -22,8 +22,20 @@ describe('parseLayout', () => {
   })
 
   it('keeps the values a record holds', () => {
-    const stored = { panel: 'history', panelOpen: false, panelWidth: 420, editorSize: 60 }
+    const stored = {
+      panel: 'history',
+      panelOpen: false,
+      panelWidth: 420,
+      editorSize: 60,
+      resultsCollapsed: true,
+    }
     expect(parseLayout(JSON.stringify(stored))).toEqual(stored)
+  })
+
+  it('falls back when the state of the results panel is not a true or false value', () => {
+    expect(parseLayout(JSON.stringify({ resultsCollapsed: 'yes' })).resultsCollapsed).toBe(
+      defaultLayout().resultsCollapsed,
+    )
   })
 
   it('holds the width of the side panel inside its limits', () => {
@@ -117,6 +129,22 @@ describe('useLayoutStore', () => {
 
     layout.setEditorSize(150)
     expect(layout.layout.editorSize).toBe(MAX_EDITOR_SIZE)
+  })
+
+  it('puts the results panel away and brings it back', () => {
+    const layout = useLayoutStore()
+    layout.setEditorSize(70)
+
+    layout.toggleResults()
+    expect(layout.layout.resultsCollapsed).toBe(true)
+
+    layout.toggleResults()
+    expect(layout.layout.resultsCollapsed).toBe(false)
+    // The split that the user had comes back with the panel.
+    expect(layout.layout.editorSize).toBe(70)
+
+    layout.setResultsCollapsed(true)
+    expect(layout.layout.resultsCollapsed).toBe(true)
   })
 
   it('keeps the share it has when the new one is not a number', () => {

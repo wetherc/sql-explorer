@@ -519,6 +519,13 @@ const commands: Command[] = [
     run: () => layout.togglePanel(),
   },
   {
+    id: 'view.results',
+    title: 'Show or hide the results panel',
+    group: 'View',
+    key: 'mod+j',
+    run: () => layout.toggleResults(),
+  },
+  {
     id: 'app.settings',
     title: 'Open the settings',
     group: 'Application',

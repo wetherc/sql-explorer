@@ -119,8 +119,16 @@
       />
     </div>
 
-    <splitpanes horizontal class="panes" @resize="onPaneResize">
-      <pane :size="editorSize" :min-size="MIN_EDITOR_SIZE">
+    <splitpanes
+      horizontal
+      class="panes"
+      :class="{ 'results-away': resultsCollapsed }"
+      @resize="onPaneResize"
+    >
+      <pane
+        :size="resultsCollapsed ? 100 : editorSize"
+        :min-size="resultsCollapsed ? 100 : MIN_EDITOR_SIZE"
+      >
         <SqlEditor
           ref="editorRef"
           :model-value="tab.query"
@@ -135,8 +143,13 @@
           @show-keys="ui.setKeyboardHelpOpen(true)"
         />
       </pane>
-      <pane :size="100 - editorSize" :min-size="MIN_EDITOR_SIZE">
-        <div class="results-pane">
+      <!-- The pane keeps its content while the panel is away, so the grid
+           holds its scroll place, its filter and its selection. -->
+      <pane
+        :size="resultsCollapsed ? 0 : 100 - editorSize"
+        :min-size="resultsCollapsed ? 0 : MIN_EDITOR_SIZE"
+      >
+        <div v-show="!resultsCollapsed" class="results-pane">
           <!-- The actions of a result sit beside the strip and act on the
                result that is open. A tab is itself a button, so a button
                inside it would nest one inside another, and the two would
@@ -166,32 +179,47 @@
               </v-tab>
             </v-tabs>
 
-            <div v-if="activePane" class="results-actions d-flex align-center ga-1 px-1">
-              <v-tooltip
-                location="bottom"
-                :text="activePane.pinned ? 'Let this result go' : 'Keep this result'"
-              >
+            <div class="results-actions d-flex align-center ga-1 px-1">
+              <template v-if="activePane">
+                <v-tooltip
+                  location="bottom"
+                  :text="activePane.pinned ? 'Let this result go' : 'Keep this result'"
+                >
+                  <template #activator="{ props: tip }">
+                    <v-btn
+                      v-bind="tip"
+                      :icon="activePane.pinned ? 'mdi-pin' : 'mdi-pin-outline'"
+                      :color="activePane.pinned ? 'warning' : undefined"
+                      size="small"
+                      :aria-label="activePane.pinned ? 'Let this result go' : 'Keep this result'"
+                      data-test="pin-result"
+                      @click="queries.togglePin(tab.id, activePane.id)"
+                    />
+                  </template>
+                </v-tooltip>
+                <v-tooltip location="bottom" text="Close this result">
+                  <template #activator="{ props: tip }">
+                    <v-btn
+                      v-bind="tip"
+                      icon="mdi-close"
+                      size="small"
+                      aria-label="Close this result"
+                      data-test="close-result"
+                      @click="queries.closePane(tab.id, activePane.id)"
+                    />
+                  </template>
+                </v-tooltip>
+              </template>
+
+              <v-tooltip location="bottom" text="Put the results away">
                 <template #activator="{ props: tip }">
                   <v-btn
                     v-bind="tip"
-                    :icon="activePane.pinned ? 'mdi-pin' : 'mdi-pin-outline'"
-                    :color="activePane.pinned ? 'warning' : undefined"
+                    icon="mdi-chevron-down"
                     size="small"
-                    :aria-label="activePane.pinned ? 'Let this result go' : 'Keep this result'"
-                    data-test="pin-result"
-                    @click="queries.togglePin(tab.id, activePane.id)"
-                  />
-                </template>
-              </v-tooltip>
-              <v-tooltip location="bottom" text="Close this result">
-                <template #activator="{ props: tip }">
-                  <v-btn
-                    v-bind="tip"
-                    icon="mdi-close"
-                    size="small"
-                    aria-label="Close this result"
-                    data-test="close-result"
-                    @click="queries.closePane(tab.id, activePane.id)"
+                    aria-label="Put the results away"
+                    data-test="collapse-results"
+                    @click="layout.setResultsCollapsed(true)"
                   />
                 </template>
               </v-tooltip>
@@ -251,6 +279,25 @@
         </div>
       </pane>
     </splitpanes>
+
+    <!-- The bar stands in the place of the results panel while it is away.
+         It names the result that is open and brings the panel back. -->
+    <div
+      v-if="resultsCollapsed"
+      class="results-bar d-flex align-center px-2"
+      data-test="results-bar"
+    >
+      <span class="text-caption text-medium-emphasis">{{ collapsedLabel }}</span>
+      <v-spacer />
+      <v-btn
+        icon="mdi-chevron-up"
+        size="small"
+        variant="text"
+        aria-label="Bring the results back"
+        data-test="expand-results"
+        @click="layout.setResultsCollapsed(false)"
+      />
+    </div>
 
     <AppDialog v-model="askingTable" max-width="420">
       <v-card>
@@ -397,6 +444,8 @@ const paramCard = ref<{ $el: HTMLElement } | null>(null)
  * every tab shows the same split and a restart brings it back.
  */
 const editorSize = computed(() => layout.layout.editorSize)
+/** True while the results panel is a bar below the editor. */
+const resultsCollapsed = computed(() => layout.layout.resultsCollapsed)
 const savingQuery = ref(false)
 const saveName = ref('')
 const saveFolder = ref('')
@@ -481,6 +530,9 @@ function focusParamDialog(): void {
     card?.querySelector<HTMLElement>('input, button')
   field?.focus()
 }
+
+/** What the bar of the results panel says while the panel is away. */
+const collapsedLabel = computed(() => (activePane.value ? paneLabel(activePane.value) : 'Messages'))
 
 function paneLabel(pane: ResultPane): string {
   const name = pane.label ?? `Result ${pane.number}`
@@ -598,6 +650,8 @@ async function run(statement: string): Promise<void> {
     ui.warn('Choose a connection before you run a statement.')
     return
   }
+  // The rows of a run are what the user asked for, so the panel comes back.
+  layout.setResultsCollapsed(false)
   await withParams(statement, (values) => {
     void queries.execute(props.tab.id, connectionId, statement, values)
   })
@@ -886,5 +940,17 @@ defineExpose({ runStatement, runAll, formatStatement, readPlan })
 :deep(.splitpanes__splitter) {
   background: rgb(var(--v-theme-surface-variant));
   min-height: 4px;
+}
+
+/* The splitter has nothing to move while the results panel is away. */
+.results-away :deep(.splitpanes__splitter) {
+  display: none;
+}
+
+.results-bar {
+  flex: 0 0 auto;
+  height: 32px;
+  border-top: var(--app-divider);
+  background: rgb(var(--v-theme-surface));
 }
 </style>

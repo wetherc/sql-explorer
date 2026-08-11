@@ -1043,6 +1043,56 @@ describe('QueryView edge paths', () => {
     expect(layout.layout.editorSize).toBe(62)
   })
 
+  it('puts the results panel away and shows a bar in its place', async () => {
+    const wrapper = await mountView()
+    const layout = useLayoutStore()
+    expect(wrapper.find('[data-test="results-bar"]').exists()).toBe(false)
+
+    await wrapper.find('[data-test="collapse-results"]').trigger('click')
+    await wrapper.vm.$nextTick()
+
+    expect(layout.layout.resultsCollapsed).toBe(true)
+    const bar = wrapper.find('[data-test="results-bar"]')
+    expect(bar.exists()).toBe(true)
+    // The messages stand open, so the bar names them.
+    expect(bar.text()).toContain('Messages')
+    // The editor takes the whole height, and the panel keeps its content.
+    const panes = wrapper.findAllComponents({ name: 'pane' })
+    expect(panes[0]?.props('size')).toBe(100)
+    expect(panes[1]?.props('size')).toBe(0)
+    expect(wrapper.find('[data-test="messages-tab"]').exists()).toBe(true)
+
+    await wrapper.find('[data-test="expand-results"]').trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(layout.layout.resultsCollapsed).toBe(false)
+    expect(wrapper.find('[data-test="results-bar"]').exists()).toBe(false)
+  })
+
+  it('names the result that is open in the bar', async () => {
+    apiStub.executeQuery.mockResolvedValue(response)
+    const wrapper = await mountView()
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+
+    await wrapper.find('[data-test="collapse-results"]').trigger('click')
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('[data-test="results-bar"]').text()).toContain('Result 1')
+  })
+
+  it('brings the results panel back when a statement runs', async () => {
+    apiStub.executeQuery.mockResolvedValue(response)
+    const wrapper = await mountView()
+    const layout = useLayoutStore()
+    layout.setResultsCollapsed(true)
+    await wrapper.vm.$nextTick()
+
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+
+    expect(layout.layout.resultsCollapsed).toBe(false)
+  })
+
   it('leaves the split alone when the drag reports no pane', async () => {
     const wrapper = await mountView()
     const layout = useLayoutStore()

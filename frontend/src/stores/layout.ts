@@ -15,6 +15,8 @@ export interface Layout {
   panelWidth: number
   /** The share of the query view the editor takes, as a percentage. */
   editorSize: number
+  /** True while the results panel is a bar below the editor. */
+  resultsCollapsed: boolean
 }
 
 /** The smallest and the largest share the editor may take. */
@@ -33,7 +35,13 @@ export const PANEL_WIDTH_STEP = 16
 
 /** The shape a new installation starts with. */
 export function defaultLayout(): Layout {
-  return { panel: 'connections', panelOpen: true, panelWidth: 320, editorSize: 45 }
+  return {
+    panel: 'connections',
+    panelOpen: true,
+    panelWidth: 320,
+    editorSize: 45,
+    resultsCollapsed: false,
+  }
 }
 
 /** The key under which the shape of the work area lives in the browser store. */
@@ -54,6 +62,10 @@ export function parseLayout(raw: string | null): Layout {
       panelOpen: typeof parsed.panelOpen === 'boolean' ? parsed.panelOpen : defaults.panelOpen,
       panelWidth: clamp(parsed.panelWidth, defaults.panelWidth, MIN_PANEL_WIDTH, MAX_PANEL_WIDTH),
       editorSize: sizeOr(parsed.editorSize, defaults.editorSize),
+      resultsCollapsed:
+        typeof parsed.resultsCollapsed === 'boolean'
+          ? parsed.resultsCollapsed
+          : defaults.resultsCollapsed,
     }
   } catch {
     return defaults
@@ -159,6 +171,18 @@ export const useLayoutStore = defineStore('layout', () => {
     update({ editorSize: sizeOr(size, layout.value.editorSize) })
   }
 
+  /**
+   * Puts the results panel away, or brings it back. The share of the editor
+   * stays as it is, so an expansion gives back the split the user had.
+   */
+  function setResultsCollapsed(collapsed: boolean): void {
+    update({ resultsCollapsed: collapsed })
+  }
+
+  function toggleResults(): void {
+    setResultsCollapsed(!layout.value.resultsCollapsed)
+  }
+
   return {
     layout,
     resizingPanel,
@@ -174,5 +198,7 @@ export const useLayoutStore = defineStore('layout', () => {
     beginPanelResize,
     endPanelResize,
     setEditorSize,
+    setResultsCollapsed,
+    toggleResults,
   }
 })
