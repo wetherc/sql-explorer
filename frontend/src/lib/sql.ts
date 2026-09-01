@@ -95,15 +95,16 @@ export function quoteIfNeeded(name: string, dialect: Dialect): string {
  * Returns the statement that surrounds the given position. The editor uses
  * it to run the statement under the cursor when nothing is selected. A
  * position that no statement holds gives the statement in front of it, and a
- * script that holds no statement gives an empty text.
+ * script that holds no statement gives an empty text. On MS SQL Server the
+ * word GO bounds a statement and never travels with it.
  *
  * The split is a simple one that respects single quotes, double quotes and
  * comments. The backend splits again before it sends anything to a server,
  * so this only has to be good enough to pick the right block.
  */
-export function statementAt(script: string, offset: number): string {
+export function statementAt(script: string, offset: number, dialect?: Dialect): string {
   const position = Math.max(0, Math.min(offset, script.length))
-  const parts = statementBounds(script)
+  const parts = statementBounds(script, dialect)
     .map(([start, end]) => ({ start, end, text: script.slice(start, end).trim() }))
     .filter((part) => part.text !== '')
   const first = parts[0]
@@ -121,8 +122,28 @@ export function statementAt(script: string, offset: number): string {
   return (before[before.length - 1] ?? first).text
 }
 
-/** Returns the start and the end of every statement in the script. */
-export function statementBounds(script: string): Array<[number, number]> {
+/**
+ * The batch separator of MS SQL Server: the word GO alone on a line, with an
+ * optional count of runs and an optional comment behind it.
+ */
+const BATCH_SEPARATOR = /^[ \t]*GO(?:[ \t]+\d+)?[ \t]*(?:--[^\n]*)?(?:\r?\n|$)/i
+
+/**
+ * Reads a batch separator that starts at the given position. Returns the
+ * position after the line of the separator, or -1 when the line holds
+ * something else.
+ */
+function batchSeparatorAt(script: string, index: number): number {
+  const match = BATCH_SEPARATOR.exec(script.slice(index))
+  return match ? index + match[0].length : -1
+}
+
+/**
+ * Returns the start and the end of every statement in the script. On MS SQL
+ * Server the word GO ends a batch and belongs to no statement, so it bounds
+ * the statement in front of it and the text of it never reaches the server.
+ */
+export function statementBounds(script: string, dialect?: Dialect): Array<[number, number]> {
   const bounds: Array<[number, number]> = []
   let start = 0
   let index = 0
@@ -160,6 +181,15 @@ export function statementBounds(script: string): Array<[number, number]> {
       }
       index += 1
       continue
+    }
+    if (dialect === Dialect.MsSql && (index === 0 || script[index - 1] === '\n')) {
+      const after = batchSeparatorAt(script, index)
+      if (after >= 0) {
+        bounds.push([start, index])
+        start = after
+        index = after
+        continue
+      }
     }
     if (character === '-' && next === '-') {
       lineComment = true

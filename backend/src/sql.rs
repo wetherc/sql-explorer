@@ -119,6 +119,14 @@ impl Dialect {
     fn nested_block_comments(&self) -> bool {
         matches!(self, Dialect::MsSql | Dialect::Postgres)
     }
+
+    /// True when the word `GO` on a line of its own ends a batch. MS SQL
+    /// Server holds the variables and the temporary names of a batch until
+    /// the batch ends, so the unit that the server compiles is the batch and
+    /// not the statement.
+    fn batch_separator(&self) -> bool {
+        matches!(self, Dialect::MsSql)
+    }
 }
 
 /// Reads the first word of a statement, in small letters. The reader steps
@@ -175,7 +183,10 @@ const WRITE_WORDS: [&str; 15] = [
 /// hold a writing word outside a quoted region or a comment. The check reads
 /// the text alone, so a function of the server that writes can still pass.
 pub fn only_reads(script: &str, dialect: Dialect) -> bool {
-    let statements = split_statements(script, dialect);
+    let statements: Vec<String> = split_batches(script, dialect)
+        .iter()
+        .flat_map(|batch| split_statements(&batch.text, dialect))
+        .collect();
     if statements.is_empty() {
         return false;
     }
@@ -256,6 +267,143 @@ fn scan_words(sql: &str, dialect: Dialect, mut visit: impl FnMut(&str)) {
 
         index += 1;
     }
+}
+
+/// One batch of a script, with the number of runs the script asked for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Batch {
+    /// The text of the batch, without the separator that ends it.
+    pub text: String,
+    /// How many times the batch runs. `GO 3` gives three runs.
+    pub runs: u32,
+}
+
+/// Splits a script into batches. A batch is the unit that the server
+/// compiles, so the statements of one batch share their variables and their
+/// temporary names.
+///
+/// Only MS SQL Server has a separator. The word `GO` ends a batch when it
+/// stands alone on a line, outside a quoted region and outside a comment. A
+/// number after the word says how many times the batch runs, and a line
+/// comment may follow. Every other dialect gives the whole script as one
+/// batch. A script of blank space alone gives no batch.
+pub fn split_batches(script: &str, dialect: Dialect) -> Vec<Batch> {
+    let mut batches: Vec<Batch> = Vec::new();
+    if !dialect.batch_separator() {
+        push_batch(&mut batches, &mut script.to_string(), 1);
+        return batches;
+    }
+
+    // MS SQL Server is the one dialect with a separator, so the walk below
+    // reads the quotes and the comments of that dialect alone.
+    let chars: Vec<char> = script.chars().collect();
+    let mut current = String::new();
+    let mut index = 0usize;
+
+    while index < chars.len() {
+        let c = chars[index];
+
+        // The separator holds a whole line, so it is read at a line start
+        // alone. Every character that the walk steps over goes into the
+        // buffer, so the end of the buffer tells where the line starts.
+        if current.is_empty() || current.ends_with('\n') {
+            if let Some((runs, next_index)) = read_batch_separator(&chars, index) {
+                push_batch(&mut batches, &mut current, runs);
+                index = next_index;
+                continue;
+            }
+        }
+
+        if c == '-' && chars.get(index + 1) == Some(&'-') {
+            index = copy_to_end_of_line(&chars, index, &mut current);
+            continue;
+        }
+        if c == '/' && chars.get(index + 1) == Some(&'*') {
+            index = copy_block_comment(&chars, index, &mut current, true);
+            continue;
+        }
+        if c == '\'' || c == '"' {
+            index = copy_quoted(&chars, index, c, false, &mut current);
+            continue;
+        }
+        if c == '[' {
+            index = copy_bracket(&chars, index, &mut current);
+            continue;
+        }
+
+        current.push(c);
+        index += 1;
+    }
+
+    push_batch(&mut batches, &mut current, 1);
+    batches
+}
+
+/// Adds the buffer to the list of batches when it holds more than blank
+/// space, then clears the buffer.
+fn push_batch(batches: &mut Vec<Batch>, current: &mut String, runs: u32) {
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        batches.push(Batch {
+            text: trimmed.to_string(),
+            runs,
+        });
+    }
+    current.clear();
+}
+
+/// Reads a batch separator that starts at the given position. Returns the
+/// number of runs and the position after the line of the separator, or `None`
+/// when the line holds something else.
+fn read_batch_separator(chars: &[char], index: usize) -> Option<(u32, usize)> {
+    let mut cursor = skip_blanks(chars, index);
+    let word: String = chars.get(cursor..cursor + 2)?.iter().collect();
+    if !word.eq_ignore_ascii_case("go") {
+        return None;
+    }
+    cursor += 2;
+    // A longer word that starts with these two letters is not the separator.
+    if chars
+        .get(cursor)
+        .is_some_and(|&c| c.is_alphanumeric() || c == '_')
+    {
+        return None;
+    }
+
+    cursor = skip_blanks(chars, cursor);
+    let mut digits = String::new();
+    while let Some(&c) = chars.get(cursor) {
+        if !c.is_ascii_digit() {
+            break;
+        }
+        digits.push(c);
+        cursor += 1;
+    }
+    cursor = skip_blanks(chars, cursor);
+    if chars.get(cursor) == Some(&'-') && chars.get(cursor + 1) == Some(&'-') {
+        while chars.get(cursor).is_some_and(|&c| c != '\n') {
+            cursor += 1;
+        }
+    }
+
+    match chars.get(cursor) {
+        None => {}
+        Some('\n') => cursor += 1,
+        Some('\r') if chars.get(cursor + 1) == Some(&'\n') => cursor += 2,
+        // The line carries more than the separator, so it is text.
+        Some(_) => return None,
+    }
+    // A count that no number can hold, and the count zero, both give one run.
+    let runs = digits.parse::<u32>().ok().filter(|runs| *runs > 0);
+    Some((runs.unwrap_or(1), cursor))
+}
+
+/// Steps over the spaces and the tabs that start at the given position.
+fn skip_blanks(chars: &[char], mut index: usize) -> usize {
+    while matches!(chars.get(index), Some(' ') | Some('\t')) {
+        index += 1;
+    }
+    index
 }
 
 /// Splits a script into single statements. The splitter keeps a semicolon
@@ -1070,6 +1218,124 @@ mod tests {
             split_statements("SELECT 1;\nDELIMITER //\nSELECT 2//", Dialect::MySql),
             vec!["SELECT 1", "SELECT 2"]
         );
+    }
+
+    /// The text of each batch, which is what most of the tests below check.
+    fn batch_texts(script: &str, dialect: Dialect) -> Vec<String> {
+        split_batches(script, dialect)
+            .into_iter()
+            .map(|batch| batch.text)
+            .collect()
+    }
+
+    #[test]
+    fn the_word_go_ends_a_batch_of_ms_sql_server() {
+        assert_eq!(
+            batch_texts(
+                "DECLARE @x int = 1;\nSELECT @x;\nGO\nSELECT 2;",
+                Dialect::MsSql
+            ),
+            vec!["DECLARE @x int = 1;\nSELECT @x;", "SELECT 2;"]
+        );
+        // The word carries any mix of capitals, and blank space may stand
+        // around it.
+        assert_eq!(
+            batch_texts("SELECT 1;\n  gO \t\nSELECT 2;", Dialect::MsSql),
+            vec!["SELECT 1;", "SELECT 2;"]
+        );
+        // A separator at the start and at the end of a script gives no empty
+        // batch.
+        assert_eq!(
+            batch_texts("GO\nSELECT 1;\nGO\n", Dialect::MsSql),
+            vec!["SELECT 1;"]
+        );
+        // A separator on the last line, with no line end behind it.
+        assert_eq!(
+            batch_texts("SELECT 1;\r\nGO", Dialect::MsSql),
+            vec!["SELECT 1;"]
+        );
+        // A line that ends with a return and a line feed.
+        assert_eq!(
+            batch_texts("SELECT 1;\r\nGO\r\nSELECT 2;", Dialect::MsSql),
+            vec!["SELECT 1;", "SELECT 2;"]
+        );
+        assert!(batch_texts("  \n GO \n ", Dialect::MsSql).is_empty());
+    }
+
+    #[test]
+    fn a_count_after_the_word_go_says_how_many_runs_the_batch_takes() {
+        assert_eq!(
+            split_batches("SELECT 1;\nGO 3\n", Dialect::MsSql),
+            vec![Batch {
+                text: "SELECT 1;".to_string(),
+                runs: 3
+            }]
+        );
+        // A count of zero and a count that no number can hold give one run.
+        assert_eq!(
+            split_batches("SELECT 1;\nGO 0\n", Dialect::MsSql)[0].runs,
+            1
+        );
+        assert_eq!(
+            split_batches("SELECT 1;\nGO 99999999999\n", Dialect::MsSql)[0].runs,
+            1
+        );
+        // A comment may follow the separator.
+        assert_eq!(
+            split_batches("SELECT 1;\nGO 2 -- twice\nSELECT 2;", Dialect::MsSql),
+            vec![
+                Batch {
+                    text: "SELECT 1;".to_string(),
+                    runs: 2
+                },
+                Batch {
+                    text: "SELECT 2;".to_string(),
+                    runs: 1
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_line_that_holds_more_than_the_separator_is_text() {
+        for script in [
+            "SELECT 1;\nGOTO done\n",
+            "SELECT 1;\nGO_1\n",
+            "SELECT 1;\nGO SELECT 2;\n",
+            "SELECT 1; GO\n",
+            "SELECT 1;\nGO 2 3\n",
+        ] {
+            assert_eq!(batch_texts(script, Dialect::MsSql).len(), 1, "{script}");
+        }
+    }
+
+    #[test]
+    fn a_separator_inside_a_quote_or_a_comment_does_not_end_a_batch() {
+        for script in [
+            "SELECT 'a\nGO\nb';",
+            "SELECT \"a\nGO\nb\";",
+            "SELECT [a\nGO\nb];",
+            "SELECT 1 -- GO\n;",
+            "SELECT /* a\nGO\n */ 1;",
+        ] {
+            assert_eq!(batch_texts(script, Dialect::MsSql).len(), 1, "{script}");
+        }
+    }
+
+    #[test]
+    fn a_dialect_without_a_separator_gives_the_whole_script() {
+        assert_eq!(
+            batch_texts("SELECT 1;\nGO\nSELECT 2;", Dialect::Postgres),
+            vec!["SELECT 1;\nGO\nSELECT 2;"]
+        );
+        assert!(batch_texts("   ", Dialect::Postgres).is_empty());
+    }
+
+    #[test]
+    fn a_script_with_a_separator_can_still_be_exported() {
+        assert!(only_reads("SELECT 1;\nGO\nSELECT 2;", Dialect::MsSql));
+        assert!(!only_reads("SELECT 1;\nGO\nDELETE FROM t;", Dialect::MsSql));
+        assert!(!only_reads("GO\n", Dialect::MsSql));
     }
 
     #[test]

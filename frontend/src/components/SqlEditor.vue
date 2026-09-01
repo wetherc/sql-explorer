@@ -62,7 +62,7 @@ function currentStatement(): string {
   }
   const position = editor.getPosition()
   const offset = position ? model.getOffsetAt(position) : 0
-  return statementAt(model.getValue(), offset)
+  return statementAt(model.getValue(), offset, props.dialect)
 }
 
 /**

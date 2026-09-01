@@ -18,7 +18,7 @@ use crate::db::{
     SchemaSnapshot, SnapshotColumn, Table, TableFact, TableKind,
 };
 use crate::error::{Error, Result};
-use crate::sql::{split_statements, Dialect};
+use crate::sql::{split_batches, split_statements, Dialect};
 use crate::storage::{MssqlAuth, SavedConnection, TlsMode};
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
@@ -292,7 +292,7 @@ impl MssqlDriver {
         Ok(Box::new(MssqlDriver { client }))
     }
 
-    /// Runs one statement through the path that keeps rows, and feeds each
+    /// Runs one batch through the path that keeps rows, and feeds each
     /// result set to the sink as it arrives.
     ///
     /// A stream that is dropped in the middle leaves the connection in the
@@ -623,44 +623,59 @@ impl DatabaseDriver for MssqlDriver {
         let started = Instant::now();
         let mut rows_affected: Option<u64> = None;
 
-        let split = split_statements(query, Dialect::MsSql);
-        // The attention packet of the row limit ends a whole batch. A batch
-        // that holds more than one statement therefore keeps the walk, so
-        // that no statement of it loses its result set. Each statement of a
-        // script without parameters goes as a batch of its own, so only the
-        // whole script below can hold more than one.
-        let may_end_early = params.is_none() || split.len() <= 1;
-        // A script with parameters is sent whole, because the parameter
-        // positions belong to the script and not to one statement.
-        let statements: Vec<String> = if params.is_some() {
-            vec![query.to_string()]
-        } else {
-            split
-        };
+        // The batch is the unit that the server compiles, so a batch goes to
+        // the server whole. A variable that one statement declares then holds
+        // for the statements that follow it in the same batch.
+        let batches = split_batches(query, Dialect::MsSql);
+        // The placeholders of the parameters are numbered over the whole
+        // text, and each batch is a request of its own, so the parameters of
+        // a later batch cannot be named.
+        if params.is_some() && batches.len() > 1 {
+            return Err(Error::Configuration(
+                "A run with parameters takes one batch. Remove the GO separators, or run one \
+                 batch at a time."
+                    .to_string(),
+            ));
+        }
 
-        for statement in statements {
-            let bound = bind_params(params)?;
-            let borrowed: Vec<&dyn tiberius::ToSql> =
-                bound.iter().map(|value| value.as_ref()).collect();
+        'batches: for batch in batches {
+            // The attention packet of the row limit ends a whole batch, so a
+            // batch that holds more than one statement keeps the walk. No
+            // statement of such a batch then loses its result set.
+            let statements = split_statements(&batch.text, Dialect::MsSql);
+            let may_end_early = statements.len() <= 1;
+            // A batch whose statements all change data goes through the path
+            // that counts the changed rows. Every other batch can answer with
+            // rows, so it goes through the path that keeps them.
+            let keeps_rows = statements.iter().any(|statement| returns_rows(statement));
 
-            if returns_rows(&statement) {
-                let stopped = self
-                    .stream_sets(
-                        &statement,
-                        borrowed.as_slice(),
-                        options,
-                        sink,
-                        may_end_early,
-                    )
-                    .await?;
-                if stopped {
-                    break;
+            for _ in 0..batch.runs {
+                let bound = bind_params(params)?;
+                let borrowed: Vec<&dyn tiberius::ToSql> =
+                    bound.iter().map(|value| value.as_ref()).collect();
+
+                if keeps_rows {
+                    let stopped = self
+                        .stream_sets(
+                            &batch.text,
+                            borrowed.as_slice(),
+                            options,
+                            sink,
+                            may_end_early,
+                        )
+                        .await?;
+                    if stopped {
+                        break 'batches;
+                    }
+                } else {
+                    let result = self
+                        .client
+                        .execute(&batch.text, borrowed.as_slice())
+                        .await?;
+                    let affected: u64 = result.rows_affected().iter().sum();
+                    rows_affected = Some(rows_affected.unwrap_or(0) + affected);
+                    sink.message(rows_affected_message(affected));
                 }
-            } else {
-                let result = self.client.execute(&statement, borrowed.as_slice()).await?;
-                let affected: u64 = result.rows_affected().iter().sum();
-                rows_affected = Some(rows_affected.unwrap_or(0) + affected);
-                sink.message(rows_affected_message(affected));
             }
         }
 
@@ -1535,6 +1550,106 @@ mod tests {
             .unwrap();
 
         server.await.unwrap();
+    }
+
+    /// Answers each request with one result set of one row, and gives back
+    /// how many requests arrived. The wait ends when no request comes for a
+    /// moment, so a driver that sends too few does not hold the test.
+    async fn serve_and_count(listener: TcpListener) -> usize {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        accept_login(&mut socket).await;
+
+        let mut count = 0usize;
+        let pause = Duration::from_millis(300);
+        while let Ok(kind) = tokio::time::timeout(pause, read_message(&mut socket)).await {
+            assert!(kind == PACKET_RPC || kind == PACKET_SQL_BATCH);
+            let mut answer = int_metadata();
+            answer.extend_from_slice(&int_row(count as i32));
+            answer.extend_from_slice(&done_token(0, 1));
+            write_packet(&mut socket, END_OF_MESSAGE, &answer).await;
+            count += 1;
+        }
+        count
+    }
+
+    /// Opens a driver against a fake server that counts the requests.
+    async fn driver_that_counts() -> (MssqlDriver, tokio::task::JoinHandle<usize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_and_count(listener));
+        let tcp = TcpStream::connect(address).await.unwrap();
+        let client = Client::connect(test_config(), tcp.compat_write())
+            .await
+            .unwrap();
+        (MssqlDriver { client }, server)
+    }
+
+    #[tokio::test]
+    async fn a_batch_goes_to_the_server_whole_and_the_word_go_ends_it() {
+        let (mut driver, server) = driver_that_counts().await;
+        let options = ExecOptions {
+            max_rows: 10,
+            timeout_secs: 30,
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+
+        let summary = driver
+            .execute_stream(
+                "DECLARE @x int = 1;\nSELECT @x;\nGO\nSELECT 2;",
+                None,
+                &options,
+                &mut sink,
+            )
+            .await
+            .unwrap();
+
+        // The two statements of the first batch travel together, so the
+        // variable of the first holds for the second.
+        assert_eq!(server.await.unwrap(), 2);
+        assert_eq!(sink.into_response(summary).results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_count_after_the_word_go_runs_the_batch_again() {
+        let (mut driver, server) = driver_that_counts().await;
+        let options = ExecOptions {
+            max_rows: 10,
+            timeout_secs: 30,
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+
+        driver
+            .execute_stream("SELECT 1;\nGO 3\n", None, &options, &mut sink)
+            .await
+            .unwrap();
+
+        assert_eq!(server.await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_run_with_parameters_refuses_a_script_of_several_batches() {
+        let (mut driver, server) = driver_that_counts().await;
+        let options = ExecOptions {
+            max_rows: 10,
+            timeout_secs: 30,
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        let params = vec![crate::db::QueryParam {
+            value: JsonValue::from(1),
+        }];
+
+        let error = driver
+            .execute_stream(
+                "SELECT @P1;\nGO\nSELECT @P1;",
+                Some(&params),
+                &options,
+                &mut sink,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("GO"), "{error}");
+        assert_eq!(server.await.unwrap(), 0);
     }
 
     #[tokio::test]

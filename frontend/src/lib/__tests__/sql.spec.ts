@@ -114,6 +114,33 @@ describe('statementBounds', () => {
     expect(statementBounds('SELECT /* a; b')).toEqual([[0, 14]])
     expect(statementBounds('SELECT -- a; b')).toEqual([[0, 14]])
   })
+
+  it('ends a statement on the batch separator of MS SQL Server', () => {
+    const script = 'SELECT 1\nGO\nSELECT 2'
+    expect(statementBounds(script, Dialect.MsSql)).toEqual([
+      [0, 9],
+      [12, 20],
+    ])
+    // The separator carries a count and a comment.
+    expect(statementBounds('SELECT 1\nGO 2 -- twice\nSELECT 2', Dialect.MsSql)).toEqual([
+      [0, 9],
+      [23, 31],
+    ])
+    // Another dialect holds no separator.
+    expect(statementBounds(script, Dialect.Postgres)).toEqual([[0, 20]])
+    expect(statementBounds(script)).toEqual([[0, 20]])
+  })
+
+  it('keeps a line that holds more than the batch separator', () => {
+    for (const script of ['SELECT 1\nGOTO done', 'SELECT 1\nGO SELECT 2', 'SELECT 1 GO']) {
+      expect(statementBounds(script, Dialect.MsSql)).toEqual([[0, script.length]])
+    }
+  })
+
+  it('keeps a batch separator that stands inside a text', () => {
+    expect(statementBounds("SELECT 'a\nGO\nb'", Dialect.MsSql)).toEqual([[0, 15]])
+    expect(statementBounds('SELECT 1 -- GO\n', Dialect.MsSql)).toEqual([[0, 15]])
+  })
 })
 
 describe('statementAt', () => {
@@ -143,6 +170,15 @@ describe('statementAt', () => {
   it('gives an empty text when the script holds no statement', () => {
     expect(statementAt('', 0)).toBe('')
     expect(statementAt('  ;  ', 3)).toBe('')
+    expect(statementAt('GO\n', 0, Dialect.MsSql)).toBe('')
+  })
+
+  it('never sends the batch separator with the statement', () => {
+    const script = 'SELECT 1\nGO\nSELECT 2'
+    expect(statementAt(script, 0, Dialect.MsSql)).toBe('SELECT 1')
+    // A cursor on the line of the separator gives the statement in front.
+    expect(statementAt(script, 10, Dialect.MsSql)).toBe('SELECT 1')
+    expect(statementAt(script, 15, Dialect.MsSql)).toBe('SELECT 2')
   })
 })
 

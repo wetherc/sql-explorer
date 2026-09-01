@@ -332,8 +332,21 @@ pub fn size_text(bytes: u64) -> String {
 /// in front of that statement. A request with two statements is therefore
 /// refused, and the trailing semicolon goes, so that the statement fits
 /// behind a keyword.
+///
+/// A batch separator carries no plan of its own, so a text that holds more
+/// than one batch is refused as well.
 pub fn single_statement(query: &str, dialect: Dialect) -> Result<String> {
-    let statements = split_statements(query, dialect);
+    let batches = crate::sql::split_batches(query, dialect);
+    if batches.len() > 1 {
+        return Err(Error::Configuration(format!(
+            "The text holds {} batches. Select one statement to read its plan.",
+            batches.len()
+        )));
+    }
+    let statements = match batches.first() {
+        Some(batch) => split_statements(&batch.text, dialect),
+        None => Vec::new(),
+    };
     match statements.len() {
         0 => Err(Error::Configuration(
             "There is no statement to read a plan for.".to_string(),

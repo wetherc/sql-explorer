@@ -279,13 +279,29 @@ can still end with the timeout message.
 
 ## The row limit ends a whole batch on MS SQL Server
 
-The attention packet ends the whole batch, not one result set of it. Each
-statement of a script goes to the server as a batch of its own, and a script
-with parameters that holds more than one statement keeps the walk, so a
-script loses no result set. A single statement that answers with more than
-one result set, such as a call of a procedure, gives back no set after the
-one that reached the limit. The messages of the run say so. A higher row
+The attention packet ends the whole batch, not one result set of it. A batch
+that holds more than one statement therefore keeps the walk, so no statement
+of it loses its result set. A batch of one statement that answers with more
+than one result set, such as a call of a procedure, gives back no set after
+the one that reached the limit. The messages of the run say so. A higher row
 limit in the settings brings the later sets back.
+
+## A batch that both changes rows and reads rows reports no count
+
+The driver counts the changed rows through the path that gives no rows back,
+so a batch whose statements all change data reports a count for each of
+them. A batch that also holds a statement which answers with rows goes
+through the path that keeps the rows, and that path gives no count. Such a
+batch shows its result sets alone. A `GO` separator in front of the reading
+statement puts it in a batch of its own and brings the count back.
+
+## A run with parameters takes one batch on MS SQL Server
+
+The placeholders of the parameters are numbered over the whole text, and
+each batch is a request of its own, so the parameters of a later batch
+cannot be named. A run with parameters over a script that holds a `GO`
+separator is refused, and the message says so. A script without parameters
+holds as many batches as the user wrote.
 
 ## A pasted AWS session token is not made fresh again
 
