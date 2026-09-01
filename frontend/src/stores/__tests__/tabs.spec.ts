@@ -25,6 +25,7 @@ describe('parseWorkspace', () => {
           query: 'SELECT 1',
           title: 'One',
           connectionId: 'c1',
+          dirty: true,
           savedQueryId: 'q1',
           params: [{ name: 'id', kind: 'number', text: '7' }],
           filePath: '/data/one.sql',
@@ -42,6 +43,7 @@ describe('parseWorkspace', () => {
       title: 'One',
       query: 'SELECT 1',
       connectionId: 'c1',
+      dirty: true,
       savedQueryId: 'q1',
       params: [{ name: 'id', kind: 'number', text: '7' }],
       filePath: '/data/one.sql',
@@ -51,6 +53,7 @@ describe('parseWorkspace', () => {
       title: 'Query',
       query: 'SELECT 2',
       connectionId: null,
+      dirty: false,
       savedQueryId: null,
       params: [],
       filePath: null,
@@ -292,6 +295,7 @@ describe('tabs store', () => {
           title: tab.title,
           query: 'SELECT 1',
           connectionId: 'c1',
+          dirty: false,
           savedQueryId: null,
           params: [],
           filePath: null,
@@ -363,11 +367,56 @@ describe('tabs store', () => {
       tabs: [{ id: 'a', query: 'SELECT 1', filePath: '/data/a.sql' }],
       activeTabId: 'a',
     })
+    apiStub.readTextFile.mockResolvedValue('SELECT 1')
     const tabs = useTabsStore()
 
     await tabs.restore()
 
     expect(tabs.tabs[0]?.filePath).toBe('/data/a.sql')
+    expect(tabs.tabs[0]?.dirty).toBe(false)
+  })
+
+  it('restores the mark of a tab that the last session did not save', async () => {
+    apiStub.getWorkspace.mockResolvedValue({
+      tabs: [{ id: 'a', query: 'SELECT 1', dirty: true }],
+      activeTabId: 'a',
+    })
+    const tabs = useTabsStore()
+
+    await tabs.restore()
+
+    expect(tabs.tabs[0]?.dirty).toBe(true)
+    expect(apiStub.readTextFile).not.toHaveBeenCalled()
+  })
+
+  it('marks a restored tab whose text differs from the file', async () => {
+    apiStub.getWorkspace.mockResolvedValue({
+      tabs: [{ id: 'a', query: 'SELECT 2', filePath: '/data/a.sql' }],
+      activeTabId: 'a',
+    })
+    apiStub.readTextFile.mockResolvedValue('SELECT 1')
+    const tabs = useTabsStore()
+
+    await tabs.restore()
+
+    expect(tabs.tabs[0]?.dirty).toBe(true)
+  })
+
+  it('keeps the recorded mark when the file cannot be read', async () => {
+    apiStub.getWorkspace.mockResolvedValue({
+      tabs: [
+        { id: 'a', query: 'SELECT 1', filePath: '/data/a.sql', dirty: true },
+        { id: 'b', query: 'SELECT 2', filePath: '/data/b.sql' },
+      ],
+      activeTabId: 'a',
+    })
+    apiStub.readTextFile.mockRejectedValue(new Error('outside the folders'))
+    const tabs = useTabsStore()
+
+    await tabs.restore()
+
+    expect(tabs.tabs[0]?.dirty).toBe(true)
+    expect(tabs.tabs[1]?.dirty).toBe(false)
   })
 
   it('holds the file of a tab in the record it writes', async () => {

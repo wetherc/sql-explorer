@@ -27,7 +27,7 @@ export interface Workspace {
   tabs: Array<
     Pick<
       QueryTab,
-      'id' | 'title' | 'query' | 'connectionId' | 'savedQueryId' | 'params' | 'filePath'
+      'id' | 'title' | 'query' | 'connectionId' | 'dirty' | 'savedQueryId' | 'params' | 'filePath'
     >
   >
   activeTabId: string | null
@@ -51,6 +51,7 @@ export function parseWorkspace(value: unknown): Workspace {
       title: typeof tab.title === 'string' ? tab.title : 'Query',
       query: tab.query as string,
       connectionId: typeof tab.connectionId === 'string' ? tab.connectionId : null,
+      dirty: tab.dirty === true,
       savedQueryId: typeof tab.savedQueryId === 'string' ? tab.savedQueryId : null,
       params: parseParamValues(tab.params),
       filePath: typeof tab.filePath === 'string' && tab.filePath !== '' ? tab.filePath : null,
@@ -214,6 +215,7 @@ export const useTabsStore = defineStore('tabs', () => {
         title: tab.title,
         query: tab.query,
         connectionId: tab.connectionId,
+        dirty: tab.dirty,
         savedQueryId: tab.savedQueryId,
         params: tab.params,
         filePath: tab.filePath,
@@ -231,10 +233,31 @@ export const useTabsStore = defineStore('tabs', () => {
     }
   }
 
+  /**
+   * Compares each tab that names a file with the text of that file. The disk
+   * decides the mark: a text that differs carries the mark, and a text that
+   * agrees does not. A file that the application cannot read keeps the mark
+   * from the workspace record, because the tab then holds the only copy.
+   */
+  async function reconcileFiles(): Promise<void> {
+    await Promise.all(
+      tabs.value.map(async (tab) => {
+        if (tab.filePath === null) {
+          return
+        }
+        try {
+          tab.dirty = (await api.readTextFile(tab.filePath)) !== tab.query
+        } catch {
+          // The recorded mark stays, because the text on the disk is unknown.
+        }
+      }),
+    )
+  }
+
   async function restore(): Promise<void> {
     try {
       const workspace = parseWorkspace(await api.getWorkspace())
-      tabs.value = workspace.tabs.map((tab) => ({ ...tab, dirty: false }))
+      tabs.value = workspace.tabs.map((tab) => ({ ...tab }))
       activeTabId.value = workspace.activeTabId
       // The counter continues after the highest restored title, so a new
       // tab does not repeat the name of a restored one.
@@ -245,7 +268,9 @@ export const useTabsStore = defineStore('tabs', () => {
     } catch {
       tabs.value = []
       activeTabId.value = null
+      return
     }
+    await reconcileFiles()
   }
 
   /** Sets or clears the file that a tab writes back to. */
