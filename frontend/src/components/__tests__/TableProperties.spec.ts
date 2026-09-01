@@ -154,6 +154,59 @@ describe('TableProperties', () => {
     void wrapper
   })
 
+  it('drops a slow answer for the relation that the user left', async () => {
+    let releaseFirst: (value: typeof details) => void = () => {}
+    let rejectFirst: (error: unknown) => void = () => {}
+    apiStub.tableDetails.mockImplementationOnce(
+      () =>
+        new Promise((resolve, reject) => {
+          releaseFirst = resolve
+          rejectFirst = reject
+        }),
+    )
+    const second = {
+      ...details,
+      columns: [{ name: 'total', dataType: 'money', nullable: false, isPrimaryKey: false }],
+    }
+    apiStub.tableDetails.mockResolvedValue(second)
+
+    const wrapper = mountWithPlugins(TableProperties, {
+      props: { open: true, node: node({ table: 'orders' }) },
+    })
+    await settle()
+    await wrapper.setProps({ node: node({ key: 'c1/Sales/dbo/table/lines', table: 'lines' }) })
+    await settle()
+    expect(overlayText()).toContain('total')
+
+    releaseFirst(details)
+    await settle()
+    // The answer of the relation that the dialog left does not land.
+    expect(overlayAll('property-column')).toHaveLength(1)
+    expect(overlayText()).toContain('total')
+    void rejectFirst
+  })
+
+  it('drops a slow failure for the relation that the user left', async () => {
+    let rejectFirst: (error: unknown) => void = () => {}
+    apiStub.tableDetails.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectFirst = reject
+        }),
+    )
+    apiStub.tableDetails.mockResolvedValue(details)
+
+    const wrapper = mountWithPlugins(TableProperties, { props: { open: true, node: node() } })
+    await settle()
+    await wrapper.setProps({ node: node({ key: 'c1/Sales/dbo/table/lines', table: 'lines' }) })
+    await settle()
+
+    rejectFirst({ kind: 'database', message: 'The relation is gone.', detail: null })
+    await settle()
+    expect(document.querySelector('[data-test="properties-error"]')).toBeNull()
+    expect(overlayAll('property-column')).toHaveLength(2)
+  })
+
   it('closes itself when the overlay reports it', async () => {
     apiStub.tableDetails.mockResolvedValue(details)
     const wrapper = mountWithPlugins(TableProperties, { props: { open: true, node: node() } })

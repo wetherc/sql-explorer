@@ -143,21 +143,39 @@ function indexRule(index: IndexRef): string {
   return index.unique ? 'unique' : ''
 }
 
+/**
+ * Counts the reads that the dialog started. Each read keeps the count that it
+ * got, and it writes into the dialog only while that count is the last one.
+ * A slow answer for the relation that the user left then goes away.
+ */
+let lastRead = 0
+
 async function read(node: ExplorerNode): Promise<void> {
+  lastRead += 1
+  const ticket = lastRead
   loading.value = true
   details.value = null
   failure.value = null
   try {
-    details.value = await api.tableDetails(
+    const answer = await api.tableDetails(
       node.connectionId,
       node.database ?? '',
       node.schema ?? null,
       node.table ?? node.label,
     )
+    if (ticket !== lastRead) {
+      return
+    }
+    details.value = answer
   } catch (error) {
+    if (ticket !== lastRead) {
+      return
+    }
     failure.value = toErrorPayload(error)
   } finally {
-    loading.value = false
+    if (ticket === lastRead) {
+      loading.value = false
+    }
   }
 }
 
