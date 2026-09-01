@@ -287,6 +287,17 @@ result and drops the rows past the limit. The time of that walk counts
 against the time budget of the run, so a result of many millions of rows
 can still end with the timeout message.
 
+## A PostgreSQL script of more than one statement walks past the row limit
+
+The PostgreSQL driver stops a statement with a cancel request on a second
+socket. The simple protocol carries a script of more than one statement in
+one exchange, and the cancel would end the statements that follow together
+with the one that reached the limit. The driver therefore sends the cancel
+for a script of one statement alone. A larger script reads the rest of the
+result and drops the rows past the limit. The time of that walk counts
+against the time budget of the run. A statement that runs alone, or a
+statement that carries parameters, ends at the limit.
+
 ## The row limit ends a whole batch on MS SQL Server
 
 The attention packet ends the whole batch, not one result set of it. A batch

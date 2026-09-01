@@ -18,7 +18,7 @@ use crate::db::{
     SchemaSnapshot, SnapshotColumn, Table, TableFact, TableKind,
 };
 use crate::error::{Error, Result};
-use crate::sql::Dialect;
+use crate::sql::{split_statements, Dialect};
 use crate::storage::{SavedConnection, TlsMode};
 use async_trait::async_trait;
 use bytes::BytesMut;
@@ -33,13 +33,17 @@ use serde_json::Value as JsonValue;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio_postgres::error::DbError;
+use tokio_postgres::error::{DbError, SqlState};
 use tokio_postgres::{AsyncMessage, Client, Config as PgConfig, Row, SimpleQueryMessage};
 
 pub struct PostgresDriver {
     client: Client,
     /// The notices that the server sent since the last answer.
     notices: NoticeBuffer,
+    /// The token that stops the statement that runs on this connection. The
+    /// driver holds it, so a read that reaches the row limit can end the
+    /// statement without a second handle from the caller.
+    stop: Arc<dyn CancelHandle>,
 }
 
 /// Builds the connection configuration from a saved connection.
@@ -248,7 +252,12 @@ impl PostgresDriver {
             }
         });
 
-        Ok(Box::new(PostgresDriver { client, notices }))
+        let stop: Arc<dyn CancelHandle> = Arc::new(PostgresCancel(client.cancel_token()));
+        Ok(Box::new(PostgresDriver {
+            client,
+            notices,
+            stop,
+        }))
     }
 
     /// Takes the notices that arrived since the last run.
@@ -667,8 +676,27 @@ impl DatabaseDriver for PostgresDriver {
     }
 
     fn cancel_handle(&self) -> Option<Arc<dyn CancelHandle>> {
-        Some(Arc::new(PostgresCancel(self.client.cancel_token())))
+        Some(self.stop.clone())
     }
+}
+
+/// Asks the server to stop the statement that runs now. It gives back true
+/// when the request reached the server. A request that does not reach the
+/// server leaves the statement running, and the caller then reads the rest
+/// of the result.
+async fn request_stop(stop: &Arc<dyn CancelHandle>) -> bool {
+    match stop.cancel().await {
+        Ok(()) => true,
+        Err(error) => {
+            log::warn!("The stop of the PostgreSQL statement failed: {error}");
+            false
+        }
+    }
+}
+
+/// True for the error that a cancel raises on the statement it stopped.
+fn is_query_cancelled(error: &tokio_postgres::Error) -> bool {
+    error.code() == Some(&SqlState::QUERY_CANCELED)
 }
 
 /// A token that asks the server to stop the statement that runs on this
@@ -688,17 +716,25 @@ impl PostgresDriver {
     /// Runs a script through the simple protocol and feeds the sink one
     /// message at a time.
     ///
-    /// The walk goes on past the row limit, because the simple protocol
-    /// carries every statement of the script in one exchange and the later
-    /// command tags hold the counts of the rows those statements changed.
-    /// The driver holds one message while it walks, so the memory cost does
-    /// not grow with the size of the answer.
+    /// A script of one statement ends at the row limit: the driver sends a
+    /// cancel request on a second socket, and the server stops the statement
+    /// instead of sending the rest of the result. The server answers the
+    /// cancel with the error 57014, which the walk reads as the end of the
+    /// set.
+    ///
+    /// A script of more than one statement keeps the walk, because the simple
+    /// protocol carries every statement of the script in one exchange and a
+    /// cancel would drop the statements that follow. The driver holds one
+    /// message while it walks, so the memory cost does not grow with the size
+    /// of the answer.
     async fn stream_simple(
         &mut self,
         query: &str,
         options: &ExecOptions,
         sink: &mut dyn RowSink,
     ) -> Result<Option<u64>> {
+        let alone = split_statements(query, Dialect::Postgres).len() <= 1;
+        let stop = self.stop.clone();
         let messages = self.client.simple_query_raw(query).await?;
         pin_mut!(messages);
         let mut rows_affected: Option<u64> = None;
@@ -706,8 +742,21 @@ impl PostgresDriver {
         let mut count = 0usize;
         let mut truncated = false;
         let mut stopped = false;
+        // True after the cancel reached the server. The error that the
+        // cancel raises then ends the walk and is not a fault of the run.
+        let mut cancelled = false;
 
-        while let Some(message) = messages.try_next().await? {
+        loop {
+            let message = match messages.try_next().await {
+                Ok(Some(message)) => message,
+                Ok(None) => break,
+                Err(error) => {
+                    if cancelled && is_query_cancelled(&error) {
+                        break;
+                    }
+                    return Err(error.into());
+                }
+            };
             match message {
                 SimpleQueryMessage::RowDescription(columns) => {
                     if open {
@@ -730,6 +779,9 @@ impl PostgresDriver {
                     }
                     if count >= options.max_rows {
                         truncated = true;
+                        if alone && !cancelled {
+                            cancelled = request_stop(&stop).await;
+                        }
                         continue;
                     }
                     let values = (0..row.len())
@@ -741,6 +793,9 @@ impl PostgresDriver {
                     if sink.row(values)? == SinkControl::Stop {
                         truncated = true;
                         stopped = true;
+                        if alone && !cancelled {
+                            cancelled = request_stop(&stop).await;
+                        }
                         continue;
                     }
                     count += 1;
@@ -771,9 +826,9 @@ impl PostgresDriver {
     }
 
     /// Runs one statement with bound parameters through the extended
-    /// protocol and streams the rows into the sink one at a time. The
-    /// stream drops at a stop, and the connection task discards the rows
-    /// that remain.
+    /// protocol and streams the rows into the sink one at a time. A stop
+    /// cancels the statement on the server and drops the stream, so the rows
+    /// past the stop do not cross the wire.
     ///
     /// The statement is prepared first, so the columns of the answer are
     /// known before the first row arrives. A `SELECT` that matches no row
@@ -802,15 +857,16 @@ impl PostgresDriver {
         if returns_rows {
             sink.begin_set(columns)?;
         }
+        let stop = self.stop.clone();
         let mut count = 0usize;
         let mut truncated = false;
         while let Some(row) = rows.try_next().await? {
-            if count >= options.max_rows {
+            if count >= options.max_rows || sink.row(row_to_json(&row))? == SinkControl::Stop {
                 truncated = true;
-                break;
-            }
-            if sink.row(row_to_json(&row))? == SinkControl::Stop {
-                truncated = true;
+                // The statement holds the rest of its result on the server.
+                // The cancel ends it there, so those rows never cross the
+                // wire.
+                request_stop(&stop).await;
                 break;
             }
             count += 1;
@@ -1380,7 +1436,9 @@ impl<'a> Reader<'a> {
 mod tests {
     use super::*;
     use crate::db::sink::BufferSink;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+    use tokio::sync::Notify;
 
     /// Wraps a body of a message with its kind and its length. The length
     /// counts itself and the body, and never the byte of the kind.
@@ -1432,6 +1490,18 @@ mod tests {
             }
         }
         message(b'D', &body)
+    }
+
+    /// An error of the server, with the state that names its cause.
+    fn error_response(state: &str, text: &str) -> Vec<u8> {
+        let mut body = Vec::new();
+        for (field, value) in [(b'S', "ERROR"), (b'C', state), (b'M', text)] {
+            body.push(field);
+            body.extend_from_slice(value.as_bytes());
+            body.push(0);
+        }
+        body.push(0);
+        message(b'E', &body)
     }
 
     /// The tag that ends one statement of the script.
@@ -1532,7 +1602,43 @@ mod tests {
     }
 
     /// Builds a driver that speaks to a fake server on a pipe.
+    /// A stop that counts its calls. The test server waits on the same
+    /// signal, so it can answer the cancel the way a server answers it.
+    struct TestStop {
+        calls: Arc<AtomicUsize>,
+        signal: Arc<Notify>,
+        works: bool,
+    }
+
+    #[async_trait]
+    impl CancelHandle for TestStop {
+        async fn cancel(&self) -> Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.signal.notify_one();
+            if self.works {
+                Ok(())
+            } else {
+                Err(Error::Connection("no socket for the stop".into()))
+            }
+        }
+    }
+
+    fn test_stop(works: bool) -> (Arc<TestStop>, Arc<AtomicUsize>, Arc<Notify>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let signal = Arc::new(Notify::new());
+        let stop = Arc::new(TestStop {
+            calls: calls.clone(),
+            signal: signal.clone(),
+            works,
+        });
+        (stop, calls, signal)
+    }
+
     async fn driver_on(client_end: DuplexStream) -> PostgresDriver {
+        driver_with_stop(client_end, test_stop(false).0).await
+    }
+
+    async fn driver_with_stop(client_end: DuplexStream, stop: Arc<TestStop>) -> PostgresDriver {
         let mut config = PgConfig::new();
         config.user("tester").dbname("test");
         let (client, connection) = config
@@ -1543,6 +1649,7 @@ mod tests {
         PostgresDriver {
             client,
             notices: Arc::new(Mutex::new(Vec::new())),
+            stop,
         }
     }
 
@@ -1632,6 +1739,163 @@ mod tests {
             .any(|message| message.text.contains("The row limit stopped the read")));
         // The tag of the statement after the set still reaches the summary.
         assert_eq!(rows_affected, Some(5));
+
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_script_of_one_statement_stops_the_server_at_the_row_limit() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let (stop, calls, signal) = test_stop(true);
+        let waiter = signal.clone();
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            read_query(&mut server).await;
+
+            let mut answer = row_description(&["id"]);
+            for value in ["1", "2", "3"] {
+                answer.extend_from_slice(&data_row(&[Some(value)]));
+            }
+            server.write_all(&answer).await.unwrap();
+
+            // The server answers the cancel the way PostgreSQL answers it.
+            waiter.notified().await;
+            let mut end = error_response("57014", "canceling statement due to user request");
+            end.extend_from_slice(&ready_for_query());
+            server.write_all(&end).await.unwrap();
+        });
+
+        let mut driver = driver_with_stop(client_end, stop).await;
+        let options = ExecOptions {
+            max_rows: 1,
+            timeout_secs: 30,
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        driver
+            .stream_simple("SELECT id FROM t", &options, &mut sink)
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].rows.len(), 1);
+        assert!(response.results[0].truncated);
+
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_stop_that_does_not_reach_the_server_keeps_the_walk() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let (stop, calls, _signal) = test_stop(false);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            read_query(&mut server).await;
+
+            let mut answer = row_description(&["id"]);
+            for value in ["1", "2", "3"] {
+                answer.extend_from_slice(&data_row(&[Some(value)]));
+            }
+            answer.extend_from_slice(&command_complete("SELECT 3"));
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
+        });
+
+        let mut driver = driver_with_stop(client_end, stop).await;
+        let options = ExecOptions {
+            max_rows: 1,
+            timeout_secs: 30,
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        driver
+            .stream_simple("SELECT id FROM t", &options, &mut sink)
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        // The stop was asked for at each row past the limit, because no
+        // request reached the server.
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(response.results[0].rows.len(), 1);
+        assert!(response.results[0].truncated);
+
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_error_that_is_not_the_stop_ends_the_run() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let (stop, _calls, signal) = test_stop(true);
+        let waiter = signal.clone();
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            read_query(&mut server).await;
+
+            let mut answer = row_description(&["id"]);
+            for value in ["1", "2"] {
+                answer.extend_from_slice(&data_row(&[Some(value)]));
+            }
+            server.write_all(&answer).await.unwrap();
+
+            waiter.notified().await;
+            let mut end = error_response("42P01", "relation \"t\" does not exist");
+            end.extend_from_slice(&ready_for_query());
+            server.write_all(&end).await.unwrap();
+        });
+
+        let mut driver = driver_with_stop(client_end, stop).await;
+        let options = ExecOptions {
+            max_rows: 1,
+            timeout_secs: 30,
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        let outcome = driver
+            .stream_simple("SELECT id FROM t", &options, &mut sink)
+            .await;
+
+        assert!(outcome.is_err());
+
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_sink_that_stops_a_script_of_one_statement_stops_the_server() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let (stop, calls, signal) = test_stop(true);
+        let waiter = signal.clone();
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            read_query(&mut server).await;
+
+            let mut answer = row_description(&["id"]);
+            for value in ["1", "2", "3"] {
+                answer.extend_from_slice(&data_row(&[Some(value)]));
+            }
+            server.write_all(&answer).await.unwrap();
+
+            waiter.notified().await;
+            let mut end = error_response("57014", "canceling statement due to user request");
+            end.extend_from_slice(&ready_for_query());
+            server.write_all(&end).await.unwrap();
+        });
+
+        let mut driver = driver_with_stop(client_end, stop).await;
+        let options = ExecOptions {
+            max_rows: 100,
+            timeout_secs: 30,
+        };
+        // The sink holds one row and asks the walk to stop after it.
+        let mut sink = BufferSink::new(1);
+        driver
+            .stream_simple("SELECT id FROM t", &options, &mut sink)
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(response.results[0].rows.len(), 1);
+        assert!(response.results[0].truncated);
 
         task.await.unwrap();
     }
@@ -1775,6 +2039,7 @@ mod tests {
     #[tokio::test]
     async fn the_row_limit_cuts_a_parameterised_select() {
         let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let (stop, calls, _signal) = test_stop(true);
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
             read_until_sync(&mut server).await;
@@ -1793,7 +2058,7 @@ mod tests {
             server.write_all(&answer).await.unwrap();
         });
 
-        let mut driver = driver_on(client_end).await;
+        let mut driver = driver_with_stop(client_end, stop).await;
         let options = ExecOptions {
             max_rows: 1,
             timeout_secs: 30,
@@ -1810,6 +2075,8 @@ mod tests {
             .unwrap();
         let response = sink.into_response(RunSummary::default());
 
+        // The rest of the result stays on the server.
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(response.results[0].rows.len(), 1);
         assert!(response.results[0].truncated);
 
