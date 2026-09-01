@@ -21,9 +21,10 @@ use crate::error::{Error, Result};
 use crate::sql::Dialect;
 use crate::storage::{SavedConnection, TlsMode};
 use async_trait::async_trait;
+use bytes::BytesMut;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use futures_util::{pin_mut, stream, StreamExt, TryStreamExt};
-use postgres_types::{Field, FromSql, Kind, Type};
+use postgres_types::{to_sql_checked, Field, Format, FromSql, IsNull, Kind, ToSql, Type};
 use rust_decimal::Decimal;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -786,10 +787,6 @@ impl PostgresDriver {
         sink: &mut dyn RowSink,
     ) -> Result<Option<u64>> {
         let bound = bind_params(params)?;
-        let borrowed: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = bound
-            .iter()
-            .map(|value| value.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
-            .collect();
 
         let statement = self.client.prepare(query).await?;
         let columns: Vec<ColumnInfo> = statement
@@ -799,7 +796,7 @@ impl PostgresDriver {
             .collect();
         let returns_rows = !columns.is_empty();
 
-        let rows = self.client.query_raw(&statement, borrowed).await?;
+        let rows = self.client.query_raw(&statement, &bound).await?;
         pin_mut!(rows);
 
         if returns_rows {
@@ -862,23 +859,63 @@ fn create_query_text(schema: Option<&str>, table: &str, kind: TableKind) -> Opti
     ))
 }
 
+/// One bound parameter, in the text form that the server reads.
+///
+/// A parameter of this type accepts every column type and writes the value
+/// in the text format. The server then converts the text to the type that
+/// the statement asks for. A whole number binds against `int2`, `int4`,
+/// `int8` and `numeric` alike, a float binds against `real`, and text binds
+/// against a type that is not `text`. A binary parameter would have to hold
+/// one form for each type, so the driver leaves that work to the server.
+pub struct TextParam(Option<String>);
+
+impl ToSql for TextParam {
+    fn to_sql(&self, _: &Type, out: &mut BytesMut) -> std::result::Result<IsNull, BoxError> {
+        match &self.0 {
+            Some(text) => {
+                out.extend_from_slice(text.as_bytes());
+                Ok(IsNull::No)
+            }
+            None => Ok(IsNull::Yes),
+        }
+    }
+
+    fn accepts(_: &Type) -> bool {
+        true
+    }
+
+    fn encode_format(&self, _: &Type) -> Format {
+        Format::Text
+    }
+
+    to_sql_checked!();
+}
+
+impl std::fmt::Debug for TextParam {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            Some(text) => write!(formatter, "{text:?}"),
+            None => formatter.write_str("NULL"),
+        }
+    }
+}
+
 /// Turns the JSON parameters into values the driver can bind.
-pub fn bind_params(
-    params: &QueryParams,
-) -> Result<Vec<Box<dyn tokio_postgres::types::ToSql + Send + Sync>>> {
-    let mut bound: Vec<Box<dyn tokio_postgres::types::ToSql + Send + Sync>> = Vec::new();
+pub fn bind_params(params: &QueryParams) -> Result<Vec<TextParam>> {
+    let mut bound: Vec<TextParam> = Vec::new();
     for param in params {
-        match &param.value {
-            JsonValue::String(text) => bound.push(Box::new(text.clone())),
-            JsonValue::Bool(flag) => bound.push(Box::new(*flag)),
-            JsonValue::Null => bound.push(Box::new(Option::<String>::None)),
+        let text = match &param.value {
+            JsonValue::String(text) => Some(text.clone()),
+            JsonValue::Bool(flag) => Some(flag.to_string()),
+            JsonValue::Null => None,
             JsonValue::Number(number) => match number_value(number) {
-                Some(NumberValue::Integer(value)) => bound.push(Box::new(value)),
-                Some(NumberValue::Float(value)) => bound.push(Box::new(value)),
+                Some(NumberValue::Integer(value)) => Some(value.to_string()),
+                Some(NumberValue::Float(value)) => Some(value.to_string()),
                 None => return Err(number_out_of_range(number)),
             },
-            other => bound.push(Box::new(other.clone())),
-        }
+            other => Some(other.to_string()),
+        };
+        bound.push(TextParam(text));
     }
     Ok(bound)
 }
@@ -2429,8 +2466,50 @@ mod tests {
                 value: serde_json::json!({ "a": 1 }),
             },
         ];
-        assert_eq!(bind_params(&params).unwrap().len(), 6);
+        let bound = bind_params(&params).unwrap();
+        let texts: Vec<Option<&str>> = bound.iter().map(|param| param.0.as_deref()).collect();
+        assert_eq!(
+            texts,
+            vec![
+                Some("text"),
+                Some("7"),
+                Some("1.5"),
+                Some("true"),
+                None,
+                Some("{\"a\":1}"),
+            ]
+        );
         assert!(bind_params(&Vec::new()).unwrap().is_empty());
+    }
+
+    /// The width of the column decides the type of the parameter, and the
+    /// text form binds against each width. A parameter of the type `int4`
+    /// then takes a whole number that the caller sent as JSON.
+    #[test]
+    fn a_whole_number_binds_against_every_integer_width() {
+        let param = TextParam(Some("7".to_string()));
+        for column_type in [Type::INT2, Type::INT4, Type::INT8, Type::NUMERIC] {
+            let mut out = BytesMut::new();
+            assert!(matches!(
+                param.to_sql_checked(&column_type, &mut out).unwrap(),
+                IsNull::No
+            ));
+            assert_eq!(&out[..], b"7");
+            assert!(matches!(param.encode_format(&column_type), Format::Text));
+        }
+    }
+
+    #[test]
+    fn a_null_parameter_writes_no_bytes() {
+        let param = TextParam(None);
+        let mut out = BytesMut::new();
+        assert!(matches!(
+            param.to_sql_checked(&Type::INT4, &mut out).unwrap(),
+            IsNull::Yes
+        ));
+        assert!(out.is_empty());
+        assert_eq!(format!("{param:?}"), "NULL");
+        assert_eq!(format!("{:?}", TextParam(Some("a".to_string()))), "\"a\"");
     }
 
     #[test]

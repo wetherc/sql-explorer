@@ -216,6 +216,13 @@ domains of any element type. Bytes that no reader understands show as text
 if the bytes are text, and as base64 if they are not. A geometric type, a
 string of bits, and `tsvector` reach the grid this way.
 
+The values that go out take the other direction. The driver writes each
+bound value in the text format, so the server converts the text to the type
+that the statement asks for. A whole number binds against `int2`, `int4`,
+`int8` and `numeric` alike. A value that goes to a `bytea` column must
+carry the text form of that type, which is `\x` and then the bytes in
+hexadecimal.
+
 A `money` value shows two digits of the fraction. The count of the digits
 belongs to the `lc_monetary` setting of the server, and two digits hold for
 every locale that PostgreSQL ships.
