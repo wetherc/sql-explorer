@@ -29,7 +29,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tiberius::numeric::Numeric;
 use tiberius::xml::XmlData;
 use tiberius::{
-    AttentionHandle, AuthMethod, Client, ColumnType, Config, EncryptionLevel, QueryItem, Row,
+    AttentionHandle, AuthMethod, Client, ColumnData, ColumnType, Config, EncryptionLevel, FromSql,
+    QueryItem, Row,
 };
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
@@ -1228,7 +1229,59 @@ fn cell_to_json(row: &Row, index: usize, column_type: ColumnType) -> JsonValue {
         ColumnType::Xml => read(row.try_get::<&XmlData, _>(index))
             .map(|value| JsonValue::String(value.as_ref().to_string()))
             .unwrap_or(JsonValue::Null),
+        // Each value of a `sql_variant` column carries its own type, so the
+        // type of the column says nothing about the cell. The cell gives its
+        // own data, and the type of that data gives the JSON value.
+        ColumnType::SSVariant => row
+            .cells()
+            .nth(index)
+            .map_or(JsonValue::Null, |(_, data)| column_data_to_json(data)),
         _ => text_or_bytes(row, index),
+    }
+}
+
+/// Turns the data of one cell into JSON. The reads of `cell_to_json` ask for
+/// a target type, which a `sql_variant` cell does not have before the value
+/// arrives. This function reads the value that the cell already holds.
+fn column_data_to_json(data: &ColumnData<'static>) -> JsonValue {
+    match data {
+        ColumnData::U8(value) => value.map_or(JsonValue::Null, Into::into),
+        ColumnData::I16(value) => value.map_or(JsonValue::Null, Into::into),
+        ColumnData::I32(value) => value.map_or(JsonValue::Null, Into::into),
+        ColumnData::I64(value) => value.map_or(JsonValue::Null, Into::into),
+        ColumnData::F32(value) => value.map_or(JsonValue::Null, |value| f64_to_json(value as f64)),
+        ColumnData::F64(value) => value.map_or(JsonValue::Null, f64_to_json),
+        ColumnData::Bit(value) => value.map_or(JsonValue::Null, JsonValue::Bool),
+        ColumnData::String(value) => value
+            .as_ref()
+            .map_or(JsonValue::Null, |text| JsonValue::String(text.to_string())),
+        ColumnData::Guid(value) => value.map_or(JsonValue::Null, |value| {
+            JsonValue::String(value.to_string())
+        }),
+        ColumnData::Binary(value) => value
+            .as_ref()
+            .map_or(JsonValue::Null, |bytes| bytes_to_json(bytes)),
+        ColumnData::Numeric(value) => value.map_or(JsonValue::Null, |value| {
+            JsonValue::String(numeric_to_string(value))
+        }),
+        ColumnData::Xml(value) => value.as_ref().map_or(JsonValue::Null, |value| {
+            JsonValue::String(value.to_string())
+        }),
+        ColumnData::DateTime(_) | ColumnData::SmallDateTime(_) | ColumnData::DateTime2(_) => {
+            read(NaiveDateTime::from_sql(data)).map_or(JsonValue::Null, |value| {
+                JsonValue::String(value.to_string())
+            })
+        }
+        ColumnData::Date(_) => read(NaiveDate::from_sql(data)).map_or(JsonValue::Null, |value| {
+            JsonValue::String(value.to_string())
+        }),
+        ColumnData::Time(_) => read(NaiveTime::from_sql(data)).map_or(JsonValue::Null, |value| {
+            JsonValue::String(value.to_string())
+        }),
+        ColumnData::DateTimeOffset(_) => read(DateTime::<Utc>::from_sql(data))
+            .map_or(JsonValue::Null, |value| {
+                JsonValue::String(value.to_rfc3339())
+            }),
     }
 }
 
@@ -1351,6 +1404,42 @@ mod tests {
         token.extend_from_slice(&0xfffffffffffffffe_u64.to_le_bytes());
         token.extend_from_slice(&(utf16.len() as u32).to_le_bytes());
         token.extend_from_slice(&utf16);
+        token.extend_from_slice(&0u32.to_le_bytes());
+        token
+    }
+
+    /// A `COLMETADATA` token for one column of the type `sql_variant`. The
+    /// type carries the greatest length of a value in four bytes.
+    fn variant_metadata() -> Vec<u8> {
+        let mut token = vec![0x81];
+        token.extend_from_slice(&1u16.to_le_bytes());
+        token.extend_from_slice(&0u32.to_le_bytes());
+        token.extend_from_slice(&0u16.to_le_bytes());
+        token.push(0x62);
+        token.extend_from_slice(&8009u32.to_le_bytes());
+        token.push(1);
+        token.extend_from_slice(&('v' as u16).to_le_bytes());
+        token
+    }
+
+    /// A `ROW` token that carries one `sql_variant` value. The value holds
+    /// its total length, the token of its base type, the count of its
+    /// property bytes, the property bytes, and the value itself.
+    fn variant_row(base: u8, props: &[u8], value: &[u8]) -> Vec<u8> {
+        let mut token = vec![0xD1];
+        let total = (2 + props.len() + value.len()) as u32;
+        token.extend_from_slice(&total.to_le_bytes());
+        token.push(base);
+        token.push(props.len() as u8);
+        token.extend_from_slice(props);
+        token.extend_from_slice(value);
+        token
+    }
+
+    /// A `ROW` token that carries a `sql_variant` value of no length, which
+    /// is the null value.
+    fn variant_null_row() -> Vec<u8> {
+        let mut token = vec![0xD1];
         token.extend_from_slice(&0u32.to_le_bytes());
         token
     }
@@ -1488,6 +1577,163 @@ mod tests {
         );
 
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_sql_variant_column_shows_the_value_of_each_row() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            accept_login(&mut socket).await;
+
+            let kind = read_message(&mut socket).await;
+            assert!(kind == PACKET_RPC || kind == PACKET_SQL_BATCH);
+            let text: Vec<u8> = "hi".encode_utf16().flat_map(u16::to_le_bytes).collect();
+            let mut answer = variant_metadata();
+            answer.extend_from_slice(&variant_row(0x38, &[], &42i32.to_le_bytes()));
+            answer.extend_from_slice(&variant_row(0xE7, &[0, 0, 0, 0, 0, 0x40, 0x1F], &text));
+            answer.extend_from_slice(&variant_null_row());
+            answer.extend_from_slice(&done_token(0, 3));
+            write_packet(&mut socket, END_OF_MESSAGE, &answer).await;
+        });
+
+        let tcp = TcpStream::connect(address).await.unwrap();
+        let client = Client::connect(test_config(), tcp.compat_write())
+            .await
+            .unwrap();
+        let mut driver = MssqlDriver { client };
+
+        let options = ExecOptions {
+            max_rows: 10,
+            timeout_secs: 30,
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        driver
+            .stream_sets("SELECT v FROM b", &[], &options, &mut sink, false)
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        assert_eq!(response.results[0].columns[0].type_name, "sql_variant");
+        assert_eq!(response.results[0].rows[0][0], JsonValue::from(42));
+        assert_eq!(
+            response.results[0].rows[1][0],
+            JsonValue::String("hi".into())
+        );
+        assert_eq!(response.results[0].rows[2][0], JsonValue::Null);
+
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn the_data_of_a_cell_covers_every_form_of_value() {
+        use std::borrow::Cow;
+        use tiberius::time::{Date, DateTime, DateTime2, DateTimeOffset, SmallDateTime, Time};
+
+        assert_eq!(
+            column_data_to_json(&ColumnData::U8(Some(1))),
+            JsonValue::from(1)
+        );
+        assert_eq!(
+            column_data_to_json(&ColumnData::I16(Some(-2))),
+            JsonValue::from(-2)
+        );
+        assert_eq!(
+            column_data_to_json(&ColumnData::I32(Some(3))),
+            JsonValue::from(3)
+        );
+        assert_eq!(
+            column_data_to_json(&ColumnData::I64(Some(4))),
+            JsonValue::from(4)
+        );
+        assert_eq!(
+            column_data_to_json(&ColumnData::F32(Some(1.5))),
+            JsonValue::from(1.5)
+        );
+        assert_eq!(
+            column_data_to_json(&ColumnData::F64(Some(2.5))),
+            JsonValue::from(2.5)
+        );
+        assert_eq!(
+            column_data_to_json(&ColumnData::Bit(Some(true))),
+            JsonValue::Bool(true)
+        );
+        assert_eq!(
+            column_data_to_json(&ColumnData::String(Some(Cow::from("a")))),
+            JsonValue::String("a".into())
+        );
+        assert_eq!(
+            column_data_to_json(&ColumnData::Guid(Some(uuid::Uuid::nil()))),
+            JsonValue::String("00000000-0000-0000-0000-000000000000".into())
+        );
+        assert_eq!(
+            column_data_to_json(&ColumnData::Binary(Some(Cow::from(vec![1u8])))),
+            bytes_to_json(&[1])
+        );
+        assert_eq!(
+            column_data_to_json(&ColumnData::Numeric(Some(Numeric::new_with_scale(125, 2)))),
+            JsonValue::String("1.25".into())
+        );
+        assert_eq!(
+            column_data_to_json(&ColumnData::Xml(Some(Cow::Owned(XmlData::new("<a/>"))))),
+            JsonValue::String("<a/>".into())
+        );
+        assert_eq!(
+            column_data_to_json(&ColumnData::DateTime(Some(DateTime::new(0, 0)))),
+            JsonValue::String("1900-01-01 00:00:00".into())
+        );
+        assert_eq!(
+            column_data_to_json(&ColumnData::SmallDateTime(Some(SmallDateTime::new(0, 0)))),
+            JsonValue::String("1900-01-01 00:00:00".into())
+        );
+        assert_eq!(
+            column_data_to_json(&ColumnData::DateTime2(Some(DateTime2::new(
+                Date::new(0),
+                Time::new(0, 0)
+            )))),
+            JsonValue::String("0001-01-01 00:00:00".into())
+        );
+        assert_eq!(
+            column_data_to_json(&ColumnData::Date(Some(Date::new(0)))),
+            JsonValue::String("0001-01-01".into())
+        );
+        assert_eq!(
+            column_data_to_json(&ColumnData::Time(Some(Time::new(0, 0)))),
+            JsonValue::String("00:00:00".into())
+        );
+        assert_eq!(
+            column_data_to_json(&ColumnData::DateTimeOffset(Some(DateTimeOffset::new(
+                DateTime2::new(Date::new(730119), Time::new(0, 0)),
+                0
+            )))),
+            JsonValue::String("2000-01-01T00:00:00+00:00".into())
+        );
+
+        // A value that is absent gives the null of JSON in every form.
+        for data in [
+            ColumnData::U8(None),
+            ColumnData::I16(None),
+            ColumnData::I32(None),
+            ColumnData::I64(None),
+            ColumnData::F32(None),
+            ColumnData::F64(None),
+            ColumnData::Bit(None),
+            ColumnData::String(None),
+            ColumnData::Guid(None),
+            ColumnData::Binary(None),
+            ColumnData::Numeric(None),
+            ColumnData::Xml(None),
+            ColumnData::DateTime(None),
+            ColumnData::SmallDateTime(None),
+            ColumnData::DateTime2(None),
+            ColumnData::Date(None),
+            ColumnData::Time(None),
+            ColumnData::DateTimeOffset(None),
+        ] {
+            assert_eq!(column_data_to_json(&data), JsonValue::Null);
+        }
     }
 
     #[tokio::test]

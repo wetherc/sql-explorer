@@ -81,6 +81,7 @@ impl<'a> Display for MetaDataColumn<'a> {
                 VarLenType::Text => write!(f, "text")?,
                 VarLenType::Image => write!(f, "image")?,
                 VarLenType::NText => write!(f, "ntext")?,
+                VarLenType::SSVariant => write!(f, "sql_variant")?,
                 VarLenType::Intn => match ctx.len() {
                     1 => write!(f, "tinyint")?,
                     2 => write!(f, "smallint")?,
@@ -171,7 +172,9 @@ impl BaseMetaDataColumn {
                 VarLenType::Text => ColumnData::String(None),
                 VarLenType::Image => ColumnData::Binary(None),
                 VarLenType::NText => ColumnData::String(None),
-                VarLenType::SSVariant => todo!(),
+                // A `sql_variant` column carries the type in each value. A
+                // null value has no type, so it takes the neutral form.
+                VarLenType::SSVariant => ColumnData::String(None),
             },
             TypeInfo::VarLenSizedPrecision { ty, .. } => match ty {
                 VarLenType::Guid => ColumnData::Guid(None),
@@ -201,7 +204,9 @@ impl BaseMetaDataColumn {
                 VarLenType::Text => ColumnData::String(None),
                 VarLenType::Image => ColumnData::Binary(None),
                 VarLenType::NText => ColumnData::String(None),
-                VarLenType::SSVariant => todo!(),
+                // A `sql_variant` column carries the type in each value. A
+                // null value has no type, so it takes the neutral form.
+                VarLenType::SSVariant => ColumnData::String(None),
             },
             TypeInfo::Xml { .. } => ColumnData::Xml(None),
         }

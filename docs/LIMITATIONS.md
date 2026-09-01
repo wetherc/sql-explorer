@@ -7,7 +7,7 @@ the cause and the state of any fix.
 
 `backend/vendor/tiberius` holds a copy of `tiberius` 0.12.3, which is the
 newest release. Cargo is pointed at the copy through `[patch.crates-io]` in
-`backend/Cargo.toml`. The copy carries three changes that the release does not.
+`backend/Cargo.toml`. The copy carries four changes that the release does not.
 Read this list before an upgrade, because an upgrade drops the copy and brings
 each defect back.
 
@@ -50,6 +50,22 @@ release of `tiberius` asks for 0.4. The copy asks for 0.8.1 and calls the two
 methods of `ClientCtx` that the newer release changed. The change is in
 `Cargo.toml` and in `src/client/connection.rs`. The source of `tiberius` holds
 the same change, so this part goes away with the next release.
+
+### The client can read a `sql_variant` column
+
+The release holds `todo!()` where it decodes the metadata and the values of
+a `sql_variant` column, so one such column caused a panic in the task that
+runs the query. The copy reads the type of the column and the value of each
+cell.
+
+A `sql_variant` value carries its own base type. The reader takes the base
+type out of the value and gives the data of that type, so a whole number, a
+decimal, a date, a text and a binary value each keep their form in the grid.
+A value of no length is a null value. A base type that the reader cannot
+take gives a protocol error, which the application shows as a query error.
+The change is in `src/tds/codec/column_data/variant.rs`, in
+`src/tds/codec/type_info.rs` and in
+`src/tds/codec/token/token_col_metadata.rs`.
 
 ## MS SQL Server does not show the text of PRINT
 

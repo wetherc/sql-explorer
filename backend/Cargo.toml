@@ -150,5 +150,9 @@ strip = true
 # `Client::attention_handle` gives a handle, and a signal on the handle sends a
 # TDS attention packet to the server. The server stops the running statement,
 # the statement ends with `Error::Canceled`, and the connection stays open.
+#
+# The copy also reads a `sql_variant` column. The release holds `todo!()` in
+# the decode of that type, so one such column caused a panic in the task that
+# runs the query.
 [patch.crates-io]
 tiberius = { path = "vendor/tiberius" }
