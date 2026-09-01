@@ -98,9 +98,10 @@ export function quoteIfNeeded(name: string, dialect: Dialect): string {
  * script that holds no statement gives an empty text. On MS SQL Server the
  * word GO bounds a statement and never travels with it.
  *
- * The split is a simple one that respects single quotes, double quotes and
- * comments. The backend splits again before it sends anything to a server,
- * so this only has to be good enough to pick the right block.
+ * The split follows the rules of the dialect: the quotes, the comments and
+ * the terminator that the backend splitter knows. The backend splits again
+ * before it sends anything to a server, so both splits find the same
+ * bounds.
  */
 export function statementAt(script: string, offset: number, dialect?: Dialect): string {
   const position = Math.max(0, Math.min(offset, script.length))
@@ -138,51 +139,201 @@ function batchSeparatorAt(script: string, index: number): number {
   return match ? index + match[0].length : -1
 }
 
+/** The word of the command of MySQL that changes the terminator. */
+const DELIMITER_KEYWORD = 'DELIMITER'
+
+/**
+ * Reads a `DELIMITER` command that starts at the given position. The command
+ * holds the word, blank space, and the new terminator, which runs to the next
+ * blank space. Returns the new terminator and the position after the line, or
+ * null when the line holds something else.
+ */
+function delimiterCommandAt(
+  script: string,
+  index: number,
+): { delimiter: string; end: number } | null {
+  const word = script.slice(index, index + DELIMITER_KEYWORD.length)
+  if (word.toUpperCase() !== DELIMITER_KEYWORD) {
+    return null
+  }
+  let cursor = index + DELIMITER_KEYWORD.length
+  if (script.charAt(cursor) !== ' ' && script.charAt(cursor) !== '\t') {
+    return null
+  }
+  while (script.charAt(cursor) === ' ' || script.charAt(cursor) === '\t') {
+    cursor += 1
+  }
+  const start = cursor
+  while (cursor < script.length && !/\s/.test(script.charAt(cursor))) {
+    cursor += 1
+  }
+  const delimiter = script.slice(start, cursor)
+  return delimiter === '' ? null : { delimiter, end: endOfLine(script, cursor) }
+}
+
+/** The rules of one dialect that the split of a script follows. */
+interface SplitRules {
+  /** A backslash starts an escape inside a string literal. */
+  backslashEscapes: boolean
+  /** A number sign starts a comment that runs to the end of the line. */
+  hashComments: boolean
+  /** Brackets quote a name. */
+  bracketQuotes: boolean
+  /** A backtick quotes a name. */
+  backtickQuotes: boolean
+  /** A dollar sign starts a tagged string literal. */
+  dollarQuotes: boolean
+  /** A block comment can hold another block comment. */
+  nestedBlockComments: boolean
+  /** The word GO alone on a line ends a batch. */
+  batchSeparator: boolean
+  /** The word DELIMITER alone on a line changes the terminator. */
+  delimiterCommand: boolean
+}
+
+/**
+ * The rules of the given dialect. A caller that names no dialect gets the
+ * rules that every engine shares, with the backtick of MySQL, because a
+ * script of an unknown engine can carry one.
+ */
+function splitRules(dialect?: Dialect): SplitRules {
+  return {
+    backslashEscapes: dialect === Dialect.MySql,
+    hashComments: dialect === Dialect.MySql,
+    bracketQuotes: dialect === Dialect.MsSql,
+    backtickQuotes: dialect === Dialect.MySql || dialect === undefined,
+    dollarQuotes: dialect === Dialect.Postgres,
+    nestedBlockComments: dialect === Dialect.MsSql || dialect === Dialect.Postgres,
+    batchSeparator: dialect === Dialect.MsSql,
+    delimiterCommand: dialect === Dialect.MySql,
+  }
+}
+
+/** The position after the end of the line that holds the given position. */
+function endOfLine(script: string, index: number): number {
+  const stop = script.indexOf('\n', index)
+  return stop === -1 ? script.length : stop + 1
+}
+
+/**
+ * The position after a block comment that starts at the given position. A
+ * comment that no end mark closes runs to the end of the script.
+ */
+function endOfBlockComment(script: string, index: number, nested: boolean): number {
+  let cursor = index + 2
+  let depth = 1
+  while (cursor < script.length) {
+    if (nested && script.startsWith('/*', cursor)) {
+      depth += 1
+      cursor += 2
+      continue
+    }
+    if (script.startsWith('*/', cursor)) {
+      depth -= 1
+      cursor += 2
+      if (depth === 0) {
+        return cursor
+      }
+      continue
+    }
+    cursor += 1
+  }
+  return cursor
+}
+
+/**
+ * The position after a region that the given quote opens. A doubled quote
+ * stays inside the region.
+ */
+function endOfQuoted(
+  script: string,
+  index: number,
+  quote: string,
+  backslashEscapes: boolean,
+): number {
+  let cursor = index + 1
+  while (cursor < script.length) {
+    const character = script[cursor]
+    if (backslashEscapes && character === '\\') {
+      cursor += 2
+      continue
+    }
+    if (character === quote) {
+      if (script[cursor + 1] === quote) {
+        cursor += 2
+        continue
+      }
+      return cursor + 1
+    }
+    cursor += 1
+  }
+  return cursor
+}
+
+/**
+ * The position after a name in brackets. A doubled closing bracket stays
+ * inside the name.
+ */
+function endOfBracket(script: string, index: number): number {
+  let cursor = index + 1
+  while (cursor < script.length) {
+    if (script[cursor] === ']') {
+      if (script[cursor + 1] === ']') {
+        cursor += 2
+        continue
+      }
+      return cursor + 1
+    }
+    cursor += 1
+  }
+  return cursor
+}
+
+/**
+ * The position after a string that a dollar tag encloses. Returns -1 when
+ * the dollar sign opens no tag.
+ */
+function endOfDollarQuoted(script: string, index: number): number {
+  const match = /^\$[A-Za-z0-9_]*\$/.exec(script.slice(index))
+  if (!match) {
+    return -1
+  }
+  const tag = match[0]
+  const stop = script.indexOf(tag, index + tag.length)
+  return stop === -1 ? script.length : stop + tag.length
+}
+
 /**
  * Returns the start and the end of every statement in the script. On MS SQL
  * Server the word GO ends a batch and belongs to no statement, so it bounds
  * the statement in front of it and the text of it never reaches the server.
+ * On MySQL the word DELIMITER changes the terminator, and its line belongs
+ * to no statement either.
  */
 export function statementBounds(script: string, dialect?: Dialect): Array<[number, number]> {
+  const rules = splitRules(dialect)
   const bounds: Array<[number, number]> = []
+  let delimiter = ';'
   let start = 0
   let index = 0
-  let quote: string | null = null
-  let lineComment = false
-  let blockComment = false
 
   while (index < script.length) {
     const character = script[index]
     const next = script[index + 1]
+    const atLineStart = index === 0 || script[index - 1] === '\n'
 
-    if (lineComment) {
-      if (character === '\n') {
-        lineComment = false
-      }
-      index += 1
-      continue
-    }
-    if (blockComment) {
-      if (character === '*' && next === '/') {
-        blockComment = false
-        index += 2
+    // The DELIMITER command holds a whole line, and it can stand only where
+    // a statement starts.
+    if (rules.delimiterCommand && atLineStart && script.slice(start, index).trim() === '') {
+      const command = delimiterCommandAt(script, index)
+      if (command) {
+        delimiter = command.delimiter
+        start = command.end
+        index = command.end
         continue
       }
-      index += 1
-      continue
     }
-    if (quote) {
-      if (character === quote) {
-        if (next === quote) {
-          index += 2
-          continue
-        }
-        quote = null
-      }
-      index += 1
-      continue
-    }
-    if (dialect === Dialect.MsSql && (index === 0 || script[index - 1] === '\n')) {
+    if (rules.batchSeparator && atLineStart) {
       const after = batchSeparatorAt(script, index)
       if (after >= 0) {
         bounds.push([start, index])
@@ -192,23 +343,37 @@ export function statementBounds(script: string, dialect?: Dialect): Array<[numbe
       }
     }
     if (character === '-' && next === '-') {
-      lineComment = true
-      index += 2
+      index = endOfLine(script, index)
+      continue
+    }
+    if (rules.hashComments && character === '#') {
+      index = endOfLine(script, index)
       continue
     }
     if (character === '/' && next === '*') {
-      blockComment = true
-      index += 2
+      index = endOfBlockComment(script, index, rules.nestedBlockComments)
       continue
     }
-    if (character === "'" || character === '"' || character === '`') {
-      quote = character
-      index += 1
+    if (character === "'" || character === '"' || (character === '`' && rules.backtickQuotes)) {
+      index = endOfQuoted(script, index, character, rules.backslashEscapes)
       continue
     }
-    if (character === ';') {
+    if (character === '[' && rules.bracketQuotes) {
+      index = endOfBracket(script, index)
+      continue
+    }
+    if (character === '$' && rules.dollarQuotes) {
+      const after = endOfDollarQuoted(script, index)
+      if (after >= 0) {
+        index = after
+        continue
+      }
+    }
+    if (script.startsWith(delimiter, index)) {
       bounds.push([start, index])
-      start = index + 1
+      index += delimiter.length
+      start = index
+      continue
     }
     index += 1
   }

@@ -695,6 +695,11 @@ impl DatabaseDriver for MssqlDriver {
     /// The statement goes through the path that keeps rows, whatever its first
     /// keyword is, because with the plan switch on an INSERT also answers with
     /// a plan.
+    ///
+    /// With the actual plan the server sends the plan set after the rows of
+    /// the statement. An attention packet at the row limit would end the batch
+    /// before that set arrives, so the walk of the actual plan keeps to the end
+    /// of the stream.
     async fn explain(
         &mut self,
         query: &str,
@@ -712,8 +717,15 @@ impl DatabaseDriver for MssqlDriver {
         self.run_switch(&format!("SET {switch} ON")).await?;
         // The plan sets are filtered after the run, so the rows buffer here.
         let mut sink = BufferSink::new(options.max_rows);
+        let may_end_early = kind == PlanKind::Estimated;
         let outcome = self
-            .stream_sets(&statement, borrowed.as_slice(), options, &mut sink, true)
+            .stream_sets(
+                &statement,
+                borrowed.as_slice(),
+                options,
+                &mut sink,
+                may_end_early,
+            )
             .await;
         if let Err(error) = self.run_switch(&format!("SET {switch} OFF")).await {
             // The switch holds for the session, so a session that keeps it on
@@ -1364,6 +1376,16 @@ mod tests {
         server.write_all(&packet).await.unwrap();
     }
 
+    /// A `DONEINPROC` token with the given count of rows. The token ends one
+    /// result set of a batch that holds more sets behind it.
+    fn done_in_proc(rows: u64) -> Vec<u8> {
+        let mut token = vec![0xFF];
+        token.extend_from_slice(&0u16.to_le_bytes());
+        token.extend_from_slice(&0u16.to_le_bytes());
+        token.extend_from_slice(&rows.to_le_bytes());
+        token
+    }
+
     /// A `DONE` token with the given flags and count of rows.
     fn done_token(status: u16, rows: u64) -> Vec<u8> {
         let mut token = vec![0xFD];
@@ -1392,19 +1414,28 @@ mod tests {
         token
     }
 
-    /// A `COLMETADATA` token for one column of the type `xml`. The type
-    /// carries a byte that says whether a schema follows, and no schema
-    /// follows here.
-    fn xml_metadata() -> Vec<u8> {
+    /// A `COLMETADATA` token for one column of the type `xml` with the given
+    /// name. The type carries a byte that says whether a schema follows, and
+    /// no schema follows here.
+    fn xml_metadata_named(name: &str) -> Vec<u8> {
+        let utf16: Vec<u16> = name.encode_utf16().collect();
         let mut token = vec![0x81];
         token.extend_from_slice(&1u16.to_le_bytes());
         token.extend_from_slice(&0u32.to_le_bytes());
         token.extend_from_slice(&0u16.to_le_bytes());
         token.push(0xF1);
         token.push(0);
-        token.push(1);
-        token.extend_from_slice(&('x' as u16).to_le_bytes());
+        token.push(utf16.len() as u8);
+        for unit in utf16 {
+            token.extend_from_slice(&unit.to_le_bytes());
+        }
         token
+    }
+
+    /// A `COLMETADATA` token for one column of the type `xml` with the name
+    /// `x`.
+    fn xml_metadata() -> Vec<u8> {
+        xml_metadata_named("x")
     }
 
     /// A `ROW` token that carries one `xml` value. The value goes in the
@@ -1550,6 +1581,83 @@ mod tests {
             .unwrap();
 
         server.await.unwrap();
+    }
+
+    /// Answers a run that asks for the actual plan. The server sends five
+    /// rows of the statement and then waits. An attention packet ends the
+    /// batch without the plan set, in the way the real server ends it. When
+    /// no attention arrives, the plan set follows the rows. Gives back true
+    /// when the attention packet came.
+    async fn serve_plan_run(listener: TcpListener) -> bool {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        accept_login(&mut socket).await;
+
+        // The switch that turns the plan on.
+        read_message(&mut socket).await;
+        write_packet(&mut socket, END_OF_MESSAGE, &done_token(0, 0)).await;
+
+        let kind = read_message(&mut socket).await;
+        assert!(kind == PACKET_RPC || kind == PACKET_SQL_BATCH);
+        let mut rows = int_metadata();
+        for value in 0..5 {
+            rows.extend_from_slice(&int_row(value));
+        }
+        write_packet(&mut socket, 0, &rows).await;
+
+        let pause = Duration::from_millis(300);
+        let ended_early = match tokio::time::timeout(pause, read_message(&mut socket)).await {
+            Ok(kind) => {
+                assert_eq!(kind, PACKET_ATTENTION);
+                write_packet(&mut socket, END_OF_MESSAGE, &done_token(DONE_ATTENTION, 0)).await;
+                true
+            }
+            Err(_) => {
+                let mut plan = done_in_proc(5);
+                plan.extend_from_slice(&xml_metadata_named(PLAN_COLUMN));
+                plan.extend_from_slice(&xml_row("<ShowPlanXML />"));
+                plan.extend_from_slice(&done_token(0, 1));
+                write_packet(&mut socket, END_OF_MESSAGE, &plan).await;
+                false
+            }
+        };
+
+        // The switch that turns the plan off.
+        read_message(&mut socket).await;
+        write_packet(&mut socket, END_OF_MESSAGE, &done_token(0, 0)).await;
+        ended_early
+    }
+
+    #[tokio::test]
+    async fn the_actual_plan_arrives_when_the_rows_pass_the_limit() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_plan_run(listener));
+
+        let tcp = TcpStream::connect(address).await.unwrap();
+        let client = Client::connect(test_config(), tcp.compat_write())
+            .await
+            .unwrap();
+        let mut driver = MssqlDriver { client };
+
+        let options = ExecOptions {
+            max_rows: 2,
+            timeout_secs: 30,
+        };
+        let response = driver
+            .explain("SELECT a FROM b", None, PlanKind::Actual, &options)
+            .await
+            .unwrap();
+
+        // The walk keeps to the end of the stream, so no attention packet
+        // reaches the server and the plan set arrives behind the rows.
+        assert!(!server.await.unwrap());
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].columns[0].name, PLAN_COLUMN);
+        assert_eq!(
+            response.results[0].rows[0][0],
+            JsonValue::String("<ShowPlanXML />".into())
+        );
+        assert!(response.messages.is_empty());
     }
 
     /// Answers each request with one result set of one row, and gives back

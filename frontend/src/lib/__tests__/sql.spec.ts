@@ -110,6 +110,11 @@ describe('statementBounds', () => {
     expect(statementBounds('SELECT /* a; b */ 1')).toEqual([[0, 19]])
   })
 
+  it('reads a text and a name that never close', () => {
+    expect(statementBounds("SELECT 'a; b")).toEqual([[0, 12]])
+    expect(statementBounds('SELECT [a; b', Dialect.MsSql)).toEqual([[0, 12]])
+  })
+
   it('reads a comment that never closes', () => {
     expect(statementBounds('SELECT /* a; b')).toEqual([[0, 14]])
     expect(statementBounds('SELECT -- a; b')).toEqual([[0, 14]])
@@ -140,6 +145,86 @@ describe('statementBounds', () => {
   it('keeps a batch separator that stands inside a text', () => {
     expect(statementBounds("SELECT 'a\nGO\nb'", Dialect.MsSql)).toEqual([[0, 15]])
     expect(statementBounds('SELECT 1 -- GO\n', Dialect.MsSql)).toEqual([[0, 15]])
+  })
+
+  it('keeps a terminator inside a name in brackets on MS SQL Server', () => {
+    const script = 'SELECT [a;b] FROM t'
+    expect(statementBounds(script, Dialect.MsSql)).toEqual([[0, script.length]])
+    // A doubled closing bracket stays inside the name.
+    const doubled = 'SELECT [a]];b] FROM t'
+    expect(statementBounds(doubled, Dialect.MsSql)).toEqual([[0, doubled.length]])
+    // Another dialect reads no name in brackets.
+    expect(statementBounds(script, Dialect.Postgres)).toEqual([
+      [0, 9],
+      [10, 19],
+    ])
+  })
+
+  it('keeps a terminator inside a body that a dollar tag encloses', () => {
+    const script = 'CREATE FUNCTION f() RETURNS int AS $body$ BEGIN RETURN 1; END $body$;'
+    expect(statementBounds(script, Dialect.Postgres)).toEqual([[0, 68]])
+    // A tag that never closes runs to the end of the script.
+    expect(statementBounds('SELECT $$a; b', Dialect.Postgres)).toEqual([[0, 13]])
+    // A dollar sign that opens no tag holds no text.
+    expect(statementBounds('SELECT $1; SELECT $2', Dialect.Postgres)).toEqual([
+      [0, 9],
+      [10, 20],
+    ])
+  })
+
+  it('reads a block comment inside a block comment on PostgreSQL', () => {
+    const script = 'SELECT /* a /* b */ ; */ 1'
+    expect(statementBounds(script, Dialect.Postgres)).toEqual([[0, script.length]])
+    expect(statementBounds(script, Dialect.MsSql)).toEqual([[0, script.length]])
+    // A dialect without nested comments ends the comment at the first mark.
+    expect(statementBounds(script, Dialect.Sqlite)).toEqual([
+      [0, 20],
+      [21, 26],
+    ])
+  })
+
+  it('reads the escapes and the comments of MySQL', () => {
+    // A backslash holds the quote that follows it inside the text.
+    const escaped = "SELECT 'a\\'; b'"
+    expect(statementBounds(escaped, Dialect.MySql)).toEqual([[0, escaped.length]])
+    // A number sign starts a comment.
+    const hash = 'SELECT 1 # a; b'
+    expect(statementBounds(hash, Dialect.MySql)).toEqual([[0, hash.length]])
+    expect(statementBounds(hash, Dialect.Postgres)).toEqual([
+      [0, 12],
+      [13, 15],
+    ])
+  })
+
+  it('follows the DELIMITER command of MySQL', () => {
+    const script =
+      'DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; END$$\nDELIMITER ;\nSELECT 2;\n'
+    expect(statementBounds(script, Dialect.MySql)).toEqual([
+      [13, 53],
+      [68, 76],
+      [77, 78],
+    ])
+    expect(script.slice(13, 53)).toBe('CREATE PROCEDURE p() BEGIN SELECT 1; END')
+    // Another dialect holds the command as text and splits on the semicolon.
+    expect(statementBounds('DELIMITER $$\nSELECT 1;', Dialect.Sqlite)).toEqual([[0, 21]])
+  })
+
+  it('holds a line that carries no terminator for the DELIMITER command', () => {
+    // The word alone, the word with a longer word behind it, and the word
+    // without a terminator all stay text.
+    for (const script of ['DELIMITER \nSELECT 1;', 'DELIMITERS $$\nSELECT 1;']) {
+      expect(statementBounds(script, Dialect.MySql)).toEqual([[0, script.length - 1]])
+    }
+    // The command can end the script.
+    expect(statementBounds('SELECT 1;\nDELIMITER $$', Dialect.MySql)).toEqual([[0, 8]])
+  })
+
+  it('reads a backtick as a quote on MySQL alone', () => {
+    expect(statementBounds('SELECT `a;b`', Dialect.MySql)).toEqual([[0, 12]])
+    expect(statementBounds('SELECT `a;b`', Dialect.Postgres)).toEqual([
+      [0, 9],
+      [10, 12],
+    ])
   })
 })
 
