@@ -205,6 +205,21 @@ and not one statement at a time, because the numbers of the placeholders belong
 to the whole text. The same script without a parameter is split and each part
 holds its own effect.
 
+## A statement with a parameter reads the values of PostgreSQL in binary
+
+A statement without a parameter goes to PostgreSQL through the simple
+protocol, which sends every value as text. A statement with a parameter goes
+through the extended protocol, which sends every value in the binary form of
+its type. The driver holds a reader for the types that the engine ships,
+among them the arrays, the ranges, the multiranges, the composites, and the
+domains of any element type. Bytes that no reader understands show as text
+if the bytes are text, and as base64 if they are not. A geometric type, a
+string of bits, and `tsvector` reach the grid this way.
+
+A `money` value shows two digits of the fraction. The count of the digits
+belongs to the `lc_monetary` setting of the server, and two digits hold for
+every locale that PostgreSQL ships.
+
 ## The Excel export of the grid builds the whole sheet in memory
 
 The export of the rows that the grid shows goes through

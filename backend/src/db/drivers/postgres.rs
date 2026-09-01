@@ -23,12 +23,13 @@ use crate::storage::{SavedConnection, TlsMode};
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use futures_util::{pin_mut, stream, StreamExt, TryStreamExt};
-use postgres_types::Type;
+use postgres_types::{Field, FromSql, Kind, Type};
 use rust_decimal::Decimal;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 use serde_json::Value as JsonValue;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio_postgres::error::DbError;
@@ -772,6 +773,11 @@ impl PostgresDriver {
     /// protocol and streams the rows into the sink one at a time. The
     /// stream drops at a stop, and the connection task discards the rows
     /// that remain.
+    ///
+    /// The statement is prepared first, so the columns of the answer are
+    /// known before the first row arrives. A `SELECT` that matches no row
+    /// then still shows its columns, and a statement that returns no
+    /// column reports the count of the rows it changed.
     async fn stream_with_params(
         &mut self,
         query: &str,
@@ -785,22 +791,23 @@ impl PostgresDriver {
             .map(|value| value.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
             .collect();
 
-        let rows = self.client.query_raw(query, borrowed).await?;
+        let statement = self.client.prepare(query).await?;
+        let columns: Vec<ColumnInfo> = statement
+            .columns()
+            .iter()
+            .map(|column| ColumnInfo::new(column.name(), column.type_().name()))
+            .collect();
+        let returns_rows = !columns.is_empty();
+
+        let rows = self.client.query_raw(&statement, borrowed).await?;
         pin_mut!(rows);
 
-        let mut open = false;
+        if returns_rows {
+            sink.begin_set(columns)?;
+        }
         let mut count = 0usize;
         let mut truncated = false;
         while let Some(row) = rows.try_next().await? {
-            if !open {
-                sink.begin_set(
-                    row.columns()
-                        .iter()
-                        .map(|column| ColumnInfo::new(column.name(), column.type_().name()))
-                        .collect(),
-                )?;
-                open = true;
-            }
             if count >= options.max_rows {
                 truncated = true;
                 break;
@@ -812,13 +819,16 @@ impl PostgresDriver {
             count += 1;
         }
 
-        if open {
+        if returns_rows {
             sink.message(rows_returned_message(count, truncated));
             sink.end_set(truncated)?;
-        } else {
-            sink.message(rows_affected_message(0));
+            return Ok(None);
         }
-        Ok(None)
+        // The count of the rows arrives with the tag that ends the
+        // statement, so it can be read after the walk.
+        let affected = rows.rows_affected().unwrap_or(0);
+        sink.message(rows_affected_message(affected));
+        Ok(Some(affected))
     }
 }
 
@@ -880,78 +890,452 @@ pub fn row_to_json(row: &Row) -> Vec<JsonValue> {
         .collect()
 }
 
-/// Reads one cell. Every target type is an option, because a column that
-/// holds no value would otherwise make the driver panic.
+/// Reads one cell. The extended protocol sends every value in its binary
+/// form, so the bytes of the cell come out of the row and a reader for the
+/// type of the column turns them into JSON. A cell shows NULL only when the
+/// server sent no value: bytes that no reader understands show as text when
+/// they are text, and as base64 when they are not.
 fn cell_to_json(row: &Row, index: usize) -> JsonValue {
     // The type stays in the row, because a copy of it would cost a count on
     // a shared record for each cell of the answer.
     let column_type = row.columns()[index].type_();
+    match row.try_get::<_, Option<Raw>>(index) {
+        Ok(None) => JsonValue::Null,
+        Ok(Some(Raw(bytes))) => decode_value(column_type, bytes),
+        Err(error) => {
+            log::debug!("A column gave no value: {error}");
+            JsonValue::Null
+        }
+    }
+}
+
+/// The bytes of one cell, as the server sent them.
+struct Raw<'a>(&'a [u8]);
+
+impl<'a> FromSql<'a> for Raw<'a> {
+    fn from_sql(_: &Type, bytes: &'a [u8]) -> std::result::Result<Self, BoxError> {
+        Ok(Raw(bytes))
+    }
+
+    fn accepts(_: &Type) -> bool {
+        true
+    }
+}
+
+/// The error that the conversions of `tokio_postgres` give.
+type BoxError = Box<dyn std::error::Error + Sync + Send>;
+
+/// Turns the binary form of one value into JSON. The shape of a value that
+/// holds other values comes from the kind of its type, so an array, a
+/// range, and a composite of any element type read the same way.
+fn decode_value(column_type: &Type, bytes: &[u8]) -> JsonValue {
+    match column_type.kind() {
+        Kind::Array(element) => decode_array(element, bytes),
+        Kind::Range(element) => decode_range(element, bytes),
+        Kind::Multirange(element) => decode_multirange(element, bytes),
+        // A domain carries the value of the type it is built on.
+        Kind::Domain(inner) => decode_value(inner, bytes),
+        Kind::Composite(fields) => decode_composite(fields, bytes),
+        // The value of an enumerated type is the label itself.
+        Kind::Enum(_) => text_or_bytes(bytes),
+        _ => decode_scalar(column_type, bytes),
+    }
+}
+
+/// Reads one value that holds no other value.
+fn decode_scalar(column_type: &Type, bytes: &[u8]) -> JsonValue {
     match *column_type {
-        Type::BOOL => get(row, index).map_or(JsonValue::Null, JsonValue::Bool),
-        Type::INT2 => get::<i16>(row, index).map_or(JsonValue::Null, Into::into),
-        Type::INT4 => get::<i32>(row, index).map_or(JsonValue::Null, Into::into),
-        Type::INT8 | Type::OID => get::<i64>(row, index).map_or(JsonValue::Null, Into::into),
-        Type::FLOAT4 => get::<f32>(row, index).map_or(JsonValue::Null, |v| f64_to_json(v as f64)),
-        Type::FLOAT8 => get::<f64>(row, index).map_or(JsonValue::Null, f64_to_json),
-        Type::NUMERIC => get::<Decimal>(row, index)
-            .map(|value| JsonValue::String(value.to_string()))
-            .unwrap_or(JsonValue::Null),
-        Type::TEXT | Type::VARCHAR | Type::NAME | Type::BPCHAR | Type::UNKNOWN => {
-            get::<String>(row, index).map_or(JsonValue::Null, JsonValue::String)
-        }
-        Type::UUID => get::<uuid::Uuid>(row, index)
-            .map(|value| JsonValue::String(value.to_string()))
-            .unwrap_or(JsonValue::Null),
-        Type::JSON | Type::JSONB => get::<JsonValue>(row, index).unwrap_or(JsonValue::Null),
-        Type::BYTEA => get::<Vec<u8>>(row, index).map_or(JsonValue::Null, |v| bytes_to_json(&v)),
-        Type::DATE => get::<NaiveDate>(row, index)
-            .map(|value| JsonValue::String(value.to_string()))
-            .unwrap_or(JsonValue::Null),
-        Type::TIME => get::<NaiveTime>(row, index)
-            .map(|value| JsonValue::String(value.to_string()))
-            .unwrap_or(JsonValue::Null),
-        Type::TIMESTAMP => get::<NaiveDateTime>(row, index)
-            .map(|value| JsonValue::String(value.to_string()))
-            .unwrap_or(JsonValue::Null),
-        Type::TIMESTAMPTZ => get::<DateTime<Utc>>(row, index)
-            .map(|value| JsonValue::String(value.to_rfc3339()))
-            .unwrap_or(JsonValue::Null),
-        Type::BOOL_ARRAY => array_to_json(get::<Vec<Option<bool>>>(row, index)),
-        Type::INT2_ARRAY => array_to_json(get::<Vec<Option<i16>>>(row, index)),
-        Type::INT4_ARRAY => array_to_json(get::<Vec<Option<i32>>>(row, index)),
-        Type::INT8_ARRAY => array_to_json(get::<Vec<Option<i64>>>(row, index)),
-        Type::FLOAT4_ARRAY => array_to_json(get::<Vec<Option<f32>>>(row, index)),
-        Type::FLOAT8_ARRAY => array_to_json(get::<Vec<Option<f64>>>(row, index)),
-        Type::TEXT_ARRAY | Type::VARCHAR_ARRAY | Type::NAME_ARRAY => {
-            array_to_json(get::<Vec<Option<String>>>(row, index))
-        }
-        // Every other type is read through its text form, which the server
-        // can produce for any type.
-        _ => get::<String>(row, index).map_or(JsonValue::Null, JsonValue::String),
+        Type::BOOL => scalar(column_type, bytes, JsonValue::Bool),
+        Type::INT2 => scalar(column_type, bytes, |value: i16| value.into()),
+        Type::INT4 => scalar(column_type, bytes, |value: i32| value.into()),
+        Type::INT8 => scalar(column_type, bytes, |value: i64| value.into()),
+        // An OID is four bytes without a sign, so the read of a signed
+        // eight-byte number refuses it.
+        Type::OID => scalar(column_type, bytes, |value: u32| value.into()),
+        Type::FLOAT4 => scalar(column_type, bytes, |value: f32| f64_to_json(value as f64)),
+        Type::FLOAT8 => scalar(column_type, bytes, f64_to_json),
+        Type::NUMERIC => scalar(column_type, bytes, |value: Decimal| {
+            JsonValue::String(value.to_string())
+        }),
+        Type::TEXT
+        | Type::VARCHAR
+        | Type::NAME
+        | Type::BPCHAR
+        | Type::CHAR
+        | Type::XML
+        | Type::UNKNOWN => text_or_bytes(bytes),
+        Type::UUID => scalar(column_type, bytes, |value: uuid::Uuid| {
+            JsonValue::String(value.to_string())
+        }),
+        Type::JSON | Type::JSONB => scalar(column_type, bytes, |value: JsonValue| value),
+        Type::BYTEA => JsonValue::String(base64_text(bytes)),
+        Type::DATE => scalar(column_type, bytes, |value: NaiveDate| {
+            JsonValue::String(value.to_string())
+        }),
+        Type::TIME => scalar(column_type, bytes, |value: NaiveTime| {
+            JsonValue::String(value.to_string())
+        }),
+        Type::TIMESTAMP => scalar(column_type, bytes, |value: NaiveDateTime| {
+            JsonValue::String(value.to_string())
+        }),
+        Type::TIMESTAMPTZ => scalar(column_type, bytes, |value: DateTime<Utc>| {
+            JsonValue::String(value.to_rfc3339())
+        }),
+        Type::MONEY => money_text(bytes),
+        Type::INTERVAL => interval_text(bytes),
+        Type::INET | Type::CIDR => inet_text(bytes),
+        Type::MACADDR => mac_text(bytes, 6),
+        Type::MACADDR8 => mac_text(bytes, 8),
+        _ => text_or_bytes(bytes),
     }
 }
 
-/// Turns a list of optional values into a JSON array.
-fn array_to_json<T: Into<JsonValue>>(values: Option<Vec<Option<T>>>) -> JsonValue {
-    match values {
-        None => JsonValue::Null,
-        Some(values) => JsonValue::Array(
-            values
-                .into_iter()
-                .map(|value| value.map_or(JsonValue::Null, Into::into))
-                .collect(),
-        ),
-    }
-}
-
-/// Reads one value and treats a failure as an absent value.
-fn get<'a, T: tokio_postgres::types::FromSql<'a>>(row: &'a Row, index: usize) -> Option<T> {
-    match row.try_get::<_, Option<T>>(index) {
-        Ok(value) => value,
+/// Reads one value through the conversion of `tokio_postgres`. Bytes that
+/// the target type refuses fall back on the text rule, so a value that the
+/// server sent never shows as NULL.
+fn scalar<'a, T: FromSql<'a>>(
+    column_type: &Type,
+    bytes: &'a [u8],
+    to_json: impl FnOnce(T) -> JsonValue,
+) -> JsonValue {
+    match T::from_sql(column_type, bytes) {
+        Ok(value) => to_json(value),
         Err(error) => {
             log::debug!("A column did not match the target type: {error}");
-            None
+            text_or_bytes(bytes)
         }
+    }
+}
+
+/// Gives the bytes as text when they are text, and as base64 when they are
+/// not.
+fn text_or_bytes(bytes: &[u8]) -> JsonValue {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => JsonValue::String(text.to_string()),
+        Err(_) => JsonValue::String(base64_text(bytes)),
+    }
+}
+
+/// Writes bytes in base64, in the form that the grid shows for a blob.
+fn base64_text(bytes: &[u8]) -> String {
+    match bytes_to_json(bytes) {
+        JsonValue::String(text) => text,
+        other => other.to_string(),
+    }
+}
+
+/// Reads an array of any element type. The value holds the count of the
+/// dimensions, the type of the elements, the length of each dimension, and
+/// then the elements in row order.
+fn decode_array(element: &Type, bytes: &[u8]) -> JsonValue {
+    let mut reader = Reader::new(bytes);
+    let Some(dimensions) = reader.i32() else {
+        return text_or_bytes(bytes);
+    };
+    // The flag of the null values and the type of the elements are known
+    // from the type of the column already.
+    if reader.i32().is_none() || reader.u32().is_none() {
+        return text_or_bytes(bytes);
+    }
+    if dimensions <= 0 {
+        return JsonValue::Array(Vec::new());
+    }
+    let mut lengths = Vec::new();
+    for _ in 0..dimensions {
+        // The lower bound of a dimension does not reach the grid, which
+        // shows the elements in their order.
+        match (reader.i32(), reader.i32()) {
+            (Some(length), Some(_)) if length >= 0 => lengths.push(length as usize),
+            _ => return text_or_bytes(bytes),
+        }
+    }
+    match nested_elements(&mut reader, element, &lengths) {
+        Some(value) => value,
+        None => text_or_bytes(bytes),
+    }
+}
+
+/// Builds the elements of one dimension of an array, and the dimensions
+/// under it.
+fn nested_elements(
+    reader: &mut Reader<'_>,
+    element: &Type,
+    lengths: &[usize],
+) -> Option<JsonValue> {
+    let (length, rest) = lengths.split_first()?;
+    let mut values = Vec::with_capacity(*length);
+    for _ in 0..*length {
+        if rest.is_empty() {
+            values.push(reader.value(element)?);
+        } else {
+            values.push(nested_elements(reader, element, rest)?);
+        }
+    }
+    Some(JsonValue::Array(values))
+}
+
+/// The flags of a range value.
+const RANGE_EMPTY: u8 = 0x01;
+const RANGE_LOWER_CLOSED: u8 = 0x02;
+const RANGE_UPPER_CLOSED: u8 = 0x04;
+const RANGE_LOWER_OPEN_END: u8 = 0x08;
+const RANGE_UPPER_OPEN_END: u8 = 0x10;
+
+/// Reads a range of any element type and writes it in the form that
+/// PostgreSQL itself writes, such as `[1,10)`.
+fn decode_range(element: &Type, bytes: &[u8]) -> JsonValue {
+    match range_text(element, &mut Reader::new(bytes)) {
+        Some(text) => JsonValue::String(text),
+        None => text_or_bytes(bytes),
+    }
+}
+
+/// Reads one range out of the reader and writes it as text.
+fn range_text(element: &Type, reader: &mut Reader<'_>) -> Option<String> {
+    let flags = reader.u8()?;
+    if flags & RANGE_EMPTY != 0 {
+        return Some("empty".to_string());
+    }
+    let lower = if flags & RANGE_LOWER_OPEN_END != 0 {
+        String::new()
+    } else {
+        render(&reader.value(element)?)
+    };
+    let upper = if flags & RANGE_UPPER_OPEN_END != 0 {
+        String::new()
+    } else {
+        render(&reader.value(element)?)
+    };
+    let open = if flags & RANGE_LOWER_CLOSED != 0 {
+        '['
+    } else {
+        '('
+    };
+    let close = if flags & RANGE_UPPER_CLOSED != 0 {
+        ']'
+    } else {
+        ')'
+    };
+    Some(format!("{open}{lower},{upper}{close}"))
+}
+
+/// Reads a multirange, which holds a count and then the ranges.
+fn decode_multirange(element: &Type, bytes: &[u8]) -> JsonValue {
+    let mut reader = Reader::new(bytes);
+    let Some(count) = reader.i32() else {
+        return text_or_bytes(bytes);
+    };
+    let mut parts = Vec::new();
+    for _ in 0..count.max(0) {
+        let Some(part) = reader.i32().and_then(|length| {
+            let mut inner = Reader::new(reader.take(length.max(0) as usize)?);
+            range_text(element, &mut inner)
+        }) else {
+            return text_or_bytes(bytes);
+        };
+        parts.push(part);
+    }
+    JsonValue::String(format!("{{{}}}", parts.join(",")))
+}
+
+/// Reads a composite value and writes it in the form that PostgreSQL itself
+/// writes, such as `(1,two)`.
+fn decode_composite(fields: &[Field], bytes: &[u8]) -> JsonValue {
+    let mut reader = Reader::new(bytes);
+    let Some(count) = reader.i32() else {
+        return text_or_bytes(bytes);
+    };
+    if count < 0 || count as usize != fields.len() {
+        return text_or_bytes(bytes);
+    }
+    let mut parts = Vec::with_capacity(fields.len());
+    for field in fields {
+        // The type of the field arrives with the value, and the type of the
+        // column holds the same one.
+        let Some(value) = reader.u32().and_then(|_| reader.value(field.type_())) else {
+            return text_or_bytes(bytes);
+        };
+        parts.push(render(&value));
+    }
+    JsonValue::String(format!("({})", parts.join(",")))
+}
+
+/// Writes one JSON value as the text that a value inside a range, a
+/// multirange, or a composite shows.
+fn render(value: &JsonValue) -> String {
+    match value {
+        JsonValue::Null => String::new(),
+        JsonValue::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Writes a money value. The server sends the amount in the smallest unit
+/// of the currency, and the count of the digits of the fraction comes from
+/// the `lc_monetary` setting of the server. Two digits hold for every
+/// currency that PostgreSQL ships a locale for.
+fn money_text(bytes: &[u8]) -> JsonValue {
+    let Some(amount) = Reader::new(bytes).i64() else {
+        return text_or_bytes(bytes);
+    };
+    let sign = if amount < 0 { "-" } else { "" };
+    let units = amount.unsigned_abs();
+    JsonValue::String(format!("{sign}{}.{:02}", units / 100, units % 100))
+}
+
+/// Writes an interval in the form that PostgreSQL itself writes, such as
+/// `1 year 2 mons 3 days 04:05:06`.
+fn interval_text(bytes: &[u8]) -> JsonValue {
+    let mut reader = Reader::new(bytes);
+    let (Some(micros), Some(days), Some(months)) = (reader.i64(), reader.i32(), reader.i32())
+    else {
+        return text_or_bytes(bytes);
+    };
+    let mut parts = Vec::new();
+    let years = months / 12;
+    let rest_months = months % 12;
+    if years != 0 {
+        parts.push(format!("{years} {}", plural(years, "year", "years")));
+    }
+    if rest_months != 0 {
+        parts.push(format!(
+            "{rest_months} {}",
+            plural(rest_months, "mon", "mons")
+        ));
+    }
+    if days != 0 {
+        parts.push(format!("{days} {}", plural(days, "day", "days")));
+    }
+    if micros != 0 || parts.is_empty() {
+        parts.push(clock_text(micros));
+    }
+    JsonValue::String(parts.join(" "))
+}
+
+/// Gives the singular word for a count of one, and the plural for every
+/// other count.
+fn plural<'a>(count: i32, one: &'a str, many: &'a str) -> &'a str {
+    if count.abs() == 1 {
+        one
+    } else {
+        many
+    }
+}
+
+/// Writes a count of microseconds as a clock, with the fraction only when
+/// the count holds one.
+fn clock_text(micros: i64) -> String {
+    let sign = if micros < 0 { "-" } else { "" };
+    let total = micros.unsigned_abs();
+    let seconds = total / 1_000_000;
+    let fraction = total % 1_000_000;
+    let clock = format!(
+        "{sign}{:02}:{:02}:{:02}",
+        seconds / 3600,
+        (seconds / 60) % 60,
+        seconds % 60
+    );
+    if fraction == 0 {
+        clock
+    } else {
+        format!("{clock}.{:06}", fraction)
+            .trim_end_matches('0')
+            .into()
+    }
+}
+
+/// Writes an address of a network. The value holds the family, the count of
+/// the bits of the mask, a flag for a network, and the bytes of the address.
+fn inet_text(bytes: &[u8]) -> JsonValue {
+    let mut reader = Reader::new(bytes);
+    let (Some(_family), Some(mask_bits), Some(is_network), Some(length)) =
+        (reader.u8(), reader.u8(), reader.u8(), reader.u8())
+    else {
+        return text_or_bytes(bytes);
+    };
+    let Some(address) = reader.take(length as usize) else {
+        return text_or_bytes(bytes);
+    };
+    // The count of the bytes names the family, so a server that numbers the
+    // families in its own way still reads.
+    let text = match address.len() {
+        4 => {
+            let mut octets = [0u8; 4];
+            octets.copy_from_slice(address);
+            Ipv4Addr::from(octets).to_string()
+        }
+        16 => {
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(address);
+            Ipv6Addr::from(octets).to_string()
+        }
+        _ => return text_or_bytes(bytes),
+    };
+    let full_mask = (address.len() * 8) as u8;
+    if is_network == 1 || mask_bits != full_mask {
+        return JsonValue::String(format!("{text}/{mask_bits}"));
+    }
+    JsonValue::String(text)
+}
+
+/// Writes the bytes of a hardware address, in groups of one byte.
+fn mac_text(bytes: &[u8], length: usize) -> JsonValue {
+    if bytes.len() != length {
+        return text_or_bytes(bytes);
+    }
+    let groups: Vec<String> = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    JsonValue::String(groups.join(":"))
+}
+
+/// A walk over the bytes of one value. A read that runs past the end gives
+/// nothing, so a value of a form the reader does not expect falls back on
+/// the text rule instead of stopping the run.
+struct Reader<'a> {
+    bytes: &'a [u8],
+}
+
+impl<'a> Reader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Reader { bytes }
+    }
+
+    fn take(&mut self, count: usize) -> Option<&'a [u8]> {
+        if self.bytes.len() < count {
+            return None;
+        }
+        let (head, rest) = self.bytes.split_at(count);
+        self.bytes = rest;
+        Some(head)
+    }
+
+    fn u8(&mut self) -> Option<u8> {
+        self.take(1).map(|bytes| bytes[0])
+    }
+
+    fn i32(&mut self) -> Option<i32> {
+        self.take(4)
+            .map(|bytes| i32::from_be_bytes(bytes.try_into().unwrap()))
+    }
+
+    fn u32(&mut self) -> Option<u32> {
+        self.i32().map(|value| value as u32)
+    }
+
+    fn i64(&mut self) -> Option<i64> {
+        self.take(8)
+            .map(|bytes| i64::from_be_bytes(bytes.try_into().unwrap()))
+    }
+
+    /// Reads one value that carries its own length, as the elements of an
+    /// array and the bounds of a range do. A length of minus one means a
+    /// value that is null.
+    fn value(&mut self, column_type: &Type) -> Option<JsonValue> {
+        let length = self.i32()?;
+        if length < 0 {
+            return Some(JsonValue::Null);
+        }
+        let bytes = self.take(length as usize)?;
+        Some(decode_value(column_type, bytes))
     }
 }
 
@@ -1043,6 +1427,71 @@ mod tests {
         server.read_exact(&mut body).await.unwrap();
         body.pop();
         String::from_utf8(body).unwrap()
+    }
+
+    /// Names the columns of a result set of the extended protocol, with the
+    /// type of each column and the binary form of the values.
+    fn typed_row_description(columns: &[(&str, u32)]) -> Vec<u8> {
+        let mut body = (columns.len() as i16).to_be_bytes().to_vec();
+        for (index, (name, oid)) in columns.iter().enumerate() {
+            body.extend_from_slice(name.as_bytes());
+            body.push(0);
+            body.extend_from_slice(&0i32.to_be_bytes());
+            body.extend_from_slice(&(index as i16 + 1).to_be_bytes());
+            body.extend_from_slice(&oid.to_be_bytes());
+            body.extend_from_slice(&(-1i16).to_be_bytes());
+            body.extend_from_slice(&(-1i32).to_be_bytes());
+            body.extend_from_slice(&1i16.to_be_bytes());
+        }
+        message(b'T', &body)
+    }
+
+    /// One row of the extended protocol. Each value carries its length and
+    /// its bytes, and a value that is null carries the length of minus one.
+    fn binary_data_row(values: &[Option<&[u8]>]) -> Vec<u8> {
+        let mut body = (values.len() as i16).to_be_bytes().to_vec();
+        for value in values {
+            body.extend_from_slice(&element_body(*value));
+        }
+        message(b'D', &body)
+    }
+
+    /// The answer to a statement that the client prepares. The kinds of the
+    /// parameters go back as the client asked for them.
+    fn prepared(columns: Option<&[(&str, u32)]>) -> Vec<u8> {
+        let mut out = message(b'1', &[]);
+        let mut body = 1i16.to_be_bytes().to_vec();
+        body.extend_from_slice(&20u32.to_be_bytes());
+        out.extend_from_slice(&message(b't', &body));
+        match columns {
+            Some(columns) => out.extend_from_slice(&typed_row_description(columns)),
+            None => out.extend_from_slice(&message(b'n', &[])),
+        }
+        out.extend_from_slice(&ready_for_query());
+        out
+    }
+
+    /// Reads the messages of the client up to the one that asks the server
+    /// to answer.
+    async fn read_until_sync(server: &mut DuplexStream) {
+        loop {
+            let mut kind = [0u8; 1];
+            server.read_exact(&mut kind).await.unwrap();
+            let mut length = [0u8; 4];
+            server.read_exact(&mut length).await.unwrap();
+            let mut body = vec![0u8; i32::from_be_bytes(length) as usize - 4];
+            server.read_exact(&mut body).await.unwrap();
+            if kind[0] == b'S' {
+                return;
+            }
+        }
+    }
+
+    /// One parameter of a statement.
+    fn one_param() -> QueryParams {
+        vec![crate::db::QueryParam {
+            value: JsonValue::from(1),
+        }]
     }
 
     /// Builds a driver that speaks to a fake server on a pipe.
@@ -1148,6 +1597,625 @@ mod tests {
         assert_eq!(rows_affected, Some(5));
 
         task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_parameterised_select_reads_its_rows_in_their_binary_form() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            read_until_sync(&mut server).await;
+            server
+                .write_all(&prepared(Some(&[("id", 23), ("name", 25)])))
+                .await
+                .unwrap();
+
+            read_until_sync(&mut server).await;
+            let mut answer = message(b'2', &[]);
+            answer.extend_from_slice(&binary_data_row(&[Some(&7i32.to_be_bytes()), Some(b"Ada")]));
+            answer.extend_from_slice(&binary_data_row(&[None, None]));
+            answer.extend_from_slice(&command_complete("SELECT 2"));
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
+        });
+
+        let mut driver = driver_on(client_end).await;
+        let options = ExecOptions {
+            max_rows: 100,
+            timeout_secs: 30,
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        let rows_affected = driver
+            .stream_with_params(
+                "SELECT id, name FROM t WHERE id = $1",
+                &one_param(),
+                &options,
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        assert_eq!(rows_affected, None);
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].columns[0].name, "id");
+        assert_eq!(response.results[0].columns[0].type_name, "int4");
+        assert_eq!(response.results[0].rows[0][0], JsonValue::from(7));
+        assert_eq!(
+            response.results[0].rows[0][1],
+            JsonValue::String("Ada".into())
+        );
+        // A column without a value shows as NULL.
+        assert_eq!(response.results[0].rows[1][0], JsonValue::Null);
+
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_parameterised_select_that_matches_no_row_still_shows_its_columns() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            read_until_sync(&mut server).await;
+            server
+                .write_all(&prepared(Some(&[("id", 23)])))
+                .await
+                .unwrap();
+
+            read_until_sync(&mut server).await;
+            let mut answer = message(b'2', &[]);
+            answer.extend_from_slice(&command_complete("SELECT 0"));
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
+        });
+
+        let mut driver = driver_on(client_end).await;
+        let options = ExecOptions {
+            max_rows: 100,
+            timeout_secs: 30,
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        driver
+            .stream_with_params(
+                "SELECT id FROM t WHERE id = $1",
+                &one_param(),
+                &options,
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].columns.len(), 1);
+        assert!(response.results[0].rows.is_empty());
+
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_parameterised_write_reports_the_rows_it_changed() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            read_until_sync(&mut server).await;
+            server.write_all(&prepared(None)).await.unwrap();
+
+            read_until_sync(&mut server).await;
+            let mut answer = message(b'2', &[]);
+            answer.extend_from_slice(&command_complete("UPDATE 3"));
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
+        });
+
+        let mut driver = driver_on(client_end).await;
+        let options = ExecOptions {
+            max_rows: 100,
+            timeout_secs: 30,
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        let rows_affected = driver
+            .stream_with_params(
+                "UPDATE t SET a = 1 WHERE b = $1",
+                &one_param(),
+                &options,
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        assert_eq!(rows_affected, Some(3));
+        assert!(response.results.is_empty());
+        assert!(response
+            .messages
+            .iter()
+            .any(|message| message.text.contains('3')));
+
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_row_limit_cuts_a_parameterised_select() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            read_until_sync(&mut server).await;
+            server
+                .write_all(&prepared(Some(&[("id", 23)])))
+                .await
+                .unwrap();
+
+            read_until_sync(&mut server).await;
+            let mut answer = message(b'2', &[]);
+            for value in 0..3i32 {
+                answer.extend_from_slice(&binary_data_row(&[Some(&value.to_be_bytes())]));
+            }
+            answer.extend_from_slice(&command_complete("SELECT 3"));
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
+        });
+
+        let mut driver = driver_on(client_end).await;
+        let options = ExecOptions {
+            max_rows: 1,
+            timeout_secs: 30,
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        driver
+            .stream_with_params(
+                "SELECT id FROM t WHERE id > $1",
+                &one_param(),
+                &options,
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        assert_eq!(response.results[0].rows.len(), 1);
+        assert!(response.results[0].truncated);
+
+        task.await.unwrap();
+    }
+
+    /// Builds the binary form of an array. The lengths name the dimensions,
+    /// and the values follow in row order.
+    fn array_body(element: &Type, lengths: &[i32], values: &[Option<&[u8]>]) -> Vec<u8> {
+        let mut body = (lengths.len() as i32).to_be_bytes().to_vec();
+        body.extend_from_slice(&0i32.to_be_bytes());
+        body.extend_from_slice(&element.oid().to_be_bytes());
+        for length in lengths {
+            body.extend_from_slice(&length.to_be_bytes());
+            body.extend_from_slice(&1i32.to_be_bytes());
+        }
+        for value in values {
+            body.extend_from_slice(&element_body(*value));
+        }
+        body
+    }
+
+    /// Builds one value that carries its own length.
+    fn element_body(value: Option<&[u8]>) -> Vec<u8> {
+        match value {
+            None => (-1i32).to_be_bytes().to_vec(),
+            Some(bytes) => {
+                let mut out = (bytes.len() as i32).to_be_bytes().to_vec();
+                out.extend_from_slice(bytes);
+                out
+            }
+        }
+    }
+
+    /// A type of a range over the given element type.
+    fn range_type(element: Type) -> Type {
+        Type::new(
+            "int4range".to_string(),
+            3904,
+            Kind::Range(element),
+            "pg_catalog".to_string(),
+        )
+    }
+
+    /// Builds the binary form of a range.
+    fn range_body(flags: u8, bounds: &[&[u8]]) -> Vec<u8> {
+        let mut body = vec![flags];
+        for bound in bounds {
+            body.extend_from_slice(&element_body(Some(bound)));
+        }
+        body
+    }
+
+    fn decoded(column_type: &Type, bytes: &[u8]) -> JsonValue {
+        decode_value(column_type, bytes)
+    }
+
+    #[test]
+    fn the_numbers_and_the_text_of_a_binary_value_are_read() {
+        assert_eq!(decoded(&Type::BOOL, &[1]), JsonValue::Bool(true));
+        assert_eq!(
+            decoded(&Type::INT2, &7i16.to_be_bytes()),
+            JsonValue::from(7)
+        );
+        assert_eq!(
+            decoded(&Type::INT4, &7i32.to_be_bytes()),
+            JsonValue::from(7)
+        );
+        assert_eq!(
+            decoded(&Type::INT8, &7i64.to_be_bytes()),
+            JsonValue::from(7)
+        );
+        assert_eq!(
+            decoded(&Type::FLOAT4, &1.5f32.to_be_bytes()),
+            JsonValue::from(1.5)
+        );
+        assert_eq!(
+            decoded(&Type::FLOAT8, &1.5f64.to_be_bytes()),
+            JsonValue::from(1.5)
+        );
+        assert_eq!(
+            decoded(&Type::TEXT, b"hello"),
+            JsonValue::String("hello".into())
+        );
+        assert_eq!(
+            decoded(&Type::XML, b"<a/>"),
+            JsonValue::String("<a/>".into())
+        );
+        assert_eq!(
+            decoded(&Type::BYTEA, b"hi"),
+            JsonValue::String("aGk=".into())
+        );
+    }
+
+    #[test]
+    fn an_oid_is_read_as_a_number_without_a_sign() {
+        assert_eq!(
+            decoded(&Type::OID, &4294967295u32.to_be_bytes()),
+            JsonValue::from(4294967295u32)
+        );
+    }
+
+    #[test]
+    fn a_numeric_keeps_its_digits() {
+        // One digit of the base of ten thousand, the weight of the first
+        // digit, the sign, and the count of the digits of the fraction.
+        let mut body = 1i16.to_be_bytes().to_vec();
+        body.extend_from_slice(&0i16.to_be_bytes());
+        body.extend_from_slice(&0i16.to_be_bytes());
+        body.extend_from_slice(&0i16.to_be_bytes());
+        body.extend_from_slice(&1i16.to_be_bytes());
+        assert_eq!(
+            decoded(&Type::NUMERIC, &body),
+            JsonValue::String("1".into())
+        );
+    }
+
+    #[test]
+    fn the_dates_and_the_times_carry_the_epoch_of_the_server() {
+        assert_eq!(
+            decoded(&Type::DATE, &0i32.to_be_bytes()),
+            JsonValue::String("2000-01-01".into())
+        );
+        assert_eq!(
+            decoded(&Type::TIME, &0i64.to_be_bytes()),
+            JsonValue::String("00:00:00".into())
+        );
+        assert_eq!(
+            decoded(&Type::TIMESTAMP, &0i64.to_be_bytes()),
+            JsonValue::String("2000-01-01 00:00:00".into())
+        );
+        assert_eq!(
+            decoded(&Type::TIMESTAMPTZ, &0i64.to_be_bytes()),
+            JsonValue::String("2000-01-01T00:00:00+00:00".into())
+        );
+    }
+
+    #[test]
+    fn a_uuid_and_a_json_value_are_read() {
+        assert_eq!(
+            decoded(&Type::UUID, &[0x11; 16]),
+            JsonValue::String("11111111-1111-1111-1111-111111111111".into())
+        );
+        assert_eq!(decoded(&Type::JSON, b"[1]"), serde_json::json!([1]));
+        let mut jsonb = vec![1u8];
+        jsonb.extend_from_slice(b"[1]");
+        assert_eq!(decoded(&Type::JSONB, &jsonb), serde_json::json!([1]));
+    }
+
+    #[test]
+    fn a_money_value_holds_two_digits_of_the_fraction() {
+        assert_eq!(
+            decoded(&Type::MONEY, &123456i64.to_be_bytes()),
+            JsonValue::String("1234.56".into())
+        );
+        assert_eq!(
+            decoded(&Type::MONEY, &(-5i64).to_be_bytes()),
+            JsonValue::String("-0.05".into())
+        );
+        // A value of the wrong length falls back on the text rule.
+        assert_eq!(decoded(&Type::MONEY, b"12"), JsonValue::String("12".into()));
+    }
+
+    #[test]
+    fn an_interval_names_every_part_that_it_holds() {
+        fn interval(micros: i64, days: i32, months: i32) -> JsonValue {
+            let mut body = micros.to_be_bytes().to_vec();
+            body.extend_from_slice(&days.to_be_bytes());
+            body.extend_from_slice(&months.to_be_bytes());
+            decoded(&Type::INTERVAL, &body)
+        }
+
+        assert_eq!(interval(0, 0, 0), JsonValue::String("00:00:00".into()));
+        assert_eq!(
+            interval(14_706_500_000, 3, 14),
+            JsonValue::String("1 year 2 mons 3 days 04:05:06.5".into())
+        );
+        assert_eq!(
+            interval(0, 1, 25),
+            JsonValue::String("2 years 1 mon 1 day".into())
+        );
+        assert_eq!(
+            interval(-3_600_000_000, 0, 0),
+            JsonValue::String("-01:00:00".into())
+        );
+        assert_eq!(
+            decoded(&Type::INTERVAL, b"short"),
+            JsonValue::String("short".into())
+        );
+    }
+
+    #[test]
+    fn an_address_of_a_network_carries_its_mask() {
+        let host = [2u8, 32, 0, 4, 10, 0, 0, 1];
+        assert_eq!(
+            decoded(&Type::INET, &host),
+            JsonValue::String("10.0.0.1".into())
+        );
+        let network = [2u8, 24, 1, 4, 10, 0, 0, 0];
+        assert_eq!(
+            decoded(&Type::CIDR, &network),
+            JsonValue::String("10.0.0.0/24".into())
+        );
+        let partial = [2u8, 24, 0, 4, 10, 0, 0, 1];
+        assert_eq!(
+            decoded(&Type::INET, &partial),
+            JsonValue::String("10.0.0.1/24".into())
+        );
+        let mut six = vec![3u8, 128, 0, 16];
+        six.extend_from_slice(&[0u8; 15]);
+        six.push(1);
+        assert_eq!(decoded(&Type::INET, &six), JsonValue::String("::1".into()));
+        // A length that names no family, and a value that ends too early,
+        // both fall back on the text rule.
+        assert_eq!(
+            decoded(&Type::INET, &[2u8, 8, 0, 1, 10]),
+            JsonValue::String("\u{2}\u{8}\u{0}\u{1}\n".into())
+        );
+        assert_eq!(
+            decoded(&Type::INET, &[2u8, 32, 0, 4]),
+            JsonValue::String("\u{2} \u{0}\u{4}".into())
+        );
+        assert_eq!(
+            decoded(&Type::INET, &[2u8]),
+            JsonValue::String("\u{2}".into())
+        );
+    }
+
+    #[test]
+    fn a_hardware_address_shows_its_bytes_in_groups() {
+        assert_eq!(
+            decoded(&Type::MACADDR, &[0x08, 0x00, 0x2b, 0x01, 0x02, 0x03]),
+            JsonValue::String("08:00:2b:01:02:03".into())
+        );
+        assert_eq!(
+            decoded(&Type::MACADDR8, &[0x08, 0, 0x2b, 1, 2, 3, 4, 5]),
+            JsonValue::String("08:00:2b:01:02:03:04:05".into())
+        );
+        assert_eq!(
+            decoded(&Type::MACADDR, b"ab"),
+            JsonValue::String("ab".into())
+        );
+    }
+
+    #[test]
+    fn an_array_keeps_its_order_its_nulls_and_its_dimensions() {
+        let one = 1i32.to_be_bytes();
+        let two = 2i32.to_be_bytes();
+        let body = array_body(&Type::INT4, &[3], &[Some(&one), None, Some(&two)]);
+        assert_eq!(
+            decoded(&Type::INT4_ARRAY, &body),
+            serde_json::json!([1, null, 2])
+        );
+
+        let nested = array_body(&Type::INT4, &[2, 1], &[Some(&one), Some(&two)]);
+        assert_eq!(
+            decoded(&Type::INT4_ARRAY, &nested),
+            serde_json::json!([[1], [2]])
+        );
+
+        let empty = array_body(&Type::INT4, &[], &[]);
+        assert_eq!(decoded(&Type::INT4_ARRAY, &empty), serde_json::json!([]));
+    }
+
+    #[test]
+    fn an_array_of_a_form_the_reader_cannot_use_falls_back_on_the_text_rule() {
+        // A count of the dimensions and nothing else.
+        assert_eq!(
+            decoded(&Type::INT4_ARRAY, &1i32.to_be_bytes()),
+            JsonValue::String("\u{0}\u{0}\u{0}\u{1}".into())
+        );
+        // A dimension of a negative length.
+        let mut body = 1i32.to_be_bytes().to_vec();
+        body.extend_from_slice(&0i32.to_be_bytes());
+        body.extend_from_slice(&Type::INT4.oid().to_be_bytes());
+        body.extend_from_slice(&(-1i32).to_be_bytes());
+        body.extend_from_slice(&1i32.to_be_bytes());
+        assert!(matches!(
+            decoded(&Type::INT4_ARRAY, &body),
+            JsonValue::String(_)
+        ));
+        // A dimension that names more elements than the value holds.
+        let short = array_body(&Type::INT4, &[2], &[Some(&1i32.to_be_bytes())]);
+        assert!(matches!(
+            decoded(&Type::INT4_ARRAY, &short),
+            JsonValue::String(_)
+        ));
+        // A value that ends inside the header.
+        assert_eq!(
+            decoded(&Type::INT4_ARRAY, b"x"),
+            JsonValue::String("x".into())
+        );
+    }
+
+    #[test]
+    fn a_range_shows_its_bounds_and_the_form_of_its_ends() {
+        let kind = range_type(Type::INT4);
+        let one = 1i32.to_be_bytes();
+        let ten = 10i32.to_be_bytes();
+        assert_eq!(
+            decoded(&kind, &range_body(RANGE_LOWER_CLOSED, &[&one, &ten])),
+            JsonValue::String("[1,10)".into())
+        );
+        assert_eq!(
+            decoded(
+                &kind,
+                &range_body(RANGE_LOWER_CLOSED | RANGE_UPPER_CLOSED, &[&one, &ten])
+            ),
+            JsonValue::String("[1,10]".into())
+        );
+        assert_eq!(
+            decoded(&kind, &[RANGE_EMPTY]),
+            JsonValue::String("empty".into())
+        );
+        assert_eq!(
+            decoded(
+                &kind,
+                &range_body(RANGE_LOWER_OPEN_END | RANGE_UPPER_OPEN_END, &[])
+            ),
+            JsonValue::String("(,)".into())
+        );
+        // A range without its bounds falls back on the text rule.
+        assert_eq!(
+            decoded(&kind, &[RANGE_LOWER_CLOSED]),
+            JsonValue::String("\u{2}".into())
+        );
+        assert_eq!(decoded(&kind, &[]), JsonValue::String(String::new()));
+    }
+
+    #[test]
+    fn a_multirange_holds_its_ranges_in_braces() {
+        let element = range_type(Type::INT4);
+        let kind = Type::new(
+            "int4multirange".to_string(),
+            4451,
+            Kind::Multirange(Type::INT4),
+            "pg_catalog".to_string(),
+        );
+        let one = 1i32.to_be_bytes();
+        let ten = 10i32.to_be_bytes();
+        let first = range_body(RANGE_LOWER_CLOSED, &[&one, &ten]);
+        let mut body = 1i32.to_be_bytes().to_vec();
+        body.extend_from_slice(&element_body(Some(&first)));
+        assert_eq!(decoded(&kind, &body), JsonValue::String("{[1,10)}".into()));
+        assert_eq!(
+            decoded(&kind, &0i32.to_be_bytes()),
+            JsonValue::String("{}".into())
+        );
+        // A count that names a range the value does not hold.
+        assert_eq!(
+            decoded(&kind, &1i32.to_be_bytes()),
+            JsonValue::String("\u{0}\u{0}\u{0}\u{1}".into())
+        );
+        assert_eq!(decoded(&kind, b"ab"), JsonValue::String("ab".into()));
+        // The element type of the multirange reads on its own as well.
+        assert_eq!(
+            decoded(&element, &[RANGE_EMPTY]),
+            JsonValue::String("empty".into())
+        );
+    }
+
+    #[test]
+    fn a_composite_shows_its_fields_in_order() {
+        let kind = Type::new(
+            "pair".to_string(),
+            17000,
+            Kind::Composite(vec![
+                Field::new("id".to_string(), Type::INT4),
+                Field::new("name".to_string(), Type::TEXT),
+            ]),
+            "public".to_string(),
+        );
+        let mut body = 2i32.to_be_bytes().to_vec();
+        body.extend_from_slice(&Type::INT4.oid().to_be_bytes());
+        body.extend_from_slice(&element_body(Some(&1i32.to_be_bytes())));
+        body.extend_from_slice(&Type::TEXT.oid().to_be_bytes());
+        body.extend_from_slice(&element_body(Some(b"two")));
+        assert_eq!(decoded(&kind, &body), JsonValue::String("(1,two)".into()));
+
+        // A count that does not match the fields of the type, and a value
+        // that ends too early, both fall back on the text rule.
+        assert_eq!(
+            decoded(&kind, &1i32.to_be_bytes()),
+            JsonValue::String("\u{0}\u{0}\u{0}\u{1}".into())
+        );
+        assert_eq!(
+            decoded(&kind, &2i32.to_be_bytes()),
+            JsonValue::String("\u{0}\u{0}\u{0}\u{2}".into())
+        );
+        assert_eq!(decoded(&kind, b"ab"), JsonValue::String("ab".into()));
+    }
+
+    #[test]
+    fn a_field_of_a_composite_that_holds_no_value_shows_as_empty() {
+        let kind = Type::new(
+            "one".to_string(),
+            17001,
+            Kind::Composite(vec![Field::new("name".to_string(), Type::TEXT)]),
+            "public".to_string(),
+        );
+        let mut body = 1i32.to_be_bytes().to_vec();
+        body.extend_from_slice(&Type::TEXT.oid().to_be_bytes());
+        body.extend_from_slice(&element_body(None));
+        assert_eq!(decoded(&kind, &body), JsonValue::String("()".into()));
+    }
+
+    #[test]
+    fn an_enumerated_value_and_a_domain_carry_the_text_of_the_label() {
+        let enumerated = Type::new(
+            "mood".to_string(),
+            17002,
+            Kind::Enum(vec!["happy".to_string()]),
+            "public".to_string(),
+        );
+        assert_eq!(
+            decoded(&enumerated, b"happy"),
+            JsonValue::String("happy".into())
+        );
+        let domain = Type::new(
+            "positive".to_string(),
+            17003,
+            Kind::Domain(Type::INT4),
+            "public".to_string(),
+        );
+        assert_eq!(decoded(&domain, &7i32.to_be_bytes()), JsonValue::from(7));
+    }
+
+    #[test]
+    fn bytes_that_no_reader_understands_show_as_text_or_as_base64() {
+        let unknown = Type::new(
+            "point".to_string(),
+            600,
+            Kind::Simple,
+            "pg_catalog".to_string(),
+        );
+        assert_eq!(decoded(&unknown, b"text"), JsonValue::String("text".into()));
+        assert_eq!(
+            decoded(&unknown, &[0xff, 0xfe]),
+            JsonValue::String("//4=".into())
+        );
+        // A value of a known type that the target type refuses follows the
+        // same rule.
+        assert_eq!(decoded(&Type::INT4, b"ab"), JsonValue::String("ab".into()));
     }
 
     #[test]
@@ -1373,19 +2441,6 @@ mod tests {
         assert_eq!(
             bind_params(&params).unwrap_err().kind(),
             crate::error::ErrorKind::Configuration
-        );
-    }
-
-    #[test]
-    fn an_array_of_values_becomes_a_json_array() {
-        assert_eq!(
-            array_to_json(Some(vec![Some(1i32), None, Some(3i32)])),
-            serde_json::json!([1, null, 3])
-        );
-        assert_eq!(array_to_json::<i32>(None), JsonValue::Null);
-        assert_eq!(
-            array_to_json(Some(Vec::<Option<i32>>::new())),
-            serde_json::json!([])
         );
     }
 }

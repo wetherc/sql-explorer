@@ -27,6 +27,7 @@ use serde_json::Value as JsonValue;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tiberius::numeric::Numeric;
+use tiberius::xml::XmlData;
 use tiberius::{
     AttentionHandle, AuthMethod, Client, ColumnType, Config, EncryptionLevel, QueryItem, Row,
 };
@@ -1221,6 +1222,12 @@ fn cell_to_json(row: &Row, index: usize, column_type: ColumnType) -> JsonValue {
         ColumnType::BigVarBin | ColumnType::BigBinary | ColumnType::Image | ColumnType::Udt => {
             read(row.try_get::<&[u8], _>(index)).map_or(JsonValue::Null, bytes_to_json)
         }
+        // The server sends an XML value in its own column type, which holds
+        // text. The reads for text refuse that type, so the value needs the
+        // type of the driver.
+        ColumnType::Xml => read(row.try_get::<&XmlData, _>(index))
+            .map(|value| JsonValue::String(value.as_ref().to_string()))
+            .unwrap_or(JsonValue::Null),
         _ => text_or_bytes(row, index),
     }
 }
@@ -1317,6 +1324,37 @@ mod tests {
         token
     }
 
+    /// A `COLMETADATA` token for one column of the type `xml`. The type
+    /// carries a byte that says whether a schema follows, and no schema
+    /// follows here.
+    fn xml_metadata() -> Vec<u8> {
+        let mut token = vec![0x81];
+        token.extend_from_slice(&1u16.to_le_bytes());
+        token.extend_from_slice(&0u32.to_le_bytes());
+        token.extend_from_slice(&0u16.to_le_bytes());
+        token.push(0xF1);
+        token.push(0);
+        token.push(1);
+        token.extend_from_slice(&('x' as u16).to_le_bytes());
+        token
+    }
+
+    /// A `ROW` token that carries one `xml` value. The value goes in the
+    /// form of a blob of unknown size: one chunk of UTF-16 text and a length
+    /// of zero that ends the value.
+    fn xml_row(text: &str) -> Vec<u8> {
+        let utf16: Vec<u8> = text
+            .encode_utf16()
+            .flat_map(|unit| unit.to_le_bytes())
+            .collect();
+        let mut token = vec![0xD1];
+        token.extend_from_slice(&0xfffffffffffffffe_u64.to_le_bytes());
+        token.extend_from_slice(&(utf16.len() as u32).to_le_bytes());
+        token.extend_from_slice(&utf16);
+        token.extend_from_slice(&0u32.to_le_bytes());
+        token
+    }
+
     /// Answers the prelogin and the login of a client that connects. The
     /// answer to the prelogin holds the terminator alone, which leaves the
     /// connection without encryption.
@@ -1406,6 +1444,48 @@ mod tests {
             .stream_sets("SELECT 1", &[], &options, &mut next, true)
             .await
             .unwrap();
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_xml_column_shows_its_text() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            accept_login(&mut socket).await;
+
+            let kind = read_message(&mut socket).await;
+            assert!(kind == PACKET_RPC || kind == PACKET_SQL_BATCH);
+            let mut answer = xml_metadata();
+            answer.extend_from_slice(&xml_row("<a>1</a>"));
+            answer.extend_from_slice(&done_token(0, 1));
+            write_packet(&mut socket, END_OF_MESSAGE, &answer).await;
+        });
+
+        let tcp = TcpStream::connect(address).await.unwrap();
+        let client = Client::connect(test_config(), tcp.compat_write())
+            .await
+            .unwrap();
+        let mut driver = MssqlDriver { client };
+
+        let options = ExecOptions {
+            max_rows: 10,
+            timeout_secs: 30,
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        driver
+            .stream_sets("SELECT x FROM b", &[], &options, &mut sink, false)
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        assert_eq!(
+            response.results[0].rows[0][0],
+            JsonValue::String("<a>1</a>".into())
+        );
 
         server.await.unwrap();
     }
