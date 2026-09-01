@@ -218,6 +218,26 @@ describe('ConnectionForm', () => {
     )
   })
 
+  it('keeps the stored password when a test runs with an empty box', async () => {
+    apiStub.testConnection.mockResolvedValue('The connection works.')
+    const wrapper = await mountForm(connectionFixture({ password: '' }))
+    await wrapper.find('[data-test="test-button"]').trigger('click')
+    await settle()
+    // An empty box means that the stored secret stays, so the field goes
+    // out absent and the backend fills it from the keychain.
+    expect(apiStub.testConnection).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'c1', password: null }),
+    )
+  })
+
+  it('sends an empty password when a new record is tested', async () => {
+    apiStub.testConnection.mockResolvedValue('The connection works.')
+    const wrapper = await mountForm(connectionFixture({ password: '' }), true)
+    await wrapper.find('[data-test="test-button"]').trigger('click')
+    await settle()
+    expect(apiStub.testConnection).toHaveBeenCalledWith(expect.objectContaining({ password: '' }))
+  })
+
   it('saves the record and closes the form', async () => {
     apiStub.saveConnection.mockResolvedValue(undefined)
     const wrapper = await mountForm()

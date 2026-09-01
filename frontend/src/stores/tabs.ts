@@ -31,17 +31,11 @@ export interface Workspace {
     >
   >
   activeTabId: string | null
-  /**
-   * The folders that the user opened in the last session. The user accepted
-   * each one through the dialog of the operating system, and this record
-   * holds that acceptance across a restart.
-   */
-  fileRoots: string[]
 }
 
 /** Reads a workspace record and drops anything that is not usable. */
 export function parseWorkspace(value: unknown): Workspace {
-  const empty: Workspace = { tabs: [], activeTabId: null, fileRoots: [] }
+  const empty: Workspace = { tabs: [], activeTabId: null }
   if (typeof value !== 'object' || value === null) {
     return empty
   }
@@ -49,9 +43,6 @@ export function parseWorkspace(value: unknown): Workspace {
   if (!Array.isArray(record.tabs)) {
     return empty
   }
-  const fileRoots = Array.isArray(record.fileRoots)
-    ? record.fileRoots.filter((root): root is string => typeof root === 'string' && root !== '')
-    : []
   const tabs = record.tabs
     .filter((tab): tab is Record<string, unknown> => typeof tab === 'object' && tab !== null)
     .filter((tab) => typeof tab.id === 'string' && typeof tab.query === 'string')
@@ -68,7 +59,7 @@ export function parseWorkspace(value: unknown): Workspace {
     typeof record.activeTabId === 'string' && tabs.some((tab) => tab.id === record.activeTabId)
       ? record.activeTabId
       : (tabs[0]?.id ?? null)
-  return { tabs, activeTabId, fileRoots }
+  return { tabs, activeTabId }
 }
 
 export const useTabsStore = defineStore('tabs', () => {
@@ -76,8 +67,6 @@ export const useTabsStore = defineStore('tabs', () => {
 
   const tabs = ref<QueryTab[]>([])
   const activeTabId = ref<string | null>(null)
-  /** The folders of the files panel, which the workspace file holds. */
-  const fileRoots = ref<string[]>([])
   let counter = 0
 
   const activeTab = computed(() => tabs.value.find((tab) => tab.id === activeTabId.value) ?? null)
@@ -230,7 +219,6 @@ export const useTabsStore = defineStore('tabs', () => {
         filePath: tab.filePath,
       })),
       activeTabId: activeTabId.value,
-      fileRoots: fileRoots.value,
     }
   }
 
@@ -248,7 +236,6 @@ export const useTabsStore = defineStore('tabs', () => {
       const workspace = parseWorkspace(await api.getWorkspace())
       tabs.value = workspace.tabs.map((tab) => ({ ...tab, dirty: false }))
       activeTabId.value = workspace.activeTabId
-      await restoreFileRoots(workspace.fileRoots)
       // The counter continues after the highest restored title, so a new
       // tab does not repeat the name of a restored one.
       counter = tabs.value.reduce((highest, tab) => {
@@ -258,39 +245,7 @@ export const useTabsStore = defineStore('tabs', () => {
     } catch {
       tabs.value = []
       activeTabId.value = null
-      fileRoots.value = []
     }
-  }
-
-  /**
-   * Gives the folders of the last session back to the backend, which guards
-   * every read and every write against them. A folder that is gone from the
-   * disk, or that the backend refuses, is dropped from the record.
-   */
-  async function restoreFileRoots(roots: string[]): Promise<void> {
-    const kept: string[] = []
-    for (const root of roots) {
-      try {
-        if (await api.restoreFolder(root)) {
-          kept.push(root)
-        }
-      } catch {
-        // A folder that the backend cannot take is left out of the record.
-      }
-    }
-    fileRoots.value = kept
-  }
-
-  /** Records a folder that the user opened in this session. */
-  function addFileRoot(root: string): void {
-    if (!fileRoots.value.includes(root)) {
-      fileRoots.value = [...fileRoots.value, root]
-    }
-  }
-
-  /** Takes a folder out of the panel of this session and of the record. */
-  function removeFileRoot(root: string): void {
-    fileRoots.value = fileRoots.value.filter((held) => held !== root)
   }
 
   /** Sets or clears the file that a tab writes back to. */
@@ -311,9 +266,6 @@ export const useTabsStore = defineStore('tabs', () => {
     activeTabId,
     activeTab,
     hasTabs,
-    fileRoots,
-    addFileRoot,
-    removeFileRoot,
     setFilePath,
     tabForFile,
     add,

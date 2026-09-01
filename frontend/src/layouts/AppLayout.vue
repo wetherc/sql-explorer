@@ -698,9 +698,9 @@ onMounted(async () => {
   await connections.load()
   await history.load()
   await tabs.restore()
-  // The restore keeps the folders that the backend took back, so the panel
-  // shows those folders alone.
-  files.restoreRoots(tabs.fileRoots)
+  // The backend records the folders that the user accepted, so the panel
+  // reads that record and shows those folders alone.
+  await files.restoreRoots()
   for (const info of Object.values(connections.active)) {
     explorer.addRoot(info.connectionId)
   }

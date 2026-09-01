@@ -10,7 +10,7 @@ const { useConnectionsStore } = await import('@/stores/connections')
 
 describe('parseWorkspace', () => {
   it('gives an empty workspace for a record it cannot read', () => {
-    const empty = { tabs: [], activeTabId: null, fileRoots: [] }
+    const empty = { tabs: [], activeTabId: null }
     expect(parseWorkspace(null)).toEqual(empty)
     expect(parseWorkspace('text')).toEqual(empty)
     expect(parseWorkspace({})).toEqual(empty)
@@ -68,19 +68,6 @@ describe('parseWorkspace', () => {
 
   it('gives no active tab when the list is empty', () => {
     expect(parseWorkspace({ tabs: [], activeTabId: 'a' }).activeTabId).toBeNull()
-  })
-
-  it('keeps the folders that the record names as text', () => {
-    const workspace = parseWorkspace({
-      tabs: [],
-      fileRoots: ['/data/statements', '', 7, null, '/data/other'],
-    })
-    expect(workspace.fileRoots).toEqual(['/data/statements', '/data/other'])
-  })
-
-  it('holds no folder when the record names none', () => {
-    expect(parseWorkspace({ tabs: [] }).fileRoots).toEqual([])
-    expect(parseWorkspace({ tabs: [], fileRoots: 'one' }).fileRoots).toEqual([])
   })
 
   it('takes a file path that is text and drops one that is empty', () => {
@@ -311,7 +298,6 @@ describe('tabs store', () => {
         },
       ],
       activeTabId: tab.id,
-      fileRoots: [],
     })
   })
 
@@ -365,54 +351,35 @@ describe('tabs store', () => {
   it('starts empty when the workspace cannot be read', async () => {
     apiStub.getWorkspace.mockRejectedValue(new Error('gone'))
     const tabs = useTabsStore()
-    tabs.addFileRoot('/data/statements')
 
     await tabs.restore()
 
     expect(tabs.tabs).toEqual([])
     expect(tabs.activeTabId).toBeNull()
-    expect(tabs.fileRoots).toEqual([])
   })
 
-  it('gives the folders of the last session back to the backend', async () => {
+  it('restores the file that a tab came from', async () => {
     apiStub.getWorkspace.mockResolvedValue({
       tabs: [{ id: 'a', query: 'SELECT 1', filePath: '/data/a.sql' }],
       activeTabId: 'a',
-      fileRoots: ['/data', '/gone', '/refused'],
-    })
-    // The middle folder is no longer a folder, and the last one is refused.
-    apiStub.restoreFolder.mockImplementation((path: string) => {
-      if (path === '/refused') {
-        return Promise.reject(new Error('no'))
-      }
-      return Promise.resolve(path === '/data')
     })
     const tabs = useTabsStore()
 
     await tabs.restore()
 
-    expect(apiStub.restoreFolder).toHaveBeenCalledTimes(3)
-    expect(tabs.fileRoots).toEqual(['/data'])
     expect(tabs.tabs[0]?.filePath).toBe('/data/a.sql')
   })
 
-  it('holds the folders and the file of a tab in the record it writes', async () => {
+  it('holds the file of a tab in the record it writes', async () => {
     apiStub.saveWorkspace.mockResolvedValue(undefined)
     const tabs = useTabsStore()
     const tab = tabs.add({ filePath: '/data/a.sql' })
-    tabs.addFileRoot('/data')
-    // The same folder a second time adds no second record.
-    tabs.addFileRoot('/data')
 
     expect(tabs.snapshot()).toEqual(
       expect.objectContaining({
-        fileRoots: ['/data'],
         tabs: [expect.objectContaining({ id: tab.id, filePath: '/data/a.sql' })],
       }),
     )
-
-    tabs.removeFileRoot('/data')
-    expect(tabs.snapshot().fileRoots).toEqual([])
   })
 
   it('sets and clears the file that a tab writes back to', () => {

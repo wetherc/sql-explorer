@@ -941,7 +941,8 @@ describe('QueryView', () => {
         filePath: null,
       },
     ]
-    useFilesStore().restoreRoots(['/data'])
+    apiStub.fileRoots.mockResolvedValue(['/data'])
+    await useFilesStore().restoreRoots()
 
     await wrapper.find('[data-test="save-file-button"]').trigger('click')
     await settle()

@@ -39,6 +39,7 @@ describe('AppLayout', () => {
     apiStub.getSavedQueries.mockResolvedValue([])
     apiStub.getWorkspace.mockResolvedValue({ tabs: [], activeTabId: null })
     apiStub.saveWorkspace.mockResolvedValue(undefined)
+    apiStub.fileRoots.mockResolvedValue([])
     apiStub.queryParameters.mockResolvedValue([])
     apiStub.onConnectionStatus.mockResolvedValue(() => {})
     apiStub.onMenuCommand.mockResolvedValue(() => {})
@@ -384,14 +385,9 @@ describe('AppLayout', () => {
     wrapper.unmount()
   })
 
-  it('puts the folders of the last session into the files panel', async () => {
-    apiStub.getWorkspace.mockResolvedValue({
-      tabs: [],
-      activeTabId: null,
-      fileRoots: ['/data', '/gone'],
-    })
-    // The second folder is no longer a folder on the disk.
-    apiStub.restoreFolder.mockImplementation((path: string) => Promise.resolve(path === '/data'))
+  it('puts the folders that the backend records into the files panel', async () => {
+    apiStub.getWorkspace.mockResolvedValue({ tabs: [], activeTabId: null })
+    apiStub.fileRoots.mockResolvedValue(['/data'])
     const wrapper = mountWithPlugins(AppLayout)
     await settle()
 
@@ -603,6 +599,7 @@ describe('AppLayout settings dialog', () => {
     apiStub.getSavedQueries.mockResolvedValue([])
     apiStub.getWorkspace.mockResolvedValue({ tabs: [], activeTabId: null })
     apiStub.saveWorkspace.mockResolvedValue(undefined)
+    apiStub.fileRoots.mockResolvedValue([])
     apiStub.queryParameters.mockResolvedValue([])
     apiStub.onConnectionStatus.mockResolvedValue(() => {})
   })
@@ -637,6 +634,7 @@ describe('AppLayout dialog state', () => {
     apiStub.getSavedQueries.mockResolvedValue([])
     apiStub.getWorkspace.mockResolvedValue({ tabs: [], activeTabId: null })
     apiStub.saveWorkspace.mockResolvedValue(undefined)
+    apiStub.fileRoots.mockResolvedValue([])
     apiStub.queryParameters.mockResolvedValue([])
     apiStub.onConnectionStatus.mockResolvedValue(() => {})
   })
@@ -717,6 +715,7 @@ describe('AppLayout keys', () => {
     apiStub.getSavedQueries.mockResolvedValue([])
     apiStub.getWorkspace.mockResolvedValue({ tabs: [], activeTabId: null })
     apiStub.saveWorkspace.mockResolvedValue(undefined)
+    apiStub.fileRoots.mockResolvedValue([])
     apiStub.queryParameters.mockResolvedValue([])
     apiStub.onConnectionStatus.mockResolvedValue(() => {})
     forgetTabActions('key-tab')

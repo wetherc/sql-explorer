@@ -461,9 +461,12 @@ that the user did not accept.
 - `write_text_file(path, contents)`: the same guard. Writes through a
   temporary file and a rename, the same as `FileSink`.
 
-The accepted roots persist in `workspace.json` next to the tabs, and the
-restore path puts them back into the accepted set. The user accepted them
-once; the workspace file records that acceptance.
+The accepted roots persist in `folders.json`, which the backend writes and
+no command of the interface changes. The start of a session reads that file,
+drops each path that is no longer a folder, and puts the rest into the
+accepted set. The interface reads the list to draw the panel. A record that
+the interface could write would let the interface widen what the guard
+accepts, so the roots stay out of `workspace.json`.
 
 The frontend:
 
@@ -498,9 +501,8 @@ The frontend:
 
 Moderate. The path guard is the security boundary of the feature; its
 tests come first. A folder with very many entries needs the lazy load
-from the start. The restore of the accepted roots widens what a stolen
-workspace file can point at; the guard still refuses everything outside
-those roots, and the roots are folders the user chose.
+from the start. The record of the roots belongs to the backend, so the
+guard accepts a folder only after the user chose it in a dialog.
 
 ## 12. Move the Excel export to the backend
 

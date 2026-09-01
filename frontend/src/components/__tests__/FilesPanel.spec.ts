@@ -17,7 +17,8 @@ function entry(name: string, kind: 'folder' | 'file' = 'file', root = '/data') {
 /** Mounts the panel with one folder already open. */
 async function mountWithRoot() {
   const wrapper = mountWithPlugins(FilesPanel)
-  useFilesStore().restoreRoots(['/data'])
+  apiStub.fileRoots.mockResolvedValue(['/data'])
+  await useFilesStore().restoreRoots()
   await settle()
   return wrapper
 }

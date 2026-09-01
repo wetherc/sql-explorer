@@ -247,7 +247,7 @@ export const useConnectionsStore = defineStore('connections', () => {
   async function connect(connection: SavedConnection): Promise<boolean> {
     connecting.value = { ...connecting.value, [connection.id]: true }
     try {
-      const info = await api.connect(connection)
+      const info = await api.connect(connection.id)
       active.value = { ...active.value, [connection.id]: info }
       health.value = { ...health.value, [connection.id]: ConnectionHealth.Connected }
       selectedId.value = connection.id

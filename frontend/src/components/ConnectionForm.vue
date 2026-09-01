@@ -500,27 +500,40 @@ async function chooseFile(): Promise<void> {
   }
 }
 
+/**
+ * The record to send to the backend. On a saved connection an empty box means
+ * that the stored secret stays as it is, so the field goes out absent and the
+ * backend fills it from the keychain. An empty text would instead mean an
+ * empty secret.
+ */
+function recordToSend(): SavedConnection {
+  const record = withSecrets()
+  if (props.isNew) {
+    return record
+  }
+  if (password.value === '') {
+    record.password = null
+  }
+  if (awsSecretAccessKey.value === '') {
+    record.awsSecretAccessKey = null
+  }
+  if (awsSessionToken.value === '') {
+    record.awsSessionToken = null
+  }
+  return record
+}
+
 async function test(): Promise<void> {
-  await connections.test(withSecrets())
+  await connections.test(recordToSend())
 }
 
 async function saveConnection(): Promise<void> {
-  const record = withSecrets()
   if (props.needsNewToken && needsAccessToken.value && password.value.trim() === '') {
     // The stored token is too old, so an empty box cannot mean "keep it".
     ui.warn('Paste a new access token, or choose another authentication method.')
     return
   }
-  if (!props.isNew && password.value === '') {
-    // An empty box means that the stored password stays as it is.
-    record.password = null
-  }
-  if (!props.isNew && awsSecretAccessKey.value === '') {
-    record.awsSecretAccessKey = null
-  }
-  if (!props.isNew && awsSessionToken.value === '') {
-    record.awsSessionToken = null
-  }
+  const record = recordToSend()
   const saved = await connections.save(record)
   if (saved) {
     emit('saved', record.id)

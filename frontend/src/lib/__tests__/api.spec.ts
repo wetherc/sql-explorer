@@ -28,10 +28,9 @@ describe('api', () => {
     listen.mockReset().mockResolvedValue(() => {})
   })
 
-  it('sends the whole record when it opens a connection', async () => {
-    const connection = newConnection()
-    await api.connect(connection)
-    expect(invoke).toHaveBeenCalledWith('connect', { connection })
+  it('sends the identifier alone when it opens a connection', async () => {
+    await api.connect('c1')
+    expect(invoke).toHaveBeenCalledWith('connect', { connectionId: 'c1' })
   })
 
   it('names each command with the arguments the backend expects', async () => {
@@ -116,8 +115,11 @@ describe('api', () => {
     await api.pickFolder()
     expect(invoke).toHaveBeenCalledWith('pick_folder')
 
-    await api.restoreFolder('/data')
-    expect(invoke).toHaveBeenCalledWith('restore_folder', { path: '/data' })
+    await api.fileRoots()
+    expect(invoke).toHaveBeenCalledWith('file_roots')
+
+    await api.closeFolder('/data')
+    expect(invoke).toHaveBeenCalledWith('close_folder', { path: '/data' })
 
     await api.listFolder('/data')
     expect(invoke).toHaveBeenCalledWith('list_folder', { path: '/data' })

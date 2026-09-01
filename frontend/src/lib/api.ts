@@ -65,8 +65,10 @@ function withNulls(value: Record<string, unknown>): Record<string, unknown> {
  * means a command name appears once, and the tests replace one module.
  */
 export const api = {
-  connect(connection: SavedConnection): Promise<ConnectionInfo> {
-    return invoke('connect', { connection })
+  /** Opens the saved connection with this identifier. The backend reads
+   *  the server and the credentials out of its own record. */
+  connect(connectionId: string): Promise<ConnectionInfo> {
+    return invoke('connect', { connectionId })
   },
 
   testConnection(connection: SavedConnection): Promise<string> {
@@ -295,10 +297,16 @@ export const api = {
     return invoke('pick_folder')
   },
 
-  /** Gives a folder of the last session back to the backend. Gives back
-   *  false when that folder is no longer a folder on the disk. */
-  restoreFolder(path: string): Promise<boolean> {
-    return invoke('restore_folder', { path })
+  /** The folders that the user accepted, which the backend records. A
+   *  folder that is gone from the disk is not in the list. */
+  fileRoots(): Promise<string[]> {
+    return invoke('file_roots')
+  },
+
+  /** Takes one folder out of the record, so no path under it is reachable
+   *  any more. */
+  closeFolder(path: string): Promise<void> {
+    return invoke('close_folder', { path })
   },
 
   /** Asks the user for one statement file and reads it. The folder of that

@@ -93,21 +93,32 @@ export function quoteIfNeeded(name: string, dialect: Dialect): string {
 
 /**
  * Returns the statement that surrounds the given position. The editor uses
- * it to run the statement under the cursor when nothing is selected.
+ * it to run the statement under the cursor when nothing is selected. A
+ * position that no statement holds gives the statement in front of it, and a
+ * script that holds no statement gives an empty text.
  *
  * The split is a simple one that respects single quotes, double quotes and
  * comments. The backend splits again before it sends anything to a server,
  * so this only has to be good enough to pick the right block.
  */
 export function statementAt(script: string, offset: number): string {
-  const bounds = statementBounds(script)
   const position = Math.max(0, Math.min(offset, script.length))
-  for (const [start, end] of bounds) {
-    if (position >= start && position <= end) {
-      return script.slice(start, end).trim()
-    }
+  const parts = statementBounds(script)
+    .map(([start, end]) => ({ start, end, text: script.slice(start, end).trim() }))
+    .filter((part) => part.text !== '')
+  const first = parts[0]
+  if (!first) {
+    return ''
   }
-  return script.trim()
+  const covering = parts.find((part) => position >= part.start && position <= part.end)
+  if (covering) {
+    return covering.text
+  }
+  // The position stands in the empty space that follows a semicolon. The
+  // statement in front of that space is the one the user means, so a cursor
+  // after the last semicolon of a script runs the last statement alone.
+  const before = parts.filter((part) => part.start <= position)
+  return (before[before.length - 1] ?? first).text
 }
 
 /** Returns the start and the end of every statement in the script. */

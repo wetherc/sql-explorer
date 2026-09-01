@@ -78,15 +78,12 @@ describe('files store', () => {
       entry('image.png'),
     ])
     const files = useFilesStore()
-    const tabs = useTabsStore()
 
     await files.openFolder()
 
     expect(files.hasRoots).toBe(true)
     // The folder stands open, so every entry of it is a row of the panel.
     expect(files.rows.map((row) => row.name)).toEqual(['data', 'reports', 'a.sql', 'image.png'])
-    // The workspace holds the folder, so the next start reaches it again.
-    expect(tabs.fileRoots).toEqual(['/data'])
     expect(files.loading).toBe(false)
   })
 
@@ -112,21 +109,24 @@ describe('files store', () => {
 
   it('adds one folder once and takes it away again', async () => {
     apiStub.pickFolder.mockResolvedValue('/data')
+    apiStub.closeFolder.mockResolvedValue(undefined)
     const files = useFilesStore()
-    const tabs = useTabsStore()
 
     await files.openFolder()
     await files.openFolder()
     expect(files.roots).toHaveLength(1)
 
-    files.closeRoot('/data')
+    await files.closeRoot('/data')
     expect(files.hasRoots).toBe(false)
-    expect(tabs.fileRoots).toEqual([])
+    // The backend drops the folder as well, so no path under it is
+    // reachable any more.
+    expect(apiStub.closeFolder).toHaveBeenCalledWith('/data')
   })
 
   it('opens and closes a folder inside a root', async () => {
     const files = useFilesStore()
-    files.restoreRoots(['/data'])
+    apiStub.fileRoots.mockResolvedValue(['/data'])
+    await files.restoreRoots()
     apiStub.listFolder.mockResolvedValue([entry('reports', 'folder')])
     await files.expand('/data')
     apiStub.listFolder.mockResolvedValue([entry('a.sql', 'file', '/data/reports')])
@@ -140,7 +140,8 @@ describe('files store', () => {
 
   it('reads the entries of a folder once', async () => {
     const files = useFilesStore()
-    files.restoreRoots(['/data'])
+    apiStub.fileRoots.mockResolvedValue(['/data'])
+    await files.restoreRoots()
 
     await files.expand('/data')
     files.collapse('/data')
@@ -154,7 +155,8 @@ describe('files store', () => {
 
   it('opens no folder that the panel does not hold', async () => {
     const files = useFilesStore()
-    files.restoreRoots(['/data'])
+    apiStub.fileRoots.mockResolvedValue(['/data'])
+    await files.restoreRoots()
     apiStub.listFolder.mockResolvedValue([entry('a.sql')])
     await files.expand('/data')
 
@@ -169,7 +171,8 @@ describe('files store', () => {
 
   it('reports a folder whose entries cannot be read', async () => {
     const files = useFilesStore()
-    files.restoreRoots(['/data'])
+    apiStub.fileRoots.mockResolvedValue(['/data'])
+    await files.restoreRoots()
     apiStub.listFolder.mockRejectedValue({ kind: 'configuration', message: 'no', detail: null })
 
     await files.expand('/data')
@@ -227,10 +230,9 @@ describe('files store', () => {
       query: 'SELECT 1',
       filePath: '/data/reports/daily.sql',
     })
-    // The folder joins the panel and the workspace, so the work beside the
-    // file is one click away and the next start reaches it again.
+    // The folder joins the panel, so the work beside the file is one click
+    // away. The backend records it, so the next start reaches it again.
     expect(files.roots.map((root) => root.path)).toEqual(['/data/reports'])
-    expect(tabs.fileRoots).toEqual(['/data/reports'])
     expect(files.loading).toBe(false)
   })
 
@@ -269,13 +271,37 @@ describe('files store', () => {
     expect(files.loading).toBe(false)
   })
 
-  it('puts the folders of the workspace back into the panel', () => {
+  it('puts the folders that the backend records into the panel', async () => {
     const files = useFilesStore()
-    files.restoreRoots(['/data', '/other'])
+    apiStub.fileRoots.mockResolvedValue(['/data', '/other'])
+    await files.restoreRoots()
     expect(files.roots.map((root) => root.name)).toEqual(['data', 'other'])
 
     // A second restore takes the place of the first.
-    files.restoreRoots(['/only'])
+    apiStub.fileRoots.mockResolvedValue(['/only'])
+    await files.restoreRoots()
     expect(files.roots.map((root) => root.name)).toEqual(['only'])
+  })
+
+  it('reports a record of folders that cannot be read', async () => {
+    const files = useFilesStore()
+    apiStub.fileRoots.mockRejectedValue({ kind: 'io', message: 'gone', detail: null })
+
+    await files.restoreRoots()
+
+    expect(files.hasRoots).toBe(false)
+    expect(useUiStore().notices.some((notice) => notice.level === 'error')).toBe(true)
+  })
+
+  it('reports a folder that the backend cannot close', async () => {
+    apiStub.fileRoots.mockResolvedValue(['/data'])
+    apiStub.closeFolder.mockRejectedValue({ kind: 'io', message: 'no', detail: null })
+    const files = useFilesStore()
+    await files.restoreRoots()
+
+    await files.closeRoot('/data')
+
+    expect(files.hasRoots).toBe(false)
+    expect(useUiStore().notices.some((notice) => notice.level === 'error')).toBe(true)
   })
 })

@@ -107,7 +107,6 @@ export const useFilesStore = defineStore('files', () => {
       const path = await api.pickFolder()
       if (path) {
         addRoot(path)
-        tabs.addFileRoot(path)
         await expand(path)
       }
     } catch (error) {
@@ -117,12 +116,20 @@ export const useFilesStore = defineStore('files', () => {
     }
   }
 
-  /** Puts the folders of the workspace back into the panel. */
-  function restoreRoots(paths: string[]): void {
+  /**
+   * Puts the folders that the backend records back into the panel. The
+   * backend owns that record, so the panel shows the folders the user
+   * accepted and nothing else.
+   */
+  async function restoreRoots(): Promise<void> {
     roots.value = []
     openPaths.value = new Set()
-    for (const path of paths) {
-      addRoot(path)
+    try {
+      for (const path of await api.fileRoots()) {
+        addRoot(path)
+      }
+    } catch (error) {
+      ui.reportError(error)
     }
   }
 
@@ -145,13 +152,21 @@ export const useFilesStore = defineStore('files', () => {
     ]
   }
 
-  /** Takes one folder out of the panel and out of the workspace. */
-  function closeRoot(path: string): void {
+  /**
+   * Takes one folder out of the panel and out of the record of the backend.
+   * A file under the folder is no longer reachable after the call, so a tab
+   * that holds such a file cannot write it back.
+   */
+  async function closeRoot(path: string): Promise<void> {
     roots.value = roots.value.filter((root) => root.path !== path)
     const open = new Set(openPaths.value)
     open.delete(path)
     openPaths.value = open
-    tabs.removeFileRoot(path)
+    try {
+      await api.closeFolder(path)
+    } catch (error) {
+      ui.reportError(error)
+    }
   }
 
   /** Reads the entries of one folder, unless they are already read. */
@@ -240,7 +255,6 @@ export const useFilesStore = defineStore('files', () => {
       const folder = folderOf(opened.path)
       if (folder !== null) {
         addRoot(folder)
-        tabs.addFileRoot(folder)
         await expand(folder)
       }
     } catch (error) {

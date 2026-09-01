@@ -19,10 +19,28 @@ pub const CONNECTIONS_FILE: &str = "connections.json";
 pub const QUERIES_FILE: &str = "queries.json";
 /// The file that holds the open tabs.
 pub const WORKSPACE_FILE: &str = "workspace.json";
+/// The file that holds the folders the user accepted.
+pub const FOLDERS_FILE: &str = "folders.json";
 
 const HISTORY_KEY: &str = "history";
 const SAVED_KEY: &str = "saved";
 const WORKSPACE_KEY: &str = "workspace";
+const ROOTS_KEY: &str = "roots";
+
+/// The path of one file of the settings.
+///
+/// A relative path lands in the data folder of the application, which is what
+/// the release build uses. A test names a folder of its own, so no test reads
+/// or writes the files of the real application.
+#[cfg(not(test))]
+fn settings_path(name: &str) -> PathBuf {
+    PathBuf::from(name)
+}
+
+#[cfg(test)]
+fn settings_path(name: &str) -> PathBuf {
+    tests::settings_folder().join(name)
+}
 
 /// Reads every value of a file and drops the records that cannot be
 /// understood.
@@ -58,7 +76,7 @@ fn parse_list<T: DeserializeOwned>(value: Option<JsonValue>) -> Vec<T> {
 }
 
 pub fn read_connections<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<SavedConnection>> {
-    let store = app.store(PathBuf::from(CONNECTIONS_FILE))?;
+    let store = app.store(settings_path(CONNECTIONS_FILE))?;
     let values: Vec<(String, JsonValue)> = store.entries();
     let mut connections: Vec<SavedConnection> = parse_values(values);
     connections.sort_by_key(|connection| connection.name.to_lowercase());
@@ -69,21 +87,21 @@ pub fn write_connection<R: Runtime>(
     app: &AppHandle<R>,
     connection: &SavedConnection,
 ) -> Result<()> {
-    let store = app.store(PathBuf::from(CONNECTIONS_FILE))?;
+    let store = app.store(settings_path(CONNECTIONS_FILE))?;
     store.set(connection.id.clone(), serde_json::to_value(connection)?);
     store.save()?;
     Ok(())
 }
 
 pub fn delete_connection<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<()> {
-    let store = app.store(PathBuf::from(CONNECTIONS_FILE))?;
+    let store = app.store(settings_path(CONNECTIONS_FILE))?;
     store.delete(id);
     store.save()?;
     Ok(())
 }
 
 pub fn read_history<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<HistoryEntry>> {
-    let store = app.store(PathBuf::from(QUERIES_FILE))?;
+    let store = app.store(settings_path(QUERIES_FILE))?;
     Ok(parse_list(store.get(HISTORY_KEY)))
 }
 
@@ -91,7 +109,7 @@ pub fn read_history<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<HistoryEntry>>
 /// list, so the function gives no list back. A large history then stays out of
 /// the answer of each execution.
 pub fn add_history<R: Runtime>(app: &AppHandle<R>, entry: HistoryEntry) -> Result<()> {
-    let store = app.store(PathBuf::from(QUERIES_FILE))?;
+    let store = app.store(settings_path(QUERIES_FILE))?;
     let mut history: Vec<HistoryEntry> = parse_list(store.get(HISTORY_KEY));
     push_entry(&mut history, entry);
     store.set(HISTORY_KEY, serde_json::to_value(&history)?);
@@ -100,14 +118,14 @@ pub fn add_history<R: Runtime>(app: &AppHandle<R>, entry: HistoryEntry) -> Resul
 }
 
 pub fn clear_history<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
-    let store = app.store(PathBuf::from(QUERIES_FILE))?;
+    let store = app.store(settings_path(QUERIES_FILE))?;
     store.set(HISTORY_KEY, JsonValue::Array(Vec::new()));
     store.save()?;
     Ok(())
 }
 
 pub fn read_saved_queries<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<SavedQuery>> {
-    let store = app.store(PathBuf::from(QUERIES_FILE))?;
+    let store = app.store(settings_path(QUERIES_FILE))?;
     let mut queries: Vec<SavedQuery> = parse_list(store.get(SAVED_KEY));
     queries.sort_by_key(|query| query.name.to_lowercase());
     Ok(queries)
@@ -119,7 +137,7 @@ pub fn write_saved_query<R: Runtime>(app: &AppHandle<R>, query: &SavedQuery) -> 
             "A saved statement needs an identifier.".to_string(),
         ));
     }
-    let store = app.store(PathBuf::from(QUERIES_FILE))?;
+    let store = app.store(settings_path(QUERIES_FILE))?;
     let mut queries: Vec<SavedQuery> = parse_list(store.get(SAVED_KEY));
     match queries.iter_mut().find(|item| item.id == query.id) {
         Some(existing) => *existing = query.clone(),
@@ -131,7 +149,7 @@ pub fn write_saved_query<R: Runtime>(app: &AppHandle<R>, query: &SavedQuery) -> 
 }
 
 pub fn delete_saved_query<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<()> {
-    let store = app.store(PathBuf::from(QUERIES_FILE))?;
+    let store = app.store(settings_path(QUERIES_FILE))?;
     let mut queries: Vec<SavedQuery> = parse_list(store.get(SAVED_KEY));
     queries.retain(|item| item.id != id);
     store.set(SAVED_KEY, serde_json::to_value(&queries)?);
@@ -139,13 +157,31 @@ pub fn delete_saved_query<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<()
     Ok(())
 }
 
+/// Reads the folders that the user accepted in an earlier session.
+///
+/// This file belongs to the backend. No command writes it with a path that
+/// the interface chose, so a folder reaches the list only after the user
+/// accepted it in a dialog of the operating system.
+pub fn read_file_roots<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<String>> {
+    let store = app.store(settings_path(FOLDERS_FILE))?;
+    Ok(parse_list(store.get(ROOTS_KEY)))
+}
+
+/// Writes the folders that the user accepted.
+pub fn write_file_roots<R: Runtime>(app: &AppHandle<R>, roots: &[String]) -> Result<()> {
+    let store = app.store(settings_path(FOLDERS_FILE))?;
+    store.set(ROOTS_KEY, serde_json::to_value(roots)?);
+    store.save()?;
+    Ok(())
+}
+
 pub fn read_workspace<R: Runtime>(app: &AppHandle<R>) -> Result<JsonValue> {
-    let store = app.store(PathBuf::from(WORKSPACE_FILE))?;
+    let store = app.store(settings_path(WORKSPACE_FILE))?;
     Ok(store.get(WORKSPACE_KEY).unwrap_or(JsonValue::Null))
 }
 
 pub fn write_workspace<R: Runtime>(app: &AppHandle<R>, workspace: JsonValue) -> Result<()> {
-    let store = app.store(PathBuf::from(WORKSPACE_FILE))?;
+    let store = app.store(settings_path(WORKSPACE_FILE))?;
     store.set(WORKSPACE_KEY, workspace);
     store.save()?;
     Ok(())
@@ -155,6 +191,26 @@ pub fn write_workspace<R: Runtime>(app: &AppHandle<R>, workspace: JsonValue) -> 
 mod tests {
     use super::*;
     use crate::storage::DbType;
+
+    /// The folder that holds the files of the settings while a test runs.
+    ///
+    /// Each thread takes a folder of its own, and one test runs on one
+    /// thread, so two tests that run at the same time write no file in
+    /// common.
+    pub(super) fn settings_folder() -> PathBuf {
+        thread_local! {
+            static FOLDER: PathBuf = {
+                let path = std::env::temp_dir().join(format!(
+                    "sql-explorer-settings-{:?}",
+                    std::thread::current().id()
+                ));
+                let _ = std::fs::remove_dir_all(&path);
+                std::fs::create_dir_all(&path).unwrap();
+                path
+            };
+        }
+        FOLDER.with(PathBuf::clone)
+    }
 
     fn record(id: &str, name: &str) -> JsonValue {
         serde_json::json!({ "id": id, "name": name, "dbType": "sqlite" })
@@ -213,5 +269,6 @@ mod tests {
         assert_eq!(CONNECTIONS_FILE, "connections.json");
         assert_eq!(QUERIES_FILE, "queries.json");
         assert_eq!(WORKSPACE_FILE, "workspace.json");
+        assert_eq!(FOLDERS_FILE, "folders.json");
     }
 }

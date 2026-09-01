@@ -97,14 +97,32 @@ fn store_secret(state: &AppState, key: &str, value: Option<&str>) -> Result<bool
     }
 }
 
+/// The saved record of one connection, out of the file of connections.
+fn saved_record<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<Option<SavedConnection>> {
+    Ok(store::read_connections(app)?
+        .into_iter()
+        .find(|record| record.id == id))
+}
+
+/// Opens a connection that the file of connections holds.
+///
+/// The command takes the identifier alone and reads every other field out of
+/// that file. A stored secret therefore always goes to the server that the
+/// user saved beside it, and a caller cannot pair a stored secret with a
+/// server of its own choice.
 #[tauri::command]
 pub async fn connect<R: Runtime>(
     app: AppHandle<R>,
-    connection: SavedConnection,
+    connection_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<ConnectionInfo> {
-    let id = connection.id.clone();
-    let full = with_secrets(&state, connection)?;
+    let id = connection_id;
+    let Some(record) = saved_record(&app, &id)? else {
+        return Err(Error::Configuration(format!(
+            "No saved connection carries the identifier '{id}'."
+        )));
+    };
+    let full = with_secrets(&state, record)?;
 
     match open_driver(&full).await {
         Ok(driver) => {
@@ -125,13 +143,60 @@ pub async fn connect<R: Runtime>(
     }
 }
 
+/// Fills the secrets of a record that a test names.
+///
+/// A test carries the form as the user filled it in, so the record can differ
+/// from the saved one. A stored secret belongs to the server that the user
+/// saved beside it, so the keychain answers only while every other field of
+/// the record still matches the saved record. A record that names another
+/// server must carry its own secrets, and the message asks the user for
+/// them.
+fn with_secrets_for_test<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    connection: SavedConnection,
+) -> Result<SavedConnection> {
+    let Some(saved) = saved_record(app, &connection.id)? else {
+        return Ok(connection);
+    };
+    if saved.without_secrets() == connection.without_secrets() {
+        return with_secrets(state, connection);
+    }
+    let held = [
+        (
+            connection.password.is_none(),
+            connection.id.clone(),
+            "password",
+        ),
+        (
+            connection.aws_secret_access_key.is_none(),
+            secrets::aws_secret_key(&connection.id),
+            "secret access key",
+        ),
+        (
+            connection.aws_session_token.is_none(),
+            secrets::aws_token_key(&connection.id),
+            "session token",
+        ),
+    ];
+    for (absent, key, name) in held {
+        if absent && state.secrets.get(&key)?.is_some() {
+            return Err(Error::Configuration(format!(
+                "This record differs from the connection that is saved, so the stored {name} does not belong to it. Type the {name} to test the change."
+            )));
+        }
+    }
+    Ok(connection)
+}
+
 /// Opens a connection, confirms that it answers, and closes it again.
 #[tauri::command]
-pub async fn test_connection(
+pub async fn test_connection<R: Runtime>(
+    app: AppHandle<R>,
     connection: SavedConnection,
     state: tauri::State<'_, AppState>,
 ) -> Result<String> {
-    let full = with_secrets(&state, connection)?;
+    let full = with_secrets_for_test(&app, &state, connection)?;
     let mut driver = open_driver(&full).await?;
     driver.ping().await?;
     Ok("The connection works.".to_string())
@@ -1306,6 +1371,30 @@ async fn ask_save_path<R: Runtime>(
 
 // --- The files of the user ---
 
+/// The paths of a list of folders, as text for the interface and for the
+/// record of the backend.
+fn root_names(roots: &[std::path::PathBuf]) -> Vec<String> {
+    roots
+        .iter()
+        .map(|root| root.to_string_lossy().to_string())
+        .collect()
+}
+
+/// Records a folder that the user accepted in a dialog of the operating
+/// system.
+///
+/// The folder goes into the state, which guards every later path, and into
+/// the record of the backend, so the next session reaches the same folders.
+/// A record that cannot be written costs the next session the folder alone,
+/// so the dialog goes on.
+async fn accept_folder<R: Runtime>(app: &AppHandle<R>, state: &AppState, root: std::path::PathBuf) {
+    state.add_file_root(root).await;
+    let names = root_names(&state.file_roots().await);
+    if let Err(error) = store::write_file_roots(app, &names) {
+        log::warn!("The folders of the panel could not be written: {error}");
+    }
+}
+
 /// Asks the user for a folder and records it as a root.
 ///
 /// Every other file command refuses a path outside the roots, so this
@@ -1329,7 +1418,7 @@ pub async fn pick_folder<R: Runtime>(
     else {
         return Ok(None);
     };
-    state.add_file_root(path.clone()).await;
+    accept_folder(&app, &state, path.clone()).await;
     let opened = path.to_string_lossy().to_string();
     log::info!("Opened the folder '{opened}'.");
     Ok(Some(opened))
@@ -1402,7 +1491,7 @@ pub async fn open_statement_file<R: Runtime>(
     };
 
     if let Some(folder) = files::folder_of(&path) {
-        state.add_file_root(folder).await;
+        accept_folder(&app, &state, folder).await;
     }
     let contents = files::read_text(&path)?;
     let opened = path.to_string_lossy().to_string();
@@ -1413,16 +1502,56 @@ pub async fn open_statement_file<R: Runtime>(
     }))
 }
 
-/// Records a folder that the workspace file held, so the folders of the last
-/// session are reachable again. The folder must still be a folder on the
-/// disk, so a record that names something else brings nothing back.
+/// The folders that the user accepted, for the panel of files.
+///
+/// The record of the backend holds this list. The interface reads it and
+/// never writes it, so the interface cannot widen what the guard accepts.
+/// A folder that is gone from the disk drops out of the list and out of the
+/// record.
 #[tauri::command]
-pub async fn restore_folder(path: String, state: tauri::State<'_, AppState>) -> Result<bool> {
-    let Some(root) = files::root_from_record(&path) else {
-        return Ok(false);
-    };
-    state.add_file_root(root).await;
-    Ok(true)
+pub async fn file_roots<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<String>> {
+    file_roots_for(&app, &state).await
+}
+
+async fn file_roots_for<R: Runtime>(app: &AppHandle<R>, state: &AppState) -> Result<Vec<String>> {
+    let recorded = store::read_file_roots(app)?;
+    let kept: Vec<std::path::PathBuf> = recorded
+        .iter()
+        .filter_map(|path| files::root_from_record(path))
+        .collect();
+    state.set_file_roots(kept.clone()).await;
+    let names = root_names(&kept);
+    if names.len() != recorded.len() {
+        store::write_file_roots(app, &names)?;
+    }
+    Ok(names)
+}
+
+/// Takes one folder out of the panel and out of the record. A path that
+/// stands under the folder is outside every root after the call, so the
+/// close of a folder ends the reach of the interface into it.
+#[tauri::command]
+pub async fn close_folder<R: Runtime>(
+    app: AppHandle<R>,
+    path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<()> {
+    close_folder_for(&app, &path, &state).await
+}
+
+async fn close_folder_for<R: Runtime>(
+    app: &AppHandle<R>,
+    path: &str,
+    state: &AppState,
+) -> Result<()> {
+    state.remove_file_root(std::path::Path::new(path)).await;
+    let names = root_names(&state.file_roots().await);
+    store::write_file_roots(app, &names)?;
+    log::info!("Closed the folder '{path}'.");
+    Ok(())
 }
 
 /// Lists the entries of one folder inside the roots.
@@ -1487,7 +1616,7 @@ pub async fn save_statement_file<R: Runtime>(
     };
     files::write_text(&path, &request.contents)?;
     if let Some(folder) = files::folder_of(&path) {
-        state.add_file_root(folder).await;
+        accept_folder(&app, &state, folder).await;
     }
     let written = path.to_string_lossy().to_string();
     log::info!("Wrote the file '{written}'.");
@@ -2369,6 +2498,171 @@ mod tests {
         // An absent field over an empty store reports no secret.
         assert!(!store_secret(&state, "k1", None).unwrap());
     }
+    /// Builds an application of the tests that holds the store plugin, so
+    /// the files of the settings answer.
+    fn app_with_store() -> tauri::App<tauri::test::MockRuntime> {
+        tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(tauri::generate_context!())
+            .unwrap()
+    }
+
+    #[test]
+    fn the_paths_of_the_roots_go_out_as_text() {
+        let roots = vec![
+            std::path::PathBuf::from("/data"),
+            std::path::PathBuf::from("/data/other"),
+        ];
+        assert_eq!(root_names(&roots), vec!["/data", "/data/other"]);
+        assert!(root_names(&[]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_folder_that_the_user_accepted_survives_a_restart() {
+        let app = app_with_store();
+        let state = state();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+
+        accept_folder(app.handle(), &state, root.clone()).await;
+        assert_eq!(state.file_roots().await, vec![root.clone()]);
+
+        // A new session reads the record of the backend and holds the same
+        // folder against every path.
+        let next = AppState::new(Box::new(MemoryStore::default()));
+        let names = file_roots_for(app.handle(), &next).await.unwrap();
+        assert_eq!(names, root_names(std::slice::from_ref(&root)));
+        assert_eq!(next.file_roots().await, vec![root.clone()]);
+    }
+
+    #[tokio::test]
+    async fn a_folder_that_is_gone_drops_out_of_the_record() {
+        let app = app_with_store();
+        let state = state();
+        let dir = tempfile::tempdir().unwrap();
+        let kept = dir.path().to_path_buf();
+        let gone = kept.join("nowhere");
+
+        accept_folder(app.handle(), &state, kept.clone()).await;
+        accept_folder(app.handle(), &state, gone).await;
+
+        let names = file_roots_for(app.handle(), &state).await.unwrap();
+        assert_eq!(names, root_names(std::slice::from_ref(&kept)));
+        // The record holds the folder that is left alone.
+        assert_eq!(
+            store::read_file_roots(app.handle()).unwrap(),
+            root_names(std::slice::from_ref(&kept))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_folder_that_closes_leaves_the_state_and_the_record() {
+        let app = app_with_store();
+        let state = state();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        accept_folder(app.handle(), &state, root.clone()).await;
+
+        close_folder_for(app.handle(), &root.to_string_lossy(), &state)
+            .await
+            .unwrap();
+
+        assert!(state.file_roots().await.is_empty());
+        assert!(store::read_file_roots(app.handle()).unwrap().is_empty());
+        // No path under the folder passes the guard any more.
+        let file = root.join("a.sql");
+        std::fs::write(&file, "SELECT 1").unwrap();
+        assert!(files::path_inside_roots(&file, &state.file_roots().await).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_test_of_the_saved_record_takes_the_stored_secret() {
+        let app = app_with_store();
+        let state = state();
+        let saved = sqlite_connection("/tmp/a.db");
+        store::write_connection(app.handle(), &saved).unwrap();
+        state.secrets.set(&saved.id, "from-the-store").unwrap();
+
+        let filled = with_secrets_for_test(app.handle(), &state, saved).unwrap();
+        assert_eq!(filled.password.as_deref(), Some("from-the-store"));
+    }
+
+    #[tokio::test]
+    async fn a_test_of_a_changed_record_asks_for_the_secret() {
+        let app = app_with_store();
+        let state = state();
+        let saved = sqlite_connection("/tmp/a.db");
+        store::write_connection(app.handle(), &saved).unwrap();
+        state.secrets.set(&saved.id, "from-the-store").unwrap();
+
+        // The caller names another file, so the stored password does not
+        // belong to the record any more.
+        let mut changed = saved.clone();
+        changed.options.file_path = Some("/tmp/elsewhere.db".into());
+        let error = with_secrets_for_test(app.handle(), &state, changed.clone())
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), crate::error::ErrorKind::Configuration);
+        assert!(error.to_string().contains("Type the password"));
+
+        // The same record with the password of the caller goes through, and
+        // the store gives nothing to it.
+        let mut typed = changed.clone();
+        typed.password = Some("typed".into());
+        let kept = with_secrets_for_test(app.handle(), &state, typed).unwrap();
+        assert_eq!(kept.password.as_deref(), Some("typed"));
+    }
+
+    #[tokio::test]
+    async fn a_test_of_a_changed_record_names_the_secret_of_aws_that_it_needs() {
+        let app = app_with_store();
+        let state = state();
+        let saved = sqlite_connection("/tmp/a.db");
+        store::write_connection(app.handle(), &saved).unwrap();
+        state
+            .secrets
+            .set(&secrets::aws_secret_key(&saved.id), "the-secret")
+            .unwrap();
+        state
+            .secrets
+            .set(&secrets::aws_token_key(&saved.id), "the-token")
+            .unwrap();
+
+        let mut changed = saved.clone();
+        changed.host = Some("elsewhere".into());
+        let error = with_secrets_for_test(app.handle(), &state, changed.clone())
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("secret access key"));
+
+        changed.aws_secret_access_key = Some("typed".into());
+        let error = with_secrets_for_test(app.handle(), &state, changed.clone())
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("session token"));
+
+        changed.aws_session_token = Some("typed-token".into());
+        let kept = with_secrets_for_test(app.handle(), &state, changed).unwrap();
+        assert_eq!(kept.aws_secret_access_key.as_deref(), Some("typed"));
+    }
+
+    #[tokio::test]
+    async fn a_test_of_a_record_that_is_not_saved_holds_its_own_fields() {
+        let app = app_with_store();
+        let state = state();
+        let mut given = sqlite_connection("/tmp/a.db");
+        given.password = Some("typed".into());
+
+        let kept = with_secrets_for_test(app.handle(), &state, given).unwrap();
+        assert_eq!(kept.password.as_deref(), Some("typed"));
+    }
+
+    #[tokio::test]
+    async fn an_identifier_that_no_record_carries_cannot_open() {
+        let app = app_with_store();
+        assert!(saved_record(app.handle(), "nowhere").unwrap().is_none());
+    }
+
     #[test]
     fn base64_gives_bytes_and_damaged_content_is_refused() {
         // "PK" is the mark that a ZIP container starts with.

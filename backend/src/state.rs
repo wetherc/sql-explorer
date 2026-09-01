@@ -175,6 +175,18 @@ impl AppState {
         }
     }
 
+    /// Takes a folder out of the list, so no later path passes the guard
+    /// through it.
+    pub async fn remove_file_root(&self, root: &std::path::Path) {
+        self.file_roots.lock().await.retain(|held| held != root);
+    }
+
+    /// Puts the folders of the record of the backend in the place of the
+    /// list. The start of a session calls this once.
+    pub async fn set_file_roots(&self, roots: Vec<std::path::PathBuf>) {
+        *self.file_roots.lock().await = roots;
+    }
+
     /// The folders that the user accepted.
     pub async fn file_roots(&self) -> Vec<std::path::PathBuf> {
         self.file_roots.lock().await.clone()

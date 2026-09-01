@@ -130,8 +130,19 @@ describe('statementAt', () => {
     expect(statementAt(script, 5000)).toBe('SELECT 3')
   })
 
-  it('gives the whole script when no block holds the position', () => {
-    expect(statementAt('SELECT 1;', 9)).toBe('SELECT 1;')
+  it('gives the last statement when the position follows the last semicolon', () => {
+    expect(statementAt('SELECT 1;', 9)).toBe('SELECT 1')
+    expect(statementAt('SELECT 1;\nSELECT 2;\n', 20)).toBe('SELECT 2')
+    expect(statementAt('SELECT 1;\n   ', 13)).toBe('SELECT 1')
+  })
+
+  it('gives the first statement when nothing stands in front of the position', () => {
+    expect(statementAt(' ;SELECT 1', 0)).toBe('SELECT 1')
+  })
+
+  it('gives an empty text when the script holds no statement', () => {
+    expect(statementAt('', 0)).toBe('')
+    expect(statementAt('  ;  ', 3)).toBe('')
   })
 })
 
