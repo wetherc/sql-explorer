@@ -688,6 +688,130 @@ describe('ResultsGrid as a grid a reader can follow', () => {
     expect(cell.attributes('title')).toBeUndefined()
   })
 
+  /** A result of more rows than one slice of the filter reads. */
+  function largeResult(): ResultTable {
+    const rows: CellValue[][] = Array.from({ length: 6000 }, (_, index) => [
+      index,
+      index === 5999 ? 'zulu' : 'other',
+    ])
+    return ResultTable.fromRows(columns, rows)
+  }
+
+  it('reads a large result in slices and says that the filter builds', async () => {
+    vi.useFakeTimers()
+    try {
+      const wrapper = mountWithPlugins(ResultsGrid, { props: { result: largeResult() } })
+      await wrapper.find('[data-test="grid-filter"] input').setValue('zulu')
+      vi.advanceTimersByTime(250)
+      await wrapper.vm.$nextTick()
+
+      // The first slice read a part of the rows, so the build goes on and
+      // the rows on screen still stand under no filter.
+      expect(wrapper.find('[data-test="grid-filtering"]').text()).toContain('%')
+      expect(wrapper.find('[data-test="grid-count"]').text()).not.toContain('of')
+
+      await vi.runAllTimersAsync()
+      await wrapper.vm.$nextTick()
+      expect(wrapper.find('[data-test="grid-filtering"]').exists()).toBe(false)
+      expect(wrapper.find('[data-test="grid-count"]').text()).toContain('1 of')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('drops a build that runs when the filter clears', async () => {
+    vi.useFakeTimers()
+    try {
+      const wrapper = mountWithPlugins(ResultsGrid, { props: { result: largeResult() } })
+      const field = wrapper.find('[data-test="grid-filter"] input')
+      await field.setValue('zulu')
+      vi.advanceTimersByTime(250)
+      await wrapper.vm.$nextTick()
+      expect(wrapper.find('[data-test="grid-filtering"]').exists()).toBe(true)
+
+      await field.setValue('')
+      await vi.runAllTimersAsync()
+      await wrapper.vm.$nextTick()
+
+      expect(wrapper.find('[data-test="grid-filtering"]').exists()).toBe(false)
+      expect(wrapper.find('[data-test="grid-count"]').text()).not.toContain('of')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps the text it read when the filter changes during a build', async () => {
+    vi.useFakeTimers()
+    try {
+      const wrapper = mountWithPlugins(ResultsGrid, { props: { result: largeResult() } })
+      const field = wrapper.find('[data-test="grid-filter"] input')
+      await field.setValue('zulu')
+      vi.advanceTimersByTime(250)
+      await wrapper.vm.$nextTick()
+      expect(wrapper.find('[data-test="grid-filtering"]').exists()).toBe(true)
+
+      // The second filter arrives while the build runs. The build goes on
+      // from the row it reached, and the new filter follows it.
+      await field.setValue('5999')
+      await vi.runAllTimersAsync()
+      await wrapper.vm.$nextTick()
+
+      expect(wrapper.find('[data-test="grid-filtering"]').exists()).toBe(false)
+      expect(wrapper.find('[data-test="grid-count"]').text()).toContain('1 of')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('drops a build that runs when the grid closes', async () => {
+    vi.useFakeTimers()
+    try {
+      const wrapper = mountWithPlugins(ResultsGrid, { props: { result: largeResult() } })
+      await wrapper.find('[data-test="grid-filter"] input').setValue('zulu')
+      vi.advanceTimersByTime(250)
+      await wrapper.vm.$nextTick()
+      expect(wrapper.find('[data-test="grid-filtering"]').exists()).toBe(true)
+
+      wrapper.unmount()
+      await vi.runAllTimersAsync()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('takes the filter away when another result arrives', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    await wrapper.find('[data-test="grid-filter"] input').setValue('ada')
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findAll('[data-test="grid-row"]')).toHaveLength(1)
+
+    await wrapper.setProps({
+      result: result({
+        rows: [
+          [4, 'Ada'],
+          [5, 'Alan'],
+        ],
+      }),
+    })
+    expect(wrapper.findAll('[data-test="grid-row"]')).toHaveLength(2)
+    expect(wrapper.find('[data-test="grid-count"]').text()).not.toContain('of')
+  })
+
+  it('sorts the rows that arrived while the set streams', async () => {
+    const table = ResultTable.fromRows(columns, records)
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: table, rows: 3 } })
+    await wrapper.findAll('[data-test="grid-header"]')[1]!.trigger('click')
+    expect(wrapper.findAll('[data-test="grid-row"]')[0]?.text()).toContain('Ada')
+
+    // The keys of the sort hold one value for each row, so a row that
+    // arrives after the sort brings its own key.
+    table.addSegment([], 1)
+    await wrapper.setProps({ rows: 4 })
+    expect(wrapper.findAll('[data-test="grid-row"]')).toHaveLength(4)
+    expect(wrapper.findAll('[data-test="grid-row"]')[0]?.text()).toContain('Ada')
+  })
+
   it('holds the whole value under the focus that a key brings to a cell', async () => {
     const long = 'x'.repeat(200)
     const wrapper = mountWithPlugins(ResultsGrid, {

@@ -7,6 +7,8 @@ import {
   scanCost,
   formatClockTime,
   compareCells,
+  compareSortKeys,
+  sortKey,
   formatCell,
   formatDuration,
   formatRowCount,
@@ -115,6 +117,22 @@ describe('compareCells', () => {
     expect(compareCells('a', 'b')).toBeLessThan(0)
     expect(compareCells('item2', 'item10')).toBeLessThan(0)
     expect(compareCells({ a: 1 }, { a: 1 })).toBe(0)
+  })
+})
+
+describe('sortKey', () => {
+  it('gives no key for a cell without a value', () => {
+    expect(sortKey(null)).toBeNull()
+  })
+
+  it('keeps a number and writes every other cell as text', () => {
+    expect(sortKey(7)).toBe(7)
+    expect(sortKey(true)).toBe('true')
+    expect(sortKey('Ada')).toBe('Ada')
+  })
+
+  it('compares the keys of two cells of different kinds as text', () => {
+    expect(compareSortKeys(sortKey(2), sortKey('10'))).toBeLessThan(0)
   })
 })
 

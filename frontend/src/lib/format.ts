@@ -53,29 +53,54 @@ export function formatRowCount(count: number): string {
 }
 
 /**
- * Compares two cells for the sort of the grid. Cells without a value go to
- * the end, numbers compare as numbers, and everything else compares as
- * text.
+ * The value a sort compares. A cell without a value gives null, a number
+ * stays a number, and every other cell gives its text. One collator serves
+ * every comparison, because a new collator for each pair costs more than
+ * the comparison itself.
  */
-export function compareCells(left: CellValue, right: CellValue): number {
-  const leftEmpty = isNullCell(left)
-  const rightEmpty = isNullCell(right)
-  if (leftEmpty && rightEmpty) {
+export type SortKey = number | string | null
+
+const collator = new Intl.Collator(undefined, { numeric: true })
+
+/**
+ * Builds the value a sort compares from one cell. A sort of many rows builds
+ * one key for each row and then compares the keys, so the text of a cell is
+ * built once and not once for each comparison.
+ */
+export function sortKey(value: CellValue): SortKey {
+  if (isNullCell(value)) {
+    return null
+  }
+  return typeof value === 'number' ? value : formatCell(value)
+}
+
+/**
+ * Compares two sort keys. Keys without a value go to the end, two numbers
+ * compare as numbers, and every other pair compares as text.
+ */
+export function compareSortKeys(left: SortKey, right: SortKey): number {
+  if (left === null && right === null) {
     return 0
   }
-  if (leftEmpty) {
+  if (left === null) {
     return 1
   }
-  if (rightEmpty) {
+  if (right === null) {
     return -1
   }
   if (typeof left === 'number' && typeof right === 'number') {
     return left - right
   }
-  if (typeof left === 'boolean' && typeof right === 'boolean') {
-    return Number(left) - Number(right)
-  }
-  return formatCell(left).localeCompare(formatCell(right), undefined, { numeric: true })
+  return collator.compare(String(left), String(right))
+}
+
+/**
+ * Compares two cells for the sort of the grid. Cells without a value go to
+ * the end, numbers compare as numbers, and everything else compares as
+ * text.
+ */
+export function compareCells(left: CellValue, right: CellValue): number {
+  return compareSortKeys(sortKey(left), sortKey(right))
 }
 
 /** Writes a moment as a short local date and time. */

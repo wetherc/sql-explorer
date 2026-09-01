@@ -10,6 +10,14 @@
       filter-test-id="grid-filter"
     >
       <template #actions>
+        <span
+          v-if="filterProgress !== null"
+          class="text-caption text-medium-emphasis mr-2"
+          role="status"
+          data-test="grid-filtering"
+        >
+          Filtering… {{ Math.round(filterProgress * 100) }}%
+        </span>
         <span class="text-caption text-medium-emphasis mr-2" data-test="grid-count">
           {{ countLabel }}
         </span>
@@ -213,7 +221,8 @@ import AppDialog from './AppDialog.vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { ComponentPublicInstance } from 'vue'
 import PanelHeader from './PanelHeader.vue'
-import { compareCells, formatCell, isNullCell, truncate } from '@/lib/format'
+import { compareSortKeys, formatCell, isNullCell, sortKey, truncate } from '@/lib/format'
+import type { SortKey } from '@/lib/format'
 import { toTabSeparated } from '@/lib/export'
 import type { ResultTable } from '@/lib/results'
 import type { CellValue, ResultSet } from '@/types/api'
@@ -314,6 +323,7 @@ onBeforeUnmount(() => {
   if (filterTimer !== null) {
     clearTimeout(filterTimer)
   }
+  dropRowTexts()
 })
 
 const inspecting = ref(false)
@@ -346,43 +356,134 @@ const sourceOrder = computed(() => {
  * The copy weighs as much as the result itself, so it lives only while a
  * filter is active: it is built when the first filter arrives, kept between
  * keystrokes, and released when the filter clears or the result changes.
+ *
+ * A result of many rows takes longer to read than one frame, so the build
+ * runs in slices and gives the main thread back between them. The rows on
+ * screen stay under the filter that the finished text answers, and the
+ * header says that a build runs.
  */
-let rowTexts: string[] | null = null
+let rowTexts: string[] = []
 let rowTextsSource: ResultTable | null = null
+/** Rises when a slice of the build finished the text of every row. */
+const rowTextsVersion = ref(0)
+/** The filter the finished text answers, which the rows on screen follow. */
+const activeFilter = ref('')
+/** The part of the rows the build covered, or null while no build runs. */
+const filterProgress = ref<number | null>(null)
+/** The longest a slice of the build holds the main thread. */
+const BUILD_SLICE_MS = 12
+/** The most rows one slice reads, so a slice of small rows also gives way. */
+const BUILD_SLICE_ROWS = 5000
+let buildTimer: ReturnType<typeof setTimeout> | null = null
 
-function rowTextsFor(table: ResultTable): string[] {
-  // Rows that arrived while the set streams are not in the copy, so the
-  // copy is built again when the count of the rows moved past it.
-  if (rowTexts === null || rowTextsSource !== table || rowTexts.length !== rowTotal.value) {
-    const texts = new Array<string>(rowTotal.value)
-    for (let index = 0; index < texts.length; index += 1) {
-      texts[index] = table
-        .row(index)
-        .map((cell) => formatCell(cell))
-        .join(' ')
-        .toLowerCase()
-    }
-    rowTexts = texts
-    rowTextsSource = table
-  }
-  return rowTexts
+function rowText(table: ResultTable, index: number): string {
+  return table
+    .row(index)
+    .map((cell) => formatCell(cell))
+    .join(' ')
+    .toLowerCase()
 }
 
-watch(appliedSearch, (needle) => {
-  if (needle === '') {
-    rowTexts = null
-    rowTextsSource = null
+/** Holds back the slice of a build that waits for its turn. */
+function stopBuild(): void {
+  if (buildTimer !== null) {
+    clearTimeout(buildTimer)
+    buildTimer = null
   }
-})
+}
+
+/** Drops the text and stops a build that runs. */
+function dropRowTexts(): void {
+  stopBuild()
+  rowTexts = []
+  rowTextsSource = null
+  filterProgress.value = null
+}
+
+/**
+ * Reads one slice of the rows the text does not hold yet. It calls itself
+ * through a timer until the text covers every row, and it then puts the
+ * filter of the field on the rows.
+ */
+function buildRowTexts(): void {
+  buildTimer = null
+  const table = props.result
+  const total = rowTotal.value
+  const start = performance.now()
+  let read = 0
+  while (
+    rowTexts.length < total &&
+    read < BUILD_SLICE_ROWS &&
+    (read === 0 || performance.now() - start < BUILD_SLICE_MS)
+  ) {
+    rowTexts.push(rowText(table, rowTexts.length))
+    read += 1
+  }
+  if (rowTexts.length < total) {
+    filterProgress.value = rowTexts.length / total
+    buildTimer = setTimeout(buildRowTexts, 0)
+    return
+  }
+  filterProgress.value = null
+  activeFilter.value = appliedSearch.value
+  rowTextsVersion.value += 1
+}
+
+/**
+ * Makes the text of the rows answer the filter of the field. The text of a
+ * row that the build already read is kept, so a row that arrived while the
+ * set streams costs its own text alone.
+ */
+function refreshRowTexts(): void {
+  if (appliedSearch.value === '') {
+    dropRowTexts()
+    activeFilter.value = ''
+    return
+  }
+  if (rowTextsSource !== props.result) {
+    dropRowTexts()
+    rowTextsSource = props.result
+  }
+  stopBuild()
+  // The first slice runs now, so a small result answers the filter in the
+  // same tick and draws no mark of a build.
+  buildRowTexts()
+}
+
+watch([appliedSearch, rowTotal, () => props.result], refreshRowTexts)
 
 const filteredOrder = computed(() => {
-  const needle = appliedSearch.value
+  const needle = activeFilter.value
   if (needle === '') {
     return sourceOrder.value
   }
-  const texts = rowTextsFor(props.result)
-  return sourceOrder.value.filter((row) => texts[row]?.includes(needle))
+  // The text stands outside the reactivity of Vue, so the count of the
+  // builds carries a new text to this value.
+  void rowTextsVersion.value
+  return sourceOrder.value.filter((row) => rowTexts[row]?.includes(needle))
 })
+
+/**
+ * The value of one column for every row, which the sort compares. The keys
+ * are built once for a column, so a sort of many rows builds the text of a
+ * cell once and not once for each comparison.
+ */
+let sortKeys: SortKey[] = []
+let sortKeysSource: ResultTable | null = null
+let sortKeysColumn = -1
+
+function sortKeysFor(table: ResultTable, column: number, total: number): SortKey[] {
+  if (sortKeysSource !== table || sortKeysColumn !== column || sortKeys.length !== total) {
+    const keys = new Array<SortKey>(total)
+    for (let index = 0; index < total; index += 1) {
+      keys[index] = sortKey(table.cell(index, column))
+    }
+    sortKeys = keys
+    sortKeysSource = table
+    sortKeysColumn = column
+  }
+  return sortKeys
+}
 
 const sortedOrder = computed(() => {
   const index = sortIndex.value
@@ -390,9 +491,9 @@ const sortedOrder = computed(() => {
     return filteredOrder.value
   }
   const direction = sortDescending.value ? -1 : 1
-  const table = props.result
+  const keys = sortKeysFor(props.result, index, rowTotal.value)
   return [...filteredOrder.value].sort(
-    (left, right) => compareCells(table.cell(left, index), table.cell(right, index)) * direction,
+    (left, right) => compareSortKeys(keys[left] ?? null, keys[right] ?? null) * direction,
   )
 })
 

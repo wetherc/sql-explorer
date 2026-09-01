@@ -266,6 +266,17 @@ An Excel sheet holds 1048576 rows, the row of the column names among them.
 An export of more rows than that stops at the bound and reports the result
 as truncated. The CSV and the JSON forms have no such bound.
 
+## The filter of the grid reads the rows before it answers
+
+The filter matches against a copy of the text of each row. The grid builds
+that copy in slices and gives the main thread back between them, so the
+interface answers a pointer and a key while the build runs. The header
+shows the part of the rows the build covered. The rows on screen keep the
+filter of the last finished build until the new one ends, so a filter on a
+result of many rows takes some seconds to answer. The copy weighs as much
+as the text of the result, and the grid drops it when the filter clears or
+another result arrives.
+
 ## The files panel does not watch the disk
 
 The panel reads a folder when the user opens it and when the user asks for
