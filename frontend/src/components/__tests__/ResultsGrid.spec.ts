@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { nextTick } from 'vue'
 import ResultsGrid from '@/components/ResultsGrid.vue'
 import { mountWithPlugins } from './mount'
 import { ResultTable } from '@/lib/results'
@@ -492,6 +493,73 @@ describe('ResultsGrid as a grid a reader can follow', () => {
 
     await grid(wrapper).trigger('keydown', { key: 'PageUp' })
     expect(tabStop(wrapper)).toEqual([0, 0])
+  })
+
+  /**
+   * Gives a scroll area that holds a position, because the test environment
+   * draws nothing and reports a height of zero for each element.
+   */
+  function measure(element: Element, height: number): { position: number } {
+    const box = { position: 0 }
+    Object.defineProperty(element, 'scrollTop', {
+      configurable: true,
+      get: () => box.position,
+      set: (value: number) => {
+        box.position = value
+      },
+    })
+    Object.defineProperty(element, 'clientHeight', { configurable: true, value: height })
+    return box
+  }
+
+  it('keeps the focus on a jump past the rows that it draws', async () => {
+    const many = ResultTable.fromRows(
+      [{ name: 'n', typeName: 'int' }],
+      Array.from({ length: 500 }, (_unused, index) => [index]),
+    )
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: many } })
+    const scroller = wrapper.find('.grid-scroll')
+    const area = measure(scroller.element, 300)
+    await scroller.trigger('scroll')
+
+    await grid(wrapper).trigger('keydown', { key: 'End', ctrlKey: true })
+    await nextTick()
+
+    expect(area.position).toBeGreaterThan(0)
+    expect(document.activeElement?.getAttribute('data-test')).toBe('grid-cell')
+    expect(document.activeElement?.textContent).toContain('499')
+
+    // A step to a row that already stands in the visible part holds the area
+    // where it is.
+    const reached = area.position
+    await grid(wrapper).trigger('keydown', { key: 'ArrowUp' })
+    await nextTick()
+    expect(area.position).toBe(reached)
+    expect(document.activeElement?.textContent).toContain('498')
+  })
+
+  it('holds the row clear of the header when it scrolls up to it', async () => {
+    const many = ResultTable.fromRows(
+      [{ name: 'n', typeName: 'int' }],
+      Array.from({ length: 500 }, (_unused, index) => [index]),
+    )
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: many } })
+    const scroller = wrapper.find('.grid-scroll')
+    const area = measure(scroller.element, 300)
+    Object.defineProperty(wrapper.find('thead tr').element, 'clientHeight', {
+      configurable: true,
+      value: 40,
+    })
+    await scroller.trigger('scroll')
+
+    await grid(wrapper).trigger('keydown', { key: 'End', ctrlKey: true })
+    await grid(wrapper).trigger('keydown', { key: 'PageUp' })
+    await nextTick()
+
+    // Row 489 starts at 14670 pixels, and the header covers 40 pixels of the
+    // top of the area, so the area stands 40 pixels above the row.
+    expect(area.position).toBe(14630)
+    expect(document.activeElement?.textContent).toContain('489')
   })
 
   it('opens the whole value of a cell with the enter key', async () => {

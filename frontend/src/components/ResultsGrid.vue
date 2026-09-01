@@ -104,7 +104,7 @@
           @keydown="onGridKeyDown"
         >
           <thead>
-            <tr role="row" aria-rowindex="1">
+            <tr ref="headerRow" role="row" aria-rowindex="1">
               <th class="row-number" role="columnheader" aria-colindex="1" scope="col">#</th>
               <th
                 v-for="(column, index) in result.columns"
@@ -280,6 +280,8 @@ const scrollTop = ref(0)
 const viewportHeight = ref(600)
 /** The element the rows scroll in, which gives the height of the window. */
 const scrollArea = ref<HTMLElement | null>(null)
+/** The header row, which holds still at the top of the area above the rows. */
+const headerRow = ref<HTMLElement | null>(null)
 let sizeObserver: ResizeObserver | null = null
 
 onMounted(() => {
@@ -520,21 +522,45 @@ function focusCellAt(row: number, column: number, move = true): void {
     return
   }
   scrollRowIntoView(focusedRow.value)
-  void nextTick(() => cellElements.get(cellId(focusedRow.value, focusedColumn.value))?.focus())
+  void nextTick(() => {
+    const cell = cellElements.get(cellId(focusedRow.value, focusedColumn.value))
+    if (!cell) {
+      return
+    }
+    // The scroll above already put the row in the visible part, and the browser
+    // would move it again behind the header. The second call moves the area
+    // sideways alone, because the row stands inside it in the other direction.
+    cell.focus({ preventScroll: true })
+    cell.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  })
 }
 
-/** Scrolls the area so that one row stands inside it. */
+/**
+ * Scrolls the area so that one row stands inside it, below the header that
+ * holds still at the top.
+ */
 function scrollRowIntoView(row: number): void {
   const area = scrollArea.value
-  if (area) {
-    const top = row * ROW_HEIGHT
-    const bottom = top + ROW_HEIGHT
-    if (top < area.scrollTop) {
-      area.scrollTop = top
-    } else if (bottom > area.scrollTop + area.clientHeight) {
-      area.scrollTop = bottom - area.clientHeight
-    }
+  if (!area) {
+    return
   }
+  const top = row * ROW_HEIGHT
+  const bottom = top + ROW_HEIGHT
+  const header = headerRow.value?.clientHeight ?? 0
+  let next = area.scrollTop
+  if (top - header < next) {
+    next = top - header
+  } else if (bottom > next + area.clientHeight) {
+    next = bottom - area.clientHeight
+  }
+  next = Math.max(0, next)
+  if (next !== area.scrollTop) {
+    area.scrollTop = next
+  }
+  // The scroll event of the area arrives after the next frame, and the rows
+  // that the grid draws follow this value. The focus needs the row now, so the
+  // value moves with the area and not with the event.
+  scrollTop.value = area.scrollTop
 }
 
 /** The number of whole rows the visible part of the area holds. */
