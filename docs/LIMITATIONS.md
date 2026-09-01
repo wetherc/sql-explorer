@@ -205,6 +205,16 @@ second connection to it opens a separate empty database; every tab of such a
 connection shares one session. Athena holds no session state at all, so its
 sessions are plain request channels.
 
+## A large number parameter goes to the server as digits
+
+The interface holds a number of the parameter dialog as a double, which keeps
+17 digits and no more. A value of the number form goes out as a number only if
+its digits come back from the double unchanged. If they do not, as with
+`90071992547409931`, the digits go out as text and the server converts the text
+to the type that the statement asks for. Each engine makes that conversion for
+a number column. A text with an exponent, such as `1e3`, stays a number,
+because the server does not read that form in each type.
+
 ## Athena takes no bound parameters
 
 The client gives no way to bind a value, so the values of the named parameters

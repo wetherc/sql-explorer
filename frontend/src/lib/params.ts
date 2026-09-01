@@ -6,6 +6,14 @@
  */
 import { ParamKind, type ParamValue } from '@/types/api'
 
+/**
+ * A number that holds digits alone, with a sign and a decimal point. The
+ * digits of such a text go to the server as they are if a double changes
+ * them. A text with an exponent stays a number, because the server does not
+ * read that form in each type.
+ */
+const PLAIN_NUMBER = /^[+-]?(\d+(\.\d*)?|\.\d+)$/
+
 /** Builds the record for one name, with the form and the text it starts at. */
 export function newParamValue(name: string, held?: ParamValue): ParamValue {
   return held ? { ...held } : { name, kind: ParamKind.Text, text: '' }
@@ -20,11 +28,16 @@ export function jsonOfParam(value: ParamValue): unknown {
     return value.text.trim().toLowerCase() === 'true'
   }
   if (value.kind === ParamKind.Number) {
-    // The dialog refuses a text that is not a number, so this call never
-    // meets one. A text that still arrives keeps its own form, and the
-    // server judges it.
-    const number = Number(value.text.trim())
-    return Number.isFinite(number) ? number : value.text
+    // A double does not hold every number that the user can write. The value
+    // goes as a number only if its digits come back unchanged. If they do
+    // not, the digits go as text and the server reads them. A text that the
+    // dialog refuses also goes as text, and the server judges it.
+    const text = value.text.trim()
+    const number = Number(text)
+    if (!Number.isFinite(number)) {
+      return text
+    }
+    return PLAIN_NUMBER.test(text) && String(number) !== text ? text : number
   }
   return value.text
 }

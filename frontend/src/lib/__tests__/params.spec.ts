@@ -33,6 +33,19 @@ describe('jsonOfParam', () => {
 
   it('keeps the text of a number it cannot read, so no value goes missing', () => {
     expect(jsonOfParam({ name: 'a', kind: ParamKind.Number, text: 'two' })).toBe('two')
+    expect(jsonOfParam({ name: 'a', kind: ParamKind.Number, text: '1e400' })).toBe('1e400')
+  })
+
+  it('sends the digits of a number that a double changes', () => {
+    // A double holds 90071992547409936 for these digits.
+    expect(jsonOfParam({ name: 'a', kind: ParamKind.Number, text: '90071992547409931' })).toBe(
+      '90071992547409931',
+    )
+    expect(jsonOfParam({ name: 'a', kind: ParamKind.Number, text: '1.50' })).toBe('1.50')
+    expect(jsonOfParam({ name: 'a', kind: ParamKind.Number, text: '-0.1' })).toBe(-0.1)
+    // The server does not read the exponent form in each type, so the value
+    // stays a number.
+    expect(jsonOfParam({ name: 'a', kind: ParamKind.Number, text: '1e3' })).toBe(1000)
   })
 })
 
