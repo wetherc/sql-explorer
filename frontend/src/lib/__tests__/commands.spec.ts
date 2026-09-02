@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  appleKeyboard,
   chordCode,
   chordLabel,
   chordMatches,
@@ -65,7 +66,34 @@ describe('chordMatches', () => {
 
   it('takes the Command key of macOS for the modifier', () => {
     const event = new KeyboardEvent('keydown', { code: 'KeyT', metaKey: true })
-    expect(chordMatches('mod+t', event)).toBe(true)
+    expect(chordMatches('mod+t', event, true)).toBe(true)
+  })
+
+  it('holds the Control key and the Command key apart', () => {
+    const control = new KeyboardEvent('keydown', { code: 'KeyR', ctrlKey: true })
+    const command = new KeyboardEvent('keydown', { code: 'KeyR', metaKey: true })
+
+    // On a keyboard of Apple the Cmd key alone reaches the command.
+    expect(chordMatches('mod+r', command, true)).toBe(true)
+    expect(chordMatches('mod+r', control, true)).toBe(false)
+    // On every other keyboard the Ctrl key does.
+    expect(chordMatches('mod+r', control, false)).toBe(true)
+    expect(chordMatches('mod+r', command, false)).toBe(false)
+  })
+
+  it('reads the keyboard of the system when the caller names none', () => {
+    const agent = vi.spyOn(navigator, 'userAgent', 'get')
+    const command = new KeyboardEvent('keydown', { code: 'KeyR', metaKey: true })
+
+    agent.mockReturnValue('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)')
+    expect(appleKeyboard()).toBe(true)
+    expect(chordMatches('mod+r', command)).toBe(true)
+
+    agent.mockReturnValue('Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
+    expect(appleKeyboard()).toBe(false)
+    expect(chordMatches('mod+r', command)).toBe(false)
+
+    agent.mockRestore()
   })
 })
 

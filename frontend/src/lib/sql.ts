@@ -593,35 +593,44 @@ export function tableAliases(statement: string, dialect: Dialect): Map<string, s
       continue
     }
 
-    // The name of the relation, which can carry a database and a schema.
-    const parts: string[] = []
     let cursor = index + 1
-    while (cursor < tokens.length && !endsTheName(tokens[cursor] as Token)) {
-      const part = tokens[cursor] as Token
-      if (part.text === '.') {
+    // One FROM clause can name more than one relation, with a comma between
+    // two names, so the reader takes each name of the list.
+    for (;;) {
+      // The name of the relation, which can carry a database and a schema.
+      const parts: string[] = []
+      while (cursor < tokens.length && !endsTheName(tokens[cursor] as Token)) {
+        const part = tokens[cursor] as Token
+        if (part.text === '.') {
+          cursor += 1
+          continue
+        }
+        if (parts.length > 0 && (tokens[cursor - 1] as Token).text !== '.') {
+          break
+        }
+        parts.push(part.text)
         cursor += 1
-        continue
       }
-      if (parts.length > 0 && (tokens[cursor - 1] as Token).text !== '.') {
+      if (parts.length === 0) {
         break
       }
-      parts.push(part.text)
-      cursor += 1
-    }
-    if (parts.length === 0) {
-      continue
-    }
-    const relation = parts[parts.length - 1] as string
-    aliases.set(relation.toLowerCase(), relation)
+      const relation = parts[parts.length - 1] as string
+      aliases.set(relation.toLowerCase(), relation)
 
-    // The alias, with or without the word AS in front of it.
-    let alias = tokens[cursor] as Token | undefined
-    if (alias && !alias.quoted && alias.text.toUpperCase() === 'AS') {
+      // The alias, with or without the word AS in front of it.
+      let alias = tokens[cursor] as Token | undefined
+      if (alias && !alias.quoted && alias.text.toUpperCase() === 'AS') {
+        cursor += 1
+        alias = tokens[cursor] as Token | undefined
+      }
+      if (alias && !endsTheName(alias)) {
+        aliases.set(alias.text.toLowerCase(), relation)
+        cursor += 1
+      }
+      if ((tokens[cursor] as Token | undefined)?.text !== ',') {
+        break
+      }
       cursor += 1
-      alias = tokens[cursor] as Token | undefined
-    }
-    if (alias && !endsTheName(alias)) {
-      aliases.set(alias.text.toLowerCase(), relation)
     }
     // The loop steps forward by one, and the word at the cursor may itself
     // start the next clause, so the cursor goes back by one here.

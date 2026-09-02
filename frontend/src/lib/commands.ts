@@ -52,12 +52,28 @@ export function chordCode(key: string): string {
   return key.charAt(0).toUpperCase() + key.slice(1)
 }
 
-/** True when the event carries exactly the chord. */
-export function chordMatches(spec: string, event: KeyboardEvent): boolean {
+/**
+ * True when the keyboard of the system carries the Cmd key. The `mod` part
+ * of a chord is Cmd on such a keyboard and Ctrl on every other one.
+ */
+export function appleKeyboard(): boolean {
+  return /mac|iphone|ipad/i.test(navigator.userAgent)
+}
+
+/**
+ * True when the event carries exactly the chord.
+ *
+ * One key holds the place of `mod`: Cmd on the keyboards of Apple and Ctrl
+ * on every other keyboard. The other of the two must stand up, so Ctrl + R
+ * on a Mac does not reach the command of Cmd + R.
+ */
+export function chordMatches(spec: string, event: KeyboardEvent, apple = appleKeyboard()): boolean {
   const chord = parseChord(spec)
-  const mod = event.ctrlKey || event.metaKey
+  const mod = apple ? event.metaKey : event.ctrlKey
+  const other = apple ? event.ctrlKey : event.metaKey
   return (
     mod === chord.mod &&
+    !other &&
     event.shiftKey === chord.shift &&
     event.altKey === chord.alt &&
     event.code === chordCode(chord.key)
@@ -111,9 +127,13 @@ export function keysOf(command: Command): string[] {
 }
 
 /** Finds the command that the event asks for, if there is one. */
-export function commandForEvent(commands: Command[], event: KeyboardEvent): Command | null {
+export function commandForEvent(
+  commands: Command[],
+  event: KeyboardEvent,
+  apple = appleKeyboard(),
+): Command | null {
   for (const command of commands) {
-    if (keysOf(command).some((key) => chordMatches(key, event))) {
+    if (keysOf(command).some((key) => chordMatches(key, event, apple))) {
       return command
     }
   }

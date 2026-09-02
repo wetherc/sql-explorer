@@ -184,6 +184,30 @@ describe('ui store holding the corner to a few notices', () => {
     expect(ui.notices[ui.notices.length - 1]?.message).toBe(`Notice ${MAX_NOTICES + 2}`)
   })
 
+  it('keeps an error that stays while a burst of short notices arrives', () => {
+    const ui = useUiStore()
+
+    ui.reportError({ kind: ErrorKind.Database, message: 'It failed', detail: null })
+    for (let index = 0; index < MAX_NOTICES + 3; index += 1) {
+      ui.info(`Notice ${index}`)
+    }
+
+    expect(ui.notices).toHaveLength(MAX_NOTICES)
+    expect(ui.notices[0]?.message).toBe('It failed')
+    expect(ui.notices[ui.notices.length - 1]?.message).toBe(`Notice ${MAX_NOTICES + 2}`)
+  })
+
+  it('loses its oldest notice when every notice stays', () => {
+    const ui = useUiStore()
+
+    for (let index = 0; index < MAX_NOTICES + 1; index += 1) {
+      ui.reportError({ kind: ErrorKind.Database, message: `Fault ${index}`, detail: null })
+    }
+
+    expect(ui.notices).toHaveLength(MAX_NOTICES)
+    expect(ui.notices[0]?.message).toBe('Fault 1')
+  })
+
   it('holds an error in the corner until the user takes it away', () => {
     const ui = useUiStore()
 

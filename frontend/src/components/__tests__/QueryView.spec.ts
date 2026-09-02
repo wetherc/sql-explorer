@@ -15,6 +15,7 @@ const QueryView = (await import('@/components/QueryView.vue')).default
 const { mountWithPlugins, settle } = await import('./mount')
 const { useConnectionsStore } = await import('@/stores/connections')
 const { useFilesStore } = await import('@/stores/files')
+const { useHistoryStore } = await import('@/stores/history')
 const { useLayoutStore } = await import('@/stores/layout')
 const { useQueryStore } = await import('@/stores/query')
 const { useTabsStore } = await import('@/stores/tabs')
@@ -1178,6 +1179,48 @@ describe('QueryView details', () => {
     confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     await settle()
 
+    expect(apiStub.saveQuery).toHaveBeenCalledWith(expect.objectContaining({ folder: 'Reports' }))
+  })
+
+  it('keeps the folder of a statement that is already saved', async () => {
+    apiStub.getSavedQueries.mockResolvedValue([
+      {
+        id: 's1',
+        name: 'Query 1',
+        query: 'SELECT 1',
+        connectionId: 'c1',
+        folder: 'Reports',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      },
+    ])
+    apiStub.saveQuery.mockResolvedValue(undefined)
+    const wrapper = mountWithPlugins(QueryView, {
+      props: {
+        tab: {
+          id: 't1',
+          title: 'Query 1',
+          query: 'SELECT 1',
+          connectionId: 'c1',
+          dirty: false,
+          savedQueryId: 's1',
+          params: [],
+          filePath: null,
+        },
+      },
+    })
+    await useConnectionsStore().load()
+    await useHistoryStore().load()
+    await settle()
+
+    await wrapper.find('[data-test="save-query-button"]').trigger('click')
+    await settle()
+
+    const confirm = document.querySelector('[data-test="save-query-confirm"]') as HTMLElement
+    confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+
+    // The folder of the record stands in the dialog, so the second save
+    // leaves the statement where it is.
     expect(apiStub.saveQuery).toHaveBeenCalledWith(expect.objectContaining({ folder: 'Reports' }))
   })
 

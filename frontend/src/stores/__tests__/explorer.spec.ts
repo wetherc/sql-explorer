@@ -689,6 +689,57 @@ describe('explorer store', () => {
     expect(root.children).toHaveLength(2)
   })
 
+  it('drops the answer of a read that a refresh passed', async () => {
+    let releaseFirst: (value: { name: string }[]) => void = () => {}
+    apiStub.listDatabases.mockReturnValueOnce(
+      new Promise<{ name: string }[]>((resolve) => {
+        releaseFirst = resolve
+      }),
+    )
+    const explorer = await readyStore()
+    const root = explorer.addRoot('c1')
+    const first = explorer.expand(root)
+
+    apiStub.listDatabases.mockResolvedValue([{ name: 'New' }])
+    await explorer.refresh(root)
+    expect(root.children?.map((child) => child.label)).toEqual(['New'])
+    expect(root.loading).toBe(false)
+
+    releaseFirst([{ name: 'Old' }])
+    await first
+    // The older answer holds no place, so the newer one stays.
+    expect(root.children?.map((child) => child.label)).toEqual(['New'])
+    expect(root.loaded).toBe(true)
+    expect(root.loading).toBe(false)
+  })
+
+  it('says nothing about a failure of a read that a refresh passed', async () => {
+    let refuseFirst: (error: unknown) => void = () => {}
+    apiStub.listDatabases.mockReturnValueOnce(
+      new Promise<{ name: string }[]>((_resolve, reject) => {
+        refuseFirst = reject
+      }),
+    )
+    const explorer = await readyStore()
+    const root = explorer.addRoot('c1')
+    const first = explorer.expand(root)
+
+    apiStub.listDatabases.mockResolvedValue([{ name: 'New' }])
+    await explorer.refresh(root)
+
+    refuseFirst({ kind: 'notConnected', message: 'gone', detail: null })
+    await first
+    expect(useUiStore().notices).toEqual([])
+    expect(root.children?.map((child) => child.label)).toEqual(['New'])
+    expect(root.loaded).toBe(true)
+  })
+
+  it('reads nothing again for a leaf', async () => {
+    const explorer = await readyStore()
+    await explorer.refresh(node({ kind: 'column' }))
+    expect(apiStub.listColumns).not.toHaveBeenCalled()
+  })
+
   it('treats a connection the store does not know as one without schemas', async () => {
     const explorer = useExplorerStore()
     const database = node({ kind: 'database', database: 'shop', connectionId: 'other' })

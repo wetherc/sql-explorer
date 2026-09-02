@@ -150,6 +150,7 @@ describe('StatusBar', () => {
         pinned: false,
       },
     ]
+    state.lastRunAt = 0
     state.elapsedMs = 1500
     state.rowsAffected = 3
     await wrapper.vm.$nextTick()
@@ -157,6 +158,54 @@ describe('StatusBar', () => {
     expect(wrapper.find('[data-test="status-rows"]').text()).toBe('2 rows')
     expect(wrapper.find('[data-test="status-elapsed"]').text()).toBe('1.50 s')
     expect(wrapper.find('[data-test="status-affected"]').text()).toBe('3 rows affected')
+  })
+
+  it('counts the rows of the last run and not those of a kept result', async () => {
+    const wrapper = mountWithPlugins(StatusBar)
+    const tab = useTabsStore().add({ connectionId: 'c1' })
+    const state = useQueryStore().stateFor(tab.id)
+    state.panes = [
+      {
+        id: 'kept',
+        result: ResultTable.fromRows([], [[1], [2], [3]]),
+        rows: 3,
+        number: 1,
+        ranAt: 100,
+        pinned: true,
+      },
+      {
+        id: 'fresh',
+        result: ResultTable.fromRows([], [[1], [2]]),
+        rows: 2,
+        number: 1,
+        ranAt: 200,
+        pinned: false,
+      },
+    ]
+    state.lastRunAt = 200
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('[data-test="status-rows"]').text()).toBe('2 rows')
+  })
+
+  it('reports no rows for a run that gave no result', async () => {
+    const wrapper = mountWithPlugins(StatusBar)
+    const tab = useTabsStore().add({ connectionId: 'c1' })
+    const state = useQueryStore().stateFor(tab.id)
+    state.panes = [
+      {
+        id: 'kept',
+        result: ResultTable.fromRows([], [[1]]),
+        rows: 1,
+        number: 1,
+        ranAt: 100,
+        pinned: true,
+      },
+    ]
+    state.lastRunAt = 200
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('[data-test="status-rows"]').exists()).toBe(false)
   })
 
   it('reports the scan, its estimated cost and the total of the session', async () => {

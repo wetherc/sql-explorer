@@ -262,13 +262,42 @@ export class ResultStream {
   private readonly handlers: ResultStreamHandlers
   /** The set that each number of the backend names. */
   private readonly open = new Map<number, ResultTable>()
+  /** The first fault of the frames, when one came. */
+  private fault: Error | null = null
 
   constructor(handlers: ResultStreamHandlers) {
     this.handlers = handlers
   }
 
-  /** Reads one message, which holds one or more frames. */
+  /**
+   * The fault of the frames, when one came. The caller of the run reads it
+   * once the backend answers and reports it to the user.
+   */
+  get failure(): Error | null {
+    return this.fault
+  }
+
+  /**
+   * Reads one message, which holds one or more frames.
+   *
+   * A fault of the frames is kept and not thrown, because the caller is the
+   * channel of the bridge and a throw there reaches nobody. The reader also
+   * takes no later message, because a message that it cannot read leaves the
+   * place in the frames unknown.
+   */
   feed(buffer: ArrayBuffer): void {
+    if (this.fault !== null) {
+      return
+    }
+    try {
+      this.readFrames(buffer)
+    } catch (error) {
+      this.fault = error instanceof Error ? error : new Error(String(error))
+    }
+  }
+
+  /** Walks the frames of one message. */
+  private readFrames(buffer: ArrayBuffer): void {
     const view = new DataView(buffer)
     let at = 0
     while (at < buffer.byteLength) {

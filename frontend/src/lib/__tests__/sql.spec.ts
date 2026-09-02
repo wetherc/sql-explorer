@@ -403,6 +403,18 @@ describe('tableAliases', () => {
     expect([...joined.keys()]).toEqual(['a', 'b'])
   })
 
+  it('reads every relation of a list with commas', () => {
+    const aliases = tableAliases('SELECT * FROM a, b AS second, c third', Dialect.Postgres)
+    expect([...aliases.keys()]).toEqual(['a', 'b', 'second', 'c', 'third'])
+    expect(aliases.get('second')).toBe('b')
+    expect(aliases.get('third')).toBe('c')
+  })
+
+  it('stops a list with commas at a name it cannot read', () => {
+    const aliases = tableAliases('SELECT * FROM a, (SELECT 1) AS x', Dialect.Postgres)
+    expect([...aliases.keys()]).toEqual(['a'])
+  })
+
   it('reads a relation that stands at the end of the statement', () => {
     const aliases = tableAliases('SELECT * FROM orders', Dialect.Postgres)
     expect(aliases.get('orders')).toBe('orders')

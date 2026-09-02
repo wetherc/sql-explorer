@@ -305,13 +305,48 @@ describe('the reader of the chunks', () => {
   })
 
   it('refuses a frame and a form that it does not know', () => {
-    const { stream } = collect()
-    expect(() => stream.feed(new Uint8Array([99]).buffer)).toThrow(/frame of the unknown kind 99/)
+    const first = collect()
+    first.stream.feed(new Uint8Array([99]).buffer)
+    expect(first.stream.failure?.message).toMatch(/frame of the unknown kind 99/)
 
     const writer = new Writer()
     writer.u8(FRAME_BEGIN_SET).u32(0).u32(1).text('n').text('int')
     writer.u8(FRAME_CHUNK).u32(0).u32(1).u32(1).u8(9)
-    expect(() => stream.feed(writer.buffer())).toThrow(/column of the unknown form 9/)
+    const second = collect()
+    second.stream.feed(writer.buffer())
+    expect(second.stream.failure?.message).toMatch(/column of the unknown form 9/)
+  })
+
+  it('keeps a fault that is not an error as words', () => {
+    const stream = new ResultStream({
+      onBegin: () => {
+        throw 'the pane is gone'
+      },
+      onSet: () => {},
+      onEnd: () => {},
+    })
+    const writer = new Writer()
+    writer.u8(FRAME_BEGIN_SET).u32(0).u32(1).text('n').text('int')
+    stream.feed(writer.buffer())
+
+    expect(stream.failure?.message).toBe('the pane is gone')
+  })
+
+  it('takes no message after a fault of the frames', () => {
+    const { stream, sets, ends } = collect()
+    stream.feed(new Uint8Array([99]).buffer)
+    const first = stream.failure
+
+    const writer = new Writer()
+    writer.u8(FRAME_BEGIN_SET).u32(0).u32(1).text('n').text('int')
+    writer.u8(FRAME_END_SET).u32(0).u8(0)
+    stream.feed(writer.buffer())
+
+    expect(sets).toHaveLength(0)
+    expect(ends).toHaveLength(0)
+    // The first fault stays, because a later message cannot mend the place
+    // in the frames.
+    expect(stream.failure).toBe(first)
   })
 
   it('holds no set that it never opened', () => {

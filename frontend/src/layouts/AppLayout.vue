@@ -316,6 +316,7 @@ import { api } from '@/lib/api'
 import {
   chordLabel,
   commandEnabled,
+  appleKeyboard,
   commandForEvent,
   tabActions,
   type Command,
@@ -351,7 +352,7 @@ const theme = useTheme()
 const RAIL_WIDTH = 56
 
 /** True on macOS, where the key list names Cmd in place of Ctrl. */
-const apple = /mac|iphone|ipad/i.test(navigator.userAgent)
+const apple = appleKeyboard()
 
 const settingsOpen = ref(false)
 /** True while the question about resetting the settings stands open. */
@@ -668,7 +669,7 @@ function onKeyDown(event: KeyboardEvent): void {
   if (ui.dialogOpen) {
     return
   }
-  const command = commandForEvent(commands, event)
+  const command = commandForEvent(commands, event, apple)
   if (!command || !commandEnabled(command)) {
     return
   }

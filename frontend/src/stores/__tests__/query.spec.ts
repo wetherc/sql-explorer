@@ -52,6 +52,7 @@ describe('newQueryState', () => {
       elapsedMs: 0,
       startedAt: null,
       activePaneId: null,
+      lastRunAt: null,
       stats: null,
     })
   })

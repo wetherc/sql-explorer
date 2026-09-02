@@ -18,9 +18,9 @@
       <div data-test="status-running-elapsed">{{ formatDuration(runningMs) }}</div>
     </template>
 
-    <template v-if="state && !state.running && state.panes.length > 0">
+    <template v-if="state && !state.running && lastRunRows !== null">
       <v-divider vertical />
-      <div data-test="status-rows">{{ formatRowCount(totalRows(resultsOf(state.panes))) }}</div>
+      <div data-test="status-rows">{{ formatRowCount(lastRunRows) }}</div>
       <v-divider vertical />
       <div data-test="status-elapsed">{{ formatDuration(state.elapsedMs) }}</div>
     </template>
@@ -56,7 +56,7 @@ import { useConnectionsStore } from '@/stores/connections'
 import { useQueryStore } from '@/stores/query'
 import { useSettingsStore } from '@/stores/settings'
 import { useTabsStore } from '@/stores/tabs'
-import { resultsOf, totalRows } from '@/stores/query'
+import { panesOfLastRun, resultsOf, totalRows } from '@/stores/query'
 import { ConnectionHealth, Dialect } from '@/types/api'
 
 const connections = useConnectionsStore()
@@ -65,7 +65,19 @@ const queries = useQueryStore()
 const settings = useSettingsStore()
 
 const tab = computed(() => tabs.activeTab)
-const state = computed(() => (tab.value ? queries.stateFor(tab.value.id) : null))
+const state = computed(() => (tab.value ? (queries.peekState(tab.value.id) ?? null) : null))
+
+/**
+ * The rows of the last run, or `null` when that run gave no result. A result
+ * the user kept comes from an older run, so it adds nothing here.
+ */
+const lastRunRows = computed(() => {
+  if (!state.value) {
+    return null
+  }
+  const panes = panesOfLastRun(state.value)
+  return panes.length > 0 ? totalRows(resultsOf(panes)) : null
+})
 
 const connectionId = computed(() => tab.value?.connectionId ?? connections.selectedId)
 

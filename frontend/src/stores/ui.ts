@@ -52,10 +52,21 @@ export const useUiStore = defineStore('ui', () => {
   function push(notice: Omit<Notice, 'id'>): Notice {
     const created: Notice = { ...notice, id: (nextNoticeId += 1) }
     notices.value.push(created)
-    if (notices.value.length > MAX_NOTICES) {
-      notices.value = notices.value.slice(notices.value.length - MAX_NOTICES)
-    }
+    trim()
     return created
+  }
+
+  /**
+   * Holds the list to the limit. A notice that leaves on its own goes before
+   * one that stays until the user takes it away, so a burst of short notices
+   * cannot hide a failure. A list of notices that all stay still loses its
+   * oldest one. The notice that just arrived is always kept.
+   */
+  function trim(): void {
+    while (notices.value.length > MAX_NOTICES) {
+      const index = notices.value.slice(0, -1).findIndex((notice) => notice.timeout >= 0)
+      notices.value.splice(index === -1 ? 0 : index, 1)
+    }
   }
 
   function dismiss(id: number): void {

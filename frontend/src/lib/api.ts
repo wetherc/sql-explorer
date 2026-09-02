@@ -88,7 +88,7 @@ export const api = {
    * read runs, so neither side holds the whole answer. The handlers receive
    * each result set as it ends, and then the numbers of the run.
    */
-  executeQuery(
+  async executeQuery(
     request: {
       connectionId: string
       requestId: string
@@ -102,7 +102,13 @@ export const api = {
     const stream = new ResultStream(handlers)
     const onChunk = new Channel<ArrayBuffer>()
     onChunk.onmessage = (message) => stream.feed(message)
-    return invoke('execute_query', { request: withNulls(request), onChunk })
+    await invoke('execute_query', { request: withNulls(request), onChunk })
+    // A fault of the frames cannot travel out of the channel, so the reader
+    // keeps it and the run fails here.
+    const failure = stream.failure
+    if (failure) {
+      throw failure
+    }
   },
 
   explainQuery(request: {

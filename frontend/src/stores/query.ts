@@ -57,6 +57,9 @@ export interface QueryState {
   startedAt: number | null
   /** The result the user reads, or `null` for the messages. */
   activePaneId: string | null
+  /** The moment of the last run. A result that carries this moment came
+   *  from that run, and every other result is one the user kept. */
+  lastRunAt: number | null
   /** What the execution cost, for an engine that reports it. */
   stats: QueryStats | null
 }
@@ -75,6 +78,7 @@ export function newQueryState(): QueryState {
     elapsedMs: 0,
     startedAt: null,
     activePaneId: null,
+    lastRunAt: null,
     stats: null,
   }
 }
@@ -94,6 +98,15 @@ export function resultsOf(panes: ResultPane[]): ResultTable[] {
   return panes.map((pane) => pane.result)
 }
 
+/**
+ * Gives the results that the last run made. A result that the user kept
+ * against the next run carries the moment of an older run, so it stays out
+ * and the numbers of the status bar hold for the last run alone.
+ */
+export function panesOfLastRun(state: QueryState): ResultPane[] {
+  return state.panes.filter((pane) => pane.ranAt === state.lastRunAt)
+}
+
 export const useQueryStore = defineStore('query', () => {
   const ui = useUiStore()
   const connections = useConnectionsStore()
@@ -103,6 +116,15 @@ export const useQueryStore = defineStore('query', () => {
   const states = reactive<Record<string, QueryState>>({})
   /** The bytes every statement of this session scanned, over all tabs. */
   const sessionScannedBytes = ref(0)
+
+  /**
+   * The state of one tab, when the tab has one. The reader of a view calls
+   * this, because it writes nothing and a view must not write into the
+   * store while it renders.
+   */
+  function peekState(tabId: string): QueryState | undefined {
+    return states[tabId]
+  }
 
   function stateFor(tabId: string): QueryState {
     if (!states[tabId]) {
@@ -184,6 +206,7 @@ export const useQueryStore = defineStore('query', () => {
 
     try {
       const ranAt = Date.now()
+      state.lastRunAt = ranAt
       const openPane = (table: ResultTable): void => {
         fresh.push(table)
         state.panes = [
@@ -426,6 +449,7 @@ export const useQueryStore = defineStore('query', () => {
     states,
     sessionScannedBytes,
     stateFor,
+    peekState,
     clear,
     runningOn,
     execute,

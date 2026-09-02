@@ -1067,9 +1067,14 @@ async function confirmSave(): Promise<void> {
 }
 
 watch(savingQuery, (open) => {
-  if (open) {
-    saveName.value = props.tab.title
+  if (!open) {
+    return
   }
+  saveName.value = props.tab.title
+  // A statement that is already saved keeps the folder it stands in, so a
+  // second save does not move it to the top level.
+  const held = history.savedQueries.find((query) => query.id === props.tab.savedQueryId)
+  saveFolder.value = held?.folder ?? ''
 })
 
 // The shell holds the keys, and the editor of this tab holds the text, so

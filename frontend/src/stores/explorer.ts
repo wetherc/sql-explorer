@@ -236,6 +236,12 @@ export const useExplorerStore = defineStore('explorer', () => {
   const roots = ref<ExplorerNode[]>([])
   const filter = ref('')
   const loading = ref(false)
+  /**
+   * The number of the last read of the children of each node, by the key of
+   * the node. A refresh raises the number, so the answer of a read that the
+   * refresh passed can be told apart and dropped.
+   */
+  const loadGeneration = new Map<string, number>()
 
   /**
    * The filter text that the tree is matched against. It follows the field
@@ -499,16 +505,45 @@ export const useExplorerStore = defineStore('explorer', () => {
    */
   async function expand(given: ExplorerNode): Promise<void> {
     const node = nodeByKey(given.key) ?? given
-    if (!isExpandable(node) || node.loading) {
+    if (!isExpandable(node) || node.loading || node.loaded) {
       return
     }
-    if (node.loaded) {
+    await load(node)
+  }
+
+  /**
+   * Reads the children of a node again, also while a read of the same node
+   * runs. The newer read wins, and the answer of the older one is dropped.
+   */
+  async function refresh(given: ExplorerNode): Promise<void> {
+    const node = nodeByKey(given.key) ?? given
+    if (!isExpandable(node)) {
       return
     }
+    node.loaded = false
+    node.children = []
+    await load(node)
+  }
+
+  /**
+   * Reads the children of one node and writes them into it.
+   *
+   * Each read carries a number of its own. An answer whose number is no
+   * longer the last one of the node is dropped, because a refresh has since
+   * started a newer read of the same node.
+   */
+  async function load(node: ExplorerNode): Promise<void> {
+    const generation = (loadGeneration.get(node.key) ?? 0) + 1
+    loadGeneration.set(node.key, generation)
+    const isLast = () => loadGeneration.get(node.key) === generation
     node.loading = true
     loading.value = true
     try {
-      node.children = await childrenOf(node)
+      const children = await childrenOf(node)
+      if (!isLast()) {
+        return
+      }
+      node.children = children
       node.loaded = true
       if (node.kind === 'database') {
         // The user has shown interest in this database, so the whole schema
@@ -517,21 +552,18 @@ export const useExplorerStore = defineStore('explorer', () => {
         void readSnapshot(node.connectionId, node.database ?? node.label, snapshotOptions())
       }
     } catch (error) {
+      if (!isLast()) {
+        return
+      }
       ui.reportError(error)
       node.children = []
       node.loaded = false
     } finally {
-      node.loading = false
+      if (isLast()) {
+        node.loading = false
+      }
       loading.value = roots.value.some((root) => hasLoadingNode(root))
     }
-  }
-
-  /** Reads the children of a node again. */
-  async function refresh(given: ExplorerNode): Promise<void> {
-    const node = nodeByKey(given.key) ?? given
-    node.loaded = false
-    node.children = []
-    await expand(node)
   }
 
   function hasLoadingNode(node: ExplorerNode): boolean {
