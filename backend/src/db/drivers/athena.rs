@@ -5,8 +5,8 @@
 //! The metadata comes from the data catalog through the same service.
 
 use crate::db::drivers::{
-    add_snapshot_column, f64_to_json, prefixed_plan, rows_returned_message, table_kind,
-    CancelHandle, DatabaseDriver,
+    add_snapshot_column, f64_to_json, prefixed_plan, rows_affected_message, rows_returned_message,
+    table_kind, CancelHandle, DatabaseDriver,
 };
 use crate::db::sink::{BufferSink, RowSink, RunSummary, SinkControl};
 use crate::db::{
@@ -251,6 +251,7 @@ impl AthenaDriver {
             options,
             statement_repeats_names(statement),
             &mut sink,
+            &mut None,
         )
         .await?;
         let set = sink.into_response(RunSummary::default()).results.pop();
@@ -364,12 +365,17 @@ impl AthenaDriver {
     /// read without a fetch of the pages that remain.
     ///
     /// Returns true when the sink stopped the run.
+    ///
+    /// A statement that writes rows gives no result set. The service then
+    /// reports the number of rows it changed, which lands in
+    /// `rows_affected`.
     async fn stream_results(
         &self,
         execution_id: &str,
         options: &ExecOptions,
         expect_header: bool,
         sink: &mut dyn RowSink,
+        rows_affected: &mut Option<u64>,
     ) -> Result<bool> {
         let mut token: Option<String> = None;
         let mut columns: Option<Vec<ColumnInfo>> = None;
@@ -386,6 +392,12 @@ impl AthenaDriver {
                 .send()
                 .await
                 .map_err(|error| describe(error, "The result could not be read"))?;
+
+            if let Some(changed) = page.update_count() {
+                let changed = changed.max(0) as u64;
+                *rows_affected = Some(rows_affected.unwrap_or(0) + changed);
+                sink.message(rows_affected_message(changed));
+            }
 
             let Some(result_set) = page.result_set() else {
                 break;
@@ -668,6 +680,7 @@ impl DatabaseDriver for AthenaDriver {
 
         let started = Instant::now();
         let mut total = QueryStats::default();
+        let mut rows_affected: Option<u64> = None;
         for statement in split_statements(query, Dialect::Athena) {
             let (execution_id, stats) = self.start_and_wait(&statement, options).await?;
             total.add(&stats);
@@ -677,6 +690,7 @@ impl DatabaseDriver for AthenaDriver {
                     options,
                     statement_repeats_names(&statement),
                     sink,
+                    &mut rows_affected,
                 )
                 .await?;
             if stopped {
@@ -684,7 +698,7 @@ impl DatabaseDriver for AthenaDriver {
             }
         }
         Ok(RunSummary {
-            rows_affected: None,
+            rows_affected,
             elapsed_ms: started.elapsed().as_millis() as u64,
             stats: (!total.is_empty()).then_some(total),
         })

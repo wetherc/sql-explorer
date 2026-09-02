@@ -428,10 +428,200 @@ impl DatabaseDriver for SqliteDriver {
                     }
                 }
             }
+            // A UNIQUE constraint carries no name of its own. SQLite builds
+            // an index for it with the origin 'u', and the columns of that
+            // index are the columns of the constraint.
+            let mut unique = connection.prepare(UNIQUE_QUERY)?;
+            let rows = unique.query_map([&table], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })?;
+            let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+            for row in rows {
+                let (index_name, column) = row?;
+                match groups.last_mut() {
+                    Some((held, columns)) if *held == index_name => {
+                        if let Some(column) = column {
+                            columns.push(column);
+                        }
+                    }
+                    _ => groups.push((index_name, column.into_iter().collect())),
+                }
+            }
+            for (_, columns) in groups {
+                if columns.is_empty() {
+                    continue;
+                }
+                constraints.push(Constraint {
+                    name: format!("Unique on {}", columns.join(", ")),
+                    kind: ConstraintKind::Unique,
+                    columns,
+                    detail: None,
+                });
+            }
+
+            // SQLite holds no pragma for a check, so the text of the table
+            // gives it.
+            let mut created = connection.prepare(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1 \
+                 AND sql IS NOT NULL",
+            )?;
+            let text: Option<String> = created
+                .query_map([&table], |row| row.get::<_, String>(0))?
+                .next()
+                .transpose()?;
+            for expression in check_expressions(text.as_deref().unwrap_or("")) {
+                constraints.push(Constraint {
+                    name: format!("Check ({expression})"),
+                    kind: ConstraintKind::Check,
+                    columns: Vec::new(),
+                    detail: Some(expression),
+                });
+            }
+
             Ok(constraints)
         })
         .await
     }
+}
+
+/// Reads one column of each index that a UNIQUE constraint made. The origin
+/// 'u' names such an index, and the origin 'c' names an index that a CREATE
+/// INDEX statement made.
+const UNIQUE_QUERY: &str = "SELECT list.name, info.name \
+     FROM pragma_index_list(?1) AS list \
+     LEFT JOIN pragma_index_info(list.name) AS info \
+     WHERE list.origin = 'u' \
+     ORDER BY list.name, info.seqno";
+
+/// True when the characters at the place hold the word, with no letter, no
+/// digit and no low line on either side of it.
+fn holds_word(chars: &[char], at: usize, word: &str) -> bool {
+    let inside = |c: char| c.is_alphanumeric() || c == '_';
+    if at > 0 && inside(chars[at - 1]) {
+        return false;
+    }
+    let mut index = at;
+    for wanted in word.chars() {
+        match chars.get(index) {
+            Some(current) if current.to_ascii_lowercase() == wanted => index += 1,
+            _ => return false,
+        }
+    }
+    !chars.get(index).copied().is_some_and(inside)
+}
+
+/// Steps over a quoted region that starts at the opening mark and ends at
+/// the closing one. A doubled closing mark stands for the mark itself.
+fn skip_quoted(chars: &[char], at: usize, closing: char) -> usize {
+    let mut index = at + 1;
+    while index < chars.len() {
+        if chars[index] == closing {
+            if chars.get(index + 1) == Some(&closing) {
+                index += 2;
+                continue;
+            }
+            return index + 1;
+        }
+        index += 1;
+    }
+    index
+}
+
+/// Reads the text inside the brackets that start at the place, and gives
+/// the place after the closing bracket. A bracket inside a quoted region
+/// counts for nothing.
+fn balanced(chars: &[char], at: usize) -> (String, usize) {
+    let mut index = at + 1;
+    let mut depth = 1usize;
+    let start = index;
+    while index < chars.len() && depth > 0 {
+        let current = chars[index];
+        match current {
+            '\'' | '"' | '`' => {
+                index = skip_quoted(chars, index, current);
+                continue;
+            }
+            '[' => {
+                index = skip_quoted(chars, index, ']');
+                continue;
+            }
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 {
+            break;
+        }
+        index += 1;
+    }
+    let text: String = chars[start..index.min(chars.len())].iter().collect();
+    (text.trim().to_string(), (index + 1).min(chars.len()))
+}
+
+/// Reads the CHECK expressions of a CREATE TABLE statement.
+///
+/// The reader steps over the string literals, the quoted names and the
+/// comments, and it takes the expression in the brackets that follow each
+/// CHECK keyword of the body of the table.
+pub fn check_expressions(sql: &str) -> Vec<String> {
+    let chars: Vec<char> = sql.chars().collect();
+    let mut found: Vec<String> = Vec::new();
+    let mut index = 0usize;
+    let mut depth = 0usize;
+    while index < chars.len() {
+        let current = chars[index];
+        match current {
+            '\'' | '"' | '`' => {
+                index = skip_quoted(&chars, index, current);
+                continue;
+            }
+            '[' => {
+                index = skip_quoted(&chars, index, ']');
+                continue;
+            }
+            '-' if chars.get(index + 1) == Some(&'-') => {
+                while index < chars.len() && chars[index] != '\n' {
+                    index += 1;
+                }
+                continue;
+            }
+            '/' if chars.get(index + 1) == Some(&'*') => {
+                index += 2;
+                while index < chars.len()
+                    && !(chars[index] == '*' && chars.get(index + 1) == Some(&'/'))
+                {
+                    index += 1;
+                }
+                index = (index + 2).min(chars.len());
+                continue;
+            }
+            '(' => {
+                depth += 1;
+                index += 1;
+                continue;
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                index += 1;
+                continue;
+            }
+            _ => {}
+        }
+        if depth == 1 && holds_word(&chars, index, "check") {
+            let mut after = index + "check".len();
+            while after < chars.len() && chars[after].is_whitespace() {
+                after += 1;
+            }
+            if chars.get(after) == Some(&'(') {
+                let (text, next) = balanced(&chars, after);
+                found.push(text);
+                index = next;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    found
 }
 
 /// Reads one column of one index for each row. The `origin` column of the
@@ -939,6 +1129,114 @@ mod tests {
         assert!(columns[1].nullable);
 
         driver.ping().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_metadata_lists_the_unique_and_the_check_constraints() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("marks.db");
+        let mut driver = SqliteDriver::connect(&connection_for(&path.to_string_lossy()))
+            .await
+            .unwrap();
+        driver
+            .execute_query(
+                "CREATE TABLE items ( \
+                     id INTEGER PRIMARY KEY, \
+                     code TEXT, region TEXT, \
+                     total REAL CHECK (total > 0), \
+                     UNIQUE (code, region), \
+                     CONSTRAINT within_range CHECK (id < 100 AND code <> ')') \
+                 );",
+                None,
+                &ExecOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        let constraints = driver
+            .list_constraints("marks.db", None, "items")
+            .await
+            .unwrap();
+        let unique: Vec<&Constraint> = constraints
+            .iter()
+            .filter(|constraint| constraint.kind == ConstraintKind::Unique)
+            .collect();
+        assert_eq!(unique.len(), 1);
+        assert_eq!(
+            unique[0].columns,
+            vec!["code".to_string(), "region".to_string()]
+        );
+        assert_eq!(unique[0].name, "Unique on code, region");
+
+        let checks: Vec<&Constraint> = constraints
+            .iter()
+            .filter(|constraint| constraint.kind == ConstraintKind::Check)
+            .collect();
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[0].detail.as_deref(), Some("total > 0"));
+        assert_eq!(checks[0].name, "Check (total > 0)");
+        assert_eq!(
+            checks[1].detail.as_deref(),
+            Some("id < 100 AND code <> ')'")
+        );
+        assert!(checks[1].columns.is_empty());
+    }
+
+    #[test]
+    fn a_check_of_a_table_is_read_over_the_comments_and_the_literals() {
+        // A check outside the body of the table, a comment and a literal
+        // that holds the word all give nothing.
+        assert_eq!(
+            check_expressions(
+                "CREATE TABLE t ( \
+                 a INT, -- CHECK (never)\n \
+                 b TEXT DEFAULT 'CHECK (never)', \
+                 /* CHECK (never) */ \
+                 CHECK (a > (b - 1)) \
+                 )"
+            ),
+            vec!["a > (b - 1)".to_string()]
+        );
+        // A quoted name that holds the word gives nothing either.
+        assert_eq!(
+            check_expressions("CREATE TABLE t (\"check\" INT)"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            check_expressions("CREATE TABLE t ([check] INT)"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            check_expressions("CREATE TABLE t (`check` INT)"),
+            Vec::<String>::new()
+        );
+        // A keyword that is part of a longer word gives nothing.
+        assert_eq!(
+            check_expressions("CREATE TABLE t (checked INT)"),
+            Vec::<String>::new()
+        );
+        // A CHECK with no brackets after it, and a text with no body.
+        assert_eq!(
+            check_expressions("CREATE TABLE t (a INT CHECK)"),
+            Vec::<String>::new()
+        );
+        assert_eq!(check_expressions(""), Vec::<String>::new());
+        // A quote and a bracket that never close leave the reader at the end.
+        assert_eq!(
+            check_expressions("CREATE TABLE t (a TEXT DEFAULT 'x"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            check_expressions("CREATE TABLE t (CHECK (a > 'it''s'"),
+            vec!["a > 'it''s'".to_string()]
+        );
+        // A closing bracket with no opening one holds the depth at none.
+        assert_eq!(check_expressions(") CHECK (a)"), Vec::<String>::new());
+        // A comment that never closes leaves the reader at the end as well.
+        assert_eq!(
+            check_expressions("CREATE TABLE t (/* never"),
+            Vec::<String>::new()
+        );
     }
 
     #[tokio::test]

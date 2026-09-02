@@ -1188,18 +1188,26 @@ pub fn numeric_to_string(value: Numeric) -> String {
 /// of the column does not match the target type, and the type of a column
 /// is not known before the server answers.
 pub fn row_to_json(row: &Row) -> Vec<JsonValue> {
-    row.columns()
-        .iter()
-        .map(|column| column.column_type())
+    row.cells()
         .enumerate()
-        .map(|(index, column_type)| cell_to_json(row, index, column_type))
+        .map(|(index, (column, data))| cell_to_json(row, index, column.column_type(), data))
         .collect()
 }
 
 /// Reads one cell. A read that fails falls back on the next target type,
 /// and at the end on text, so that an unknown type shows a value and does
 /// not stop the whole result.
-fn cell_to_json(row: &Row, index: usize, column_type: ColumnType) -> JsonValue {
+///
+/// A type of the server that covers several widths of value carries no
+/// width in the type of the column. Such a cell gives the data it holds,
+/// and the form of that data gives the JSON value, so the read pays no
+/// conversion that fails.
+fn cell_to_json(
+    row: &Row,
+    index: usize,
+    column_type: ColumnType,
+    data: &ColumnData<'static>,
+) -> JsonValue {
     match column_type {
         ColumnType::Bit | ColumnType::Bitn => {
             read(row.try_get::<bool, _>(index)).map_or(JsonValue::Null, JsonValue::Bool)
@@ -1208,24 +1216,18 @@ fn cell_to_json(row: &Row, index: usize, column_type: ColumnType) -> JsonValue {
         ColumnType::Int2 => read(row.try_get::<i16, _>(index)).map_or(JsonValue::Null, Into::into),
         ColumnType::Int4 => read(row.try_get::<i32, _>(index)).map_or(JsonValue::Null, Into::into),
         ColumnType::Int8 => read(row.try_get::<i64, _>(index)).map_or(JsonValue::Null, Into::into),
-        // A nullable integer covers every width from one to eight bytes, so
-        // each width is tried in turn.
-        ColumnType::Intn => read(row.try_get::<i64, _>(index))
-            .map(JsonValue::from)
-            .or_else(|| read(row.try_get::<i32, _>(index)).map(JsonValue::from))
-            .or_else(|| read(row.try_get::<i16, _>(index)).map(JsonValue::from))
-            .or_else(|| read(row.try_get::<u8, _>(index)).map(JsonValue::from))
-            .unwrap_or(JsonValue::Null),
+        // A nullable integer covers every width from one to eight bytes,
+        // which the type of the column does not name.
+        ColumnType::Intn => column_data_to_json(data),
         ColumnType::Float4 => read(row.try_get::<f32, _>(index))
             .map(|value| f64_to_json(value as f64))
             .unwrap_or(JsonValue::Null),
         ColumnType::Float8 | ColumnType::Money | ColumnType::Money4 => {
             read(row.try_get::<f64, _>(index)).map_or(JsonValue::Null, f64_to_json)
         }
-        ColumnType::Floatn => read(row.try_get::<f64, _>(index))
-            .map(f64_to_json)
-            .or_else(|| read(row.try_get::<f32, _>(index)).map(|value| f64_to_json(value as f64)))
-            .unwrap_or(JsonValue::Null),
+        // A nullable float holds four bytes or eight, which the type of the
+        // column does not name either.
+        ColumnType::Floatn => column_data_to_json(data),
         ColumnType::Decimaln | ColumnType::Numericn => read(row.try_get::<Numeric, _>(index))
             .map(|value| JsonValue::String(numeric_to_string(value)))
             .unwrap_or(JsonValue::Null),
@@ -1259,10 +1261,7 @@ fn cell_to_json(row: &Row, index: usize, column_type: ColumnType) -> JsonValue {
         // Each value of a `sql_variant` column carries its own type, so the
         // type of the column says nothing about the cell. The cell gives its
         // own data, and the type of that data gives the JSON value.
-        ColumnType::SSVariant => row
-            .cells()
-            .nth(index)
-            .map_or(JsonValue::Null, |(_, data)| column_data_to_json(data)),
+        ColumnType::SSVariant => column_data_to_json(data),
         _ => text_or_bytes(row, index),
     }
 }

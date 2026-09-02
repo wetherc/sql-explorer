@@ -424,7 +424,10 @@ pub fn split_statements(script: &str, dialect: Dialect) -> Vec<String> {
     let chars: Vec<char> = script.chars().collect();
     let mut statements: Vec<String> = Vec::new();
     let mut current = String::new();
-    let mut delimiter: String = ";".to_string();
+    // The terminator is held as characters, because the walk holds each
+    // character of the script against it and a build of that list for each
+    // character would cost the length of the script again and again.
+    let mut delimiter: Vec<char> = vec![';'];
     let mut index = 0usize;
     let mut at_line_start = true;
 
@@ -435,7 +438,7 @@ pub fn split_statements(script: &str, dialect: Dialect) -> Vec<String> {
         // the server.
         if at_line_start && current.trim().is_empty() && dialect == Dialect::MySql {
             if let Some((new_delimiter, next_index)) = read_delimiter_command(&chars, index) {
-                delimiter = new_delimiter;
+                delimiter = new_delimiter.chars().collect();
                 current.clear();
                 index = next_index;
                 at_line_start = true;
@@ -500,7 +503,7 @@ pub fn split_statements(script: &str, dialect: Dialect) -> Vec<String> {
         // The terminator ends the statement.
         if starts_with(&chars, index, &delimiter) {
             push_statement(&mut statements, &mut current);
-            index += delimiter.chars().count();
+            index += delimiter.len();
             continue;
         }
 
@@ -695,12 +698,11 @@ fn json_literal(value: &serde_json::Value, dialect: Dialect) -> String {
 }
 
 /// True when the characters at the given position start with the needle.
-fn starts_with(chars: &[char], index: usize, needle: &str) -> bool {
-    let needle: Vec<char> = needle.chars().collect();
+fn starts_with(chars: &[char], index: usize, needle: &[char]) -> bool {
     if needle.is_empty() || index + needle.len() > chars.len() {
         return false;
     }
-    chars[index..index + needle.len()] == needle[..]
+    chars[index..index + needle.len()] == *needle
 }
 
 /// Reads a `DELIMITER` command. Returns the new terminator and the position
@@ -866,13 +868,13 @@ fn copy_dollar_quoted(chars: &[char], index: usize, out: &mut String) -> Option<
     if chars.get(cursor) != Some(&'$') {
         return None;
     }
-    let opener = format!("${tag}$");
-    out.push_str(&opener);
+    let opener: Vec<char> = format!("${tag}$").chars().collect();
+    out.extend(opener.iter());
     cursor += 1;
     while cursor < chars.len() {
         if starts_with(chars, cursor, &opener) {
-            out.push_str(&opener);
-            return Some(cursor + opener.chars().count());
+            out.extend(opener.iter());
+            return Some(cursor + opener.len());
         }
         out.push(chars[cursor]);
         cursor += 1;
@@ -1349,9 +1351,9 @@ mod tests {
     #[test]
     fn starts_with_handles_the_edges() {
         let chars: Vec<char> = "abc".chars().collect();
-        assert!(starts_with(&chars, 0, "ab"));
-        assert!(!starts_with(&chars, 2, "bc"));
-        assert!(!starts_with(&chars, 0, ""));
+        assert!(starts_with(&chars, 0, &['a', 'b']));
+        assert!(!starts_with(&chars, 2, &['b', 'c']));
+        assert!(!starts_with(&chars, 0, &[]));
     }
 
     #[test]
