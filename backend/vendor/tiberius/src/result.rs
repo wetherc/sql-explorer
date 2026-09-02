@@ -1,4 +1,4 @@
-pub use crate::tds::stream::{QueryItem, ResultMetadata};
+pub use crate::tds::stream::{QueryItem, ResultMetadata, ServerMessage};
 use crate::{
     client::Connection,
     tds::stream::{ReceivedToken, TokenStream},

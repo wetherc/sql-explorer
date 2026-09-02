@@ -67,19 +67,25 @@ The change is in `src/tds/codec/column_data/variant.rs`, in
 `src/tds/codec/type_info.rs` and in
 `src/tds/codec/token/token_col_metadata.rs`.
 
-## MS SQL Server does not show the text of PRINT
+## MS SQL Server shows the text of PRINT for a batch that can hold rows
 
-`tiberius` decodes the info tokens that carry `PRINT` and a `RAISERROR` of low
-severity, and then drops them. The crate gives no public way to read them, so
-the Messages tab cannot show that text.
+`tiberius` decoded the info tokens that carry `PRINT` and a `RAISERROR` of low
+severity and then dropped them. The vendored copy gives the text of such a
+token to the caller as a `QueryItem::Message`, and the driver puts it in the
+Messages tab. The change is in `src/tds/stream/query.rs`.
 
-The driver reports what it can reach. An error of the server carries its
-number, its severity, its state, its line and its procedure, and those reach
-the user beside the text of the error.
+A batch whose statements all change data goes through the path that counts
+the changed rows, and that path holds no such item. The text of a `PRINT`
+that stands in a batch of writes alone therefore does not reach the user. A
+batch that can answer with rows, which is every batch that holds a `PRINT`
+of its own or a statement that reads, does show the text.
 
-PostgreSQL has no such limit: a `NOTICE`, a `WARNING` and an `INFO` arrive on
-the connection and reach the Messages tab with the severity, the code, the
-detail and the hint that the server sent.
+An error of the server carries its number, its severity, its state, its line
+and its procedure, and those reach the user beside the text of the error.
+
+PostgreSQL is the same: a `NOTICE`, a `WARNING` and an `INFO` arrive on the
+connection and reach the Messages tab with the severity, the code, the detail
+and the hint that the server sent.
 
 ## A server that offers only the older ciphers
 

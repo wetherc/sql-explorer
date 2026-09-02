@@ -362,6 +362,11 @@ impl MssqlDriver {
                     count = 0;
                     truncated = false;
                 }
+                // The text of PRINT and of a RAISERROR of a low severity
+                // stands beside the rows, as the server sends it.
+                QueryItem::Message(message) => {
+                    sink.message(Message::info(message.text().to_string()));
+                }
                 QueryItem::Row(row) => {
                     if !open || stopped {
                         continue;

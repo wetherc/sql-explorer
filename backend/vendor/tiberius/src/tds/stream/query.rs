@@ -237,6 +237,9 @@ impl<'a> QueryStream<'a> {
                     results.push(previous_result.take().unwrap());
                     result = None;
                 }
+                // A message of the server carries no row, so it holds no
+                // place among the results.
+                (QueryItem::Message(_), _) => {}
             }
         }
 
@@ -264,12 +267,12 @@ impl<'a> QueryStream<'a> {
         Ok(results.next())
     }
 
-    /// Convert the stream into a stream of rows, skipping metadata items.
+    /// Convert the stream into a stream of rows, skipping every other item.
     pub fn into_row_stream(self) -> BoxStream<'a, crate::Result<Row>> {
         let s = self.try_filter_map(|item| async {
             match item {
                 QueryItem::Row(row) => Ok(Some(row)),
-                QueryItem::Metadata(_) => Ok(None),
+                _ => Ok(None),
             }
         });
 
@@ -298,6 +301,46 @@ impl ResultMetadata {
     }
 }
 
+/// A message that the server sent beside the rows of a result.
+///
+/// The text of `PRINT` and of a `RAISERROR` whose severity is ten or less
+/// arrives this way. A severity above ten arrives as an error instead.
+#[derive(Debug, Clone)]
+pub struct ServerMessage {
+    text: String,
+    number: u32,
+    class: u8,
+    line: u32,
+    procedure: String,
+}
+
+impl ServerMessage {
+    /// The text that the server sent.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The number of the message. `PRINT` sends zero.
+    pub fn number(&self) -> u32 {
+        self.number
+    }
+
+    /// The severity of the message, which is ten or less.
+    pub fn class(&self) -> u8 {
+        self.class
+    }
+
+    /// The line of the batch that sent the message.
+    pub fn line(&self) -> u32 {
+        self.line
+    }
+
+    /// The routine that sent the message, or an empty text.
+    pub fn procedure(&self) -> &str {
+        &self.procedure
+    }
+}
+
 /// Resulting data from a query.
 #[derive(Debug)]
 pub enum QueryItem {
@@ -305,6 +348,8 @@ pub enum QueryItem {
     Row(Row),
     /// Information of the upcoming row data.
     Metadata(ResultMetadata),
+    /// A message that the server sent beside the rows.
+    Message(ServerMessage),
 }
 
 impl QueryItem {
@@ -318,8 +363,8 @@ impl QueryItem {
     /// Returns a reference to the metadata, if the item is of a correct variant.
     pub fn as_metadata(&self) -> Option<&ResultMetadata> {
         match self {
-            QueryItem::Row(_) => None,
             QueryItem::Metadata(ref metadata) => Some(metadata),
+            _ => None,
         }
     }
 
@@ -327,15 +372,23 @@ impl QueryItem {
     pub fn as_row(&self) -> Option<&Row> {
         match self {
             QueryItem::Row(ref row) => Some(row),
-            QueryItem::Metadata(_) => None,
+            _ => None,
+        }
+    }
+
+    /// Returns a reference to the message, if the item is of a correct variant.
+    pub fn as_message(&self) -> Option<&ServerMessage> {
+        match self {
+            QueryItem::Message(ref message) => Some(message),
+            _ => None,
         }
     }
 
     /// Returns the metadata, if the item is of a correct variant.
     pub fn into_metadata(self) -> Option<ResultMetadata> {
         match self {
-            QueryItem::Row(_) => None,
             QueryItem::Metadata(metadata) => Some(metadata),
+            _ => None,
         }
     }
 
@@ -343,7 +396,15 @@ impl QueryItem {
     pub fn into_row(self) -> Option<Row> {
         match self {
             QueryItem::Row(row) => Some(row),
-            QueryItem::Metadata(_) => None,
+            _ => None,
+        }
+    }
+
+    /// Returns the message, if the item is of a correct variant.
+    pub fn into_message(self) -> Option<ServerMessage> {
+        match self {
+            QueryItem::Message(message) => Some(message),
+            _ => None,
         }
     }
 }
@@ -381,6 +442,17 @@ impl<'a> Stream for QueryStream<'a> {
 
                     return Poll::Ready(Some(Ok(query_item)));
                 }
+                // The text of PRINT and of a RAISERROR of a low severity
+                // reaches the caller, which shows it beside the rows.
+                ReceivedToken::Info(info) => Poll::Ready(Some(Ok(QueryItem::Message(
+                    ServerMessage {
+                        text: info.message,
+                        number: info.number,
+                        class: info.class,
+                        line: info.line,
+                        procedure: info.procedure,
+                    },
+                )))),
                 ReceivedToken::Row(data) => {
                     let columns = this.columns.as_ref().unwrap().clone();
                     let result_index = this.result_set_index.unwrap();
@@ -396,5 +468,32 @@ impl<'a> Stream for QueryStream<'a> {
                 _ => continue,
             };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_message_of_the_server_names_its_parts() {
+        let item = QueryItem::Message(ServerMessage {
+            text: "hello".to_string(),
+            number: 0,
+            class: 0,
+            line: 3,
+            procedure: String::new(),
+        });
+
+        let message = item.as_message().expect("the item holds a message");
+        assert_eq!(message.text(), "hello");
+        assert_eq!(message.number(), 0);
+        assert_eq!(message.class(), 0);
+        assert_eq!(message.line(), 3);
+        assert_eq!(message.procedure(), "");
+
+        assert!(item.as_row().is_none());
+        assert!(item.as_metadata().is_none());
+        assert!(item.into_message().is_some());
     }
 }
