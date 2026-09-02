@@ -829,6 +829,22 @@ describe('explorer store', () => {
     expect(explorer.visibleNodes[0]?.children).toHaveLength(1)
   })
 
+  it('starts the pause again for a keystroke that follows the last one', async () => {
+    apiStub.listDatabases.mockResolvedValue([{ name: 'Sales' }, { name: 'Other' }])
+    const explorer = await readyStore()
+    const root = explorer.addRoot('c1')
+    await explorer.expand(root)
+
+    explorer.filter = 'sal'
+    // The watcher runs between the two keystrokes, so the second one holds
+    // back the pause that the first one started.
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    explorer.filter = 'sales'
+    await afterTheFilterPause()
+
+    expect(explorer.visibleNodes[0]?.children).toHaveLength(1)
+  })
+
   it('shows the whole tree as soon as the filter is empty', async () => {
     apiStub.listDatabases.mockResolvedValue([{ name: 'Sales' }, { name: 'Other' }])
     const explorer = await readyStore()

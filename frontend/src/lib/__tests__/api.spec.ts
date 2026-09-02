@@ -184,6 +184,33 @@ describe('api', () => {
     const query = { id: 'q1', name: 'n', query: 'SELECT 1', updatedAt: 'now' }
     await api.saveQuery(query)
     expect(invoke).toHaveBeenCalledWith('save_query', { query })
+
+    await api.openStatementFile()
+    expect(invoke).toHaveBeenCalledWith('open_statement_file')
+
+    await api.saveStatementFile({
+      defaultName: 'a.sql',
+      defaultFolder: null,
+      contents: 'SELECT 1',
+    })
+    expect(invoke).toHaveBeenCalledWith('save_statement_file', {
+      request: expect.objectContaining({ defaultName: 'a.sql' }),
+    })
+
+    const states = [{ id: 'run', enabled: true }]
+    await api.setMenuCommands(states)
+    expect(invoke).toHaveBeenCalledWith('set_menu_commands', { states })
+  })
+
+  it('hears the menu of the operating system', async () => {
+    const handler = vi.fn()
+    listen.mockImplementation((_name: string, listener: (event: unknown) => void) => {
+      listener({ payload: 'run' })
+      return Promise.resolve(() => {})
+    })
+
+    await api.onMenuCommand(handler)
+    expect(handler).toHaveBeenCalledWith('run')
   })
 
   it('sends the limits of an execution when they are given', async () => {

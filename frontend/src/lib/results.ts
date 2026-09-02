@@ -409,6 +409,8 @@ function readColumn(
   if (encoding === ENCODING_NULL) {
     return { column: { kind: 'null' }, at }
   }
+  // A form the reader does not know says nothing about the bytes that
+  // follow it, so the walk of the frames stops here and not further along.
   if (encoding > ENCODING_DICT) {
     throw new Error(`The rows hold a column of the unknown form ${encoding}.`)
   }
@@ -457,7 +459,9 @@ function readColumn(
         at: lengthAt + 4 + length,
       }
     }
-    case ENCODING_DICT: {
+    // The dictionary is the last form the reader knows, and a form it does
+    // not know never reaches this far.
+    default: {
       const countAt = align(nulls.at, 4)
       const count = view.getUint32(countAt, true)
       const ends = new Uint32Array(buffer, countAt + 4, count)
@@ -477,7 +481,5 @@ function readColumn(
         at: codesAt + rows * 4,
       }
     }
-    default:
-      throw new Error(`The rows hold a column of the unknown form ${encoding}.`)
   }
 }
