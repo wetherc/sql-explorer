@@ -21,18 +21,29 @@
         <span class="text-caption text-medium-emphasis mr-2" data-test="grid-count">
           {{ countLabel }}
         </span>
-        <v-tooltip location="top" text="Copy the rows as text">
-          <template #activator="{ props: tip }">
+        <v-menu>
+          <template #activator="{ props: menu }">
             <v-btn
-              v-bind="tip"
+              v-bind="menu"
               icon="mdi-content-copy"
               size="small"
               aria-label="Copy the rows as text"
               data-test="grid-copy"
-              @click="copyAll"
             />
           </template>
-        </v-tooltip>
+          <v-list density="compact">
+            <v-list-item
+              title="Copy with the column names"
+              data-test="grid-copy-with-names"
+              @click="copyAll"
+            />
+            <v-list-item
+              title="Copy without the column names"
+              data-test="grid-copy-without-names"
+              @click="copyRowsOnly"
+            />
+          </v-list>
+        </v-menu>
         <v-menu>
           <template #activator="{ props: menu }">
             <v-btn
@@ -118,6 +129,7 @@
                 v-for="(column, index) in result.columns"
                 :key="`${column.name}-${index}`"
                 :class="{ sorted: sortIndex === index }"
+                :style="headerStyle(index)"
                 role="columnheader"
                 scope="col"
                 :aria-colindex="index + 2"
@@ -138,6 +150,19 @@
                     {{ sortDescending ? 'mdi-arrow-down' : 'mdi-arrow-up' }}
                   </v-icon>
                 </button>
+                <!-- The grip changes the width of the column. It is a control
+                     of its own, so the arrow keys reach it as well. -->
+                <span
+                  class="column-grip"
+                  role="separator"
+                  aria-orientation="vertical"
+                  :aria-label="`Change the width of the column ${column.name}`"
+                  tabindex="0"
+                  data-test="grid-column-grip"
+                  @pointerdown="startResize($event, index)"
+                  @keydown="onGripKeyDown($event, index)"
+                  @dblclick="clearWidth(index)"
+                ></span>
               </th>
             </tr>
           </thead>
@@ -175,11 +200,12 @@
                 @focus="onCellFocus($event, entry.position, cellIndex)"
                 @mouseenter="revealFullValue($event, entry.position, cellIndex)"
                 @dblclick="inspect(cell, columnName(cellIndex))"
+                @contextmenu.prevent="openCellMenu($event, entry.position, cellIndex)"
               >
                 <!-- The width of a cell is capped on this element and not on
                      the cell itself, because a table of automatic width pays
                      no attention to a cap on one of its cells. -->
-                <span class="cell-text">
+                <span class="cell-text" :style="cellStyle(cellIndex)">
                   {{ truncate(entry.texts[cellIndex] ?? '', CELL_LIMIT) }}
                 </span>
               </td>
@@ -200,6 +226,32 @@
         </table>
       </div>
     </div>
+
+    <v-menu v-model="cellMenu.open" :target="[cellMenu.x, cellMenu.y]" data-test="grid-cell-menu">
+      <v-list density="compact" min-width="240">
+        <v-list-item
+          title="Copy this cell"
+          data-test="grid-menu-copy-cell"
+          @click="copyCellOfMenu"
+        />
+        <v-list-item title="Copy this row" data-test="grid-menu-copy-row" @click="copyRowOfMenu" />
+        <v-list-item
+          title="Copy with the column names"
+          data-test="grid-menu-copy-with-names"
+          @click="copyAll"
+        />
+        <v-list-item
+          title="Copy without the column names"
+          data-test="grid-menu-copy-without-names"
+          @click="copyRowsOnly"
+        />
+        <v-list-item
+          title="Show the whole value"
+          data-test="grid-menu-inspect"
+          @click="inspectCellOfMenu"
+        />
+      </v-list>
+    </v-menu>
 
     <AppDialog v-model="inspecting" max-width="720">
       <v-card>
@@ -858,6 +910,144 @@ function copyAll(): void {
   void copyText(toTabSeparated([header, ...rowsToExport().rows]))
 }
 
+/** Copies the rows alone, with no line of column names above them. */
+function copyRowsOnly(): void {
+  void copyText(toTabSeparated(rowsToExport().rows))
+}
+
+/** The cell of one place of the view, or nothing when the place is empty. */
+function cellAt(position: number, column: number): CellValue | undefined {
+  const source = sortedOrder.value[position]
+  return source === undefined ? undefined : props.result.cell(source, column)
+}
+
+/** Copies the value of one cell as text. */
+function copyCell(position: number, column: number): void {
+  const cell = cellAt(position, column)
+  if (cell !== undefined) {
+    void copyText(formatCell(cell))
+  }
+}
+
+/** Copies one row of the view as text. */
+function copyRow(position: number): void {
+  const source = sortedOrder.value[position]
+  if (source !== undefined) {
+    void copyText(toTabSeparated([props.result.row(source)]))
+  }
+}
+
+/** The place the menu of the cells stands at, and the cell it belongs to. */
+const cellMenu = ref({ open: false, x: 0, y: 0, row: 0, column: 0 })
+
+/** Opens the menu of one cell where the pointer stands. */
+function openCellMenu(event: MouseEvent, position: number, column: number): void {
+  focusCellAt(position, column)
+  cellMenu.value = { open: true, x: event.clientX, y: event.clientY, row: position, column }
+}
+
+function copyCellOfMenu(): void {
+  copyCell(cellMenu.value.row, cellMenu.value.column)
+}
+
+function copyRowOfMenu(): void {
+  copyRow(cellMenu.value.row)
+}
+
+function inspectCellOfMenu(): void {
+  const cell = cellAt(cellMenu.value.row, cellMenu.value.column)
+  if (cell !== undefined) {
+    inspect(cell, columnName(cellMenu.value.column))
+  }
+}
+
+/**
+ * The width the user gave each column, by the place of the column. A column
+ * that the user never dragged holds no width and takes the width of its
+ * content.
+ */
+const columnWidths = ref<Record<number, number>>({})
+/** The narrowest a column can become. */
+const MIN_COLUMN_WIDTH = 56
+/** The step of a change of the width from the keyboard. */
+const WIDTH_STEP = 16
+/** The drag that runs, when one runs. */
+let resizing: { column: number; startX: number; startWidth: number } | null = null
+
+function headerStyle(index: number): Record<string, string> {
+  const width = columnWidths.value[index]
+  return width === undefined
+    ? {}
+    : { width: `${width}px`, minWidth: `${width}px`, maxWidth: `${width}px` }
+}
+
+function cellStyle(index: number): Record<string, string> {
+  const width = columnWidths.value[index]
+  return width === undefined ? {} : { maxWidth: `${width}px` }
+}
+
+/** Gives one column a width, never narrower than the limit. */
+function setWidth(index: number, width: number): void {
+  columnWidths.value = { ...columnWidths.value, [index]: Math.max(MIN_COLUMN_WIDTH, width) }
+}
+
+/** Lets a column take the width of its content again. */
+function clearWidth(index: number): void {
+  const next = { ...columnWidths.value }
+  delete next[index]
+  columnWidths.value = next
+}
+
+/** The width one column holds now, from the record or from the element. */
+function widthOf(index: number, element: HTMLElement | null): number {
+  return columnWidths.value[index] ?? element?.getBoundingClientRect().width ?? MIN_COLUMN_WIDTH
+}
+
+/** Follows the pointer while it drags the grip of a column. */
+function onResizeMove(event: PointerEvent): void {
+  if (resizing) {
+    setWidth(resizing.column, resizing.startWidth + (event.clientX - resizing.startX))
+  }
+}
+
+/** Ends the drag of a grip. */
+function endResize(): void {
+  resizing = null
+  globalThis.removeEventListener('pointermove', onResizeMove)
+  globalThis.removeEventListener('pointerup', endResize)
+}
+
+/** Starts the drag of the grip of one column. */
+function startResize(event: PointerEvent, index: number): void {
+  const header = (event.target as HTMLElement | null)?.parentElement ?? null
+  resizing = { column: index, startX: event.clientX, startWidth: widthOf(index, header) }
+  globalThis.addEventListener('pointermove', onResizeMove)
+  globalThis.addEventListener('pointerup', endResize)
+  event.preventDefault()
+}
+
+/**
+ * The keys of the grip of a column. The arrows change the width by one step,
+ * and Enter lets the column take the width of its content again.
+ */
+function onGripKeyDown(event: KeyboardEvent, index: number): void {
+  const header = (event.target as HTMLElement | null)?.parentElement ?? null
+  switch (event.key) {
+    case 'ArrowRight':
+      setWidth(index, widthOf(index, header) + WIDTH_STEP)
+      break
+    case 'ArrowLeft':
+      setWidth(index, widthOf(index, header) - WIDTH_STEP)
+      break
+    case 'Enter':
+      clearWidth(index)
+      break
+    default:
+      return
+  }
+  event.preventDefault()
+}
+
 // A sort or a filter moves the rows in the view, so the anchor of a click
 // with Shift no longer points at the row the user last clicked.
 watch([sortIndex, sortDescending, appliedSearch], () => {
@@ -878,6 +1068,7 @@ watch(
     sortDescending.value = false
     scrollTop.value = 0
     resultGeneration.value += 1
+    columnWidths.value = {}
     // The tab stop returns to the first cell, because the rows it stood on
     // belong to the result that has gone.
     focusedRow.value = 0
@@ -946,11 +1137,33 @@ watch(
   padding: 0;
   white-space: nowrap;
   border-bottom: var(--app-divider);
+  /* A column that the user made narrow cuts its own name. The grip of the
+     column sits against the right edge of this element. */
+  overflow: hidden;
+  position: relative;
+}
+
+/* The grip sits on the right edge of the header of a column. */
+.column-grip {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.column-grip:hover,
+.column-grip:focus-visible {
+  background: rgba(var(--v-theme-primary), 0.4);
+  outline: none;
 }
 
 .header-button {
   display: block;
   width: 100%;
+  overflow: hidden;
   padding: 4px 10px;
   background: none;
   border: 0;

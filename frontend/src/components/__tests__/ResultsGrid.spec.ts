@@ -27,6 +27,11 @@ function result(
   )
 }
 
+/** Clicks one item of a menu that the library drew outside the wrapper. */
+function click(selector: string): void {
+  document.querySelector(selector)?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+}
+
 describe('ResultsGrid', () => {
   beforeEach(() => {
     Object.defineProperty(globalThis.navigator, 'clipboard', {
@@ -160,14 +165,23 @@ describe('ResultsGrid', () => {
     expect(document.body.textContent).toContain('Grace')
   })
 
-  it('copies the rows to the clipboard', async () => {
+  it('copies the rows to the clipboard, with and without the column names', async () => {
     const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
     await wrapper.find('[data-test="grid-copy"]').trigger('click')
-    await Promise.resolve()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    click('[data-test="grid-copy-with-names"]')
+    await new Promise((resolve) => setTimeout(resolve, 0))
     expect(globalThis.navigator.clipboard.writeText).toHaveBeenCalledWith(
       'id\tname\n2\tGrace\n1\tAda\n3\tNULL',
     )
     expect(wrapper.emitted('copied')).toBeTruthy()
+
+    click('[data-test="grid-copy-without-names"]')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(globalThis.navigator.clipboard.writeText).toHaveBeenCalledWith(
+      '2\tGrace\n1\tAda\n3\tNULL',
+    )
   })
 
   it('copies even when the host offers no clipboard', async () => {
@@ -177,8 +191,104 @@ describe('ResultsGrid', () => {
     })
     const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
     await wrapper.find('[data-test="grid-copy"]').trigger('click')
-    await Promise.resolve()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    click('[data-test="grid-copy-with-names"]')
+    await new Promise((resolve) => setTimeout(resolve, 0))
     expect(wrapper.emitted('copied')).toBeTruthy()
+  })
+
+  it('copies one cell and one row from the menu of the cells', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(globalThis.navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+
+    await wrapper.findAll('[data-test="grid-cell"]')[1]!.trigger('contextmenu')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    click('[data-test="grid-menu-copy-cell"]')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(writeText).toHaveBeenCalledWith('Grace')
+
+    click('[data-test="grid-menu-copy-row"]')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(writeText).toHaveBeenCalledWith('2\tGrace')
+
+    click('[data-test="grid-menu-inspect"]')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(document.body.textContent).toContain('Grace')
+  })
+
+  it('holds no cell of the menu when the view holds no row', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    await wrapper.findAll('[data-test="grid-cell"]')[1]!.trigger('contextmenu')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    // The filter takes the rows away, so the place the menu holds is empty.
+    await wrapper.find('[data-test="grid-filter"] input').setValue('nothing here')
+    await new Promise((resolve) => setTimeout(resolve, 300))
+
+    click('[data-test="grid-menu-copy-cell"]')
+    click('[data-test="grid-menu-copy-row"]')
+    click('[data-test="grid-menu-inspect"]')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(wrapper.emitted('copied')).toBeUndefined()
+  })
+
+  it('changes the width of a column with the pointer and with the keys', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    const grip = wrapper.findAll('[data-test="grid-column-grip"]')[0]!
+    const header = () => wrapper.findAll('[data-test="grid-header-cell"]')[0]!
+
+    // The drag of the grip gives the column the width it reaches.
+    await grip.trigger('pointerdown', { clientX: 100 })
+    globalThis.dispatchEvent(
+      Object.assign(new Event('pointermove'), { clientX: 300 }) as PointerEvent,
+    )
+    await wrapper.vm.$nextTick()
+    expect(header().attributes('style')).toContain('width: 200px')
+
+    // The drag ends, so a later move of the pointer changes nothing.
+    globalThis.dispatchEvent(new Event('pointerup'))
+    globalThis.dispatchEvent(
+      Object.assign(new Event('pointermove'), { clientX: 500 }) as PointerEvent,
+    )
+    await wrapper.vm.$nextTick()
+    expect(header().attributes('style')).toContain('width: 200px')
+
+    // The arrows change the width by one step, and the limit holds it.
+    await grip.trigger('keydown', { key: 'ArrowRight' })
+    expect(header().attributes('style')).toContain('width: 216px')
+    await grip.trigger('keydown', { key: 'ArrowLeft' })
+    expect(header().attributes('style')).toContain('width: 200px')
+    for (let step = 0; step < 20; step += 1) {
+      await grip.trigger('keydown', { key: 'ArrowLeft' })
+    }
+    expect(header().attributes('style')).toContain('width: 56px')
+
+    // A key the grip does not hold changes nothing, and Enter gives the
+    // column the width of its content again.
+    await grip.trigger('keydown', { key: 'a' })
+    expect(header().attributes('style')).toContain('width: 56px')
+    await grip.trigger('keydown', { key: 'Enter' })
+    expect(header().attributes('style')).toBeUndefined()
+
+    // A new result starts with the width of the content of each column.
+    await grip.trigger('keydown', { key: 'ArrowLeft' })
+    expect(header().attributes('style')).toContain('width')
+    await wrapper.setProps({ result: result() })
+    expect(header().attributes('style')).toBeUndefined()
+  })
+
+  it('changes the width of a column that the double click reaches', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    const grip = wrapper.findAll('[data-test="grid-column-grip"]')[0]!
+    await grip.trigger('keydown', { key: 'ArrowRight' })
+    await grip.trigger('dblclick')
+    expect(
+      wrapper.findAll('[data-test="grid-header-cell"]')[0]!.attributes('style'),
+    ).toBeUndefined()
   })
 
   it('reports the scroll position so that only the visible rows are drawn', async () => {
@@ -323,6 +433,8 @@ describe('ResultsGrid', () => {
     const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
     await wrapper.findAll('[data-test="grid-row"]')[1]!.trigger('click')
     await wrapper.find('[data-test="grid-copy"]').trigger('click')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    click('[data-test="grid-copy-with-names"]')
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(writeText).toHaveBeenCalledWith('id\tname\n1\tAda')
   })
