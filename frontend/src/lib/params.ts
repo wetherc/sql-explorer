@@ -14,6 +14,28 @@ import { ParamKind, type ParamValue } from '@/types/api'
  */
 const PLAIN_NUMBER = /^[+-]?(\d+(\.\d*)?|\.\d+)$/
 
+/** The texts that a Boolean value accepts for true. */
+const TRUE_WORDS = ['true', 't', 'yes', 'y', 'on', '1']
+
+/** The texts that a Boolean value accepts for false. */
+const FALSE_WORDS = ['false', 'f', 'no', 'n', 'off', '0']
+
+/**
+ * Reads the text of a Boolean value. A text that names neither state gives
+ * `null`, so the dialog can hold the row as wrong and the value does not
+ * become false by chance.
+ */
+export function booleanOfText(text: string): boolean | null {
+  const word = text.trim().toLowerCase()
+  if (TRUE_WORDS.includes(word)) {
+    return true
+  }
+  if (FALSE_WORDS.includes(word)) {
+    return false
+  }
+  return null
+}
+
 /** Builds the record for one name, with the form and the text it starts at. */
 export function newParamValue(name: string, held?: ParamValue): ParamValue {
   return held ? { ...held } : { name, kind: ParamKind.Text, text: '' }
@@ -25,7 +47,10 @@ export function jsonOfParam(value: ParamValue): unknown {
     return null
   }
   if (value.kind === ParamKind.Boolean) {
-    return value.text.trim().toLowerCase() === 'true'
+    // A text that names neither state goes to the server as it is, and the
+    // server judges it. The dialog blocks such a text before the run.
+    const flag = booleanOfText(value.text)
+    return flag === null ? value.text : flag
   }
   if (value.kind === ParamKind.Number) {
     // A double does not hold every number that the user can write. The value
@@ -47,14 +72,17 @@ export function jsonOfParam(value: ParamValue): unknown {
  * dialog blocks its confirm button while one row is wrong.
  */
 export function paramProblem(value: ParamValue): string | null {
-  if (value.kind !== ParamKind.Number) {
-    return null
-  }
   const text = value.text.trim()
   if (text === '') {
     return null
   }
-  return Number.isFinite(Number(text)) ? null : 'Write a number.'
+  if (value.kind === ParamKind.Number) {
+    return Number.isFinite(Number(text)) ? null : 'Write a number.'
+  }
+  if (value.kind === ParamKind.Boolean) {
+    return booleanOfText(text) === null ? 'Write true or false.' : null
+  }
+  return null
 }
 
 /**

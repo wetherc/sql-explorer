@@ -963,7 +963,7 @@ pub fn next_wait(current: Duration) -> Duration {
 /// a utility statement such as `SHOW CREATE TABLE`.
 pub fn statement_repeats_names(statement: &str) -> bool {
     matches!(
-        crate::sql::leading_keyword(statement).as_str(),
+        crate::sql::leading_keyword(statement, crate::sql::Dialect::Athena).as_str(),
         "select" | "with" | "explain"
     )
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   alignParams,
+  booleanOfText,
   jsonOfParam,
   needsAValue,
   newParamValue,
@@ -28,6 +29,8 @@ describe('jsonOfParam', () => {
     expect(jsonOfParam({ name: 'a', kind: ParamKind.Number, text: ' 12 ' })).toBe(12)
     expect(jsonOfParam({ name: 'a', kind: ParamKind.Boolean, text: 'True' })).toBe(true)
     expect(jsonOfParam({ name: 'a', kind: ParamKind.Boolean, text: 'no' })).toBe(false)
+    // A text that names neither state goes to the server as it is.
+    expect(jsonOfParam({ name: 'a', kind: ParamKind.Boolean, text: 'maybe' })).toBe('maybe')
     expect(jsonOfParam({ name: 'a', kind: ParamKind.Null, text: 'ignored' })).toBeNull()
   })
 
@@ -49,9 +52,30 @@ describe('jsonOfParam', () => {
   })
 })
 
+describe('booleanOfText', () => {
+  it('reads each word of the two states and refuses another word', () => {
+    for (const word of ['true', 'T', ' yes ', 'y', 'ON', '1']) {
+      expect(booleanOfText(word)).toBe(true)
+    }
+    for (const word of ['false', 'F', 'no', 'N', 'off', '0']) {
+      expect(booleanOfText(word)).toBe(false)
+    }
+    expect(booleanOfText('maybe')).toBeNull()
+    expect(booleanOfText('')).toBeNull()
+  })
+})
+
 describe('paramProblem', () => {
   it('names a text that the number form refuses', () => {
     expect(paramProblem({ name: 'a', kind: ParamKind.Number, text: 'two' })).toBe('Write a number.')
+  })
+
+  it('names a text that the true or false form refuses', () => {
+    expect(paramProblem({ name: 'a', kind: ParamKind.Boolean, text: 'maybe' })).toBe(
+      'Write true or false.',
+    )
+    expect(paramProblem({ name: 'a', kind: ParamKind.Boolean, text: ' Yes ' })).toBeNull()
+    expect(paramProblem({ name: 'a', kind: ParamKind.Boolean, text: '  ' })).toBeNull()
   })
 
   it('finds no fault in a text that fits its form', () => {

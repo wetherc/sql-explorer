@@ -418,7 +418,7 @@
               v-model="row.text"
               :items="BOOLEAN_VALUES"
               label="Value"
-              hide-details
+              :error-messages="paramProblem(row) ?? undefined"
               :data-test="`parameter-value-${row.name}`"
             />
             <v-text-field

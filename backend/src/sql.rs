@@ -131,14 +131,22 @@ impl Dialect {
 
 /// Reads the first word of a statement, in small letters. The reader steps
 /// over the comments and the opening brackets that can stand in front of the
-/// word, so `/* note */ (SELECT 1)` gives `select`.
-pub fn leading_keyword(statement: &str) -> String {
+/// word, so `/* note */ (SELECT 1)` gives `select`. The dialect decides
+/// whether a number sign also starts a comment, because MySQL accepts that
+/// form and a script that opens with such a line still names a keyword.
+pub fn leading_keyword(statement: &str, dialect: Dialect) -> String {
     let bytes: Vec<char> = statement.chars().collect();
     let mut index = 0;
     while index < bytes.len() {
         let current = bytes[index];
         if current.is_whitespace() || current == '(' {
             index += 1;
+            continue;
+        }
+        if dialect.hash_comments() && current == '#' {
+            while index < bytes.len() && bytes[index] != '\n' {
+                index += 1;
+            }
             continue;
         }
         if current == '-' && bytes.get(index + 1) == Some(&'-') {
@@ -192,7 +200,7 @@ pub fn only_reads(script: &str, dialect: Dialect) -> bool {
     }
     statements.iter().all(|statement| {
         matches!(
-            leading_keyword(statement).as_str(),
+            leading_keyword(statement, dialect).as_str(),
             "select" | "with" | "show"
         ) && !holds_a_write_word(statement, dialect)
     })
@@ -1371,12 +1379,29 @@ mod tests {
     }
     #[test]
     fn the_first_word_of_a_statement_is_read_over_the_comments() {
-        assert_eq!(leading_keyword("SELECT 1"), "select");
-        assert_eq!(leading_keyword("  \n(select 1)"), "select");
-        assert_eq!(leading_keyword("-- a note\nUPDATE t SET a = 1"), "update");
-        assert_eq!(leading_keyword("/* a note */ WITH x AS ()"), "with");
-        assert_eq!(leading_keyword("/* never closed"), "");
-        assert_eq!(leading_keyword("   "), "");
+        let any = Dialect::Postgres;
+        assert_eq!(leading_keyword("SELECT 1", any), "select");
+        assert_eq!(leading_keyword("  \n(select 1)", any), "select");
+        assert_eq!(
+            leading_keyword("-- a note\nUPDATE t SET a = 1", any),
+            "update"
+        );
+        assert_eq!(leading_keyword("/* a note */ WITH x AS ()", any), "with");
+        assert_eq!(leading_keyword("/* never closed", any), "");
+        assert_eq!(leading_keyword("   ", any), "");
+    }
+
+    #[test]
+    fn a_number_sign_comment_hides_no_keyword_in_mysql() {
+        assert_eq!(
+            leading_keyword("# a note\nSELECT 1", Dialect::MySql),
+            "select"
+        );
+        assert_eq!(leading_keyword("# a note", Dialect::MySql), "");
+        // The sign starts no comment in the other dialects, so the reader
+        // stops at it and finds no word.
+        assert_eq!(leading_keyword("# a note\nSELECT 1", Dialect::Postgres), "");
+        assert!(only_reads("# a note\nSELECT 1", Dialect::MySql));
     }
 
     #[test]

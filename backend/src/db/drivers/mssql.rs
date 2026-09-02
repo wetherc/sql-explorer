@@ -531,7 +531,7 @@ pub fn select_plan_sets(sets: Vec<ResultSet>) -> (Vec<ResultSet>, bool) {
 /// gives rows back. A statement that does not is sent through `execute`, so
 /// that the number of changed rows reaches the user.
 pub fn returns_rows(statement: &str) -> bool {
-    let keyword = crate::sql::leading_keyword(statement);
+    let keyword = crate::sql::leading_keyword(statement, crate::sql::Dialect::MsSql);
     !matches!(
         keyword.as_str(),
         "insert"
@@ -2293,9 +2293,18 @@ mod tests {
     #[test]
     fn the_first_keyword_steps_over_comments_that_never_close() {
         use crate::sql::leading_keyword;
-        assert_eq!(leading_keyword("-- only a comment"), "");
-        assert_eq!(leading_keyword("/* never closed"), "");
-        assert_eq!(leading_keyword("/* a */ /* b */ select"), "select");
+        assert_eq!(
+            leading_keyword("-- only a comment", crate::sql::Dialect::MsSql),
+            ""
+        );
+        assert_eq!(
+            leading_keyword("/* never closed", crate::sql::Dialect::MsSql),
+            ""
+        );
+        assert_eq!(
+            leading_keyword("/* a */ /* b */ select", crate::sql::Dialect::MsSql),
+            "select"
+        );
     }
 
     #[test]

@@ -203,6 +203,10 @@ async fn stream_statement(
             continue;
         }
 
+        let date_only: Vec<bool> = columns
+            .iter()
+            .map(|column| is_date_only(&column.type_name))
+            .collect();
         sink.begin_set(columns.clone())?;
         let mut count = 0usize;
         let mut truncated = false;
@@ -214,7 +218,7 @@ async fn stream_statement(
                 truncated = true;
                 continue;
             }
-            if sink.row(row_to_json(&row, columns.len()))? == SinkControl::Stop {
+            if sink.row(row_to_json(&row, &date_only))? == SinkControl::Stop {
                 truncated = true;
                 *stopped = true;
                 continue;
@@ -620,16 +624,31 @@ fn create_query_text(database: Option<&str>, table: &str, kind: TableKind) -> Cr
     CreateQuery::new(format!("SHOW CREATE {word} {name};"), 1)
 }
 
+/// True when the type of a column holds a date and no time. The driver
+/// gives the same value shape for DATE, DATETIME and TIMESTAMP, so the type
+/// of the column decides whether the text carries a time.
+pub fn is_date_only(type_name: &str) -> bool {
+    matches!(type_name, "mysql_type_date" | "mysql_type_newdate")
+}
+
 /// Converts one row into an array of JSON values. The values stay in the row
 /// while they are read, so a row of text costs no copy of that text.
-pub fn row_to_json(row: &MysqlRow, column_count: usize) -> Vec<JsonValue> {
-    (0..column_count)
-        .map(|index| row.as_ref(index).map_or(JsonValue::Null, value_to_json))
+///
+/// `date_only` holds one flag for each column, as `is_date_only` reads it.
+pub fn row_to_json(row: &MysqlRow, date_only: &[bool]) -> Vec<JsonValue> {
+    date_only
+        .iter()
+        .enumerate()
+        .map(|(index, date_only)| {
+            row.as_ref(index)
+                .map_or(JsonValue::Null, |value| value_to_json(value, *date_only))
+        })
         .collect()
 }
 
-/// Converts one value of the driver into JSON.
-pub fn value_to_json(value: &MysqlValue) -> JsonValue {
+/// Converts one value of the driver into JSON. `date_only` says that the
+/// column holds a date alone, so the text carries no time.
+pub fn value_to_json(value: &MysqlValue, date_only: bool) -> JsonValue {
     match value {
         MysqlValue::NULL => JsonValue::Null,
         MysqlValue::Int(number) => JsonValue::from(*number),
@@ -642,9 +661,18 @@ pub fn value_to_json(value: &MysqlValue) -> JsonValue {
             Ok(text) => JsonValue::String(text.to_string()),
             Err(_) => bytes_to_json(bytes),
         },
-        MysqlValue::Date(year, month, day, hour, minute, second, microsecond) => JsonValue::String(
-            format_date(*year, *month, *day, *hour, *minute, *second, *microsecond),
-        ),
+        MysqlValue::Date(year, month, day, hour, minute, second, microsecond) => {
+            JsonValue::String(format_date(
+                *year,
+                *month,
+                *day,
+                *hour,
+                *minute,
+                *second,
+                *microsecond,
+                date_only,
+            ))
+        }
         MysqlValue::Time(negative, days, hours, minutes, seconds, microseconds) => {
             JsonValue::String(format_time(
                 *negative,
@@ -659,7 +687,10 @@ pub fn value_to_json(value: &MysqlValue) -> JsonValue {
 }
 
 /// Writes a date and a time. The fraction of a second is left out when it
-/// is zero, which is what the server itself shows.
+/// is zero, which is what the server itself shows. A column that holds a
+/// date alone gives the date alone, and a column that holds a time keeps
+/// the time even at midnight, so a DATETIME reads as a DATETIME.
+#[allow(clippy::too_many_arguments)]
 pub fn format_date(
     year: u16,
     month: u8,
@@ -668,9 +699,10 @@ pub fn format_date(
     minute: u8,
     second: u8,
     microsecond: u32,
+    date_only: bool,
 ) -> String {
     let date = format!("{year:04}-{month:02}-{day:02}");
-    if hour == 0 && minute == 0 && second == 0 && microsecond == 0 {
+    if date_only {
         return date;
     }
     let time = format!("{hour:02}:{minute:02}:{second:02}");
@@ -879,52 +911,72 @@ mod tests {
 
     #[test]
     fn every_value_type_becomes_json() {
-        assert_eq!(value_to_json(&MysqlValue::NULL), JsonValue::Null);
-        assert_eq!(value_to_json(&MysqlValue::Int(-4)), serde_json::json!(-4));
-        assert_eq!(value_to_json(&MysqlValue::UInt(4)), serde_json::json!(4));
+        assert_eq!(value_to_json(&MysqlValue::NULL, false), JsonValue::Null);
         assert_eq!(
-            value_to_json(&MysqlValue::Double(1.25)),
+            value_to_json(&MysqlValue::Int(-4), false),
+            serde_json::json!(-4)
+        );
+        assert_eq!(
+            value_to_json(&MysqlValue::UInt(4), false),
+            serde_json::json!(4)
+        );
+        assert_eq!(
+            value_to_json(&MysqlValue::Double(1.25), false),
             serde_json::json!(1.25)
         );
         assert_eq!(
-            value_to_json(&MysqlValue::Float(0.5)),
+            value_to_json(&MysqlValue::Float(0.5), false),
             serde_json::json!(0.5)
         );
         assert_eq!(
-            value_to_json(&MysqlValue::Bytes(b"hello".to_vec())),
+            value_to_json(&MysqlValue::Bytes(b"hello".to_vec()), false),
             serde_json::json!("hello")
         );
         // Bytes that are not valid text become base64.
         assert_eq!(
-            value_to_json(&MysqlValue::Bytes(vec![0xff, 0xfe])),
+            value_to_json(&MysqlValue::Bytes(vec![0xff, 0xfe]), false),
             serde_json::json!("//4=")
         );
     }
 
     #[test]
     fn a_date_shows_only_the_parts_that_carry_information() {
+        // A DATE column gives the date alone.
         assert_eq!(
-            value_to_json(&MysqlValue::Date(2026, 8, 10, 0, 0, 0, 0)),
+            value_to_json(&MysqlValue::Date(2026, 8, 10, 0, 0, 0, 0), true),
             serde_json::json!("2026-08-10")
         );
+        // A DATETIME column keeps the time, also at midnight.
         assert_eq!(
-            value_to_json(&MysqlValue::Date(2026, 8, 10, 13, 5, 6, 0)),
+            value_to_json(&MysqlValue::Date(2026, 8, 10, 0, 0, 0, 0), false),
+            serde_json::json!("2026-08-10 00:00:00")
+        );
+        assert_eq!(
+            value_to_json(&MysqlValue::Date(2026, 8, 10, 13, 5, 6, 0), false),
             serde_json::json!("2026-08-10 13:05:06")
         );
         assert_eq!(
-            value_to_json(&MysqlValue::Date(2026, 8, 10, 13, 5, 6, 123456)),
+            value_to_json(&MysqlValue::Date(2026, 8, 10, 13, 5, 6, 123456), false),
             serde_json::json!("2026-08-10 13:05:06.123456")
         );
     }
 
     #[test]
+    fn the_type_of_a_column_says_whether_it_holds_a_time() {
+        assert!(is_date_only("mysql_type_date"));
+        assert!(is_date_only("mysql_type_newdate"));
+        assert!(!is_date_only("mysql_type_datetime"));
+        assert!(!is_date_only("mysql_type_timestamp"));
+    }
+
+    #[test]
     fn an_interval_folds_the_days_into_the_hours() {
         assert_eq!(
-            value_to_json(&MysqlValue::Time(false, 1, 2, 3, 4, 0)),
+            value_to_json(&MysqlValue::Time(false, 1, 2, 3, 4, 0), false),
             serde_json::json!("26:03:04")
         );
         assert_eq!(
-            value_to_json(&MysqlValue::Time(true, 0, 2, 3, 4, 500)),
+            value_to_json(&MysqlValue::Time(true, 0, 2, 3, 4, 500), false),
             serde_json::json!("-02:03:04.000500")
         );
     }
@@ -936,7 +988,10 @@ mod tests {
             MysqlValue::Bytes(b"a".to_vec()),
             MysqlValue::NULL,
         ];
-        let json: Vec<JsonValue> = values.iter().map(value_to_json).collect();
+        let json: Vec<JsonValue> = values
+            .iter()
+            .map(|value| value_to_json(value, false))
+            .collect();
         assert_eq!(
             json,
             vec![
