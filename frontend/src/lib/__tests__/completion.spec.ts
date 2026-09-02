@@ -5,6 +5,7 @@ import {
   clearCompletionSource,
   disposeSqlCompletions,
   installSqlCompletions,
+  MAX_SUGGESTIONS,
   monacoKind,
   setCompletionSource,
   suggestionsFor,
@@ -77,6 +78,34 @@ describe('completion provider', () => {
       position,
     )
     expect(answer.suggestions.map((item) => item.label)).toEqual(['total'])
+  })
+
+  it('reads the aliases of the statement that holds the cursor alone', () => {
+    setCompletionSource('model:one', () => ({ index, dialect: Dialect.MsSql }))
+    // The cursor stands in the second statement, so the alias of the first
+    // one reaches nothing.
+    const answer = suggestionsFor(
+      stubModel('SELECT * FROM Sales.dbo.orders AS o;\nSELECT o.'),
+      position,
+    )
+    expect(answer.suggestions.map((item) => item.label)).toEqual([])
+  })
+
+  it('holds the answer to the number of names the list carries', () => {
+    const many = {
+      databases: [],
+      schemas: [],
+      tables: [],
+      columns: Array.from({ length: MAX_SUGGESTIONS + 50 }, (_item, number) => ({
+        name: `column_${number}`,
+        table: 'orders',
+        qualifier: 'Sales.dbo',
+        dataType: 'int',
+      })),
+    }
+    setCompletionSource('model:one', () => ({ index: many, dialect: Dialect.MsSql }))
+    const answer = suggestionsFor(stubModel('SELECT col'), position)
+    expect(answer.suggestions).toHaveLength(MAX_SUGGESTIONS)
   })
 
   it('forgets a model that is gone', () => {

@@ -124,6 +124,38 @@ export function statementAt(script: string, offset: number, dialect?: Dialect): 
 }
 
 /**
+ * The statement that holds one place of a script, with that place counted
+ * from the start of the statement.
+ *
+ * A reader of the text around the cursor works on this and not on the whole
+ * script, so the cost of the work follows one statement and not the size of
+ * the file.
+ */
+export function statementAround(
+  script: string,
+  offset: number,
+  dialect?: Dialect,
+): { text: string; offset: number } {
+  const position = Math.max(0, Math.min(offset, script.length))
+  // The bounds cover the whole script and the splitter gives at least one of
+  // them, so one of them always holds the place. The last one stands in
+  // until the walk finds it.
+  const bounds = statementBounds(script, dialect)
+  let held = bounds[bounds.length - 1] as [number, number]
+  for (const bound of bounds) {
+    if (position >= bound[0] && position <= bound[1]) {
+      held = bound
+      break
+    }
+  }
+  const [start, end] = held
+  return {
+    text: script.slice(start, end),
+    offset: Math.max(0, Math.min(position - start, end - start)),
+  }
+}
+
+/**
  * The batch separator of MS SQL Server: the word GO alone on a line, with an
  * optional count of runs and an optional comment behind it.
  */
@@ -645,6 +677,12 @@ export interface CompletionContext {
   qualifier?: string
   /** The relation each alias of the statement stands for. */
   aliases?: Map<string, string>
+  /**
+   * The largest number of names to build. The editor shows a list of a few
+   * rows and filters what it holds, so a schema of many thousand columns
+   * needs no list of that size on each keystroke.
+   */
+  limit?: number
 }
 
 /**
@@ -665,8 +703,11 @@ export function completionsFor(
   const lower = prefix.toLowerCase()
   const matches = (name: string) => lower === '' || name.toLowerCase().startsWith(lower)
   const aliases = context.aliases ?? new Map<string, string>()
+  const limit = context.limit ?? Number.POSITIVE_INFINITY
 
   const items: CompletionItem[] = []
+  /** True while the list has room for another name. */
+  const room = () => items.length < limit
 
   const qualifier = (context.qualifier ?? '').trim()
   if (qualifier !== '') {
@@ -674,6 +715,9 @@ export function completionsFor(
     const relation = aliases.get(qualifier.toLowerCase()) ?? qualifier
     const wanted = relation.toLowerCase()
     for (const column of index.columns) {
+      if (!room()) {
+        break
+      }
       const place = column.qualifier.toLowerCase().split('.')
       if (
         matches(column.name) &&
@@ -693,6 +737,9 @@ export function completionsFor(
     // The qualifier names a database or a schema whose columns are not held,
     // so the relations of that place are offered instead.
     for (const table of index.tables) {
+      if (!room()) {
+        break
+      }
       if (matches(table.name) && table.qualifier.toLowerCase().split('.').includes(wanted)) {
         items.push({
           label: table.name,
@@ -705,23 +752,29 @@ export function completionsFor(
     return items
   }
 
-  // The columns of the relations of the statement come first.
+  // The columns of the relations of the statement come first. The two
+  // groups come from two walks of the same list, so no copy of the columns
+  // of the whole schema is built.
   const inStatement = (column: IndexedColumn) => aliases.has(column.table.toLowerCase())
-  const columns = [
-    ...index.columns.filter(inStatement),
-    ...index.columns.filter((column) => !inStatement(column)),
-  ]
-  for (const column of columns) {
-    if (matches(column.name)) {
-      items.push({
-        label: column.name,
-        detail: `${column.dataType} in ${column.table}`,
-        insertText: quoteIfNeeded(column.name, dialect),
-        kind: 'column',
-      })
+  for (const first of [true, false]) {
+    for (const column of index.columns) {
+      if (!room()) {
+        break
+      }
+      if (inStatement(column) === first && matches(column.name)) {
+        items.push({
+          label: column.name,
+          detail: `${column.dataType} in ${column.table}`,
+          insertText: quoteIfNeeded(column.name, dialect),
+          kind: 'column',
+        })
+      }
     }
   }
   for (const table of index.tables) {
+    if (!room()) {
+      break
+    }
     if (matches(table.name)) {
       items.push({
         label: table.name,
@@ -732,6 +785,9 @@ export function completionsFor(
     }
   }
   for (const schema of index.schemas) {
+    if (!room()) {
+      break
+    }
     if (matches(schema)) {
       items.push({
         label: schema,
@@ -742,6 +798,9 @@ export function completionsFor(
     }
   }
   for (const database of index.databases) {
+    if (!room()) {
+      break
+    }
     if (matches(database)) {
       items.push({
         label: database,
@@ -752,6 +811,9 @@ export function completionsFor(
     }
   }
   for (const keyword of SQL_KEYWORDS) {
+    if (!room()) {
+      break
+    }
     if (matches(keyword)) {
       items.push({
         label: keyword,

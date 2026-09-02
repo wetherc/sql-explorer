@@ -11,6 +11,7 @@ import {
   quoteIfNeeded,
   statementAt,
   statementBounds,
+  statementAround,
   tableAliases,
   wordBefore,
   type SchemaIndex,
@@ -315,6 +316,32 @@ describe('completionsFor', () => {
   it('describes a column with its type and its table', () => {
     expect(completionsFor('sale_', index, Dialect.MsSql)[0]?.detail).toBe('money in salesOrder')
   })
+
+  it('stops at the number of names the caller asks for', () => {
+    // The limit stops the walk of each list, the keywords among them.
+    expect(completionsFor('', index, Dialect.MsSql, { limit: 2 })).toHaveLength(2)
+    expect(completionsFor('sal', index, Dialect.MsSql, { limit: 1 })).toHaveLength(1)
+    expect(completionsFor('sales_', index, Dialect.MsSql, { limit: 1 })).toHaveLength(1)
+    expect(completionsFor('Sale', index, Dialect.MsSql, { limit: 3 })).toHaveLength(3)
+
+    // A qualifier names a relation, and the limit holds its columns too.
+    const wide: SchemaIndex = {
+      ...emptySchemaIndex(),
+      tables: [
+        { name: 'orders', qualifier: 'Sales.dbo' },
+        { name: 'items', qualifier: 'Sales.dbo' },
+      ],
+      columns: [
+        { name: 'one', table: 'orders', qualifier: 'Sales.dbo', dataType: 'int' },
+        { name: 'two', table: 'orders', qualifier: 'Sales.dbo', dataType: 'int' },
+      ],
+    }
+    expect(completionsFor('', wide, Dialect.MsSql, { qualifier: 'orders', limit: 1 })).toHaveLength(
+      1,
+    )
+    // The qualifier names a schema, so the relations of it are offered.
+    expect(completionsFor('', wide, Dialect.MsSql, { qualifier: 'dbo', limit: 1 })).toHaveLength(1)
+  })
 })
 
 describe('emptySchemaIndex', () => {
@@ -359,6 +386,25 @@ describe('qualifierBefore', () => {
 
   it('gives nothing when the quoted name never opened', () => {
     expect(qualifierBefore('SELECT dbo].', 12)).toBe('')
+  })
+})
+
+describe('statementAround', () => {
+  it('gives the statement that holds a place, with the place inside it', () => {
+    const script = 'SELECT 1;\nSELECT 2 FROM t'
+
+    const first = statementAround(script, 3)
+    expect(first.text).toBe('SELECT 1')
+    expect(first.offset).toBe(3)
+
+    const second = statementAround(script, script.length)
+    expect(second.text).toBe('\nSELECT 2 FROM t')
+    expect(second.offset).toBe(second.text.length)
+  })
+
+  it('gives the whole text of a script that holds one statement', () => {
+    expect(statementAround('SELECT 1', 100)).toEqual({ text: 'SELECT 1', offset: 8 })
+    expect(statementAround('', 0)).toEqual({ text: '', offset: 0 })
   })
 })
 

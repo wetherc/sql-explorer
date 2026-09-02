@@ -154,24 +154,29 @@ describe('tabs store', () => {
     expect(tabs.tabs).toHaveLength(1)
   })
 
-  it('closes every other tab', () => {
+  it('raises the count of the changes for each change of a tab', () => {
     const tabs = useTabsStore()
-    tabs.add()
-    const kept = tabs.add()
-    tabs.add()
-    tabs.closeOthers(kept.id)
-    expect(tabs.tabs).toHaveLength(1)
-    expect(tabs.activeTabId).toBe(kept.id)
-  })
+    const start = tabs.revision
+    const tab = tabs.add()
+    expect(tabs.revision).toBe(start + 1)
 
-  it('closes every tab', () => {
-    const tabs = useTabsStore()
-    tabs.add()
-    tabs.closeAll()
-    expect(tabs.tabs).toEqual([])
-    expect(tabs.activeTabId).toBeNull()
-    tabs.closeOthers('missing')
-    expect(tabs.activeTabId).toBeNull()
+    tabs.setQuery(tab.id, 'SELECT 2')
+    tabs.rename(tab.id, 'Report')
+    tabs.markClean(tab.id)
+    tabs.setParams(tab.id, [])
+    tabs.setFilePath(tab.id, '/tmp/a.sql')
+    tabs.activate(tab.id)
+    expect(tabs.revision).toBe(start + 7)
+
+    // A call that changes nothing raises the count no further.
+    tabs.setQuery(tab.id, 'SELECT 2')
+    tabs.rename(tab.id, '  ')
+    tabs.activate('missing')
+    tabs.close('missing')
+    expect(tabs.revision).toBe(start + 7)
+
+    tabs.close(tab.id)
+    expect(tabs.revision).toBe(start + 8)
   })
 
   it('moves to a tab that is there and ignores one that is not', () => {
@@ -234,10 +239,10 @@ describe('tabs store', () => {
     tabs.close(one.id)
     await vi.waitFor(() => expect(apiStub.releaseSession).toHaveBeenCalledWith('c1', one.id))
 
-    tabs.closeOthers(two.id)
+    tabs.close(three.id)
     await vi.waitFor(() => expect(apiStub.releaseSession).toHaveBeenCalledWith('c3', three.id))
 
-    tabs.closeAll()
+    tabs.close(two.id)
     await vi.waitFor(() => expect(apiStub.releaseSession).toHaveBeenCalledWith('c2', two.id))
   })
 
@@ -265,11 +270,11 @@ describe('tabs store', () => {
     expect(queries.states[one.id]).toBeUndefined()
     expect(queries.states[two.id]).toBeDefined()
 
-    tabs.closeOthers(two.id)
+    tabs.close(three.id)
     expect(queries.states[three.id]).toBeUndefined()
     expect(queries.states[two.id]).toBeDefined()
 
-    tabs.closeAll()
+    tabs.close(two.id)
     expect(queries.states[two.id]).toBeUndefined()
   })
 

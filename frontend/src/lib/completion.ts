@@ -3,6 +3,7 @@ import {
   completionsFor,
   emptySchemaIndex,
   qualifierBefore,
+  statementAround,
   tableAliases,
   wordBefore,
   type SchemaIndex,
@@ -25,6 +26,13 @@ export interface CompletionSource {
 const sources = new Map<string, () => CompletionSource>()
 
 let provider: monaco.IDisposable | null = null
+
+/**
+ * The largest number of names one answer carries. The list of the editor
+ * shows a few rows and filters the names it holds as the user writes, so a
+ * schema of many thousand columns needs no answer of that size.
+ */
+export const MAX_SUGGESTIONS = 300
 
 /** Records the source of one model. */
 export function setCompletionSource(uri: string, source: () => CompletionSource): void {
@@ -65,8 +73,6 @@ export function suggestionsFor(
     index: emptySchemaIndex(),
     dialect: Dialect.MsSql,
   }
-  const text = model.getValue()
-  const offset = model.getOffsetAt(position)
   const word = model.getWordUntilPosition(position)
   const range = {
     startLineNumber: position.lineNumber,
@@ -75,10 +81,20 @@ export function suggestionsFor(
     endColumn: word.endColumn,
   }
 
-  const items = completionsFor(wordBefore(text, offset), source.index, source.dialect, {
-    qualifier: qualifierBefore(text, offset),
-    aliases: tableAliases(text, source.dialect),
-  })
+  // The names come from the statement that holds the cursor and not from the
+  // whole file. The reader of the aliases splits that statement into
+  // characters, so the cost of a keystroke follows one statement.
+  const statement = statementAround(model.getValue(), model.getOffsetAt(position), source.dialect)
+  const items = completionsFor(
+    wordBefore(statement.text, statement.offset),
+    source.index,
+    source.dialect,
+    {
+      qualifier: qualifierBefore(statement.text, statement.offset),
+      aliases: tableAliases(statement.text, source.dialect),
+      limit: MAX_SUGGESTIONS,
+    },
+  )
 
   return {
     suggestions: items.map((item) => ({

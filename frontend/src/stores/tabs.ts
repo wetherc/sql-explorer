@@ -69,6 +69,17 @@ export const useTabsStore = defineStore('tabs', () => {
   const tabs = ref<QueryTab[]>([])
   const activeTabId = ref<string | null>(null)
   let counter = 0
+  /**
+   * The count of the changes of the workspace. Every change of a tab raises
+   * it, so a watcher of the workspace file follows one number and does not
+   * walk each record of each tab on every keystroke.
+   */
+  const revision = ref(0)
+
+  /** Records that the workspace record changed. */
+  function changed(): void {
+    revision.value += 1
+  }
 
   const activeTab = computed(() => tabs.value.find((tab) => tab.id === activeTabId.value) ?? null)
   const hasTabs = computed(() => tabs.value.length > 0)
@@ -98,6 +109,7 @@ export const useTabsStore = defineStore('tabs', () => {
     }
     tabs.value = [...tabs.value, tab]
     activeTabId.value = tab.id
+    changed()
     return tab
   }
 
@@ -135,33 +147,13 @@ export const useTabsStore = defineStore('tabs', () => {
     // The results of the tab go with the tab, so a closed tab frees its
     // memory.
     useQueryStore().clear(id)
-  }
-
-  function closeOthers(id: string): void {
-    const queries = useQueryStore()
-    for (const tab of tabs.value) {
-      if (tab.id !== id) {
-        releaseSession(tab)
-        queries.clear(tab.id)
-      }
-    }
-    tabs.value = tabs.value.filter((tab) => tab.id === id)
-    activeTabId.value = tabs.value[0]?.id ?? null
-  }
-
-  function closeAll(): void {
-    const queries = useQueryStore()
-    for (const tab of tabs.value) {
-      releaseSession(tab)
-      queries.clear(tab.id)
-    }
-    tabs.value = []
-    activeTabId.value = null
+    changed()
   }
 
   function activate(id: string): void {
     if (tabs.value.some((tab) => tab.id === id)) {
       activeTabId.value = id
+      changed()
     }
   }
 
@@ -170,6 +162,7 @@ export const useTabsStore = defineStore('tabs', () => {
     if (tab && tab.query !== query) {
       tab.query = query
       tab.dirty = true
+      changed()
     }
   }
 
@@ -182,6 +175,7 @@ export const useTabsStore = defineStore('tabs', () => {
         releaseSession(tab, tab.connectionId)
       }
       tab.connectionId = connectionId
+      changed()
     }
   }
 
@@ -190,6 +184,7 @@ export const useTabsStore = defineStore('tabs', () => {
     const tab = tabs.value.find((item) => item.id === id)
     if (tab) {
       tab.params = params
+      changed()
     }
   }
 
@@ -197,6 +192,7 @@ export const useTabsStore = defineStore('tabs', () => {
     const tab = tabs.value.find((item) => item.id === id)
     if (tab && title.trim()) {
       tab.title = title.trim()
+      changed()
     }
   }
 
@@ -204,6 +200,7 @@ export const useTabsStore = defineStore('tabs', () => {
     const tab = tabs.value.find((item) => item.id === id)
     if (tab) {
       tab.dirty = false
+      changed()
     }
   }
 
@@ -252,6 +249,7 @@ export const useTabsStore = defineStore('tabs', () => {
         }
       }),
     )
+    changed()
   }
 
   async function restore(): Promise<void> {
@@ -268,6 +266,7 @@ export const useTabsStore = defineStore('tabs', () => {
     } catch {
       tabs.value = []
       activeTabId.value = null
+      changed()
       return
     }
     await reconcileFiles()
@@ -278,6 +277,7 @@ export const useTabsStore = defineStore('tabs', () => {
     const tab = tabs.value.find((item) => item.id === id)
     if (tab) {
       tab.filePath = filePath
+      changed()
     }
   }
 
@@ -289,14 +289,13 @@ export const useTabsStore = defineStore('tabs', () => {
   return {
     tabs,
     activeTabId,
+    revision,
     activeTab,
     hasTabs,
     setFilePath,
     tabForFile,
     add,
     close,
-    closeOthers,
-    closeAll,
     activate,
     setQuery,
     setConnection,
