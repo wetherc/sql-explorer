@@ -1655,7 +1655,7 @@ pub async fn save_text_file<R: Runtime>(
     else {
         return Ok(None);
     };
-    std::fs::write(&path, request.contents)?;
+    files::write_bytes(&path, request.contents.as_bytes())?;
     let written = path.to_string_lossy().to_string();
     log::info!("Wrote the file '{written}'.");
     Ok(Some(written))
@@ -1681,7 +1681,7 @@ pub async fn save_binary_file<R: Runtime>(
     else {
         return Ok(None);
     };
-    std::fs::write(&path, bytes)?;
+    files::write_bytes(&path, &bytes)?;
     let written = path.to_string_lossy().to_string();
     log::info!("Wrote the file '{written}'.");
     Ok(Some(written))
@@ -1895,7 +1895,11 @@ impl crate::db::sink::RowSink for FileSink {
                     .iter()
                     .map(|column| csv_field(&serde_json::Value::String(column.name.clone())))
                     .collect();
-                writeln!(self.writer()?, "{}", names.join(","))?;
+                let line = names.join(",");
+                // The mark of the byte order stands at the head of the file,
+                // because Excel reads a file without it in the code page of
+                // the system and damages every value outside ASCII.
+                write!(self.writer()?, "{CSV_BOM}{line}{CSV_LINE_END}")?;
             }
             ExportFormat::Json => {
                 self.names = crate::db::unique_column_names(&columns);
@@ -1925,7 +1929,8 @@ impl crate::db::sink::RowSink for FileSink {
         match self.format {
             ExportFormat::Csv => {
                 let fields: Vec<String> = row.iter().map(csv_field).collect();
-                writeln!(self.writer()?, "{}", fields.join(","))?;
+                let line = fields.join(",");
+                write!(self.writer()?, "{line}{CSV_LINE_END}")?;
             }
             ExportFormat::Json => {
                 let mut object = serde_json::Map::new();
@@ -1973,6 +1978,13 @@ impl crate::db::sink::RowSink for FileSink {
 
     fn message(&mut self, _message: crate::db::Message) {}
 }
+
+/// The mark of the byte order that a comma separated file carries, so that
+/// Excel reads the file in UTF-8.
+const CSV_BOM: &str = "\u{feff}";
+
+/// The line end of a comma separated file, which Excel expects.
+const CSV_LINE_END: &str = "\r\n";
 
 /// Writes one field of a comma separated file.
 ///
@@ -2708,7 +2720,7 @@ mod tests {
         assert!(!summary.truncated);
         assert_eq!(
             std::fs::read_to_string(&csv).unwrap(),
-            "id,name\n1,Ada\n2,\n"
+            "\u{feff}id,name\r\n1,Ada\r\n2,\r\n"
         );
         // The temporary file is gone after the rename.
         assert!(!folder.path().join("out.csv.part").exists());
@@ -2859,7 +2871,10 @@ mod tests {
 
         let summary = sink.finish().unwrap();
         assert_eq!(summary.rows, 1);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "id\n1\n");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "\u{feff}id\r\n1\r\n"
+        );
     }
 
     #[test]

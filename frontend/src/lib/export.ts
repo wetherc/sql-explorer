@@ -3,20 +3,52 @@ import { formatCell, isNullCell } from './format'
 import { quoteIdentifier } from './sql'
 
 /**
+ * The mark of the byte order that a comma separated file carries. Excel
+ * reads a file without the mark in the code page of the system, and a
+ * value outside ASCII then arrives damaged.
+ */
+export const CSV_BOM = '\ufeff'
+
+/** The line end of a comma separated file, which Excel expects. */
+const CSV_LINE_END = '\r\n'
+
+/**
+ * True when a spreadsheet would read the text as a formula. A cell that
+ * begins with one of these marks runs as a formula in Excel, so the export
+ * puts an apostrophe in front of it.
+ */
+export function startsAFormula(text: string): boolean {
+  return text.length > 0 && '=+-@\t'.includes(text[0]!)
+}
+
+/**
  * Writes one field of a comma separated file. A field that holds a comma,
  * a quote, a line break or leading blank space is wrapped in quotes, and a
  * quote inside it is doubled.
+ *
+ * A text value that starts with a formula mark gets an apostrophe in front,
+ * because a spreadsheet would otherwise run the value as a formula. The
+ * apostrophe changes the exported text, and the safety of the reader weighs
+ * more than the exact form of such a value. A number keeps its sign,
+ * because a spreadsheet reads it as a number.
  */
 export function toCsvField(value: CellValue): string {
   if (isNullCell(value)) {
     return ''
   }
-  const text = formatCell(value)
+  let text = formatCell(value)
+  if (typeof value !== 'number' && startsAFormula(text)) {
+    text = `'${text}`
+  }
   const needsQuotes = /[",\r\n]/.test(text) || text !== text.trim()
   return needsQuotes ? `"${text.replace(/"/g, '""')}"` : text
 }
 
-/** Writes a whole result set as a comma separated file. */
+/**
+ * Writes a whole result set as a comma separated file. The text begins with
+ * the mark of the byte order and ends each line with a carriage return and
+ * a line feed, so Excel reads the file in UTF-8.
+ */
 export function toCsv(result: ResultSet, includeHeader = true): string {
   const lines: string[] = []
   if (includeHeader) {
@@ -25,7 +57,7 @@ export function toCsv(result: ResultSet, includeHeader = true): string {
   for (const row of result.rows) {
     lines.push(row.map(toCsvField).join(','))
   }
-  return lines.join('\n')
+  return CSV_BOM + lines.map((line) => `${line}${CSV_LINE_END}`).join('')
 }
 
 /**
@@ -99,11 +131,13 @@ export function toInsertStatements(result: ResultSet, table: string, dialect: Di
     .join('\n')
 }
 
-/** Writes the selected cells as text that a spreadsheet accepts. */
+/**
+ * Writes the selected cells as text that a spreadsheet accepts. A cell
+ * without a value gets the same word the grid shows, so that it stays
+ * different from an empty text.
+ */
 export function toTabSeparated(rows: CellValue[][]): string {
-  return rows
-    .map((row) => row.map((value) => (isNullCell(value) ? '' : formatCell(value))).join('\t'))
-    .join('\n')
+  return rows.map((row) => row.map((value) => formatCell(value)).join('\t')).join('\n')
 }
 
 /**

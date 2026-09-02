@@ -789,7 +789,7 @@ describe('QueryView', () => {
     await settle()
 
     expect(apiStub.saveTextFile).toHaveBeenCalledWith(
-      expect.objectContaining({ extension: 'csv', contents: 'n\n1' }),
+      expect.objectContaining({ extension: 'csv', contents: '\ufeffn\r\n1\r\n' }),
     )
     expect(useUiStore().notices.some((notice) => notice.level === 'success')).toBe(true)
   })

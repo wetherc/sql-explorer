@@ -148,6 +148,13 @@ pub fn read_text(path: &Path) -> Result<String> {
 /// Writes the text of a file through a temporary file and a rename, so a
 /// write that fails leaves the file that was there as it was.
 pub fn write_text(path: &Path, contents: &str) -> Result<()> {
+    write_bytes(path, contents.as_bytes())
+}
+
+/// Writes the bytes of a file through a temporary file and a rename. A stop
+/// in the middle of the write therefore leaves the temporary file and not a
+/// file that holds a part of the content.
+pub fn write_bytes(path: &Path, contents: &[u8]) -> Result<()> {
     let mut name = path.as_os_str().to_owned();
     name.push(".part");
     let temp_path = PathBuf::from(name);
@@ -300,6 +307,16 @@ mod tests {
         // A second write takes the place of the first.
         write_text(&file, "SELECT 2").unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "SELECT 2");
+    }
+
+    #[test]
+    fn a_write_of_bytes_goes_through_a_temporary_file() {
+        let root = temp_folder("write-bytes");
+        let file = root.join("out.bin");
+
+        write_bytes(&file, &[0, 1, 2, 255]).unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), vec![0, 1, 2, 255]);
+        assert!(!root.join("out.bin.part").exists());
     }
 
     #[test]

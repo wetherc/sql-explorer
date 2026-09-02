@@ -151,7 +151,7 @@ describe('ResultsGrid', () => {
     await wrapper.find('[data-test="grid-copy"]').trigger('click')
     await Promise.resolve()
     expect(globalThis.navigator.clipboard.writeText).toHaveBeenCalledWith(
-      'id\tname\n2\tGrace\n1\tAda\n3\t',
+      'id\tname\n2\tGrace\n1\tAda\n3\tNULL',
     )
     expect(wrapper.emitted('copied')).toBeTruthy()
   })

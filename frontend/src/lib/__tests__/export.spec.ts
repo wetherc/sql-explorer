@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  CSV_BOM,
   exportFileName,
   toCsv,
   toCsvField,
@@ -9,6 +10,7 @@ import {
   toScript,
   toSqlLiteral,
   toTabSeparated,
+  startsAFormula,
   uniqueColumnNames,
 } from '@/lib/export'
 import { Dialect, type ResultSet } from '@/types/api'
@@ -48,15 +50,34 @@ describe('toCsvField', () => {
   it('quotes a field with blank space at its edge', () => {
     expect(toCsvField(' a')).toBe('" a"')
   })
+
+  it('puts an apostrophe in front of a text that starts a formula', () => {
+    expect(toCsvField('=SUM(A1:A9)')).toBe("'=SUM(A1:A9)")
+    expect(toCsvField('+1')).toBe("'+1")
+    expect(toCsvField('-cmd')).toBe("'-cmd")
+    expect(toCsvField('@name')).toBe("'@name")
+    expect(toCsvField('\tpad')).toBe("'\tpad")
+  })
+
+  it('leaves a number as it is', () => {
+    expect(toCsvField(-5)).toBe('-5')
+    expect(toCsvField('a=b')).toBe('a=b')
+  })
+})
+
+describe('startsAFormula', () => {
+  it('answers false for an empty text', () => {
+    expect(startsAFormula('')).toBe(false)
+  })
 })
 
 describe('toCsv', () => {
-  it('writes a header and the rows', () => {
-    expect(toCsv(result)).toBe('id,name\n1,Ada\n2,')
+  it('writes a header and the rows with the mark and the Excel line end', () => {
+    expect(toCsv(result)).toBe(`${CSV_BOM}id,name\r\n1,Ada\r\n2,\r\n`)
   })
 
   it('leaves the header out on request', () => {
-    expect(toCsv(result, false)).toBe('1,Ada\n2,')
+    expect(toCsv(result, false)).toBe(`${CSV_BOM}1,Ada\r\n2,\r\n`)
   })
 })
 
@@ -85,7 +106,11 @@ describe('toTabSeparated', () => {
         ['a', 'b'],
         [1, null],
       ]),
-    ).toBe('a\tb\n1\t')
+    ).toBe('a\tb\n1\tNULL')
+  })
+
+  it('keeps a cell without a value apart from an empty text', () => {
+    expect(toTabSeparated([[null, '']])).toBe('NULL\t')
   })
 })
 
