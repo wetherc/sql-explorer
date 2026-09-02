@@ -208,6 +208,18 @@ describe('api', () => {
     })
   })
 
+  it('reports a fault of the frames once the backend answers', async () => {
+    invoke.mockImplementation((_command: string, args: { onChunk: ChannelStub }) => {
+      // A frame of an unknown kind reaches the reader through the channel.
+      args.onChunk.onmessage?.(new Uint8Array([99]).buffer)
+      return Promise.resolve(undefined)
+    })
+
+    await expect(
+      api.executeQuery({ connectionId: 'c1', requestId: 'r1', query: 'SELECT 1' }, handlers()),
+    ).rejects.toThrow(/frame of the unknown kind 99/)
+  })
+
   it('leaves the limits out when none are given', async () => {
     await api.executeQuery({ connectionId: 'c1', requestId: 'r1', query: 'SELECT 1' }, handlers())
     expect(invoke).toHaveBeenCalledWith('execute_query', {

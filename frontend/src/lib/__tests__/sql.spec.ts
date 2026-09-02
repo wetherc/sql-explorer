@@ -339,8 +339,18 @@ describe('completionsFor', () => {
     expect(completionsFor('', wide, Dialect.MsSql, { qualifier: 'orders', limit: 1 })).toHaveLength(
       1,
     )
-    // The qualifier names a schema, so the relations of it are offered.
-    expect(completionsFor('', wide, Dialect.MsSql, { qualifier: 'dbo', limit: 1 })).toHaveLength(1)
+    // The qualifier names a schema whose columns are not held, so the
+    // relations of it are offered and the limit holds them too.
+    const schemaOnly: SchemaIndex = {
+      ...emptySchemaIndex(),
+      tables: [
+        { name: 'orders', qualifier: 'Sales.dbo' },
+        { name: 'items', qualifier: 'Sales.dbo' },
+      ],
+    }
+    expect(
+      completionsFor('', schemaOnly, Dialect.MsSql, { qualifier: 'dbo', limit: 1 }),
+    ).toHaveLength(1)
   })
 })
 

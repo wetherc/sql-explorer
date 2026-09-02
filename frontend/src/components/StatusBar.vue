@@ -18,7 +18,7 @@
       <div data-test="status-running-elapsed">{{ formatDuration(runningMs) }}</div>
     </template>
 
-    <template v-if="state && !state.running && lastRunRows !== null">
+    <template v-if="lastRunRows !== null && state && !state.running">
       <v-divider vertical />
       <div data-test="status-rows">{{ formatRowCount(lastRunRows) }}</div>
       <v-divider vertical />

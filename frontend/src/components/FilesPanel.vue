@@ -22,17 +22,20 @@
     <div class="files-body">
       <div v-if="files.hasRoots" class="files-tree" role="tree" aria-label="Files">
         <div
-          v-for="row of files.rows"
+          v-for="(row, index) of files.rows"
           :key="row.path"
+          :ref="(element) => keepRow(row.path, element)"
           class="file-row"
           :style="{ paddingLeft: rowIndent(row.depth) }"
           role="treeitem"
           :aria-level="row.depth + 1"
           :aria-expanded="row.kind === 'folder' ? files.openPaths.has(row.path) : undefined"
-          tabindex="0"
+          :tabindex="row.path === tabStop ? 0 : -1"
+          :aria-keyshortcuts="row.depth === 0 ? 'Delete' : undefined"
           data-test="file-row"
           @click="activate(row)"
-          @keydown.enter.prevent="activate(row)"
+          @focus="activePath = row.path"
+          @keydown="onKeydown($event, row, index)"
         >
           <v-icon
             v-if="row.kind === 'folder'"
@@ -96,6 +99,7 @@
 </template>
 
 <script setup lang="ts">
+import { computed, nextTick, ref } from 'vue'
 import EmptyState from './EmptyState.vue'
 import PanelHeader from './PanelHeader.vue'
 import { useFilesStore, type FileNode } from '@/stores/files'
@@ -122,6 +126,100 @@ function activate(row: FileNode): void {
     return
   }
   void files.expand(row.path)
+}
+
+/**
+ * The row that the keys reach, and the elements of the rows.
+ *
+ * A tree carries one tab stop, and the arrows move inside it. The stop
+ * follows the row the user last reached, and it falls back on the first row
+ * when that row is gone.
+ */
+const activePath = ref<string | null>(null)
+const rowElements = new Map<string, HTMLElement>()
+
+const tabStop = computed(() => {
+  const held = files.rows.find((row) => row.path === activePath.value)
+  return held?.path ?? files.rows[0]?.path ?? null
+})
+
+/** Holds the element of one row, and forgets a row that is gone. */
+function keepRow(path: string, element: unknown): void {
+  if (element instanceof HTMLElement) {
+    rowElements.set(path, element)
+  } else {
+    rowElements.delete(path)
+  }
+}
+
+/** Moves the stop to one row and puts the focus on it. */
+function focusRow(path: string | undefined): void {
+  if (path === undefined) {
+    return
+  }
+  activePath.value = path
+  void nextTick(() => rowElements.get(path)?.focus())
+}
+
+/** The row that holds the given one, when there is one. */
+function parentOf(index: number): FileNode | undefined {
+  const row = files.rows[index]
+  if (!row || row.depth === 0) {
+    return undefined
+  }
+  return files.rows
+    .slice(0, index)
+    .reverse()
+    .find((candidate) => candidate.depth < row.depth)
+}
+
+/**
+ * The keys of a tree. The arrows walk the rows on show, the right arrow
+ * opens a folder and steps into it, the left arrow closes a folder or steps
+ * out of it, and Delete takes a root out of the panel.
+ */
+function onKeydown(event: KeyboardEvent, row: FileNode, index: number): void {
+  const open = row.kind === 'folder' && files.openPaths.has(row.path)
+  switch (event.key) {
+    case 'ArrowDown':
+      focusRow(files.rows[index + 1]?.path)
+      break
+    case 'ArrowUp':
+      focusRow(files.rows[index - 1]?.path)
+      break
+    case 'Home':
+      focusRow(files.rows[0]?.path)
+      break
+    case 'End':
+      focusRow(files.rows[files.rows.length - 1]?.path)
+      break
+    case 'ArrowRight':
+      if (row.kind === 'folder' && !open) {
+        void files.expand(row.path)
+      } else if (open) {
+        focusRow(files.rows[index + 1]?.path)
+      }
+      break
+    case 'ArrowLeft':
+      if (open) {
+        files.collapse(row.path)
+      } else {
+        focusRow(parentOf(index)?.path)
+      }
+      break
+    case 'Enter':
+    case ' ':
+      activate(row)
+      break
+    case 'Delete':
+      if (row.depth === 0) {
+        files.closeRoot(row.path)
+      }
+      break
+    default:
+      return
+  }
+  event.preventDefault()
 }
 </script>
 

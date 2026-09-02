@@ -80,10 +80,115 @@ describe('FilesPanel', () => {
     await settle()
     expect(tabs.tabs).toHaveLength(1)
 
-    await rows[2]!.trigger('keydown.enter')
+    await rows[2]!.trigger('keydown', { key: 'Enter' })
     await settle()
     expect(tabs.tabs).toHaveLength(2)
     expect(tabs.tabs[1]?.filePath).toBe('/data/b.sql')
+  })
+
+  it('walks the rows with the arrows and holds one tab stop', async () => {
+    apiStub.listFolder.mockImplementation((path: string) =>
+      Promise.resolve(
+        path === '/data'
+          ? [entry('reports', 'folder'), entry('a.sql')]
+          : [entry('c.sql', 'file', '/data/reports')],
+      ),
+    )
+    const wrapper = await mountWithRoot()
+
+    // The right arrow opens the root, and the tree holds one tab stop.
+    await wrapper.find('[data-test="file-row"]').trigger('keydown', { key: 'ArrowRight' })
+    await settle()
+    let rows = wrapper.findAll('[data-test="file-row"]')
+    expect(rows).toHaveLength(3)
+    expect(rows.map((row) => row.attributes('tabindex'))).toEqual(['0', '-1', '-1'])
+
+    // The down arrow moves the stop, and the row it moves to takes it.
+    await rows[0]!.trigger('keydown', { key: 'ArrowDown' })
+    await settle()
+    rows = wrapper.findAll('[data-test="file-row"]')
+    expect(rows.map((row) => row.attributes('tabindex'))).toEqual(['-1', '0', '-1'])
+
+    // The right arrow on a closed folder opens it and the next one steps in.
+    await rows[1]!.trigger('keydown', { key: 'ArrowRight' })
+    await settle()
+    rows = wrapper.findAll('[data-test="file-row"]')
+    expect(rows).toHaveLength(4)
+    await rows[1]!.trigger('keydown', { key: 'ArrowRight' })
+    await settle()
+    rows = wrapper.findAll('[data-test="file-row"]')
+    expect(rows[2]!.attributes('tabindex')).toBe('0')
+
+    // The left arrow on a row that holds nothing open steps out to its
+    // folder, and the next one closes that folder.
+    await rows[2]!.trigger('keydown', { key: 'ArrowLeft' })
+    await settle()
+    rows = wrapper.findAll('[data-test="file-row"]')
+    expect(rows[1]!.attributes('tabindex')).toBe('0')
+    await rows[1]!.trigger('keydown', { key: 'ArrowLeft' })
+    await settle()
+    expect(wrapper.findAll('[data-test="file-row"]')).toHaveLength(3)
+
+    // End and Home reach the last row and the first one.
+    rows = wrapper.findAll('[data-test="file-row"]')
+    await rows[0]!.trigger('keydown', { key: 'End' })
+    await settle()
+    rows = wrapper.findAll('[data-test="file-row"]')
+    expect(rows[2]!.attributes('tabindex')).toBe('0')
+    await rows[2]!.trigger('keydown', { key: 'Home' })
+    await settle()
+    rows = wrapper.findAll('[data-test="file-row"]')
+    expect(rows[0]!.attributes('tabindex')).toBe('0')
+
+    // The up arrow at the first row and a key the tree does not hold change
+    // nothing.
+    await rows[0]!.trigger('keydown', { key: 'ArrowUp' })
+    await rows[0]!.trigger('keydown', { key: 'a' })
+    await settle()
+    rows = wrapper.findAll('[data-test="file-row"]')
+    expect(rows[0]!.attributes('tabindex')).toBe('0')
+    // The left arrow at the root closes it, and a second one steps nowhere
+    // because a root holds no folder above it.
+    await rows[0]!.trigger('keydown', { key: 'ArrowLeft' })
+    await settle()
+    expect(wrapper.findAll('[data-test="file-row"]')).toHaveLength(1)
+    await wrapper.find('[data-test="file-row"]').trigger('keydown', { key: 'ArrowLeft' })
+    await settle()
+    expect(wrapper.findAll('[data-test="file-row"]')).toHaveLength(1)
+  })
+
+  it('opens a folder with the space key', async () => {
+    apiStub.listFolder.mockResolvedValue([entry('a.sql')])
+    const wrapper = await mountWithRoot()
+
+    await wrapper.find('[data-test="file-row"]').trigger('keydown', { key: ' ' })
+    await settle()
+
+    expect(wrapper.findAll('[data-test="file-row"]')).toHaveLength(2)
+  })
+
+  it('marks the row the user reached as the tab stop', async () => {
+    apiStub.listFolder.mockResolvedValue([entry('a.sql')])
+    const wrapper = await mountWithRoot()
+    await wrapper.find('[data-test="file-row"]').trigger('click')
+    await settle()
+
+    const rows = wrapper.findAll('[data-test="file-row"]')
+    await rows[1]!.trigger('focus')
+    await settle()
+    expect(
+      wrapper.findAll('[data-test="file-row"]').map((row) => row.attributes('tabindex')),
+    ).toEqual(['-1', '0'])
+  })
+
+  it('takes a folder out of the panel with the Delete key', async () => {
+    const wrapper = await mountWithRoot()
+
+    await wrapper.find('[data-test="file-row"]').trigger('keydown', { key: 'Delete' })
+    await settle()
+
+    expect(wrapper.findAll('[data-test="file-row"]')).toHaveLength(0)
+    expect(wrapper.find('[data-test="file-row"]').exists()).toBe(false)
   })
 
   it('takes a folder out of the panel from the mark of its row', async () => {

@@ -77,7 +77,21 @@ describe('ResultsGrid', () => {
 
   it('says so when a statement returned no rows', () => {
     const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result({ rows: [] }) } })
-    expect(wrapper.text()).toContain('This statement returned no rows.')
+    expect(wrapper.find('[data-test="grid-empty"]').text()).toBe('This statement returned no rows.')
+  })
+
+  it('says so when the filter matches no row', async () => {
+    vi.useFakeTimers()
+    try {
+      const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+      await wrapper.find('[data-test="grid-filter"] input').setValue('nothing here')
+      await vi.runAllTimersAsync()
+      await wrapper.vm.$nextTick()
+
+      expect(wrapper.find('[data-test="grid-empty"]').text()).toBe('No row matches the filter.')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('sorts up, then down, then not at all', async () => {

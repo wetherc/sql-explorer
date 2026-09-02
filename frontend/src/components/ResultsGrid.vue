@@ -191,8 +191,9 @@
               <td
                 :colspan="result.columns.length + 1"
                 class="text-center py-6 text-medium-emphasis"
+                data-test="grid-empty"
               >
-                This statement returned no rows.
+                {{ emptyMessage }}
               </td>
             </tr>
           </tbody>
@@ -370,6 +371,14 @@ const rowTextsVersion = ref(0)
 const activeFilter = ref('')
 /** The part of the rows the build covered, or null while no build runs. */
 const filterProgress = ref<number | null>(null)
+
+/**
+ * The words for a table with no row on show. A filter that matches no row
+ * is not a statement that gave no row, so the two states read apart.
+ */
+const emptyMessage = computed(() =>
+  rowTotal.value > 0 ? 'No row matches the filter.' : 'This statement returned no rows.',
+)
 /** The longest a slice of the build holds the main thread. */
 const BUILD_SLICE_MS = 12
 /** The most rows one slice reads, so a slice of small rows also gives way. */
