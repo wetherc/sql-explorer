@@ -186,6 +186,88 @@ describe('ExplorerTree as a tree a reader can follow', () => {
     expect(tabStop(wrapper)).toBe(1)
   })
 
+  it('draws the rows around the visible part alone', async () => {
+    const many = Array.from({ length: 400 }, (_item, index) =>
+      node({ key: `db${index}`, label: `Node ${index}` }),
+    )
+    const wrapper = mountTree(many)
+
+    // The window holds far fewer rows than the tree, and the space above
+    // and below carries the rest.
+    const drawn = wrapper.findAll('[data-test="tree-row"]').length
+    expect(drawn).toBeGreaterThan(0)
+    expect(drawn).toBeLessThan(many.length)
+
+    const first = () => wrapper.find('[data-test="tree-row"]').text()
+    expect(first()).toContain('Node 0')
+
+    // A scroll of the area moves the window.
+    Object.defineProperty(wrapper.element, 'scrollTop', { value: 24 * 200, writable: true })
+    await wrapper.trigger('scroll')
+    expect(first()).not.toContain('Node 0')
+
+    // The End key reaches the last row, which the window did not hold.
+    await wrapper.trigger('keydown', { key: 'End' })
+    await wrapper.vm.$nextTick()
+    const rows = wrapper.findAll('[data-test="tree-row"]')
+    expect(rows[rows.length - 1]!.text()).toContain('Node 399')
+    expect(rows[rows.length - 1]!.attributes('tabindex')).toBe('0')
+
+    // The Home key reaches the first row again.
+    await wrapper.trigger('keydown', { key: 'Home' })
+    await wrapper.vm.$nextTick()
+    expect(first()).toContain('Node 0')
+  })
+
+  it('follows the height of its area, and works without a watcher of it', async () => {
+    const many = Array.from({ length: 400 }, (_item, index) =>
+      node({ key: `db${index}`, label: `Node ${index}` }),
+    )
+    const callbacks: Array<() => void> = []
+    class ObserverStub {
+      constructor(callback: () => void) {
+        callbacks.push(callback)
+      }
+      observe(): void {}
+      disconnect(): void {}
+    }
+    const held = globalThis.ResizeObserver
+    globalThis.ResizeObserver = ObserverStub as unknown as typeof ResizeObserver
+    try {
+      const wrapper = mountTree(many)
+      const tall = wrapper.findAll('[data-test="tree-row"]').length
+
+      // A height of none says nothing, so the window stays as it was.
+      Object.defineProperty(wrapper.element, 'clientHeight', { value: 0, configurable: true })
+      callbacks.forEach((callback) => callback())
+      await wrapper.vm.$nextTick()
+      expect(wrapper.findAll('[data-test="tree-row"]').length).toBe(tall)
+
+      // A short area draws fewer rows than a tall one.
+      Object.defineProperty(wrapper.element, 'clientHeight', { value: 48, configurable: true })
+      callbacks.forEach((callback) => callback())
+      await wrapper.vm.$nextTick()
+      expect(wrapper.findAll('[data-test="tree-row"]').length).toBeLessThan(tall)
+      wrapper.unmount()
+    } finally {
+      globalThis.ResizeObserver = held
+    }
+
+    // A host without the watcher draws the rows all the same.
+    // @ts-expect-error the test takes the watcher away from the host.
+    delete globalThis.ResizeObserver
+    try {
+      const wrapper = mountTree(many)
+      expect(wrapper.findAll('[data-test="tree-row"]').length).toBeGreaterThan(0)
+      // The area is gone once the tree goes away, so a move of the focus
+      // reaches no place of a scroll.
+      wrapper.unmount()
+      ;(wrapper.vm as unknown as { focusRow: (key: string) => void }).focusRow('db0')
+    } finally {
+      globalThis.ResizeObserver = held
+    }
+  })
+
   it('keeps the place of the scroll across when it moves the focus', async () => {
     const wrapper = mountTree([node(), node({ key: 'db2' })])
     const row = wrapper.findAll('[data-test="tree-row"]')[1]!.element as HTMLElement

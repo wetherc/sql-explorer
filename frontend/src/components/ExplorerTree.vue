@@ -1,60 +1,84 @@
 <template>
-  <div class="explorer-tree" role="tree" aria-label="Database objects" @keydown="onKeyDown">
-    <template v-for="row in rows" :key="row.key">
-      <div
-        v-if="row.kind === 'node'"
-        :ref="(element) => keepRow(row.key, element)"
-        class="tree-row"
-        :class="{ selected: selectedKey === row.key }"
-        :style="{ paddingLeft: rowIndent(row.depth) }"
-        role="treeitem"
-        :aria-level="row.depth + 1"
-        :aria-posinset="row.posInSet"
-        :aria-setsize="row.setSize"
-        :aria-expanded="row.expandable ? row.expanded : undefined"
-        :aria-selected="selectedKey === row.key"
-        :tabindex="activeKey === row.key ? 0 : -1"
-        data-test="tree-row"
-        @click="activate(row.node)"
-        @focus="focusedKey = row.key"
-        @contextmenu.prevent="openMenuAt($event.clientX, $event.clientY, row.node)"
-      >
-        <v-icon
-          v-if="row.expandable"
-          size="x-small"
-          class="chevron"
-          aria-hidden="true"
-          data-test="tree-chevron"
+  <div
+    ref="scrollArea"
+    class="explorer-scroll"
+    role="tree"
+    aria-label="Database objects"
+    :style="{ '--tree-row-height': `${ROW_HEIGHT}px` }"
+    @keydown="onKeyDown"
+    @scroll="onScroll"
+  >
+    <!-- The tree scrolls in the element above, and it draws only the rows
+         around the visible part. Two empty blocks hold the space of the rows
+         above and below, so the bar of the scroll answers for the whole
+         tree. The block here carries the width of the widest row. It stands
+         outside the reading, so the rows belong to the tree itself. -->
+    <div class="explorer-tree" role="presentation">
+      <div v-if="topPad > 0" :style="{ height: `${topPad}px` }" aria-hidden="true"></div>
+      <template v-for="row in windowRows" :key="row.key">
+        <div
+          v-if="row.kind === 'node'"
+          :ref="(element) => keepRow(row.key, element)"
+          class="tree-row"
+          :class="{ selected: selectedKey === row.key }"
+          :style="{ paddingLeft: rowIndent(row.depth) }"
+          role="treeitem"
+          :aria-level="row.depth + 1"
+          :aria-posinset="row.posInSet"
+          :aria-setsize="row.setSize"
+          :aria-expanded="row.expandable ? row.expanded : undefined"
+          :aria-selected="selectedKey === row.key"
+          :tabindex="activeKey === row.key ? 0 : -1"
+          data-test="tree-row"
+          @click="activate(row.node)"
+          @focus="focusedKey = row.key"
+          @contextmenu.prevent="openMenuAt($event.clientX, $event.clientY, row.node)"
         >
-          {{ row.expanded ? 'mdi-chevron-down' : 'mdi-chevron-right' }}
-        </v-icon>
-        <span v-else class="chevron-space"></span>
+          <v-icon
+            v-if="row.expandable"
+            size="x-small"
+            class="chevron"
+            aria-hidden="true"
+            data-test="tree-chevron"
+          >
+            {{ row.expanded ? 'mdi-chevron-down' : 'mdi-chevron-right' }}
+          </v-icon>
+          <span v-else class="chevron-space"></span>
 
-        <v-progress-circular
-          v-if="row.node.loading"
-          indeterminate
-          size="12"
-          width="2"
-          class="mr-2"
-          data-test="tree-loading"
-        />
-        <v-icon v-else size="small" class="mr-2 node-icon" aria-hidden="true">
-          {{ row.node.icon }}
-        </v-icon>
+          <v-progress-circular
+            v-if="row.node.loading"
+            indeterminate
+            size="12"
+            width="2"
+            class="mr-2"
+            data-test="tree-loading"
+          />
+          <v-icon v-else size="small" class="mr-2 node-icon" aria-hidden="true">
+            {{ row.node.icon }}
+          </v-icon>
 
-        <span class="node-label">{{ row.node.label }}</span>
-        <span v-if="row.node.hint" class="node-hint">{{ row.node.hint }}</span>
-      </div>
+          <span class="node-label">{{ row.node.label }}</span>
+          <span v-if="row.node.hint" class="node-hint">{{ row.node.hint }}</span>
+        </div>
 
-      <div v-else class="empty-branch" :style="{ paddingLeft: labelIndent(row.depth) }">
-        Nothing here
-      </div>
-    </template>
+        <div v-else class="empty-branch" :style="{ paddingLeft: labelIndent(row.depth) }">
+          Nothing here
+        </div>
+      </template>
+      <div v-if="bottomPad > 0" :style="{ height: `${bottomPad}px` }" aria-hidden="true"></div>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, type ComponentPublicInstance } from 'vue'
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  type ComponentPublicInstance,
+} from 'vue'
 import { isExpandable, type ExplorerNode } from '@/stores/explorer'
 
 /** The width of one step of the indent. */
@@ -70,6 +94,11 @@ const LABEL_OFFSET = 46
 
 /** How long a type-ahead holds its letters before it starts again. */
 const TYPE_AHEAD_MS = 800
+
+/** The height of one row, which the window of drawn rows is built from. */
+const ROW_HEIGHT = 24
+/** The number of rows drawn above and below the visible part. */
+const OVERSCAN = 10
 
 const props = withDefaults(
   defineProps<{
@@ -104,6 +133,32 @@ type Row =
 /** The row that holds the focus, which is the one row the Tab key reaches. */
 const focusedKey = ref<string | null>(null)
 const rowElements = new Map<string, HTMLElement>()
+
+/** The element the rows scroll in, and the place and the height of it. */
+const scrollArea = ref<HTMLElement | null>(null)
+const scrollTop = ref(0)
+const viewportHeight = ref(600)
+let sizeObserver: ResizeObserver | null = null
+
+onMounted(() => {
+  if (typeof ResizeObserver === 'undefined') {
+    return
+  }
+  sizeObserver = new ResizeObserver(() => {
+    const element = scrollArea.value
+    if (element && element.clientHeight > 0) {
+      viewportHeight.value = element.clientHeight
+    }
+  })
+  if (scrollArea.value) {
+    sizeObserver.observe(scrollArea.value)
+  }
+})
+
+onBeforeUnmount(() => {
+  sizeObserver?.disconnect()
+  sizeObserver = null
+})
 
 let typed = ''
 let typedAt = 0
@@ -148,6 +203,54 @@ const rows = computed<Row[]>(() => {
 
 /** The rows a key can reach, which leaves out the note of an empty branch. */
 const nodeRows = computed(() => rows.value.filter((row) => row.kind === 'node'))
+
+/** The first row of the window, counted from the first row of the tree. */
+const firstDrawn = computed(() => Math.max(0, Math.floor(scrollTop.value / ROW_HEIGHT) - OVERSCAN))
+
+/** The row after the last row of the window. */
+const lastDrawn = computed(() =>
+  Math.min(
+    rows.value.length,
+    firstDrawn.value + Math.ceil(viewportHeight.value / ROW_HEIGHT) + OVERSCAN * 2,
+  ),
+)
+
+/** The rows the view draws. */
+const windowRows = computed(() => rows.value.slice(firstDrawn.value, lastDrawn.value))
+
+const topPad = computed(() => firstDrawn.value * ROW_HEIGHT)
+const bottomPad = computed(() => (rows.value.length - lastDrawn.value) * ROW_HEIGHT)
+
+function onScroll(event: Event): void {
+  const target = event.target as HTMLElement
+  scrollTop.value = target.scrollTop
+  viewportHeight.value = target.clientHeight || viewportHeight.value
+}
+
+/**
+ * Brings one row of the tree into the visible part. A row outside the window
+ * is not drawn, so the place of the scroll moves before the focus goes to
+ * the row.
+ */
+function scrollToRow(index: number): void {
+  const area = scrollArea.value
+  if (!area) {
+    return
+  }
+  const top = index * ROW_HEIGHT
+  const bottom = top + ROW_HEIGHT
+  if (top < scrollTop.value) {
+    area.scrollTop = top
+  } else if (bottom > scrollTop.value + viewportHeight.value) {
+    area.scrollTop = bottom - viewportHeight.value
+  } else {
+    return
+  }
+  // The place of the element and the place this view holds must agree at
+  // once, because the window of the drawn rows follows this value and the
+  // event of the scroll arrives later.
+  scrollTop.value = area.scrollTop
+}
 
 /**
  * The row that carries the one tab stop of the tree. It is the row that holds
@@ -199,6 +302,7 @@ function openMenuAt(x: number, y: number, node: ExplorerNode): void {
  */
 function focusRow(key: string): void {
   focusedKey.value = key
+  scrollToRow(rows.value.findIndex((row) => row.key === key))
   void nextTick(() => {
     const row = rowElements.get(key)
     row?.focus({ preventScroll: true })
@@ -351,6 +455,13 @@ defineExpose({ focusRow })
 </script>
 
 <style scoped>
+/* The tree scrolls here, on both axes. */
+.explorer-scroll {
+  height: 100%;
+  overflow: auto;
+  outline: none;
+}
+
 /* Each row takes the width of the widest row, so a long name reaches past
    the panel and the scroll of the panel brings it into view. A tree that is
    narrower than the panel still fills the panel. */
@@ -360,12 +471,14 @@ defineExpose({ focusRow })
   min-width: 100%;
 }
 
+/* Every row is as tall as every other one, because the window of the drawn
+   rows counts the rows above it in one height. */
 .tree-row {
   display: flex;
   align-items: center;
   gap: 2px;
-  padding-top: 3px;
-  padding-bottom: 3px;
+  height: var(--tree-row-height);
+  box-sizing: border-box;
   padding-right: 8px;
   cursor: pointer;
   font-size: var(--app-text-md);
@@ -409,10 +522,12 @@ defineExpose({ focusRow })
 }
 
 .empty-branch {
+  display: flex;
+  align-items: center;
+  height: var(--tree-row-height);
+  box-sizing: border-box;
   font-size: var(--app-text-sm);
   font-style: italic;
   color: rgb(var(--v-theme-on-surface-variant));
-  padding-top: 2px;
-  padding-bottom: 2px;
 }
 </style>

@@ -334,7 +334,9 @@ async function copyName(node: ExplorerNode): Promise<void> {
 
 .explorer-body {
   flex: 1 1 auto;
-  overflow: auto;
+  /* The tree inside holds the scroll of its own rows, so this element only
+     gives it the room that is left. */
+  overflow: hidden;
   min-height: 0;
   padding-top: 4px;
 }
