@@ -350,6 +350,21 @@ and not one statement at a time, because the numbers of the placeholders belong
 to the whole text. The same script without a parameter is split and each part
 holds its own effect.
 
+## A script with a parameter on PostgreSQL
+
+A statement with a parameter goes to PostgreSQL through the extended
+protocol, which takes one statement in each text. The placeholders `$1`,
+`$2` and on are numbered across the whole script, so the driver sends the
+text whole, and the server refuses a script of two statements with "cannot
+insert multiple commands into a prepared statement". Run such a script one
+statement at a time.
+
+MySQL and SQLite mark each place with `?`, so their drivers split a script
+with parameters. Each statement takes as many values as it has places, in
+order. On MySQL a statement that holds a `?` goes through the prepared
+protocol, and the server refuses some statements there, such as `CREATE
+PROCEDURE`, with error 1295.
+
 ## A statement with a parameter reads the values of PostgreSQL in binary
 
 A statement without a parameter goes to PostgreSQL through the simple

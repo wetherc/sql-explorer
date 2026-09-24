@@ -42,3 +42,8 @@ On MS SQL Server a statement with a parameter travels inside `sp_executesql`.
 A `USE` or a `SET` inside such a batch holds for that batch alone. A script
 that carries a parameter is also sent whole and not one statement at a time,
 because the numbers of the placeholders belong to the whole text.
+
+On PostgreSQL a statement with a parameter must stand alone. The server
+refuses a script of two statements when one of them holds a parameter. MySQL
+and SQLite run such a script one statement at a time, and each statement
+gets the values of its own parameters.

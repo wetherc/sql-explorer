@@ -2,9 +2,10 @@
 
 use crate::db::drivers::{
     add_constraint_column, add_index_column, add_snapshot_column, bytes_to_json, constraint_kind,
-    f32_to_json, f64_to_json, number_out_of_range, number_value, parameter_type_refused,
-    prefixed_plan, routine_kind, rows_affected_message, rows_returned_message, size_text,
-    system_roots, table_kind, CancelHandle, DatabaseDriver, NumberValue,
+    f32_to_json, f64_to_json, next_values, number_out_of_range, number_value,
+    parameter_type_refused, prefixed_plan, routine_kind, rows_affected_message,
+    rows_returned_message, size_text, system_roots, table_kind, CancelHandle, DatabaseDriver,
+    NumberValue,
 };
 use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{
@@ -218,10 +219,11 @@ pub fn describe_connect_error(error: mysql_async::Error) -> Error {
     Error::MySql(error)
 }
 
-/// Turns the JSON parameters into values the driver can bind.
-pub fn bind_params(params: Option<&QueryParams>) -> Result<mysql_async::Params> {
+/// Turns the JSON parameters into values the driver can bind. A run
+/// without parameters gives no list.
+pub fn bind_params(params: Option<&QueryParams>) -> Result<Option<Vec<MysqlValue>>> {
     let Some(params) = params else {
-        return Ok(mysql_async::Params::Empty);
+        return Ok(None);
     };
     let mut values: Vec<MysqlValue> = Vec::new();
     for param in params {
@@ -237,7 +239,7 @@ pub fn bind_params(params: Option<&QueryParams>) -> Result<mysql_async::Params> 
             other => return Err(parameter_type_refused(other)),
         });
     }
-    Ok(mysql_async::Params::Positional(values))
+    Ok(Some(values))
 }
 
 /// Runs one statement and feeds each row to the sink as the driver reads
@@ -247,9 +249,12 @@ pub fn bind_params(params: Option<&QueryParams>) -> Result<mysql_async::Params> 
 /// A statement without parameters goes through the text protocol. MySQL
 /// refuses `CREATE PROCEDURE`, `CREATE TRIGGER`, `USE` and some other
 /// statements in the prepared protocol with error 1295, and a prepared
-/// statement costs a second round trip. A statement with parameters, or a
-/// run that sets `one_statement`, goes through the prepared protocol,
-/// because there the server refuses a text with a second statement.
+/// statement costs a second round trip. A run that sets `one_statement`
+/// goes through the prepared protocol, because there the server refuses a
+/// text with a second statement. In a run with parameters, a statement that
+/// holds a `?` goes there too. The prepared statement gives the number of its
+/// places, and the statement takes that many of the values of the script.
+/// `used` counts the values that earlier statements took.
 ///
 /// MySQL holds no packet that ends a statement on the connection that runs
 /// it. Its stop runs `KILL QUERY` from a second connection, which ends the
@@ -259,17 +264,27 @@ pub fn bind_params(params: Option<&QueryParams>) -> Result<mysql_async::Params> 
 ///
 /// The flag `stopped` carries a stop of the sink back to the caller, and a
 /// run that arrives with the flag set drains its sets without a feed.
+#[allow(clippy::too_many_arguments)]
 async fn stream_statement(
     conn: &mut Conn,
     statement: &str,
-    params: mysql_async::Params,
+    values: Option<&[MysqlValue]>,
+    used: &mut usize,
     options: &ExecOptions,
     sink: &mut dyn RowSink,
     rows_affected: &mut Option<u64>,
     stopped: &mut bool,
 ) -> Result<()> {
-    if options.one_statement || !matches!(params, mysql_async::Params::Empty) {
-        let result = conn.exec_iter(statement, params).await?;
+    if options.one_statement || (values.is_some() && statement.contains('?')) {
+        let prepared = conn.prep(statement).await?;
+        let count = usize::from(prepared.num_params());
+        let bound = next_values(values.unwrap_or_default(), used, count);
+        let params = if bound.is_empty() {
+            mysql_async::Params::Empty
+        } else {
+            mysql_async::Params::Positional(bound)
+        };
+        let result = conn.exec_iter(prepared, params).await?;
         read_sets(result, options, sink, rows_affected, stopped).await
     } else {
         let result = conn.query_iter(statement).await?;
@@ -414,22 +429,18 @@ impl DatabaseDriver for MysqlDriver {
         let mut rows_affected: Option<u64> = None;
         let mut stopped = false;
 
-        let statements: Vec<String> = if params.is_some() {
-            vec![query.to_string()]
-        } else {
-            split_statements(query, Dialect::MySql)
-        };
-
-        for statement in statements {
+        let values = bind_params(params)?;
+        let mut used = 0;
+        for statement in split_statements(query, Dialect::MySql) {
             if stopped {
                 break;
             }
-            let bound = bind_params(params)?;
             let conn = self.conn()?;
             stream_statement(
                 conn,
                 &statement,
-                bound,
+                values.as_deref(),
+                &mut used,
                 options,
                 sink,
                 &mut rows_affected,
@@ -1291,14 +1302,8 @@ mod tests {
                 value: serde_json::Value::Null,
             },
         ];
-        match bind_params(Some(&params)).unwrap() {
-            mysql_async::Params::Positional(values) => assert_eq!(values.len(), 5),
-            other => panic!("unexpected parameters: {other:?}"),
-        }
-        assert!(matches!(
-            bind_params(None).unwrap(),
-            mysql_async::Params::Empty
-        ));
+        assert_eq!(bind_params(Some(&params)).unwrap().unwrap().len(), 5);
+        assert!(bind_params(None).unwrap().is_none());
     }
 
     #[test]

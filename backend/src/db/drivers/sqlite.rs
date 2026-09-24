@@ -5,8 +5,9 @@
 //! closure takes for the length of one call.
 
 use crate::db::drivers::{
-    add_index_column, bytes_to_json, f64_to_json, number_out_of_range, number_value, prefixed_plan,
-    rows_affected_message, rows_returned_message, CancelHandle, DatabaseDriver, NumberValue,
+    add_index_column, bytes_to_json, f64_to_json, next_values, number_out_of_range, number_value,
+    prefixed_plan, rows_affected_message, rows_returned_message, CancelHandle, DatabaseDriver,
+    NumberValue,
 };
 use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{
@@ -200,11 +201,7 @@ impl DatabaseDriver for SqliteDriver {
     ) -> Result<RunSummary> {
         let started = Instant::now();
         let bound = bind_params(params)?;
-        let statements: Vec<String> = if params.is_some() {
-            vec![query.to_string()]
-        } else {
-            join_trigger_bodies(split_statements(query, Dialect::Sqlite))
-        };
+        let statements = join_trigger_bodies(split_statements(query, Dialect::Sqlite));
         let options = *options;
         let stop = Arc::new(AtomicBool::new(false));
 
@@ -216,6 +213,7 @@ impl DatabaseDriver for SqliteDriver {
                 .lock()
                 .map_err(|_| Error::Connection("The SQLite connection is not usable.".into()))?;
             let mut rows_affected: Option<u64> = None;
+            let mut used = 0;
             for statement in statements {
                 if flag.load(Ordering::Relaxed) {
                     break;
@@ -224,6 +222,7 @@ impl DatabaseDriver for SqliteDriver {
                     &guard,
                     &statement,
                     &bound,
+                    &mut used,
                     &options,
                     &sender,
                     &flag,
@@ -711,16 +710,23 @@ fn send_event(sender: &tokio::sync::mpsc::Sender<RowEvent>, event: RowEvent) -> 
 
 /// Runs one statement and sends what it produces through the channel. The
 /// row limit stops the read of one set, and the stop flag ends it early.
+///
+/// `values` holds the values of the whole script. The statement takes as
+/// many as it has places, and `used` counts the values that earlier
+/// statements took.
+#[allow(clippy::too_many_arguments)]
 fn stream_statement(
     connection: &Connection,
     statement_text: &str,
-    params: &[SqliteValue],
+    values: &[SqliteValue],
+    used: &mut usize,
     options: &ExecOptions,
     sender: &tokio::sync::mpsc::Sender<RowEvent>,
     stop: &AtomicBool,
     rows_affected: &mut Option<u64>,
 ) -> Result<()> {
     let mut statement = connection.prepare(statement_text)?;
+    let params = next_values(values, used, statement.parameter_count());
     let column_count = statement.column_count();
 
     if column_count == 0 {
@@ -1185,6 +1191,29 @@ mod tests {
             response.results[0].rows[0],
             vec![serde_json::json!(4), serde_json::json!("four")]
         );
+    }
+
+    #[tokio::test]
+    async fn each_statement_of_a_script_takes_its_own_values() {
+        let mut driver = open_memory().await;
+        let params: QueryParams = ["Ada", "Grace", "Ada"]
+            .into_iter()
+            .map(|name| QueryParam {
+                value: serde_json::json!(name),
+            })
+            .collect();
+        let response = driver
+            .execute_query(
+                "CREATE TABLE people (name TEXT); \
+                 INSERT INTO people VALUES (?), (?); \
+                 SELECT count(*) FROM people WHERE name = ?;",
+                Some(&params),
+                &ExecOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.rows_affected, Some(2));
+        assert_eq!(response.results[0].rows[0], vec![serde_json::json!(1)]);
     }
 
     #[tokio::test]

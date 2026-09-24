@@ -566,6 +566,18 @@ pub fn rows_returned_message(count: usize, truncated: bool) -> Message {
     }
 }
 
+/// Takes the values of the next statement of a script from the list of all
+/// values. An engine that marks each place with `?` counts the places of a
+/// statement when it prepares it, and the values of the script stand in the
+/// order of those places. `used` counts the values that earlier statements
+/// took.
+pub fn next_values<T: Clone>(values: &[T], used: &mut usize, count: usize) -> Vec<T> {
+    let start = (*used).min(values.len());
+    let end = (start + count).min(values.len());
+    *used = end;
+    values[start..end].to_vec()
+}
+
 /// The roots that the operating system trusts and that `rustls` can read.
 /// These come from the keychain on macOS, from the certificate store on
 /// Windows, and from the certificate files of OpenSSL on Linux, so a company
@@ -728,6 +740,17 @@ mod tests {
         assert_eq!(indexes[0].columns, vec!["a".to_string(), "b".to_string()]);
         assert!(indexes[0].unique);
         assert!(indexes[1].columns.is_empty());
+    }
+
+    #[test]
+    fn each_statement_takes_the_values_of_its_places() {
+        let values = [1, 2, 3];
+        let mut used = 0;
+        assert_eq!(next_values(&values, &mut used, 2), vec![1, 2]);
+        assert_eq!(next_values(&values, &mut used, 0), Vec::<i32>::new());
+        assert_eq!(next_values(&values, &mut used, 5), vec![3]);
+        assert_eq!(used, 3);
+        assert_eq!(next_values(&values, &mut used, 1), Vec::<i32>::new());
     }
 
     #[test]
