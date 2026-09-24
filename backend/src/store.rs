@@ -80,6 +80,9 @@ pub fn read_connections<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<SavedConne
     let store = app.store(settings_path(CONNECTIONS_FILE))?;
     let values: Vec<(String, JsonValue)> = store.entries();
     let mut connections: Vec<SavedConnection> = parse_values(values);
+    connections
+        .iter_mut()
+        .for_each(SavedConnection::adopt_integrated_flag);
     connections.sort_by_key(|connection| connection.name.to_lowercase());
     Ok(connections)
 }

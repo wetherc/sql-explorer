@@ -119,7 +119,7 @@ pub fn string_has_password(url: &str) -> Result<bool> {
 /// A string that names no user takes the user of the record. A string that
 /// gives its own password, or that names another method, stays as it is.
 fn add_login_of_record(config: &mut Config, connection: &SavedConnection) {
-    if connection.effective_auth() != MssqlAuth::SqlLogin {
+    if connection.options.mssql_auth != MssqlAuth::SqlLogin {
         return;
     }
     let Some(password) = connection.password.as_deref().filter(|v| !v.is_empty()) else {
@@ -273,7 +273,7 @@ async fn azure_cli_token(configured_path: Option<&str>) -> Result<String> {
 /// Selects the authentication method. Windows Integrated Security needs the
 /// `winauth` feature, which builds on Windows only.
 async fn auth_method(connection: &SavedConnection) -> Result<AuthMethod> {
-    match connection.effective_auth() {
+    match connection.options.mssql_auth {
         // Windows uses SSPI. Every other system uses Kerberos through
         // GSSAPI, which reads the ticket of the user from the credential
         // cache that `kinit` fills.
@@ -347,7 +347,7 @@ impl MssqlDriver {
 
         let client = while_connecting(limit, Client::connect(config, tcp.compat_write()))
             .await?
-            .map_err(|error| describe_login(error, connection.effective_auth()))?;
+            .map_err(|error| describe_login(error, connection.options.mssql_auth))?;
         Ok(Box::new(MssqlDriver { client }))
     }
 
@@ -2735,7 +2735,7 @@ mod tests {
     #[tokio::test]
     async fn integrated_security_works_on_every_system() {
         let mut input = connection();
-        input.options.integrated_security = true;
+        input.options.mssql_auth = MssqlAuth::Integrated;
         // Windows reaches SSPI and every other system reaches Kerberos, so
         // the method is available everywhere.
         assert!(auth_method(&input).await.is_ok());
@@ -3030,17 +3030,6 @@ mod tests {
         let error = auth_method(&input).await.err().unwrap();
         assert_eq!(error.kind(), crate::error::ErrorKind::Authentication);
         assert!(error.to_string().contains("was not found"));
-    }
-
-    #[tokio::test]
-    async fn the_windows_method_comes_from_the_older_flag_as_well() {
-        let mut input = connection();
-        input.options.integrated_security = true;
-        assert_eq!(input.effective_auth(), MssqlAuth::Integrated);
-
-        input.options.mssql_auth = MssqlAuth::EntraAccessToken;
-        // The new field wins once it holds something other than its default.
-        assert_eq!(input.effective_auth(), MssqlAuth::EntraAccessToken);
     }
 
     #[test]

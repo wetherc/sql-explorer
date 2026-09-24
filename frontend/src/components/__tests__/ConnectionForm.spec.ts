@@ -329,7 +329,8 @@ describe('ConnectionForm advanced options', () => {
     const wrapper = await openAdvanced(await mountForm())
     expect(wrapper.find('[data-test="tls-select"]').exists()).toBe(true)
     expect(wrapper.find('[data-test="instance-field"]').exists()).toBe(true)
-    expect(wrapper.find('[data-test="integrated-switch"]').exists()).toBe(true)
+    // The Authentication select is the one control of the method.
+    expect(wrapper.find('[data-test="integrated-switch"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="connection-url-field"]').exists()).toBe(true)
   })
 
@@ -632,7 +633,6 @@ describe('ConnectionForm with every field filled', () => {
       .find((input) => input.attributes('id') && input.element.value === '')
     void caField
 
-    await wrapper.findAllComponents({ name: 'VSwitch' })[0]!.vm.$emit('update:modelValue', true)
     await wrapper.find('[data-test="save-button"]').trigger('click')
     await settle()
 
@@ -646,7 +646,6 @@ describe('ConnectionForm with every field filled', () => {
         database: 'Warehouse',
         options: expect.objectContaining({
           instanceName: 'SQLEXPRESS',
-          integratedSecurity: true,
         }),
       }),
     )

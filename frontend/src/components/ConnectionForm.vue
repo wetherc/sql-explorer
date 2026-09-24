@@ -245,13 +245,6 @@
                 data-test="instance-field"
               />
 
-              <v-switch
-                v-if="engine?.supportsIntegratedSecurity"
-                v-model="draft.options.integratedSecurity"
-                label="Use Windows Integrated Security"
-                data-test="integrated-switch"
-              />
-
               <div class="d-flex ga-2">
                 <v-text-field
                   v-model.number="draft.options.connectTimeoutSecs"

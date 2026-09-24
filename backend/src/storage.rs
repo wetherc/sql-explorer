@@ -126,9 +126,10 @@ pub struct ConnectionOptions {
     /// The named instance of a MS SQL Server. The SQL Browser service
     /// resolves the port of a named instance.
     pub instance_name: Option<String>,
-    /// True when MS SQL Server uses the credentials of the current user.
-    /// A record that a former release wrote holds this flag alone, so the
-    /// driver reads it when `mssql_auth` stands at its default.
+    /// True in an older MS SQL Server record that names Windows
+    /// Authentication with this flag in place of `mssql_auth`. The read of
+    /// the saved records moves the flag into `mssql_auth`, and nothing else
+    /// reads it.
     pub integrated_security: bool,
     /// How a MS SQL Server connection proves who the user is.
     pub mssql_auth: MssqlAuth,
@@ -271,15 +272,15 @@ impl SavedConnection {
 
     /// Reports the fields that the engine needs but the record does not
     /// hold.
-    /// The authentication method of a MS SQL Server connection. A record
-    /// that a former release wrote holds `integrated_security` alone, so
-    /// that flag decides while the new field stands at its default.
-    pub fn effective_auth(&self) -> MssqlAuth {
-        if self.options.mssql_auth == MssqlAuth::SqlLogin && self.options.integrated_security {
-            MssqlAuth::Integrated
-        } else {
-            self.options.mssql_auth
+    /// Moves the method of a MS SQL Server record that holds the flag
+    /// `integrated_security` into `mssql_auth`, and clears the flag. The
+    /// form shows `mssql_auth` as its one control of the method, so a record
+    /// with the flag alone would show "SQL login" and log in through SSPI.
+    pub fn adopt_integrated_flag(&mut self) {
+        if self.options.integrated_security && self.options.mssql_auth == MssqlAuth::SqlLogin {
+            self.options.mssql_auth = MssqlAuth::Integrated;
         }
+        self.options.integrated_security = false;
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -316,7 +317,7 @@ impl SavedConnection {
                 }
             }
             DbType::Mssql => {
-                if self.options.connection_url.is_some() && self.effective_auth().is_entra() {
+                if self.options.connection_url.is_some() && self.options.mssql_auth.is_entra() {
                     return Err(
                         "A connection string carries its own authentication. Remove the string, \
                          or choose the SQL login."
@@ -582,11 +583,22 @@ mod tests {
     }
 
     #[test]
-    fn the_authentication_of_an_older_record_is_read_from_the_flag() {
+    fn the_flag_of_an_older_record_moves_into_the_method() {
         let mut input = base(DbType::Mssql);
-        assert_eq!(input.effective_auth(), MssqlAuth::SqlLogin);
+        input.adopt_integrated_flag();
+        assert_eq!(input.options.mssql_auth, MssqlAuth::SqlLogin);
+
         input.options.integrated_security = true;
-        assert_eq!(input.effective_auth(), MssqlAuth::Integrated);
+        input.adopt_integrated_flag();
+        assert_eq!(input.options.mssql_auth, MssqlAuth::Integrated);
+        assert!(!input.options.integrated_security);
+
+        // A method other than the default wins over the flag.
+        input.options.mssql_auth = MssqlAuth::EntraAccessToken;
+        input.options.integrated_security = true;
+        input.adopt_integrated_flag();
+        assert_eq!(input.options.mssql_auth, MssqlAuth::EntraAccessToken);
+        assert!(!input.options.integrated_security);
         assert!(MssqlAuth::EntraAzureCli.is_entra());
         assert!(!MssqlAuth::Integrated.is_entra());
     }
