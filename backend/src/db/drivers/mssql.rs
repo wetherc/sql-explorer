@@ -572,7 +572,10 @@ async fn while_connecting<F: std::future::Future>(limit: Duration, future: F) ->
 
 /// Builds the statement that reads the CREATE text of one view. MS SQL
 /// Server keeps no text for a table, so a table gives no statement and the
-/// command layer builds a draft instead.
+/// command layer builds a draft instead. `OBJECT_DEFINITION` looks in the
+/// current database, so the statement reads `sys.sql_modules` of the
+/// database of the view. `OBJECT_ID` finds the view in that database from
+/// its three-part name.
 fn create_query_text(
     database: Option<&str>,
     schema: Option<&str>,
@@ -583,9 +586,13 @@ fn create_query_text(
         return None;
     }
     let name = Dialect::MsSql.qualified_name(database, schema, table);
+    let catalog = database
+        .map(|database| format!("{}.", Dialect::MsSql.quote_identifier(database)))
+        .unwrap_or_default();
     Some(CreateQuery::new(
         format!(
-            "SELECT OBJECT_DEFINITION(OBJECT_ID({}));",
+            "SELECT m.definition FROM {catalog}sys.sql_modules AS m \
+             WHERE m.object_id = OBJECT_ID({});",
             Dialect::MsSql.quote_literal(&name)
         ),
         0,
@@ -1159,13 +1166,16 @@ fn index_query(catalog: &str) -> String {
 }
 
 /// Reads one column of one constraint for each row. A foreign key carries the
-/// relation it points at, and a check carries its rule.
+/// relation it points at, and a check carries its rule. `OBJECT_NAME` and
+/// `SCHEMA_ID` look in the current database, so the statement joins the
+/// `sys` views of the named database instead. A foreign key matches on its
+/// schema and its name, because two schemas can each have a key of one name.
 fn constraint_query(catalog: &str) -> String {
     format!(
         "SELECT tc.CONSTRAINT_NAME, \
                 tc.CONSTRAINT_TYPE, \
                 ku.COLUMN_NAME, \
-                OBJECT_NAME(fk.referenced_object_id), \
+                ro.name, \
                 cc.CHECK_CLAUSE \
          FROM {catalog}.INFORMATION_SCHEMA.TABLE_CONSTRAINTS AS tc \
          LEFT JOIN {catalog}.INFORMATION_SCHEMA.KEY_COLUMN_USAGE AS ku \
@@ -1174,7 +1184,10 @@ fn constraint_query(catalog: &str) -> String {
          LEFT JOIN {catalog}.INFORMATION_SCHEMA.CHECK_CONSTRAINTS AS cc \
                 ON cc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME \
                AND cc.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA \
-         LEFT JOIN {catalog}.sys.foreign_keys AS fk ON fk.name = tc.CONSTRAINT_NAME \
+         LEFT JOIN ({catalog}.sys.foreign_keys AS fk \
+                    JOIN {catalog}.sys.schemas AS fs ON fs.schema_id = fk.schema_id) \
+                ON fk.name = tc.CONSTRAINT_NAME AND fs.name = tc.CONSTRAINT_SCHEMA \
+         LEFT JOIN {catalog}.sys.objects AS ro ON ro.object_id = fk.referenced_object_id \
          WHERE tc.TABLE_SCHEMA = @P1 AND tc.TABLE_NAME = @P2 \
          ORDER BY tc.CONSTRAINT_NAME, ku.ORDINAL_POSITION"
     )
@@ -2492,6 +2505,12 @@ mod tests {
         let constraints = constraint_query("[Sales]");
         assert!(constraints.contains("FROM [Sales].INFORMATION_SCHEMA.TABLE_CONSTRAINTS AS tc"));
         assert!(constraints.contains("cc.CHECK_CLAUSE"));
+        assert!(!constraints.contains("OBJECT_NAME"));
+        assert!(constraints.contains("JOIN [Sales].sys.schemas AS fs"));
+        assert!(constraints.contains("fs.name = tc.CONSTRAINT_SCHEMA"));
+        assert!(constraints.contains(
+            "LEFT JOIN [Sales].sys.objects AS ro ON ro.object_id = fk.referenced_object_id"
+        ));
         assert!(constraints.contains("WHERE tc.TABLE_SCHEMA = @P1 AND tc.TABLE_NAME = @P2"));
     }
 
@@ -2500,9 +2519,17 @@ mod tests {
         let view = create_query_text(Some("db"), Some("dbo"), "v", TableKind::View).unwrap();
         assert_eq!(
             view.sql,
-            "SELECT OBJECT_DEFINITION(OBJECT_ID('[db].[dbo].[v]'));"
+            "SELECT m.definition FROM [db].sys.sql_modules AS m \
+             WHERE m.object_id = OBJECT_ID('[db].[dbo].[v]');"
         );
         assert_eq!(view.column, 0);
+        // With no database the statement reads the current one.
+        let current = create_query_text(None, Some("dbo"), "v", TableKind::View).unwrap();
+        assert_eq!(
+            current.sql,
+            "SELECT m.definition FROM sys.sql_modules AS m \
+             WHERE m.object_id = OBJECT_ID('[dbo].[v]');"
+        );
         assert!(create_query_text(Some("db"), Some("dbo"), "t", TableKind::Table).is_none());
     }
     use crate::storage::{ConnectionOptions, DbType};
