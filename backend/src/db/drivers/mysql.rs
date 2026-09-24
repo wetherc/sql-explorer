@@ -10,8 +10,8 @@ use crate::db::drivers::{
 use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, Message, PlanKind, QueryParams, QueryResponse, Routine, Schema, SchemaSnapshot,
-    SnapshotColumn, Table, TableFact, TableKind,
+    IndexInfo, Message, MessageLevel, PlanKind, QueryParams, QueryResponse, Routine, Schema,
+    SchemaSnapshot, SnapshotColumn, Table, TableFact, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
@@ -372,6 +372,47 @@ async fn read_sets<P: Protocol>(
     Ok(())
 }
 
+/// Sends the warnings of the last statement to the sink.
+///
+/// The OK packet at the end of a statement gives only the count of its
+/// warnings, so the text needs `SHOW WARNINGS`. The query runs only when the
+/// count is above zero. The statement has already succeeded, so a failure of
+/// this read becomes a message and does not fail the run.
+async fn report_warnings(conn: &mut Conn, sink: &mut dyn RowSink) {
+    if conn.get_warnings() == 0 {
+        return;
+    }
+    match conn
+        .query::<(String, u32, String), _>("SHOW WARNINGS")
+        .await
+    {
+        Ok(rows) => {
+            for (level, code, text) in rows {
+                sink.message(warning_message(&level, code, text));
+            }
+        }
+        Err(error) => sink.message(Message::warning(format!(
+            "The warnings of the statement could not be read: {error}"
+        ))),
+    }
+}
+
+/// The message for one row of `SHOW WARNINGS`. The level of the row sets the
+/// level of the message, and the detail gives the level and the code as the
+/// server sent them.
+fn warning_message(level: &str, code: u32, text: String) -> Message {
+    let kind = match level {
+        "Note" => MessageLevel::Info,
+        "Error" => MessageLevel::Error,
+        _ => MessageLevel::Warning,
+    };
+    Message {
+        level: kind,
+        text,
+        detail: Some(format!("{level}, Code {code}")),
+    }
+}
+
 #[async_trait]
 impl DatabaseDriver for MysqlDriver {
     fn capabilities(&self) -> DriverCapabilities {
@@ -447,6 +488,7 @@ impl DatabaseDriver for MysqlDriver {
                 &mut stopped,
             )
             .await?;
+            report_warnings(self.conn()?, sink).await;
         }
 
         Ok(RunSummary {
@@ -1044,6 +1086,25 @@ mod tests {
         assert_eq!(error.kind(), crate::error::ErrorKind::Timeout);
         assert!(started.elapsed() < Duration::from_secs(5));
         server.abort();
+    }
+
+    #[test]
+    fn a_warning_row_gives_a_message_of_its_level() {
+        let note = warning_message("Note", 1051, "Unknown table 'a'".into());
+        assert_eq!(note.level, MessageLevel::Info);
+        assert_eq!(note.text, "Unknown table 'a'");
+        assert_eq!(note.detail.as_deref(), Some("Note, Code 1051"));
+
+        let warning = warning_message("Warning", 1265, "Data truncated".into());
+        assert_eq!(warning.level, MessageLevel::Warning);
+        assert_eq!(warning.detail.as_deref(), Some("Warning, Code 1265"));
+
+        let error = warning_message("Error", 1146, "No such table".into());
+        assert_eq!(error.level, MessageLevel::Error);
+
+        // A level that the server adds later reads as a warning.
+        let other = warning_message("Alert", 1, "text".into());
+        assert_eq!(other.level, MessageLevel::Warning);
     }
 
     #[test]

@@ -128,6 +128,12 @@ PostgreSQL is the same: a `NOTICE`, a `WARNING` and an `INFO` arrive on the
 connection and reach the Messages tab with the severity, the code, the detail
 and the hint that the server sent.
 
+MySQL and MariaDB send only the count of the warnings of a statement. When
+the count is above zero, the driver runs `SHOW WARNINGS` after the statement.
+Each warning then goes to the Messages tab with its level and its code. The
+server keeps a limited number of warnings for one statement, and its
+`max_error_count` variable sets that number.
+
 ## A server that offers only the older ciphers
 
 The TLS of MS SQL Server runs on the library of the operating system, and not
