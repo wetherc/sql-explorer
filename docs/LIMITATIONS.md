@@ -417,17 +417,11 @@ result and drops the rows past the limit. The time of that walk counts
 against the time budget of the run, so a result of many millions of rows
 can still end with the timeout message.
 
-## A PostgreSQL script of more than one statement walks past the row limit
+## PostgreSQL walks past the row limit for a statement that can write
 
-The PostgreSQL driver stops a statement with a cancel request on a second
-socket. The simple protocol carries a script of more than one statement in
-one exchange, and the cancel would end the statements that follow together
-with the one that reached the limit. The driver therefore sends the cancel
-for a script of one statement alone. A larger script reads the rest of the
-result and drops the rows past the limit. The time of that walk counts
-against the time budget of the run.
-
-A cancel rolls back the statement that it ends. Inside a transaction block
+The PostgreSQL driver sends each statement of a script to the server in a
+text of its own, and stops a statement at the row limit with a cancel
+request on a second socket. A cancel rolls back the statement that it ends. Inside a transaction block
 it also aborts the block, and the `COMMIT` that follows then acts as a
 `ROLLBACK`. The driver therefore sends the cancel only for a statement that
 only reads, and only when the session is outside a transaction block. A
@@ -435,7 +429,10 @@ probe statement before the run tells the driver which case applies. Every
 other statement, such as `INSERT ... RETURNING` or a `SELECT` after `BEGIN`,
 runs to its end, and the walk drops the rows past the limit. The check of
 the text cannot see a function of the server that writes, so a `SELECT` of
-such a function outside a block can still lose its writes at the limit.
+such a function outside a block can still lose its writes at the limit. The
+walk past the limit reads the rest of the result, and its time counts
+against the time budget of the run. The probe costs one more round trip for
+each statement of a script that only reads.
 
 ## MS SQL Server walks past the row limit for most batches
 

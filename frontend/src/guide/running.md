@@ -7,7 +7,9 @@ Choose a connection at the top of the tab, then write a statement.
 - A selection runs in place of the statement under the cursor.
 
 A script runs statement by statement. The splitter respects quotes, comments,
-dollar tags and the `DELIMITER` command of MySQL.
+dollar tags and the `DELIMITER` command of MySQL. Each statement commits on its
+own, unless the script opens a transaction. The first error ends the script,
+and the statements after it do not run.
 
 On MS SQL Server the unit is the batch. A line that holds only `GO` ends a
 batch, and the server gets each batch whole. The statement under the cursor

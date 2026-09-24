@@ -817,39 +817,70 @@ impl PostgresDriver {
         ))
     }
 
-    /// Runs a script through the simple protocol and feeds the sink one
-    /// message at a time.
+    /// Runs a script through the simple protocol, one statement at a time.
     ///
-    /// A script of one statement that [`Self::may_cancel`] accepts ends at
-    /// the row limit: the driver sends a cancel request on a second socket,
-    /// and the server stops the statement instead of sending the rest of the
-    /// result. The server answers the cancel with the error 57014, which the
-    /// walk reads as the end of the set.
-    ///
-    /// Every other script keeps the walk and drops the rows past the limit.
-    /// The simple protocol carries every statement of the script in one
-    /// exchange, so a cancel would drop the statements that follow. The
-    /// driver holds one message while it walks, so the memory cost does not
-    /// grow with the size of the answer.
+    /// The simple protocol runs every statement of one text in one implicit
+    /// transaction. An error in the third statement of a text then rolls back
+    /// the first two after their counts reached the window, and a statement
+    /// such as `VACUUM` refuses to run at all. Each statement therefore goes
+    /// to the server in a text of its own and commits on its own, unless the
+    /// script opened a transaction block. The first error ends the script,
+    /// and the statements after it do not run.
     ///
     /// A run that sets `one_statement` prepares the text first. The server
     /// refuses to prepare a text of more than one statement, so the run then
     /// stops before the simple protocol runs any part of it. The prepared
     /// statement closes at once, and the rows keep the text form of the
-    /// simple protocol.
+    /// simple protocol. Such a text goes to the server whole.
     async fn stream_simple(
         &mut self,
         query: &str,
         options: &ExecOptions,
         sink: &mut dyn RowSink,
     ) -> Result<Option<u64>> {
-        if options.one_statement {
+        let statements = if options.one_statement {
             self.client.prepare(query).await?;
+            vec![query.to_string()]
+        } else {
+            split_statements(query, Dialect::Postgres)
+        };
+        let mut rows_affected: Option<u64> = None;
+        for statement in &statements {
+            let (affected, stopped) = self.stream_statement(statement, options, sink).await?;
+            if let Some(affected) = affected {
+                rows_affected = Some(rows_affected.unwrap_or(0) + affected);
+            }
+            // The sink takes no more rows, so the statements after this one
+            // do not run.
+            if stopped {
+                break;
+            }
         }
-        let alone =
-            split_statements(query, Dialect::Postgres).len() <= 1 && self.may_cancel(query).await;
+        Ok(rows_affected)
+    }
+
+    /// Runs one statement through the simple protocol and feeds the sink one
+    /// message at a time. Gives the count of the changed rows, and true when
+    /// the sink took no more rows.
+    ///
+    /// A statement that [`Self::may_cancel`] accepts ends at the row limit:
+    /// the driver sends a cancel request on a second socket, and the server
+    /// stops the statement instead of sending the rest of the result. The
+    /// server answers the cancel with the error 57014, which the walk reads
+    /// as the end of the set.
+    ///
+    /// Every other statement keeps the walk and drops the rows past the
+    /// limit. The driver holds one message while it walks, so the memory cost
+    /// does not grow with the size of the answer.
+    async fn stream_statement(
+        &mut self,
+        statement: &str,
+        options: &ExecOptions,
+        sink: &mut dyn RowSink,
+    ) -> Result<(Option<u64>, bool)> {
+        let alone = self.may_cancel(statement).await;
         let stop = self.stop.clone();
-        let messages = self.client.simple_query_raw(query).await?;
+        let messages = self.client.simple_query_raw(statement).await?;
         pin_mut!(messages);
         let mut rows_affected: Option<u64> = None;
         let mut open = false;
@@ -923,11 +954,6 @@ impl PostgresDriver {
                         rows_affected = Some(rows_affected.unwrap_or(0) + affected);
                         sink.message(rows_affected_message(affected));
                     }
-                    // A stop ends the feed. The statements already ran on
-                    // the server, so the stop drops their output alone.
-                    if stopped {
-                        return Ok(rows_affected);
-                    }
                 }
                 _ => {}
             }
@@ -936,7 +962,7 @@ impl PostgresDriver {
             sink.message(rows_returned_message(count, truncated));
             sink.end_set(truncated)?;
         }
-        Ok(rows_affected)
+        Ok((rows_affected, stopped))
     }
 
     /// Runs one statement with bound parameters through the extended
@@ -1882,32 +1908,62 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_script_of_several_statements_keeps_each_set_and_each_count() {
-        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
-        let task = tokio::spawn(async move {
-            accept_startup(&mut server).await;
-            let query = read_query(&mut server).await;
-            assert!(query.contains("SELECT"));
+    /// Reads one statement of the simple protocol and answers it with the
+    /// messages given, and then with the end of the exchange.
+    async fn answer_query(server: &mut DuplexStream, expected: &str, messages: &[Vec<u8>]) {
+        assert_eq!(read_query(server).await, expected);
+        let mut answer: Vec<u8> = messages.concat();
+        answer.extend_from_slice(&ready_for_query());
+        server.write_all(&answer).await.unwrap();
+    }
 
-            let mut answer = row_description(&["id", "name"]);
-            answer.extend_from_slice(&data_row(&[Some("1"), Some("Ada")]));
-            answer.extend_from_slice(&data_row(&[Some("2"), None]));
-            answer.extend_from_slice(&command_complete("SELECT 2"));
-            answer.extend_from_slice(&command_complete("UPDATE 3"));
-            answer.extend_from_slice(&row_description(&["n"]));
-            answer.extend_from_slice(&data_row(&[Some("7")]));
-            answer.extend_from_slice(&command_complete("SELECT 1"));
-            answer.extend_from_slice(&ready_for_query());
-            server.write_all(&answer).await.unwrap();
-        });
-
-        let mut driver = driver_on(client_end).await;
-        let options = ExecOptions {
+    fn no_limit() -> ExecOptions {
+        ExecOptions {
             max_rows: 100,
             timeout_secs: 30,
             one_statement: false,
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn a_script_of_several_statements_sends_each_one_alone() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            answer_probe(&mut server, true).await;
+            answer_query(
+                &mut server,
+                "SELECT 1",
+                &[
+                    row_description(&["id", "name"]),
+                    data_row(&[Some("1"), Some("Ada")]),
+                    data_row(&[Some("2"), None]),
+                    command_complete("SELECT 2"),
+                ],
+            )
+            .await;
+            // A statement that writes gets no probe.
+            answer_query(
+                &mut server,
+                "UPDATE t SET a = 1",
+                &[command_complete("UPDATE 3")],
+            )
+            .await;
+            answer_probe(&mut server, true).await;
+            answer_query(
+                &mut server,
+                "SELECT 7",
+                &[
+                    row_description(&["n"]),
+                    data_row(&[Some("7")]),
+                    command_complete("SELECT 1"),
+                ],
+            )
+            .await;
+        });
+
+        let mut driver = driver_on(client_end).await;
+        let options = no_limit();
         let mut sink = BufferSink::new(options.max_rows);
         let rows_affected = driver
             .stream_simple(
@@ -1919,8 +1975,6 @@ mod tests {
             .unwrap();
         let response = sink.into_response(RunSummary::default());
 
-        // The count of the statement between the two sets is kept, so the
-        // walk went past the first set.
         assert_eq!(rows_affected, Some(3));
         assert_eq!(response.results.len(), 2);
         assert_eq!(response.results[0].rows.len(), 2);
@@ -1932,27 +1986,109 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_set_that_passes_the_row_limit_is_cut_and_the_walk_goes_on() {
+    async fn one_statement_that_gives_two_sets_keeps_both() {
         let (client_end, mut server) = tokio::io::duplex(64 * 1024);
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
-            read_query(&mut server).await;
-
-            let mut answer = row_description(&["id"]);
-            for value in ["1", "2", "3"] {
-                answer.extend_from_slice(&data_row(&[Some(value)]));
-            }
-            answer.extend_from_slice(&command_complete("SELECT 3"));
-            answer.extend_from_slice(&command_complete("DELETE 5"));
-            answer.extend_from_slice(&ready_for_query());
-            server.write_all(&answer).await.unwrap();
+            answer_probe(&mut server, true).await;
+            answer_query(
+                &mut server,
+                "SELECT 1",
+                &[
+                    row_description(&["a"]),
+                    data_row(&[Some("1")]),
+                    row_description(&["b"]),
+                    data_row(&[Some("2")]),
+                ],
+            )
+            .await;
         });
 
         let mut driver = driver_on(client_end).await;
+        let options = no_limit();
+        let mut sink = BufferSink::new(options.max_rows);
+        driver
+            .stream_simple("SELECT 1", &options, &mut sink)
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        // A set with no end tag closes at the next set and at the end.
+        assert_eq!(response.results.len(), 2);
+
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_first_error_of_a_script_ends_it() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            answer_query(
+                &mut server,
+                "DELETE FROM a",
+                &[command_complete("DELETE 2")],
+            )
+            .await;
+            answer_query(
+                &mut server,
+                "DELETE FROM b",
+                &[error_response("42P01", "relation \"b\" does not exist")],
+            )
+            .await;
+            // The client sends no third statement.
+            let mut rest = Vec::new();
+            server.read_to_end(&mut rest).await.unwrap();
+            assert!(!rest.contains(&b'Q'));
+        });
+
+        let mut driver = driver_on(client_end).await;
+        let options = no_limit();
+        let mut sink = BufferSink::new(options.max_rows);
+        let outcome = driver
+            .stream_simple(
+                "DELETE FROM a; DELETE FROM b; DELETE FROM c",
+                &options,
+                &mut sink,
+            )
+            .await;
+
+        assert!(outcome.is_err());
+        drop(driver);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_set_that_passes_the_row_limit_inside_a_block_is_cut_and_the_walk_goes_on() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            answer_probe(&mut server, false).await;
+            answer_query(
+                &mut server,
+                "SELECT id FROM t",
+                &[
+                    row_description(&["id"]),
+                    data_row(&[Some("1")]),
+                    data_row(&[Some("2")]),
+                    data_row(&[Some("3")]),
+                    command_complete("SELECT 3"),
+                ],
+            )
+            .await;
+            answer_query(
+                &mut server,
+                "DELETE FROM t",
+                &[command_complete("DELETE 5")],
+            )
+            .await;
+        });
+
+        let (stop, calls, _signal) = test_stop(true);
+        let mut driver = driver_with_stop(client_end, stop).await;
         let options = ExecOptions {
             max_rows: 1,
-            timeout_secs: 30,
-            one_statement: false,
+            ..no_limit()
         };
         let mut sink = BufferSink::new(options.max_rows);
         let rows_affected = driver
@@ -1961,6 +2097,8 @@ mod tests {
             .unwrap();
         let response = sink.into_response(RunSummary::default());
 
+        // The session is inside a transaction block, so no cancel goes out.
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(response.results.len(), 1);
         assert_eq!(response.results[0].rows.len(), 1);
         assert!(response.results[0].truncated);
@@ -1968,9 +2106,89 @@ mod tests {
             .messages
             .iter()
             .any(|message| message.text.contains("The row limit stopped the read")));
-        // The tag of the statement after the set still reaches the summary.
         assert_eq!(rows_affected, Some(5));
 
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_read_of_a_longer_script_stops_the_server_at_the_row_limit() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let (stop, calls, signal) = test_stop(true);
+        let waiter = signal.clone();
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            answer_probe(&mut server, true).await;
+            assert_eq!(read_query(&mut server).await, "SELECT id FROM t");
+            let mut answer = row_description(&["id"]);
+            answer.extend_from_slice(&data_row(&[Some("1")]));
+            answer.extend_from_slice(&data_row(&[Some("2")]));
+            server.write_all(&answer).await.unwrap();
+            waiter.notified().await;
+            let mut end = error_response("57014", "canceling statement due to user request");
+            end.extend_from_slice(&ready_for_query());
+            server.write_all(&end).await.unwrap();
+
+            answer_query(
+                &mut server,
+                "DELETE FROM t",
+                &[command_complete("DELETE 5")],
+            )
+            .await;
+        });
+
+        let mut driver = driver_with_stop(client_end, stop).await;
+        let options = ExecOptions {
+            max_rows: 1,
+            ..no_limit()
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        let rows_affected = driver
+            .stream_simple("SELECT id FROM t; DELETE FROM t", &options, &mut sink)
+            .await
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(rows_affected, Some(5));
+
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_sink_that_takes_no_more_rows_ends_the_script() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            answer_probe(&mut server, false).await;
+            answer_query(
+                &mut server,
+                "SELECT id FROM t",
+                &[
+                    row_description(&["id"]),
+                    data_row(&[Some("1")]),
+                    data_row(&[Some("2")]),
+                    data_row(&[Some("3")]),
+                    command_complete("SELECT 3"),
+                ],
+            )
+            .await;
+            let mut rest = Vec::new();
+            server.read_to_end(&mut rest).await.unwrap();
+            assert!(!rest.contains(&b'Q'));
+        });
+
+        let mut driver = driver_on(client_end).await;
+        let options = no_limit();
+        // The sink stops before the row limit of the run.
+        let mut sink = BufferSink::new(1);
+        driver
+            .stream_simple("SELECT id FROM t; DELETE FROM t", &options, &mut sink)
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        assert!(response.results[0].truncated);
+        drop(driver);
         task.await.unwrap();
     }
 
