@@ -20,7 +20,7 @@ The context menu of an object builds statements in the backend, so every name
 carries the quotes of its engine:
 
 - A preview of the rows.
-- A `SELECT`, an `INSERT`, an `UPDATE` and a `DELETE` draft.
+- A `SELECT`, an `INSERT` and an `UPDATE` draft.
 - A `CREATE` draft of a table. The draft holds no index, no default and no
   constraint.
 
@@ -35,5 +35,7 @@ alias offers the columns of the table that the alias names. The editor
 reads an alias in a `FROM`, a `JOIN`, an `UPDATE` and an `INSERT INTO`
 clause.
 
-One command reads every relation of a database at once. The completion then
-knows a name that the tree has never opened.
+When you open a database in the tree, the application reads every relation
+of that database in the background. The completion then knows a name that
+the tree has not opened. The **Columns the editor learns** setting sets how
+much of a large schema the read keeps.
