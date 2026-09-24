@@ -16,7 +16,7 @@ use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
 use crate::storage::{SavedConnection, TlsMode};
 use async_trait::async_trait;
-use mysql_async::consts::{ColumnType, StatusFlags};
+use mysql_async::consts::{ColumnFlags, ColumnType, StatusFlags};
 use mysql_async::prelude::*;
 use mysql_async::{Conn, Opts, OptsBuilder, Row as MysqlRow, SslOpts, Value as MysqlValue};
 use serde_json::Value as JsonValue;
@@ -290,7 +290,7 @@ async fn read_sets<P: Protocol>(
             .map(|column| {
                 ColumnInfo::new(
                     column.name_str().to_string(),
-                    format!("{:?}", column.column_type()).to_lowercase(),
+                    type_label(column.column_type(), column.character_set(), column.flags()),
                 )
             })
             .collect();
@@ -801,6 +801,70 @@ pub fn value_kind(column_type: ColumnType, charset: u16) -> ValueKind {
             ValueKind::Binary
         }
         _ => ValueKind::Other,
+    }
+}
+
+/// Names the type of a result column in the words of MySQL, such as
+/// `varchar` or `int unsigned`. The wire type says less than the type of
+/// the table: TEXT and MEDIUMTEXT both arrive as a BLOB type, ENUM and SET
+/// arrive as a fixed string with a flag, and a binary string has the
+/// binary character set.
+pub fn type_label(column_type: ColumnType, charset: u16, flags: ColumnFlags) -> String {
+    use ColumnType::*;
+    let binary = charset == BINARY_CHARSET;
+    let name = match column_type {
+        MYSQL_TYPE_DECIMAL | MYSQL_TYPE_NEWDECIMAL => "decimal",
+        MYSQL_TYPE_TINY => "tinyint",
+        MYSQL_TYPE_SHORT => "smallint",
+        MYSQL_TYPE_INT24 => "mediumint",
+        MYSQL_TYPE_LONG => "int",
+        MYSQL_TYPE_LONGLONG => "bigint",
+        MYSQL_TYPE_FLOAT => "float",
+        MYSQL_TYPE_DOUBLE => "double",
+        MYSQL_TYPE_NULL => "null",
+        MYSQL_TYPE_TIMESTAMP | MYSQL_TYPE_TIMESTAMP2 => "timestamp",
+        MYSQL_TYPE_DATE | MYSQL_TYPE_NEWDATE => "date",
+        MYSQL_TYPE_TIME | MYSQL_TYPE_TIME2 => "time",
+        MYSQL_TYPE_DATETIME | MYSQL_TYPE_DATETIME2 => "datetime",
+        MYSQL_TYPE_YEAR => "year",
+        MYSQL_TYPE_BIT => "bit",
+        MYSQL_TYPE_JSON => "json",
+        MYSQL_TYPE_VECTOR => "vector",
+        MYSQL_TYPE_GEOMETRY => "geometry",
+        MYSQL_TYPE_ENUM => "enum",
+        MYSQL_TYPE_SET => "set",
+        MYSQL_TYPE_STRING if flags.contains(ColumnFlags::ENUM_FLAG) => "enum",
+        MYSQL_TYPE_STRING if flags.contains(ColumnFlags::SET_FLAG) => "set",
+        MYSQL_TYPE_STRING if binary => "binary",
+        MYSQL_TYPE_STRING => "char",
+        MYSQL_TYPE_VARCHAR | MYSQL_TYPE_VAR_STRING if binary => "varbinary",
+        MYSQL_TYPE_VARCHAR | MYSQL_TYPE_VAR_STRING => "varchar",
+        MYSQL_TYPE_TINY_BLOB | MYSQL_TYPE_MEDIUM_BLOB | MYSQL_TYPE_LONG_BLOB | MYSQL_TYPE_BLOB
+            if binary =>
+        {
+            "blob"
+        }
+        MYSQL_TYPE_TINY_BLOB | MYSQL_TYPE_MEDIUM_BLOB | MYSQL_TYPE_LONG_BLOB | MYSQL_TYPE_BLOB => {
+            "text"
+        }
+        MYSQL_TYPE_TYPED_ARRAY | MYSQL_TYPE_UNKNOWN => "unknown",
+    };
+    let numeric = matches!(
+        column_type,
+        MYSQL_TYPE_DECIMAL
+            | MYSQL_TYPE_NEWDECIMAL
+            | MYSQL_TYPE_TINY
+            | MYSQL_TYPE_SHORT
+            | MYSQL_TYPE_INT24
+            | MYSQL_TYPE_LONG
+            | MYSQL_TYPE_LONGLONG
+            | MYSQL_TYPE_FLOAT
+            | MYSQL_TYPE_DOUBLE
+    );
+    if numeric && flags.contains(ColumnFlags::UNSIGNED_FLAG) {
+        format!("{name} unsigned")
+    } else {
+        name.to_string()
     }
 }
 
@@ -1343,6 +1407,59 @@ mod tests {
         ] {
             assert_eq!(value_kind(kind, BINARY_CHARSET), ValueKind::Binary);
             assert_eq!(value_kind(kind, text), ValueKind::Other);
+        }
+    }
+
+    #[test]
+    fn the_grid_names_each_type_in_the_words_of_mysql() {
+        use ColumnType::*;
+        let none = ColumnFlags::empty();
+        let unsigned = ColumnFlags::UNSIGNED_FLAG;
+        let text = 255;
+        let cases = [
+            (MYSQL_TYPE_DECIMAL, BINARY_CHARSET, none, "decimal"),
+            (
+                MYSQL_TYPE_NEWDECIMAL,
+                BINARY_CHARSET,
+                unsigned,
+                "decimal unsigned",
+            ),
+            (MYSQL_TYPE_TINY, BINARY_CHARSET, none, "tinyint"),
+            (MYSQL_TYPE_SHORT, BINARY_CHARSET, none, "smallint"),
+            (MYSQL_TYPE_INT24, BINARY_CHARSET, none, "mediumint"),
+            (MYSQL_TYPE_LONG, BINARY_CHARSET, unsigned, "int unsigned"),
+            (MYSQL_TYPE_LONGLONG, BINARY_CHARSET, none, "bigint"),
+            (MYSQL_TYPE_FLOAT, BINARY_CHARSET, none, "float"),
+            (MYSQL_TYPE_DOUBLE, BINARY_CHARSET, none, "double"),
+            (MYSQL_TYPE_NULL, BINARY_CHARSET, none, "null"),
+            (MYSQL_TYPE_TIMESTAMP, BINARY_CHARSET, none, "timestamp"),
+            (MYSQL_TYPE_TIMESTAMP2, BINARY_CHARSET, none, "timestamp"),
+            (MYSQL_TYPE_DATE, BINARY_CHARSET, none, "date"),
+            (MYSQL_TYPE_NEWDATE, BINARY_CHARSET, none, "date"),
+            (MYSQL_TYPE_TIME, BINARY_CHARSET, none, "time"),
+            (MYSQL_TYPE_TIME2, BINARY_CHARSET, none, "time"),
+            (MYSQL_TYPE_DATETIME, BINARY_CHARSET, none, "datetime"),
+            (MYSQL_TYPE_DATETIME2, BINARY_CHARSET, none, "datetime"),
+            (MYSQL_TYPE_YEAR, BINARY_CHARSET, unsigned, "year"),
+            (MYSQL_TYPE_BIT, BINARY_CHARSET, unsigned, "bit"),
+            (MYSQL_TYPE_JSON, BINARY_CHARSET, none, "json"),
+            (MYSQL_TYPE_VECTOR, BINARY_CHARSET, none, "vector"),
+            (MYSQL_TYPE_GEOMETRY, BINARY_CHARSET, none, "geometry"),
+            (MYSQL_TYPE_ENUM, text, none, "enum"),
+            (MYSQL_TYPE_SET, text, none, "set"),
+            (MYSQL_TYPE_STRING, text, ColumnFlags::ENUM_FLAG, "enum"),
+            (MYSQL_TYPE_STRING, text, ColumnFlags::SET_FLAG, "set"),
+            (MYSQL_TYPE_STRING, BINARY_CHARSET, none, "binary"),
+            (MYSQL_TYPE_STRING, text, none, "char"),
+            (MYSQL_TYPE_VAR_STRING, BINARY_CHARSET, none, "varbinary"),
+            (MYSQL_TYPE_VARCHAR, text, none, "varchar"),
+            (MYSQL_TYPE_BLOB, BINARY_CHARSET, none, "blob"),
+            (MYSQL_TYPE_LONG_BLOB, text, none, "text"),
+            (MYSQL_TYPE_TYPED_ARRAY, BINARY_CHARSET, none, "unknown"),
+            (MYSQL_TYPE_UNKNOWN, BINARY_CHARSET, none, "unknown"),
+        ];
+        for (column_type, charset, flags, label) in cases {
+            assert_eq!(type_label(column_type, charset, flags), label);
         }
     }
 
