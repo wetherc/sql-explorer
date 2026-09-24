@@ -121,6 +121,7 @@
           :aria-colcount="result.columns.length + 1"
           :aria-busy="busy"
           @keydown="onGridKeyDown"
+          @copy="onGridCopy"
         >
           <thead>
             <tr ref="headerRow" role="row" aria-rowindex="1">
@@ -887,6 +888,22 @@ function onGridKeyDown(event: KeyboardEvent): void {
     case ' ':
       toggleFocusedRow(event)
       break
+    case 'a':
+    case 'A':
+      if (!event.ctrlKey && !event.metaKey) {
+        return
+      }
+      selectAllRows()
+      break
+    case 'ContextMenu':
+      openFocusedCellMenu()
+      break
+    case 'F10':
+      if (!event.shiftKey) {
+        return
+      }
+      openFocusedCellMenu()
+      break
     default:
       return
   }
@@ -896,6 +913,38 @@ function onGridKeyDown(event: KeyboardEvent): void {
 /** The place in the result of the row the tab stop stands on. */
 function focusedSourceRow(): number | undefined {
   return sortedOrder.value[focusedRow.value]
+}
+
+/** Takes every row of the view, as the filter leaves them. */
+function selectAllRows(): void {
+  selected.value = new Set(sortedOrder.value)
+  anchor.value = 0
+}
+
+/**
+ * Answers the copy of the browser, which Ctrl+C, Cmd+C and the Edit menu all
+ * send. The Edit menu of macOS takes Cmd+C before the page sees the key, so a
+ * handler of the key alone would never run there. Text that the user marked
+ * with the pointer is copied as the browser copies it. Otherwise the selected
+ * rows go to the clipboard, and with no selection the cell of the tab stop
+ * goes there.
+ */
+function onGridCopy(event: ClipboardEvent): void {
+  if (globalThis.getSelection?.()?.toString()) {
+    return
+  }
+  const cell = cellAt(focusedRow.value, focusedColumn.value)
+  if (cell === undefined) {
+    return
+  }
+  const text = hasSelection.value ? toTabSeparated(rowsToExport().rows) : formatCell(cell)
+  event.preventDefault()
+  if (event.clipboardData) {
+    event.clipboardData.setData('text/plain', text)
+    emit('copied', text)
+  } else {
+    void copyText(text)
+  }
 }
 
 /** Opens the whole value of the cell the tab stop stands on. */
@@ -1054,12 +1103,47 @@ function copyRow(position: number): void {
 
 /** The place the menu of the cells stands at, and the cell it belongs to. */
 const cellMenu = ref({ open: false, x: 0, y: 0, row: 0, column: 0 })
+/** True while the menu stands open because of a key and not the pointer. */
+let menuFromKeys = false
 
 /** Opens the menu of one cell where the pointer stands. */
 function openCellMenu(event: MouseEvent, position: number, column: number): void {
   focusCellAt(position, column)
   cellMenu.value = { open: true, x: event.clientX, y: event.clientY, row: position, column }
+  menuFromKeys = false
 }
+
+/**
+ * Opens the menu of the cell of the tab stop, below that cell. Shift+F10 and
+ * the menu key reach it, so a user of the keyboard alone gets the same menu
+ * as the pointer.
+ */
+function openFocusedCellMenu(): void {
+  const row = focusedRow.value
+  const column = focusedColumn.value
+  const cell = cellElements.get(cellId(row, column))
+  if (!cell) {
+    return
+  }
+  const box = cell.getBoundingClientRect()
+  cellMenu.value = { open: true, x: box.left, y: box.bottom, row, column }
+  menuFromKeys = true
+}
+
+// The menu opens at a point and has no element that opened it. When a menu
+// that a key opened closes, the focus goes back to its cell. The focus moves
+// before the dialog of a value opens. The dialog then keeps the cell as the
+// element that opened it, and it gives the focus back to the cell.
+watch(
+  () => cellMenu.value.open,
+  (open) => {
+    if (open || !menuFromKeys) {
+      return
+    }
+    menuFromKeys = false
+    cellElements.get(cellId(cellMenu.value.row, cellMenu.value.column))?.focus()
+  },
+)
 
 function copyCellOfMenu(): void {
   copyCell(cellMenu.value.row, cellMenu.value.column)

@@ -1122,3 +1122,173 @@ describe('ResultsGrid as a grid a reader can follow', () => {
     expect(tabStop(wrapper)).toEqual([0, 1])
   })
 })
+
+describe('ResultsGrid copy and menu from the keyboard', () => {
+  beforeEach(() => {
+    Object.defineProperty(globalThis.navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn().mockResolvedValue(undefined) },
+    })
+  })
+
+  function grid(wrapper: ReturnType<typeof mountWithPlugins>) {
+    return wrapper.find('[role="grid"]')
+  }
+
+  /** Sends the copy of the browser to the grid, with a clipboard or with none. */
+  function copy(wrapper: ReturnType<typeof mountWithPlugins>, withData = true) {
+    const data = new Map<string, string>()
+    const event = new Event('copy', { bubbles: true, cancelable: true }) as ClipboardEvent
+    Object.defineProperty(event, 'clipboardData', {
+      value: withData ? { setData: (kind: string, text: string) => data.set(kind, text) } : null,
+    })
+    wrapper.find('[data-test="grid-cell"]').element.dispatchEvent(event)
+    return { event, text: data.get('text/plain') }
+  }
+
+  it('copies the cell of the tab stop, or the selected rows', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    await grid(wrapper).trigger('keydown', { key: 'ArrowRight' })
+
+    const cell = copy(wrapper)
+    expect(cell.event.defaultPrevented).toBe(true)
+    expect(cell.text).toBe('Grace')
+    expect(wrapper.emitted('copied')).toEqual([['Grace']])
+
+    await wrapper.findAll('[data-test="grid-row"]')[1]!.trigger('click')
+    expect(copy(wrapper).text).toBe('1\tAda')
+    wrapper.unmount()
+  })
+
+  it('uses the clipboard of the host when the event holds none', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    const { event } = copy(wrapper, false)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(event.defaultPrevented).toBe(true)
+    expect(globalThis.navigator.clipboard.writeText).toHaveBeenCalledWith('2')
+    wrapper.unmount()
+  })
+
+  it('leaves text that the user marked to the browser', () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    const marked = vi
+      .spyOn(globalThis, 'getSelection')
+      .mockReturnValue({ toString: () => 'Gra' } as Selection)
+    try {
+      const { event, text } = copy(wrapper)
+      expect(event.defaultPrevented).toBe(false)
+      expect(text).toBeUndefined()
+    } finally {
+      marked.mockRestore()
+    }
+    wrapper.unmount()
+  })
+
+  it('copies nothing when the view holds no row', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    await wrapper.find('[data-test="grid-filter"] input').setValue('nothing here')
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    const event = new Event('copy', { bubbles: true, cancelable: true })
+    grid(wrapper).element.dispatchEvent(event)
+    expect(event.defaultPrevented).toBe(false)
+    expect(wrapper.emitted('copied')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('takes every row with Ctrl or Cmd and A', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    const count = () => wrapper.find('[data-test="grid-count"]').text()
+
+    // A key that the grid does not know stays with the browser.
+    const other = new KeyboardEvent('keydown', { key: 'x', bubbles: true, cancelable: true })
+    grid(wrapper).element.dispatchEvent(other)
+    expect(other.defaultPrevented).toBe(false)
+
+    await grid(wrapper).trigger('keydown', { key: 'a' })
+    expect(count()).not.toContain('selected')
+
+    await grid(wrapper).trigger('keydown', { key: 'a', ctrlKey: true })
+    expect(count()).toContain('3 selected')
+
+    await wrapper.findAll('[data-test="grid-row"]')[0]!.trigger('click')
+    await grid(wrapper).trigger('keydown', { key: 'A', metaKey: true })
+    expect(count()).toContain('3 selected')
+    wrapper.unmount()
+  })
+
+  it('opens the menu of the cell with the menu key and with Shift+F10', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(globalThis.navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    const menuItem = () => document.querySelector('[data-test="grid-menu-copy-cell"]')
+
+    await grid(wrapper).trigger('keydown', { key: 'F10' })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(menuItem()).toBeNull()
+
+    await grid(wrapper).trigger('keydown', { key: 'ArrowDown' })
+    await grid(wrapper).trigger('keydown', { key: 'F10', shiftKey: true })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(menuItem()).not.toBeNull()
+
+    // A choice in the menu closes it, and the focus goes back to the cell.
+    click('[data-test="grid-menu-copy-cell"]')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(writeText).toHaveBeenCalledWith('1')
+    const cells = wrapper.findAll('[data-test="grid-cell"]')
+    expect(document.activeElement).toBe(cells[2]!.element)
+
+    await grid(wrapper).trigger('keydown', { key: 'ContextMenu' })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    click('[data-test="grid-menu-copy-row"]')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(writeText).toHaveBeenCalledWith('1\tAda')
+    wrapper.unmount()
+  })
+
+  it('gives the focus back to the cell after the dialog of a value', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    await grid(wrapper).trigger('keydown', { key: 'ContextMenu' })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    click('[data-test="grid-menu-inspect"]')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(document.body.textContent).toContain('Grace')
+
+    const close = [...document.querySelectorAll('button')].find(
+      (button) => button.textContent?.trim() === 'Close',
+    )
+    close?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await nextTick()
+    expect(document.activeElement).toBe(wrapper.find('[data-test="grid-cell"]').element)
+    wrapper.unmount()
+  })
+
+  it('leaves the focus alone when a menu of the pointer closes', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    // The menu of a key comes first, and the pointer then opens the menu again.
+    await grid(wrapper).trigger('keydown', { key: 'ContextMenu' })
+    await wrapper.findAll('[data-test="grid-cell"]')[3]!.trigger('contextmenu')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const outside = document.createElement('button')
+    document.body.append(outside)
+    outside.focus()
+    click('[data-test="grid-menu-copy-cell"]')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(document.activeElement).toBe(outside)
+    outside.remove()
+    wrapper.unmount()
+  })
+
+  it('opens no menu for a key that arrives after the grid went away', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    const element = grid(wrapper).element
+    wrapper.unmount()
+    element.dispatchEvent(new KeyboardEvent('keydown', { key: 'ContextMenu', bubbles: true }))
+    await nextTick()
+    expect(document.querySelector('[data-test="grid-menu-copy-cell"]')).toBeNull()
+  })
+})

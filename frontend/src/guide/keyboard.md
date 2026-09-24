@@ -32,3 +32,19 @@ already hold.
 The arrow keys walk the tree. The right arrow opens a branch and the left
 arrow closes it. The Home key and the End key reach the first row and the last
 row. A letter jumps to the next row that starts with it.
+
+## In the results grid
+
+The arrow keys move between the cells, and `Page Up` and `Page Down` move by
+a page of rows. `Home` and `End` reach the ends of a row, and with `Ctrl` or
+`Cmd` they reach the ends of the grid. `Enter` opens the whole value of the
+cell. `Space` takes the row, and with `Ctrl` or `Cmd` it adds the row to the
+rows already taken.
+
+`Ctrl` or `Cmd` with `A` takes every row that the filter shows. `Ctrl` or
+`Cmd` with `C` copies the rows that are taken. With no row taken, it copies
+the value of the cell. Text that you mark with the pointer is copied as it
+is.
+
+The menu key and `Shift` with `F10` open the menu of the cell. When the menu
+closes, the focus goes back to the cell.
