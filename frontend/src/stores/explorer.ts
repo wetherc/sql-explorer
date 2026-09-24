@@ -204,7 +204,10 @@ export function indexColumns(index: IndexRef): string {
 
 /**
  * Keeps the nodes whose label holds the filter text, and keeps a parent
- * whose child survives, so that the path to a match stays visible.
+ * whose child matches, so that the path to a match stays visible.
+ *
+ * A node that matches keeps all of its children. The user who opens a
+ * matching node sees what it holds, and not the note of an empty branch.
  */
 export function filterNodes(nodes: ExplorerNode[], filter: string): ExplorerNode[] {
   const needle = filter.trim().toLowerCase()
@@ -219,7 +222,10 @@ export function filterNodes(nodes: ExplorerNode[], filter: string): ExplorerNode
     if (!matches && children.length === 0) {
       return null
     }
-    return { ...node, children: node.children ? children : undefined }
+    if (!node.children) {
+      return { ...node, children: undefined }
+    }
+    return { ...node, children: matches ? node.children : children }
   }
   return nodes.map(keep).filter((node): node is ExplorerNode => node !== null)
 }

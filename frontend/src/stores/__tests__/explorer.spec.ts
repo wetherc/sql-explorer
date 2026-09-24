@@ -188,6 +188,11 @@ describe('filterNodes', () => {
     expect(filtered[0]?.children?.map((child) => child.label)).toEqual(['Sales'])
   })
 
+  it('keeps every child of a node that matches', () => {
+    const filtered = filterNodes(tree, 'sales')
+    expect(filtered[0]?.children?.[0]?.children?.map((child) => child.label)).toEqual(['orders'])
+  })
+
   it('gives an empty list when nothing matches', () => {
     expect(filterNodes(tree, 'nothing')).toEqual([])
   })
