@@ -162,7 +162,7 @@ describe('tabs store', () => {
 
     tabs.setQuery(tab.id, 'SELECT 2')
     tabs.rename(tab.id, 'Report')
-    tabs.markClean(tab.id)
+    tabs.markClean(tab.id, 'SELECT 2')
     tabs.setParams(tab.id, [])
     tabs.setFilePath(tab.id, '/tmp/a.sql')
     tabs.activate(tab.id)
@@ -196,12 +196,31 @@ describe('tabs store', () => {
     expect(tab.query).toBe('SELECT 1')
     expect(tab.dirty).toBe(true)
 
-    tabs.markClean(tab.id)
+    tabs.markClean(tab.id, 'SELECT 1')
     tabs.setQuery(tab.id, 'SELECT 1')
     expect(tab.dirty).toBe(false)
 
     tabs.setQuery('missing', 'x')
-    tabs.markClean('missing')
+    tabs.markClean('missing', 'x')
+  })
+
+  it('clears the mark when the text comes back to the saved text', () => {
+    const tabs = useTabsStore()
+    const tab = tabs.add({ query: 'SELECT 1' })
+    tabs.setQuery(tab.id, 'SELECT 12')
+    expect(tab.dirty).toBe(true)
+    tabs.setQuery(tab.id, 'SELECT 1')
+    expect(tab.dirty).toBe(false)
+  })
+
+  it('keeps the mark when the text changed after the saved text went out', () => {
+    const tabs = useTabsStore()
+    const tab = tabs.add()
+    tabs.setQuery(tab.id, 'SELECT 12')
+    tabs.markClean(tab.id, 'SELECT 1')
+    expect(tab.dirty).toBe(true)
+    tabs.setQuery(tab.id, 'SELECT 1')
+    expect(tab.dirty).toBe(false)
   })
 
   it('changes the connection of a tab', () => {
@@ -392,6 +411,32 @@ describe('tabs store', () => {
 
     expect(tabs.tabs[0]?.dirty).toBe(true)
     expect(apiStub.readTextFile).not.toHaveBeenCalled()
+
+    // The text that the last session saved is unknown, so the mark stays.
+    tabs.setQuery('a', 'SELECT 2')
+    tabs.setQuery('a', 'SELECT 1')
+    expect(tabs.tabs[0]?.dirty).toBe(true)
+  })
+
+  it('clears the mark of a restored tab whose text comes back', async () => {
+    apiStub.getWorkspace.mockResolvedValue({
+      tabs: [
+        { id: 'a', query: 'SELECT 1' },
+        { id: 'b', query: 'SELECT 3', filePath: '/data/b.sql' },
+      ],
+      activeTabId: 'a',
+    })
+    apiStub.readTextFile.mockResolvedValue('SELECT 2')
+    const tabs = useTabsStore()
+
+    await tabs.restore()
+    expect(tabs.tabs[1]?.dirty).toBe(true)
+
+    tabs.setQuery('a', 'SELECT 9')
+    tabs.setQuery('a', 'SELECT 1')
+    tabs.setQuery('b', 'SELECT 2')
+    expect(tabs.tabs[0]?.dirty).toBe(false)
+    expect(tabs.tabs[1]?.dirty).toBe(false)
   })
 
   it('marks a restored tab whose text differs from the file', async () => {

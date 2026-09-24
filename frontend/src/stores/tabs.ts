@@ -12,7 +12,7 @@ export interface QueryTab {
   title: string
   query: string
   connectionId: string | null
-  /** True when the text differs from the saved statement it came from. */
+  /** True when the text differs from the text the tab last saved or read. */
   dirty: boolean
   /** The saved statement this tab came from, when it came from one. */
   savedQueryId: string | null
@@ -75,6 +75,13 @@ export const useTabsStore = defineStore('tabs', () => {
    * walk each record of each tab on every keystroke.
    */
   const revision = ref(0)
+  /**
+   * The text that each tab last saved or read, by the identifier of the tab.
+   * A tab whose text comes back to this text loses its mark, so an undo of
+   * each change leaves the tab clean. A tab with no entry here stays marked
+   * after each change, because the text it came from is unknown.
+   */
+  const cleanText = new Map<string, string>()
 
   /** Records that the workspace record changed. */
   function changed(): void {
@@ -107,6 +114,7 @@ export const useTabsStore = defineStore('tabs', () => {
       params: [],
       filePath: options.filePath ?? null,
     }
+    cleanText.set(tab.id, tab.query)
     tabs.value = [...tabs.value, tab]
     activeTabId.value = tab.id
     changed()
@@ -139,6 +147,7 @@ export const useTabsStore = defineStore('tabs', () => {
       return
     }
     releaseSession(tab)
+    cleanText.delete(id)
     tabs.value = tabs.value.filter((tab) => tab.id !== id)
     if (activeTabId.value === id) {
       const next = tabs.value[Math.max(0, index - 1)]
@@ -161,7 +170,7 @@ export const useTabsStore = defineStore('tabs', () => {
     const tab = tabs.value.find((item) => item.id === id)
     if (tab && tab.query !== query) {
       tab.query = query
-      tab.dirty = true
+      tab.dirty = cleanText.get(id) !== query
       changed()
     }
   }
@@ -196,10 +205,16 @@ export const useTabsStore = defineStore('tabs', () => {
     }
   }
 
-  function markClean(id: string): void {
+  /**
+   * Records the text that a save wrote. A save awaits the disk or the
+   * library, and the user can type while it runs, so the caller gives the
+   * text that went out. A tab whose text changed since then keeps its mark.
+   */
+  function markClean(id: string, text: string): void {
     const tab = tabs.value.find((item) => item.id === id)
     if (tab) {
-      tab.dirty = false
+      cleanText.set(id, text)
+      tab.dirty = tab.query !== text
       changed()
     }
   }
@@ -243,7 +258,9 @@ export const useTabsStore = defineStore('tabs', () => {
           return
         }
         try {
-          tab.dirty = (await api.readTextFile(tab.filePath)) !== tab.query
+          const text = await api.readTextFile(tab.filePath)
+          cleanText.set(tab.id, text)
+          tab.dirty = text !== tab.query
         } catch {
           // The recorded mark stays, because the text on the disk is unknown.
         }
@@ -256,6 +273,14 @@ export const useTabsStore = defineStore('tabs', () => {
     try {
       const workspace = parseWorkspace(await api.getWorkspace())
       tabs.value = workspace.tabs.map((tab) => ({ ...tab }))
+      // The workspace file holds no copy of the saved text, so a tab that
+      // carries the mark stays marked until the next save.
+      cleanText.clear()
+      for (const tab of tabs.value) {
+        if (!tab.dirty) {
+          cleanText.set(tab.id, tab.query)
+        }
+      }
       activeTabId.value = workspace.activeTabId
       // The counter continues after the highest restored title, so a new
       // tab does not repeat the name of a restored one.

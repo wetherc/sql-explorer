@@ -977,6 +977,39 @@ describe('QueryView', () => {
     expect(useUiStore().notices.some((notice) => notice.level === 'success')).toBe(true)
   })
 
+  it('keeps the mark of a tab that changed while the write ran', async () => {
+    let finish: () => void = () => {}
+    apiStub.writeTextFile.mockReturnValue(
+      new Promise<void>((resolve) => {
+        finish = resolve
+      }),
+    )
+    const wrapper = await mountView('SELECT 1', '/data/report.sql')
+    const tabs = useTabsStore()
+    tabs.tabs = [
+      {
+        id: 't1',
+        title: 'report.sql',
+        query: 'SELECT 1',
+        connectionId: 'c1',
+        dirty: true,
+        savedQueryId: null,
+        params: [],
+        filePath: '/data/report.sql',
+      },
+    ]
+
+    await wrapper.find('[data-test="save-file-button"]').trigger('click')
+    tabs.setQuery('t1', 'SELECT 12')
+    finish()
+    await settle()
+
+    expect(apiStub.writeTextFile).toHaveBeenCalledWith('/data/report.sql', 'SELECT 1')
+    expect(tabs.tabs[0]?.dirty).toBe(true)
+    tabs.setQuery('t1', 'SELECT 1')
+    expect(tabs.tabs[0]?.dirty).toBe(false)
+  })
+
   it('asks for a path when the tab holds no file, and keeps that path', async () => {
     apiStub.saveStatementFile.mockResolvedValue('/data/daily.sql')
     apiStub.listFolder.mockResolvedValue([])

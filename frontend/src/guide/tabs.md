@@ -14,7 +14,9 @@ A double click on the name of a tab changes that name. The Enter key keeps the
 new name and the Escape key throws it away.
 
 A tab that holds changes carries a mark. Closing such a tab asks first,
-because the text of the statement goes with it.
+because the text of the statement goes with it. A tab whose text comes back
+to the saved text loses the mark, as after an undo of each change. A tab
+that had the mark at the last restart keeps it until the next save.
 
 The open tabs come back after a restart, with their names, their statements
 and their values.

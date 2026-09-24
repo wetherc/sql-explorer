@@ -1053,24 +1053,27 @@ async function saveToFile(): Promise<void> {
   }
   savingFile.value = true
   try {
+    // The user can type while the write runs, so the text that went out is
+    // the text that the tab records as saved.
+    const text = props.tab.query
     const path = props.tab.filePath
     if (path) {
-      await api.writeTextFile(path, props.tab.query)
-      tabs.markClean(props.tab.id)
+      await api.writeTextFile(path, text)
+      tabs.markClean(props.tab.id, text)
       ui.success(`The file ${baseName(path)} is written.`)
       return
     }
     const written = await api.saveStatementFile({
       defaultName: suggestedFileName(props.tab.title),
       defaultFolder: files.roots[0]?.path ?? null,
-      contents: props.tab.query,
+      contents: text,
     })
     if (written === null) {
       return
     }
     tabs.setFilePath(props.tab.id, written)
     tabs.rename(props.tab.id, baseName(written))
-    tabs.markClean(props.tab.id)
+    tabs.markClean(props.tab.id, text)
     ui.success(`The file ${baseName(written)} is written.`)
   } catch (error) {
     ui.reportError(error)
@@ -1080,16 +1083,17 @@ async function saveToFile(): Promise<void> {
 }
 
 async function confirmSave(): Promise<void> {
+  const text = props.tab.query
   const saved = await history.save({
     id: props.tab.savedQueryId ?? undefined,
     name: saveName.value,
-    query: props.tab.query,
+    query: text,
     connectionId: props.tab.connectionId,
     folder: saveFolder.value,
   })
   if (saved) {
     tabs.rename(props.tab.id, saved.name)
-    tabs.markClean(props.tab.id)
+    tabs.markClean(props.tab.id, text)
     savingQuery.value = false
   }
 }
