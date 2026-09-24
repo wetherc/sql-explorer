@@ -2,9 +2,9 @@
 
 use crate::db::drivers::{
     add_constraint_column, add_index_column, add_snapshot_column, bytes_to_json, constraint_kind,
-    f64_to_json, number_out_of_range, number_value, parameter_type_refused, prefixed_plan,
-    routine_kind, rows_affected_message, rows_returned_message, size_text, table_kind,
-    CancelHandle, DatabaseDriver, NumberValue,
+    f32_to_json, f64_to_json, number_out_of_range, number_value, parameter_type_refused,
+    prefixed_plan, routine_kind, rows_affected_message, rows_returned_message, size_text,
+    table_kind, CancelHandle, DatabaseDriver, NumberValue,
 };
 use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{
@@ -816,7 +816,7 @@ pub fn value_to_json(value: &MysqlValue, kind: ValueKind) -> JsonValue {
         MysqlValue::NULL => JsonValue::Null,
         MysqlValue::Int(number) => JsonValue::from(*number),
         MysqlValue::UInt(number) => JsonValue::from(*number),
-        MysqlValue::Float(number) => f64_to_json(*number as f64),
+        MysqlValue::Float(number) => f32_to_json(*number),
         MysqlValue::Double(number) => f64_to_json(*number),
         // A BIT value is a whole number of at most 64 bits, first byte
         // highest, so BIT(1) that holds 1 gives 1 and BIT(8) gives 65, not
@@ -1208,6 +1208,10 @@ mod tests {
         assert_eq!(
             value_to_json(&MysqlValue::Float(0.5), ValueKind::Other),
             serde_json::json!(0.5)
+        );
+        assert_eq!(
+            value_to_json(&MysqlValue::Float(0.1), ValueKind::Other),
+            serde_json::json!(0.1)
         );
         assert_eq!(
             value_to_json(&MysqlValue::Bytes(b"hello".to_vec()), ValueKind::Other),

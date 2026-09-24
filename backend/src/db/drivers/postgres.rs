@@ -7,7 +7,7 @@
 
 use crate::db::drivers::{
     add_constraint_column, add_index_column, add_snapshot_column, bytes_to_json, constraint_kind,
-    f64_to_json, number_out_of_range, number_value, prefixed_plan, routine_kind,
+    f32_to_json, f64_to_json, number_out_of_range, number_value, prefixed_plan, routine_kind,
     rows_affected_message, rows_returned_message, size_text, table_kind, CancelHandle,
     DatabaseDriver, NumberValue,
 };
@@ -1194,7 +1194,7 @@ fn decode_scalar(column_type: &Type, bytes: &[u8]) -> JsonValue {
         // An OID is four bytes without a sign, so the read of a signed
         // eight-byte number refuses it.
         Type::OID => scalar(column_type, bytes, |value: u32| value.into()),
-        Type::FLOAT4 => scalar(column_type, bytes, |value: f32| f64_to_json(value as f64)),
+        Type::FLOAT4 => scalar(column_type, bytes, f32_to_json),
         Type::FLOAT8 => scalar(column_type, bytes, f64_to_json),
         Type::NUMERIC => numeric_text(bytes),
         Type::TEXT
@@ -2970,6 +2970,10 @@ mod tests {
         assert_eq!(
             decoded(&Type::FLOAT4, &1.5f32.to_be_bytes()),
             JsonValue::from(1.5)
+        );
+        assert_eq!(
+            decoded(&Type::FLOAT4, &0.1f32.to_be_bytes()),
+            JsonValue::from(0.1)
         );
         assert_eq!(
             decoded(&Type::FLOAT8, &1.5f64.to_be_bytes()),

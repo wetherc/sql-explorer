@@ -7,7 +7,7 @@ the cause and the state of any fix.
 
 `backend/vendor/tiberius` holds a copy of `tiberius` 0.12.3, which is the
 newest release. Cargo is pointed at the copy through `[patch.crates-io]` in
-`backend/Cargo.toml`. The copy carries five changes that the release does not.
+`backend/Cargo.toml`. The copy carries six changes that the release does not.
 Read this list before an upgrade, because an upgrade drops the copy and brings
 each defect back.
 
@@ -77,6 +77,14 @@ configuration that a connection string built. The copy adds
 The driver uses them to find a password in a connection string, and to add
 the password of the keychain to a string that gives none. The change is in
 `src/client/config.rs` and in `src/client/auth.rs`.
+
+### The client reads a money value as a decimal
+
+The release reads a `money` and a `smallmoney` value into a double. A money
+value holds up to 19 digits and a double holds 15 or 16, so
+922337203685477.5807 became 922337203685477.6. The copy reads the value as a
+`Numeric` with a scale of four, and the grid shows each digit. The change is
+in `src/tds/codec/column_data/money.rs`.
 
 ## A saved connection string can still hold a password
 

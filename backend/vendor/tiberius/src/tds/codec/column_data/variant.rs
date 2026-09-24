@@ -369,13 +369,28 @@ mod tests {
         money.extend_from_slice(&10000u32.to_le_bytes());
         assert_eq!(
             read(cell(0x3C, &[], &money)).await.unwrap(),
-            ColumnData::F64(Some(1.0))
+            ColumnData::Numeric(Some(Numeric::new_with_scale(10000, 4)))
         );
         assert_eq!(
             read(cell(0x7A, &[], &20000i32.to_le_bytes()))
                 .await
                 .unwrap(),
-            ColumnData::F64(Some(2.0))
+            ColumnData::Numeric(Some(Numeric::new_with_scale(20000, 4)))
+        );
+
+        // The largest money value keeps each of its 19 digits, and a
+        // negative value keeps its sign.
+        let mut largest = i32::MAX.to_le_bytes().to_vec();
+        largest.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(
+            read(cell(0x3C, &[], &largest)).await.unwrap(),
+            ColumnData::Numeric(Some(Numeric::new_with_scale(i64::MAX as i128, 4)))
+        );
+        let mut negative = (-1i32).to_le_bytes().to_vec();
+        negative.extend_from_slice(&(-5i32 as u32).to_le_bytes());
+        assert_eq!(
+            read(cell(0x3C, &[], &negative)).await.unwrap(),
+            ColumnData::Numeric(Some(Numeric::new_with_scale(-5, 4)))
         );
     }
 

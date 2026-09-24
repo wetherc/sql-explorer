@@ -7,9 +7,9 @@
 
 use crate::db::drivers::{
     add_constraint_column, add_index_column, add_snapshot_column, bytes_to_json, constraint_kind,
-    f64_to_json, number_out_of_range, number_value, parameter_type_refused, routine_kind,
-    rows_affected_message, rows_returned_message, single_statement, size_text, table_kind,
-    CancelHandle, DatabaseDriver, NumberValue,
+    f32_to_json, f64_to_json, number_out_of_range, number_value, parameter_type_refused,
+    routine_kind, rows_affected_message, rows_returned_message, single_statement, size_text,
+    table_kind, CancelHandle, DatabaseDriver, NumberValue,
 };
 use crate::db::sink::{BufferSink, RowSink, RunSummary, SinkControl};
 use crate::db::{
@@ -21,7 +21,7 @@ use crate::error::{Error, Result};
 use crate::sql::{only_reads, split_batches, split_statements, Dialect};
 use crate::storage::{MssqlAuth, SavedConnection, TlsMode};
 use async_trait::async_trait;
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime};
 use futures_util::TryStreamExt;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
@@ -1338,12 +1338,15 @@ fn cell_to_json(
         // A nullable integer covers every width from one to eight bytes,
         // which the type of the column does not name.
         ColumnType::Intn => column_data_to_json(data),
-        ColumnType::Float4 => read(row.try_get::<f32, _>(index))
-            .map(|value| f64_to_json(value as f64))
-            .unwrap_or(JsonValue::Null),
-        ColumnType::Float8 | ColumnType::Money | ColumnType::Money4 => {
+        ColumnType::Float4 => {
+            read(row.try_get::<f32, _>(index)).map_or(JsonValue::Null, f32_to_json)
+        }
+        ColumnType::Float8 => {
             read(row.try_get::<f64, _>(index)).map_or(JsonValue::Null, f64_to_json)
         }
+        // The copy of `tiberius` reads a money value as a decimal, so each of
+        // its 19 digits stays.
+        ColumnType::Money | ColumnType::Money4 => column_data_to_json(data),
         // A nullable float holds four bytes or eight, which the type of the
         // column does not name either.
         ColumnType::Floatn => column_data_to_json(data),
@@ -1365,9 +1368,7 @@ fn cell_to_json(
         | ColumnType::Datetime2 => read(row.try_get::<NaiveDateTime, _>(index))
             .map(|value| JsonValue::String(value.to_string()))
             .unwrap_or(JsonValue::Null),
-        ColumnType::DatetimeOffsetn => read(row.try_get::<DateTime<Utc>, _>(index))
-            .map(|value| JsonValue::String(value.to_rfc3339()))
-            .unwrap_or(JsonValue::Null),
+        ColumnType::DatetimeOffsetn => column_data_to_json(data),
         ColumnType::BigVarBin | ColumnType::BigBinary | ColumnType::Image | ColumnType::Udt => {
             read(row.try_get::<&[u8], _>(index)).map_or(JsonValue::Null, bytes_to_json)
         }
@@ -1394,7 +1395,7 @@ fn column_data_to_json(data: &ColumnData<'static>) -> JsonValue {
         ColumnData::I16(value) => value.map_or(JsonValue::Null, Into::into),
         ColumnData::I32(value) => value.map_or(JsonValue::Null, Into::into),
         ColumnData::I64(value) => value.map_or(JsonValue::Null, Into::into),
-        ColumnData::F32(value) => value.map_or(JsonValue::Null, |value| f64_to_json(value as f64)),
+        ColumnData::F32(value) => value.map_or(JsonValue::Null, f32_to_json),
         ColumnData::F64(value) => value.map_or(JsonValue::Null, f64_to_json),
         ColumnData::Bit(value) => value.map_or(JsonValue::Null, JsonValue::Bool),
         ColumnData::String(value) => value
@@ -1423,7 +1424,8 @@ fn column_data_to_json(data: &ColumnData<'static>) -> JsonValue {
         ColumnData::Time(_) => read(NaiveTime::from_sql(data)).map_or(JsonValue::Null, |value| {
             JsonValue::String(value.to_string())
         }),
-        ColumnData::DateTimeOffset(_) => read(DateTime::<Utc>::from_sql(data))
+        // The value keeps the offset that the server sent with it.
+        ColumnData::DateTimeOffset(_) => read(DateTime::<FixedOffset>::from_sql(data))
             .map_or(JsonValue::Null, |value| {
                 JsonValue::String(value.to_rfc3339())
             }),
@@ -2375,6 +2377,34 @@ mod tests {
                 0
             )))),
             JsonValue::String("2000-01-01T00:00:00+00:00".into())
+        );
+        // The server sends the moment in UTC with the offset beside it, and
+        // the text keeps the offset.
+        assert_eq!(
+            column_data_to_json(&ColumnData::DateTimeOffset(Some(DateTimeOffset::new(
+                DateTime2::new(Date::new(730119), Time::new(14 * 3600 * 10_000_000, 7)),
+                -300
+            )))),
+            JsonValue::String("2000-01-01T09:00:00-05:00".into())
+        );
+        // A four-byte float gives the digits that it shows, and a money
+        // value keeps each of its digits.
+        assert_eq!(
+            column_data_to_json(&ColumnData::F32(Some(0.1))),
+            serde_json::json!(0.1)
+        );
+        assert_eq!(
+            column_data_to_json(&ColumnData::Numeric(Some(Numeric::new_with_scale(
+                i64::MAX as i128,
+                4
+            )))),
+            JsonValue::String("922337203685477.5807".into())
+        );
+        assert_eq!(
+            column_data_to_json(&ColumnData::Numeric(Some(Numeric::new_with_scale(
+                -15000, 4
+            )))),
+            JsonValue::String("-1.5000".into())
         );
 
         // A value that is absent gives the null of JSON in every form.

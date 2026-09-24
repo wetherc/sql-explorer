@@ -309,6 +309,15 @@ pub fn bytes_to_json(bytes: &[u8]) -> JsonValue {
 /// Builds a JSON number from a floating point value. A value that is not a
 /// number, such as infinity, becomes text so that the result stays valid
 /// JSON.
+/// Turns a four-byte float into JSON with the digits that the float shows.
+///
+/// A widening cast gives the double nearest to the float, and that double
+/// shows 0.1 as 0.10000000149011612. The shortest text of the float reads
+/// back as the double that the user wrote.
+pub fn f32_to_json(value: f32) -> JsonValue {
+    f64_to_json(value.to_string().parse().unwrap_or(f64::from(value)))
+}
+
 pub fn f64_to_json(value: f64) -> JsonValue {
     match serde_json::Number::from_f64(value) {
         Some(number) => JsonValue::Number(number),
@@ -763,6 +772,13 @@ mod tests {
     #[test]
     fn a_finite_number_stays_a_number() {
         assert_eq!(f64_to_json(1.5), serde_json::json!(1.5));
+    }
+
+    #[test]
+    fn a_four_byte_float_gives_the_digits_that_it_shows() {
+        assert_eq!(f32_to_json(0.1), serde_json::json!(0.1));
+        assert_eq!(f32_to_json(16_777_217.0), serde_json::json!(16_777_216.0));
+        assert!(f32_to_json(f32::NAN).is_string());
     }
 
     #[test]
