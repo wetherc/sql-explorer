@@ -643,6 +643,16 @@ impl DatabaseDriver for MssqlDriver {
         Ok(())
     }
 
+    async fn holds_open_transaction(&mut self) -> Result<bool> {
+        let row = self
+            .client
+            .simple_query("SELECT @@TRANCOUNT")
+            .await?
+            .into_row()
+            .await?;
+        Ok(row.and_then(|row| row.get::<i32, _>(0)).unwrap_or(0) > 0)
+    }
+
     async fn execute_stream(
         &mut self,
         query: &str,

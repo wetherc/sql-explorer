@@ -145,6 +145,11 @@ impl DatabaseDriver for SqliteDriver {
         .await
     }
 
+    async fn holds_open_transaction(&mut self) -> Result<bool> {
+        self.with_connection(|connection| Ok(!connection.is_autocommit()))
+            .await
+    }
+
     /// Runs the statements on the pool for blocking work and feeds the sink
     /// as the rows arrive. The closure sends blocks of rows through a bounded
     /// channel, and this side drives the sink. A `Stop` of the sink travels

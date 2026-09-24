@@ -352,6 +352,16 @@ impl DatabaseDriver for PostgresDriver {
         Ok(())
     }
 
+    /// A block that an error aborted still waits for a `ROLLBACK`, so the
+    /// error 25P02 of the probe counts as an open block.
+    async fn holds_open_transaction(&mut self) -> Result<bool> {
+        match self.outside_a_block().await {
+            Ok(outside) => Ok(!outside),
+            Err(error) if error.code() == Some(&SqlState::IN_FAILED_SQL_TRANSACTION) => Ok(true),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Runs a script and feeds the sink. The path with parameters streams
     /// the rows through `query_raw`. The path without parameters goes
     /// through the simple protocol, which carries the whole script in one
@@ -741,12 +751,15 @@ impl PostgresDriver {
         if !only_reads(statement, Dialect::Postgres) {
             return false;
         }
-        match self.client.simple_query(OUTSIDE_A_BLOCK).await {
-            Ok(messages) => messages.iter().any(|message| {
-                matches!(message, SimpleQueryMessage::Row(row) if row.get(0) == Some("t"))
-            }),
-            Err(_) => false,
-        }
+        self.outside_a_block().await.unwrap_or(false)
+    }
+
+    /// Runs the probe [`OUTSIDE_A_BLOCK`] and reads its answer.
+    async fn outside_a_block(&self) -> std::result::Result<bool, tokio_postgres::Error> {
+        let messages = self.client.simple_query(OUTSIDE_A_BLOCK).await?;
+        Ok(messages.iter().any(
+            |message| matches!(message, SimpleQueryMessage::Row(row) if row.get(0) == Some("t")),
+        ))
     }
 
     /// Runs a script through the simple protocol and feeds the sink one

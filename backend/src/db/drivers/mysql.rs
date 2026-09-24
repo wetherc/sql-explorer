@@ -16,6 +16,7 @@ use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
 use crate::storage::SavedConnection;
 use async_trait::async_trait;
+use mysql_async::consts::StatusFlags;
 use mysql_async::prelude::*;
 use mysql_async::{Conn, Opts, OptsBuilder, Row as MysqlRow, SslOpts, Value as MysqlValue};
 use serde_json::Value as JsonValue;
@@ -269,6 +270,17 @@ impl DatabaseDriver for MysqlDriver {
     async fn ping(&mut self) -> Result<()> {
         self.conn()?.ping().await?;
         Ok(())
+    }
+
+    /// The server marks each OK packet with a flag while a transaction is
+    /// open, so a statement that does nothing reads the state.
+    async fn holds_open_transaction(&mut self) -> Result<bool> {
+        let conn = self.conn()?;
+        conn.query_drop("DO 0").await?;
+        Ok(conn.last_ok_packet().is_some_and(|ok| {
+            ok.status_flags()
+                .contains(StatusFlags::SERVER_STATUS_IN_TRANS)
+        }))
     }
 
     async fn execute_stream(

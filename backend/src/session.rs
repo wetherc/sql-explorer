@@ -19,6 +19,10 @@ pub const DEFAULT_SESSION: &str = "@default";
 /// The time after which an idle tab session closes.
 pub const SESSION_IDLE_REAP: Duration = Duration::from_secs(600);
 
+/// The time the idle reaper gives one session to say whether it is inside
+/// an open transaction.
+pub const TRANSACTION_PROBE_LIMIT: Duration = Duration::from_secs(5);
+
 /// The largest number of tab sessions one connection opens when the record
 /// of the connection names no other limit.
 pub const DEFAULT_SESSION_CAP: usize = 6;
@@ -163,25 +167,44 @@ impl SessionPool {
     }
 
     /// Removes every tab session that stood idle past the limit. A session
-    /// whose driver is busy stays, because a statement still runs on it. The
-    /// default session stays, because the health check covers it.
+    /// whose driver is busy stays, because a statement still runs on it. A
+    /// session inside an open transaction stays, because the close would
+    /// roll back the work of the transaction. The default session stays,
+    /// because the health check covers it.
+    ///
+    /// The probe of the transaction goes to the server, so the map is free
+    /// while it runs. A probe that fails or passes [`TRANSACTION_PROBE_LIMIT`]
+    /// removes the session, because the session then does not answer.
     pub async fn reap_idle(&self) {
-        let mut sessions = self.sessions.lock().await;
-        let mut gone: Vec<String> = Vec::new();
-        for (key, session) in sessions.iter() {
-            if key == DEFAULT_SESSION {
-                continue;
-            }
+        let held: Vec<(String, Arc<Session>)> = self
+            .sessions
+            .lock()
+            .await
+            .iter()
+            .filter(|(key, _)| *key != DEFAULT_SESSION)
+            .map(|(key, session)| (key.clone(), session.clone()))
+            .collect();
+        for (key, session) in held {
             if !session.idle_past(SESSION_IDLE_REAP).await {
                 continue;
             }
-            if session.driver.try_lock().is_err() {
+            let probe = {
+                let Ok(mut driver) = session.driver.try_lock() else {
+                    continue;
+                };
+                tokio::time::timeout(TRANSACTION_PROBE_LIMIT, driver.holds_open_transaction()).await
+            };
+            if matches!(probe, Ok(Ok(true))) {
                 continue;
             }
-            gone.push(key.clone());
-        }
-        for key in &gone {
-            sessions.remove(key);
+            // A new session that took the slot during the probe stays.
+            let mut sessions = self.sessions.lock().await;
+            if sessions
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(current, &session))
+            {
+                sessions.remove(&key);
+            }
         }
     }
 }
@@ -195,6 +218,7 @@ mod tests {
     use crate::sql::Dialect;
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::Notify;
 
     /// A handle that records that it was asked to stop a statement.
     struct FlagCancel(Arc<AtomicBool>);
@@ -207,19 +231,35 @@ mod tests {
         }
     }
 
+    /// How the probe of an open transaction answers.
+    enum Probe {
+        Idle,
+        Open,
+        Fails,
+        Hangs,
+        /// Answers idle once the test sends the signal.
+        Waits(Arc<Notify>),
+    }
+
     /// A driver whose flags a test selects.
     struct StubDriver {
         cancelled: Option<Arc<AtomicBool>>,
         needs_ping: bool,
         keeps_connection_after_stop: bool,
+        probe: Probe,
     }
 
     impl StubDriver {
         fn plain() -> Self {
+            Self::probing(Probe::Idle)
+        }
+
+        fn probing(probe: Probe) -> Self {
             Self {
                 cancelled: None,
                 needs_ping: true,
                 keeps_connection_after_stop: false,
+                probe,
             }
         }
     }
@@ -245,6 +285,18 @@ mod tests {
         }
         async fn ping(&mut self) -> Result<()> {
             Ok(())
+        }
+        async fn holds_open_transaction(&mut self) -> Result<bool> {
+            match &self.probe {
+                Probe::Idle => Ok(false),
+                Probe::Open => Ok(true),
+                Probe::Fails => Err(crate::error::Error::Connection("gone".into())),
+                Probe::Hangs => std::future::pending().await,
+                Probe::Waits(signal) => {
+                    signal.notified().await;
+                    Ok(false)
+                }
+            }
         }
         async fn execute_query(
             &mut self,
@@ -287,6 +339,7 @@ mod tests {
             cancelled: Some(Arc::new(AtomicBool::new(false))),
             needs_ping: false,
             keeps_connection_after_stop: true,
+            probe: Probe::Idle,
         }));
         assert!(session.cancel_handle.is_some());
         assert!(!session.needs_ping);
@@ -305,6 +358,7 @@ mod tests {
             cancelled: Some(flag.clone()),
             needs_ping: true,
             keeps_connection_after_stop: false,
+            probe: Probe::Idle,
         }));
         session
             .cancel_handle
@@ -411,6 +465,59 @@ mod tests {
         assert!(pool.get("busy").await.is_some());
         pool.reap_idle().await;
         assert!(pool.get("busy").await.is_none());
+    }
+
+    /// Puts a session with the probe into the pool, idle past the limit.
+    async fn idle_session(pool: &SessionPool, key: &str, probe: Probe) -> Arc<Session> {
+        let session = pool
+            .insert(key, Session::new(Box::new(StubDriver::probing(probe))))
+            .await;
+        session.age(SESSION_IDLE_REAP).await;
+        session
+    }
+
+    #[tokio::test]
+    async fn the_reap_keeps_a_session_inside_a_transaction() {
+        let pool = pool();
+        idle_session(&pool, "open", Probe::Open).await;
+        idle_session(&pool, "failed", Probe::Fails).await;
+
+        pool.reap_idle().await;
+
+        assert!(pool.get("open").await.is_some());
+        // A probe that fails means that the session does not answer.
+        assert!(pool.get("failed").await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_reap_removes_a_session_whose_probe_does_not_answer() {
+        let pool = pool();
+        idle_session(&pool, "silent", Probe::Hangs).await;
+
+        pool.reap_idle().await;
+
+        assert!(pool.get("silent").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_reap_leaves_a_session_that_took_the_slot_during_the_probe() {
+        let pool = Arc::new(pool());
+        let signal = Arc::new(Notify::new());
+        idle_session(&pool, "t1", Probe::Waits(signal.clone())).await;
+
+        let sweep = tokio::spawn({
+            let pool = pool.clone();
+            async move { pool.reap_idle().await }
+        });
+        tokio::task::yield_now().await;
+        let fresh = pool
+            .insert("t1", Session::new(Box::new(StubDriver::plain())))
+            .await;
+        signal.notify_one();
+        sweep.await.unwrap();
+
+        let kept = pool.get("t1").await.unwrap();
+        assert!(Arc::ptr_eq(&kept, &fresh));
     }
 
     #[tokio::test]

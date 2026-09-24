@@ -251,8 +251,8 @@ pub async fn list_active_connections(
 /// session sits under.
 ///
 /// A tab that already holds a session gets it back after a health check. A
-/// tab without a session gets a new one, up to the cap of the pool. The
-/// sessions that other tabs left idle go on the way in.
+/// tab without a session gets a new one, up to the cap of the pool. At the
+/// cap, the sessions that other tabs left idle go first.
 async fn session_for<R: Runtime>(
     app: &AppHandle<R>,
     state: &AppState,
@@ -261,7 +261,6 @@ async fn session_for<R: Runtime>(
 ) -> Result<(OpenConnection, Arc<Session>, String)> {
     let open = state.connection(connection_id).await?;
     let key = open.session_key(tab_id);
-    open.sessions.reap_idle().await;
 
     if let Some(session) = open.sessions.get(&key).await {
         let session =
@@ -275,6 +274,9 @@ async fn session_for<R: Runtime>(
     let _opening = pool.begin_open().await;
     if let Some(session) = pool.get(&key).await {
         return Ok((open, session, key));
+    }
+    if key != DEFAULT_SESSION && pool.at_cap().await {
+        pool.reap_idle().await;
     }
     if key != DEFAULT_SESSION && pool.at_cap().await {
         return Err(Error::Configuration(format!(
@@ -2991,6 +2993,46 @@ mod tests {
             .await
             .is_ok());
         assert!(session_for(app.handle(), &state, "s1", None).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn the_cap_closes_an_idle_session_to_make_room() {
+        let (_dir, mut descriptor) = temp_sqlite();
+        descriptor.options.max_sessions = 1;
+        let (app, state) = state_with_sqlite(descriptor).await;
+
+        let (open, first, _) = session_for(app.handle(), &state, "s1", Some("t1"))
+            .await
+            .unwrap();
+        first.age(crate::session::SESSION_IDLE_REAP).await;
+        session_for(app.handle(), &state, "s1", Some("t2"))
+            .await
+            .unwrap();
+        assert!(open.sessions.get("t1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_cap_keeps_an_idle_session_inside_a_transaction() {
+        let (_dir, mut descriptor) = temp_sqlite();
+        descriptor.options.max_sessions = 1;
+        let (app, state) = state_with_sqlite(descriptor).await;
+
+        let (open, first, _) = session_for(app.handle(), &state, "s1", Some("t1"))
+            .await
+            .unwrap();
+        first
+            .driver
+            .lock()
+            .await
+            .execute_query("BEGIN", None, &ExecOptions::default())
+            .await
+            .unwrap();
+        first.age(crate::session::SESSION_IDLE_REAP).await;
+        assert!(session_for(app.handle(), &state, "s1", Some("t2"))
+            .await
+            .is_err());
+        let kept = open.sessions.get("t1").await.unwrap();
+        assert!(Arc::ptr_eq(&kept, &first));
     }
 
     #[tokio::test]

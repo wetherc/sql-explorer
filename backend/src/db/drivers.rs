@@ -40,6 +40,14 @@ pub trait DatabaseDriver: Send + Sync {
         true
     }
 
+    /// True when the session is inside a transaction that it did not end.
+    /// The idle reaper keeps such a session, because a close of it rolls
+    /// the work of the transaction back. A driver that holds no session,
+    /// such as Athena, answers false.
+    async fn holds_open_transaction(&mut self) -> Result<bool> {
+        Ok(false)
+    }
+
     /// True when the connection stays fit for use after a limit stopped a
     /// statement in the middle of its run.
     ///

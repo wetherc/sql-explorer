@@ -211,6 +211,20 @@ second connection to it opens a separate empty database; every tab of such a
 connection shares one session. Athena holds no session state at all, so its
 sessions are plain request channels.
 
+The application closes the session of a tab after ten minutes with no answer
+from the server. A sweep does this once each minute, and a new tab at the
+limit starts a sweep at once. Before the close, the application asks the
+server whether the session is inside a transaction. A session inside a
+transaction stays open until its tab closes, because the close would roll
+back the work of the transaction. A session that does not answer this
+question in five seconds closes. A closed session loses its temporary tables
+and its `SET` options, and the tab gets no message about it. The next
+statement of the tab opens a new, empty session.
+
+A session that stops answering, for example after a network fault, gets a new
+session in its place. The server rolls back the transaction of the old session,
+and the tab again gets no message.
+
 ## A large number parameter goes to the server as digits
 
 The interface holds a number of the parameter dialog as a double, which keeps
