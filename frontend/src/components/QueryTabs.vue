@@ -104,7 +104,7 @@
     <ConfirmDialog
       :open="pendingClose !== null"
       title="Close this tab?"
-      :message="`The changes to ${pendingClose?.title ?? ''} are not saved, and closing the tab loses them.`"
+      :message="closeMessage"
       confirm-text="Close the tab"
       danger
       @confirm="confirmClose"
@@ -119,10 +119,12 @@ import ConfirmDialog from './ConfirmDialog.vue'
 import EmptyState from './EmptyState.vue'
 import QueryView from './QueryView.vue'
 import { useConnectionsStore } from '@/stores/connections'
+import { useQueryStore } from '@/stores/query'
 import { useTabsStore, type QueryTab } from '@/stores/tabs'
 
 const tabs = useTabsStore()
 const connections = useConnectionsStore()
+const queries = useQueryStore()
 
 /**
  * The number of tabs that keep their view. A view holds an editor and the
@@ -221,15 +223,39 @@ function renameActiveTab(): void {
   }
 }
 
-/** The tab that waits on an answer, while its changes are not saved. */
+/**
+ * The tab that waits on an answer, while its changes are not saved or a
+ * statement of it runs.
+ */
 const pendingClose = ref<QueryTab | null>(null)
+
+function isRunning(tab: QueryTab): boolean {
+  return queries.peekState(tab.id)?.running ?? false
+}
+
+/** The text of the question, which names each thing the close loses. */
+const closeMessage = computed(() => {
+  const tab = pendingClose.value
+  if (!tab) {
+    return ''
+  }
+  const parts: string[] = []
+  if (tab.dirty) {
+    parts.push(`The changes to ${tab.title} are not saved, and closing the tab loses them.`)
+  }
+  if (isRunning(tab)) {
+    parts.push(`A statement of ${tab.title} runs, and closing the tab stops it.`)
+  }
+  return parts.join(' ')
+})
 
 /**
  * Closes one tab. A tab whose changes are not saved asks first, because the
- * text of the statement is lost with it.
+ * text of the statement is lost with it. A tab with a running statement
+ * asks too, because the close stops that statement.
  */
 function askClose(tab: QueryTab): void {
-  if (tab.dirty) {
+  if (tab.dirty || isRunning(tab)) {
     pendingClose.value = tab
     return
   }

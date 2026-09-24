@@ -9,6 +9,7 @@ const QueryTabs = (await import('@/components/QueryTabs.vue')).default
 const { mountWithPlugins, settle } = await import('./mount')
 const { useConnectionsStore } = await import('@/stores/connections')
 const { useTabsStore } = await import('@/stores/tabs')
+const { useQueryStore } = await import('@/stores/query')
 
 describe('QueryTabs', () => {
   beforeEach(() => {
@@ -291,6 +292,31 @@ describe('QueryTabs asking before it loses work', () => {
     await settle()
     expect(tabs.tabs).toHaveLength(1)
     expect(document.body.textContent).toContain('Close this tab?')
+
+    const confirm = document.querySelector('[data-test="confirm-accept"]') as HTMLElement
+    confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+    expect(tabs.tabs).toHaveLength(0)
+  })
+
+  it('asks before it closes a tab whose statement runs', async () => {
+    apiStub.releaseSession.mockResolvedValue(undefined)
+    const wrapper = mountWithPlugins(QueryTabs)
+    const tabs = useTabsStore()
+    const tab = tabs.add({ query: 'SELECT 1', title: 'Report' })
+    useQueryStore().stateFor(tab.id).running = true
+    await settle()
+
+    await wrapper.find('[data-test="close-tab"]').trigger('click')
+    await settle()
+    expect(tabs.tabs).toHaveLength(1)
+    expect(document.body.textContent).toContain('A statement of Report runs')
+    expect(document.body.textContent).not.toContain('are not saved')
+
+    tabs.setQuery(tab.id, 'SELECT 2')
+    await settle()
+    expect(document.body.textContent).toContain('The changes to Report are not saved')
+    expect(document.body.textContent).toContain('A statement of Report runs')
 
     const confirm = document.querySelector('[data-test="confirm-accept"]') as HTMLElement
     confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))

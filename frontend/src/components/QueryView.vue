@@ -458,6 +458,16 @@
       @cancel="askingPlan = false"
     />
 
+    <ConfirmDialog
+      :open="pendingConnection !== null"
+      title="Change the connection?"
+      message="A statement of this tab runs, and a change of the connection stops it."
+      confirm-text="Stop it and change"
+      danger
+      @confirm="confirmConnection"
+      @cancel="pendingConnection = null"
+    />
+
     <AppDialog v-model="savingQuery" max-width="480">
       <v-card>
         <v-card-title class="text-subtitle-1">Save this statement</v-card-title>
@@ -827,8 +837,27 @@ function onQueryChange(value: string): void {
   tabs.setQuery(props.tab.id, value)
 }
 
+/**
+ * The connection that waits on an answer, while a statement of the tab
+ * runs. A move to another connection stops that statement, so the user is
+ * asked first.
+ */
+const pendingConnection = ref<{ value: string | null } | null>(null)
+
 function onConnectionChange(value: string | null): void {
+  if (state.value.running) {
+    pendingConnection.value = { value }
+    return
+  }
   tabs.setConnection(props.tab.id, value)
+}
+
+function confirmConnection(): void {
+  const pending = pendingConnection.value
+  pendingConnection.value = null
+  if (pending) {
+    tabs.setConnection(props.tab.id, pending.value)
+  }
 }
 
 function onPaneResize(panes: Array<{ size: number }>): void {

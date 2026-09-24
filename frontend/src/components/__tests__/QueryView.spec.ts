@@ -795,6 +795,40 @@ describe('QueryView', () => {
     expect(tabs.tabs[0]?.connectionId).toBe('c2')
   })
 
+  it('asks before a change of the connection stops a running statement', async () => {
+    apiStub.releaseSession.mockResolvedValue(undefined)
+    const wrapper = await mountView()
+    const tabs = useTabsStore()
+    tabs.tabs = [
+      {
+        id: 't1',
+        title: 'Query 1',
+        query: 'SELECT 1',
+        connectionId: 'c1',
+        dirty: false,
+        savedQueryId: null,
+        params: [],
+        filePath: null,
+      },
+    ]
+    useQueryStore().stateFor('t1').running = true
+    const select = wrapper.findComponent({ name: 'VSelect' })
+
+    await select.vm.$emit('update:modelValue', 'c2')
+    await settle()
+    expect(tabs.tabs[0]?.connectionId).toBe('c1')
+    expect(document.body.textContent).toContain('Change the connection?')
+    ;(document.querySelector('[data-test="confirm-cancel"]') as HTMLElement).click()
+    await settle()
+    expect(tabs.tabs[0]?.connectionId).toBe('c1')
+
+    await select.vm.$emit('update:modelValue', 'c2')
+    await settle()
+    ;(document.querySelector('[data-test="confirm-accept"]') as HTMLElement).click()
+    await settle()
+    expect(tabs.tabs[0]?.connectionId).toBe('c2')
+  })
+
   it('writes a result to the file the user chose', async () => {
     apiStub.executeQuery.mockImplementation(streamed(response))
     apiStub.saveTextFile.mockResolvedValue('/tmp/out.csv')

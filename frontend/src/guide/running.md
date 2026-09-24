@@ -22,6 +22,9 @@ The **Format** button lays the statement out with the rules of its dialect.
 The **Stop** button stands beside **Run** while a statement runs. The time
 limit of the connection also stops a statement that runs too long.
 
+A change of the connection of the tab stops the statement, and so does a
+close of the tab. The application asks before each one.
+
 A stop opens a new session on some engines, so the temporary tables and the
 `SET` options of the old session go with it.
 
