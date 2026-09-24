@@ -698,10 +698,12 @@ onMounted(async () => {
   await connections.loadEngines()
   await connections.load()
   await history.load()
-  await tabs.restore()
-  // The backend records the folders that the user accepted, so the panel
-  // reads that record and shows those folders alone.
+  // The backend records the folders and the files that the user accepted,
+  // so the panel reads that record and shows those folders alone. The read
+  // also lets the backend admit those paths, so it comes before the tabs
+  // compare their files with the disk.
   await files.restoreRoots()
+  await tabs.restore()
   for (const info of Object.values(connections.active)) {
     explorer.addRoot(info.connectionId)
   }

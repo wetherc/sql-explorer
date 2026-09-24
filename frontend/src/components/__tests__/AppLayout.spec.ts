@@ -46,6 +46,27 @@ describe('AppLayout', () => {
     apiStub.setMenuCommands.mockResolvedValue(undefined)
   })
 
+  it('reads the accepted paths before the tabs compare their files with the disk', async () => {
+    const calls: string[] = []
+    apiStub.fileRoots.mockImplementation(async () => {
+      calls.push('fileRoots')
+      return []
+    })
+    apiStub.getWorkspace.mockResolvedValue({
+      tabs: [{ id: 't1', title: 'a.sql', query: 'SELECT 1', filePath: '/data/a.sql' }],
+      activeTabId: 't1',
+    })
+    apiStub.readTextFile.mockImplementation(async () => {
+      calls.push('readTextFile')
+      return 'SELECT 1'
+    })
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+
+    expect(calls).toEqual(['fileRoots', 'readTextFile'])
+    wrapper.unmount()
+  })
+
   it('reads everything it needs when it opens', async () => {
     const wrapper = mountWithPlugins(AppLayout)
     await settle()

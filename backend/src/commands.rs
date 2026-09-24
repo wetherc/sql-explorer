@@ -1413,9 +1413,9 @@ async fn ask_save_path<R: Runtime>(
 
 // --- The files of the user ---
 
-/// The paths of a list of folders, as text for the interface and for the
-/// record of the backend.
-fn root_names(roots: &[std::path::PathBuf]) -> Vec<String> {
+/// The paths of a list of folders or files, as text for the interface and
+/// for the record of the backend.
+fn path_names(roots: &[std::path::PathBuf]) -> Vec<String> {
     roots
         .iter()
         .map(|root| root.to_string_lossy().to_string())
@@ -1431,9 +1431,27 @@ fn root_names(roots: &[std::path::PathBuf]) -> Vec<String> {
 /// so the dialog goes on.
 async fn accept_folder<R: Runtime>(app: &AppHandle<R>, state: &AppState, root: std::path::PathBuf) {
     state.add_file_root(root).await;
-    let names = root_names(&state.file_roots().await);
+    let names = path_names(&state.file_roots().await);
     if let Err(error) = store::write_file_roots(app, &names) {
         log::warn!("The folders of the panel could not be written: {error}");
+    }
+}
+
+/// Records a file that the user accepted in a dialog of the operating system.
+///
+/// The resolved path goes into the grants of the state and into the record
+/// of the backend, so a later read or write of the same tab reaches that one
+/// file after a restart as well. A file that is gone from the disk gives no
+/// grant. A record that cannot be written costs the next session the grant
+/// alone, so the dialog goes on.
+async fn accept_file<R: Runtime>(app: &AppHandle<R>, state: &AppState, path: &std::path::Path) {
+    let Some(file) = files::grant_for(path) else {
+        return;
+    };
+    state.add_file_grant(file).await;
+    let names = path_names(&state.file_grants().await);
+    if let Err(error) = store::write_file_grants(app, &names) {
+        log::warn!("The files that the user opened could not be written: {error}");
     }
 }
 
@@ -1507,9 +1525,10 @@ pub struct OpenedFile {
 
 /// Asks the user for one statement file and reads it.
 ///
-/// The folder of the file becomes a root, so a later save of the same tab
-/// reaches the file and the panel can list the folder beside it. Returns
-/// `None` when the user closed the dialog.
+/// The file becomes a grant, so a later save of the same tab reaches it. The
+/// folder of the file stays out of reach, because the user accepted one file
+/// and not the files beside it. Returns `None` when the user closed the
+/// dialog.
 #[tauri::command]
 pub async fn open_statement_file<R: Runtime>(
     app: AppHandle<R>,
@@ -1532,10 +1551,8 @@ pub async fn open_statement_file<R: Runtime>(
         return Ok(None);
     };
 
-    if let Some(folder) = files::folder_of(&path) {
-        accept_folder(&app, &state, folder).await;
-    }
     let contents = files::read_text(&path)?;
+    accept_file(&app, &state, &path).await;
     let opened = path.to_string_lossy().to_string();
     log::info!("Opened the file '{opened}'.");
     Ok(Some(OpenedFile {
@@ -1549,7 +1566,8 @@ pub async fn open_statement_file<R: Runtime>(
 /// The record of the backend holds this list. The interface reads it and
 /// never writes it, so the interface cannot widen what the guard accepts.
 /// A folder that is gone from the disk drops out of the list and out of the
-/// record.
+/// record. The call also puts the single-file grants of the record into the
+/// state, and a file that is gone drops out the same way.
 #[tauri::command]
 pub async fn file_roots<R: Runtime>(
     app: AppHandle<R>,
@@ -1565,9 +1583,20 @@ async fn file_roots_for<R: Runtime>(app: &AppHandle<R>, state: &AppState) -> Res
         .filter_map(|path| files::root_from_record(path))
         .collect();
     state.set_file_roots(kept.clone()).await;
-    let names = root_names(&kept);
+    let names = path_names(&kept);
     if names.len() != recorded.len() {
         store::write_file_roots(app, &names)?;
+    }
+
+    let recorded = store::read_file_grants(app)?;
+    let grants: Vec<std::path::PathBuf> = recorded
+        .iter()
+        .filter_map(|path| files::grant_for(std::path::Path::new(path)))
+        .collect();
+    state.set_file_grants(grants.clone()).await;
+    let granted = path_names(&grants);
+    if granted != recorded {
+        store::write_file_grants(app, &granted)?;
     }
     Ok(names)
 }
@@ -1590,7 +1619,7 @@ async fn close_folder_for<R: Runtime>(
     state: &AppState,
 ) -> Result<()> {
     state.remove_file_root(std::path::Path::new(path)).await;
-    let names = root_names(&state.file_roots().await);
+    let names = path_names(&state.file_roots().await);
     store::write_file_roots(app, &names)?;
     log::info!("Closed the folder '{path}'.");
     Ok(())
@@ -1607,23 +1636,28 @@ pub async fn list_folder(
     files::read_folder(&target)
 }
 
-/// Reads the text of one file inside the roots.
-#[tauri::command]
-pub async fn read_text_file(path: String, state: tauri::State<'_, AppState>) -> Result<String> {
+/// Resolves a path that a read or a write of a file names, and refuses it
+/// when it is neither a grant nor inside a root.
+async fn accepted_path(path: &str, state: &AppState) -> Result<std::path::PathBuf> {
     let roots = state.file_roots().await;
-    let target = files::path_inside_roots(std::path::Path::new(&path), &roots)?;
-    files::read_text(&target)
+    let grants = state.file_grants().await;
+    files::path_accepted(std::path::Path::new(path), &roots, &grants)
 }
 
-/// Writes the text of one file inside the roots.
+/// Reads the text of one file that is a grant or inside the roots.
+#[tauri::command]
+pub async fn read_text_file(path: String, state: tauri::State<'_, AppState>) -> Result<String> {
+    files::read_text(&accepted_path(&path, &state).await?)
+}
+
+/// Writes the text of one file that is a grant or inside the roots.
 #[tauri::command]
 pub async fn write_text_file(
     path: String,
     contents: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<()> {
-    let roots = state.file_roots().await;
-    let target = files::path_inside_roots(std::path::Path::new(&path), &roots)?;
+    let target = accepted_path(&path, &state).await?;
     files::write_text(&target, &contents)?;
     log::info!("Wrote the file '{}'.", target.display());
     Ok(())
@@ -1642,9 +1676,9 @@ pub struct SaveStatementRequest {
 
 /// Asks the user for a path and writes the statement of a tab there.
 ///
-/// The folder of the file becomes a root, so the next save of the same tab
-/// reaches the file through `write_text_file`. Returns the path, or `None`
-/// when the user closed the dialog.
+/// The file becomes a grant, so the next save of the same tab reaches it
+/// through `write_text_file`. Returns the path, or `None` when the user
+/// closed the dialog.
 #[tauri::command]
 pub async fn save_statement_file<R: Runtime>(
     app: AppHandle<R>,
@@ -1657,9 +1691,7 @@ pub async fn save_statement_file<R: Runtime>(
         return Ok(None);
     };
     files::write_text(&path, &request.contents)?;
-    if let Some(folder) = files::folder_of(&path) {
-        accept_folder(&app, &state, folder).await;
-    }
+    accept_file(&app, &state, &path).await;
     let written = path.to_string_lossy().to_string();
     log::info!("Wrote the file '{written}'.");
     Ok(Some(written))
@@ -1846,10 +1878,11 @@ struct FileSink {
 
 impl FileSink {
     fn create(path: &std::path::Path, format: ExportFormat) -> Result<Self> {
-        let mut name = path.as_os_str().to_owned();
-        name.push(".part");
-        let temp_path = std::path::PathBuf::from(name);
-        let file = std::fs::File::create(&temp_path)?;
+        // The sink removes the temporary file itself when the export does
+        // not finish, so the file leaves the cleanup of `tempfile`.
+        let (file, temp_path) = files::temp_file_beside(path)?
+            .keep()
+            .map_err(|error| error.error)?;
         // The sheet takes the name of the file that the user chose.
         let sheet_title = path
             .file_stem()
@@ -2588,6 +2621,17 @@ mod tests {
         // An absent field over an empty store reports no secret.
         assert!(!store_secret(&state, "k1", None).unwrap());
     }
+    /// True when no temporary file of a write is left in a folder.
+    fn no_temporary_file(folder: &std::path::Path) -> bool {
+        std::fs::read_dir(folder).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".part")
+        })
+    }
+
     /// Builds an application of the tests that holds the store plugin, so
     /// the files of the settings answer.
     fn app_with_store() -> tauri::App<tauri::test::MockRuntime> {
@@ -2603,8 +2647,8 @@ mod tests {
             std::path::PathBuf::from("/data"),
             std::path::PathBuf::from("/data/other"),
         ];
-        assert_eq!(root_names(&roots), vec!["/data", "/data/other"]);
-        assert!(root_names(&[]).is_empty());
+        assert_eq!(path_names(&roots), vec!["/data", "/data/other"]);
+        assert!(path_names(&[]).is_empty());
     }
 
     #[tokio::test]
@@ -2621,7 +2665,7 @@ mod tests {
         // folder against every path.
         let next = AppState::new(Box::new(MemoryStore::default()));
         let names = file_roots_for(app.handle(), &next).await.unwrap();
-        assert_eq!(names, root_names(std::slice::from_ref(&root)));
+        assert_eq!(names, path_names(std::slice::from_ref(&root)));
         assert_eq!(next.file_roots().await, vec![root.clone()]);
     }
 
@@ -2637,11 +2681,11 @@ mod tests {
         accept_folder(app.handle(), &state, gone).await;
 
         let names = file_roots_for(app.handle(), &state).await.unwrap();
-        assert_eq!(names, root_names(std::slice::from_ref(&kept)));
+        assert_eq!(names, path_names(std::slice::from_ref(&kept)));
         // The record holds the folder that is left alone.
         assert_eq!(
             store::read_file_roots(app.handle()).unwrap(),
-            root_names(std::slice::from_ref(&kept))
+            path_names(std::slice::from_ref(&kept))
         );
     }
 
@@ -2663,6 +2707,50 @@ mod tests {
         let file = root.join("a.sql");
         std::fs::write(&file, "SELECT 1").unwrap();
         assert!(files::path_inside_roots(&file, &state.file_roots().await).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_file_that_the_user_accepted_survives_a_restart_without_its_folder() {
+        let app = app_with_store();
+        let state = state();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.sql");
+        std::fs::write(&file, "SELECT 1").unwrap();
+        let beside = dir.path().join("b.sql");
+        std::fs::write(&beside, "SELECT 2").unwrap();
+
+        accept_file(app.handle(), &state, &file).await;
+        // A path that no file holds gives no grant.
+        accept_file(app.handle(), &state, &dir.path().join("gone.sql")).await;
+        let resolved = std::fs::canonicalize(&file).unwrap();
+        assert_eq!(state.file_grants().await, vec![resolved.clone()]);
+        assert!(state.file_roots().await.is_empty());
+
+        // A new session reads the grant back, and the file beside it stays
+        // out of reach.
+        let next = AppState::new(Box::new(MemoryStore::default()));
+        file_roots_for(app.handle(), &next).await.unwrap();
+        assert_eq!(next.file_grants().await, vec![resolved]);
+        assert!(accepted_path(&file.to_string_lossy(), &next).await.is_ok());
+        assert!(accepted_path(&beside.to_string_lossy(), &next)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn a_granted_file_that_is_gone_drops_out_of_the_record() {
+        let app = app_with_store();
+        let state = state();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.sql");
+        std::fs::write(&file, "SELECT 1").unwrap();
+        accept_file(app.handle(), &state, &file).await;
+
+        std::fs::remove_file(&file).unwrap();
+        file_roots_for(app.handle(), &state).await.unwrap();
+
+        assert!(state.file_grants().await.is_empty());
+        assert!(store::read_file_grants(app.handle()).unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -2801,7 +2889,7 @@ mod tests {
             "\u{feff}id,name\r\n1,Ada\r\n2,\r\n"
         );
         // The temporary file is gone after the rename.
-        assert!(!folder.path().join("out.csv.part").exists());
+        assert!(no_temporary_file(folder.path()));
 
         let json = folder.path().join("out.json");
         let mut sink = FileSink::create(&json, ExportFormat::Json).unwrap();
@@ -2844,7 +2932,7 @@ mod tests {
 
         assert_eq!(summary.rows, 2);
         assert!(!summary.truncated);
-        assert!(!folder.path().join("Daily count.xlsx.part").exists());
+        assert!(no_temporary_file(folder.path()));
 
         let file = std::fs::File::open(&path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();

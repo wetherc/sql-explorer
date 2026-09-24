@@ -1,10 +1,13 @@
 //! The commands that read and write the statement files of the user.
 //!
 //! The user chooses a folder through the dialog of the operating system, and
-//! the backend records that folder as a root. Every later command refuses a
-//! path that lies outside every root, after it resolves the links of the
-//! path, so a link inside a root cannot step out of it. The interface
-//! therefore cannot reach a file that the user did not accept.
+//! the backend records that folder as a root. A file that the user opens or
+//! saves through a dialog becomes a grant for that one file, and its folder
+//! stays out of reach. Every later command refuses a path that is neither a
+//! grant nor inside a root, after it resolves the links of the path, so a
+//! link inside a root cannot step out of it. A hidden entry under a root is
+//! refused too, because the panel does not show it. The interface therefore
+//! cannot reach a file that the user did not accept.
 
 use crate::error::{Error, Result};
 use serde::Serialize;
@@ -54,17 +57,46 @@ fn outside_the_roots(path: &Path) -> Error {
 /// else is judged by where it lands. Each root is resolved as well, because a
 /// root can itself sit under a link.
 pub fn path_inside_roots(path: &Path, roots: &[PathBuf]) -> Result<PathBuf> {
+    path_accepted(path, roots, &[])
+}
+
+/// Holds a path against the folders and the single files the user accepted.
+///
+/// Each file of `files` is a resolved path, so a grant matches the resolved
+/// target alone. A link that takes the place of a granted file later
+/// resolves to a different path and is refused.
+pub fn path_accepted(path: &Path, roots: &[PathBuf], files: &[PathBuf]) -> Result<PathBuf> {
     let target = resolved(path)?;
-    for root in roots {
-        let Ok(root) = resolved(root) else {
-            // A root that is gone from the disk holds nothing any more.
-            continue;
-        };
-        if target.starts_with(&root) {
-            return Ok(target);
-        }
+    if files.contains(&target) || inside_roots(&target, roots) {
+        return Ok(target);
     }
     Err(outside_the_roots(path))
+}
+
+/// True when a resolved path lies under a root and no part of the path below
+/// that root is hidden. A root that is gone from the disk holds nothing any
+/// more.
+fn inside_roots(target: &Path, roots: &[PathBuf]) -> bool {
+    roots
+        .iter()
+        .filter_map(|root| resolved(root).ok())
+        .any(|root| {
+            target
+                .strip_prefix(&root)
+                .is_ok_and(|rest| !has_hidden_part(rest))
+        })
+}
+
+/// True when one part of a relative path is a name that the panel hides.
+fn has_hidden_part(path: &Path) -> bool {
+    path.components()
+        .any(|part| is_hidden(&part.as_os_str().to_string_lossy()))
+}
+
+/// The resolved path of a file that the user accepted in a dialog, for the
+/// list of grants. A path that no file holds gives nothing.
+pub fn grant_for(path: &Path) -> Option<PathBuf> {
+    resolved(path).ok().filter(|file| file.is_file())
 }
 
 /// Reads a folder that a record of the workspace names.
@@ -75,17 +107,6 @@ pub fn path_inside_roots(path: &Path, roots: &[PathBuf]) -> Result<PathBuf> {
 pub fn root_from_record(path: &str) -> Option<PathBuf> {
     let candidate = PathBuf::from(path);
     candidate.is_dir().then_some(candidate)
-}
-
-/// The folder that holds a file, when that folder is on the disk.
-///
-/// A file that the user names in the save dialog lies outside every root, so
-/// the folder of it becomes a root and the next write of the same tab passes
-/// the guard.
-pub fn folder_of(path: &Path) -> Option<PathBuf> {
-    path.parent()
-        .filter(|parent| parent.is_dir())
-        .map(Path::to_path_buf)
 }
 
 /// True when the name of an entry is one the panel hides.
@@ -155,15 +176,40 @@ pub fn write_text(path: &Path, contents: &str) -> Result<()> {
 /// in the middle of the write therefore leaves the temporary file and not a
 /// file that holds a part of the content.
 pub fn write_bytes(path: &Path, contents: &[u8]) -> Result<()> {
-    let mut name = path.as_os_str().to_owned();
-    name.push(".part");
-    let temp_path = PathBuf::from(name);
-    std::fs::write(&temp_path, contents)?;
-    if let Err(error) = std::fs::rename(&temp_path, path) {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(error.into());
-    }
+    use std::io::Write;
+    let mut temp = temp_file_beside(path)?;
+    temp.write_all(contents)?;
+    // A failed rename drops the temporary file, which removes it.
+    temp.persist(path).map_err(|error| error.error)?;
     Ok(())
+}
+
+/// Creates the temporary file for a write of `path`, in the same folder so
+/// that the rename at the end stays on one disk.
+///
+/// The temporary file has a random name and is created only when no entry
+/// of that name exists, so a link that waits in the folder cannot send the
+/// write to another file. It takes the permissions of the file it replaces,
+/// so a file that only its owner can read stays that way.
+pub fn temp_file_beside(path: &Path) -> Result<tempfile::NamedTempFile> {
+    let folder = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let mut prefix = std::ffi::OsString::from(".");
+    prefix.push(path.file_name().unwrap_or_default());
+    prefix.push(".");
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(&prefix).suffix(".part");
+    // A new file takes the mode that the umask of the process allows, as a
+    // plain create does. The temporary file otherwise gets 0600.
+    #[cfg(unix)]
+    builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o666));
+    let temp = builder.tempfile_in(folder)?;
+    if let Ok(existing) = std::fs::metadata(path) {
+        temp.as_file().set_permissions(existing.permissions())?;
+    }
+    Ok(temp)
 }
 
 #[cfg(test)]
@@ -242,16 +288,68 @@ mod tests {
     }
 
     #[test]
-    fn a_file_names_the_folder_that_holds_it() {
-        let root = temp_folder("folder-of");
-        let file = root.join("a.sql");
+    fn a_hidden_entry_under_a_root_is_refused() {
+        let root = temp_folder("guard-hidden");
+        std::fs::create_dir(root.join(".config")).unwrap();
+        let inner = root.join(".config").join("a.sql");
+        std::fs::write(&inner, "SELECT 1").unwrap();
+        let dotfile = root.join(".bashrc");
+        std::fs::write(&dotfile, "echo").unwrap();
+        let roots = vec![root.clone()];
 
-        // The file itself does not need to be there, because the dialog
-        // names a path before the write.
-        assert_eq!(folder_of(&file), Some(root.clone()));
-        // A folder that is not on the disk names nothing.
-        assert_eq!(folder_of(&root.join("gone").join("a.sql")), None);
-        assert_eq!(folder_of(Path::new("a.sql")), None);
+        assert!(path_inside_roots(&inner, &roots).is_err());
+        assert!(path_inside_roots(&dotfile, &roots).is_err());
+        // A root whose own path is hidden still holds the entries in it.
+        let hidden_root = root.join(".config");
+        assert!(path_inside_roots(&inner, &[hidden_root]).is_ok());
+    }
+
+    #[test]
+    fn a_granted_file_passes_and_its_folder_does_not() {
+        let folder = temp_folder("grant");
+        let file = folder.join("a.sql");
+        std::fs::write(&file, "SELECT 1").unwrap();
+        let beside = folder.join("b.sql");
+        std::fs::write(&beside, "SELECT 2").unwrap();
+        let grants = vec![grant_for(&file).unwrap()];
+
+        assert!(path_accepted(&file, &[], &grants).is_ok());
+        let error = path_accepted(&beside, &[], &grants).err().unwrap();
+        assert!(error.to_string().contains("outside every folder"));
+        // A root still admits the paths under it.
+        assert!(path_accepted(&beside, std::slice::from_ref(&folder), &grants).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_that_takes_the_place_of_a_granted_file_is_refused() {
+        let folder = temp_folder("grant-link");
+        let away = temp_folder("grant-link-away");
+        let file = folder.join("a.sql");
+        std::fs::write(&file, "SELECT 1").unwrap();
+        let grants = vec![grant_for(&file).unwrap()];
+
+        std::fs::remove_file(&file).unwrap();
+        let secret = away.join("secret");
+        std::fs::write(&secret, "keep").unwrap();
+        std::os::unix::fs::symlink(&secret, &file).unwrap();
+
+        assert!(path_accepted(&file, &[], &grants).is_err());
+    }
+
+    #[test]
+    fn a_grant_names_a_file_that_is_on_the_disk() {
+        let folder = temp_folder("grant-for");
+        let file = folder.join("a.sql");
+        std::fs::write(&file, "SELECT 1").unwrap();
+
+        assert_eq!(
+            grant_for(&file),
+            Some(std::fs::canonicalize(&file).unwrap())
+        );
+        // A folder and a path that is gone give no grant.
+        assert_eq!(grant_for(&folder), None);
+        assert_eq!(grant_for(&folder.join("gone.sql")), None);
     }
 
     #[test]
@@ -294,6 +392,15 @@ mod tests {
         assert!(read_text(&root.join("gone.sql")).is_err());
     }
 
+    /// The names of the temporary files that a write left in a folder.
+    fn leftovers(folder: &Path) -> Vec<String> {
+        std::fs::read_dir(folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|name| name.ends_with(".part"))
+            .collect()
+    }
+
     #[test]
     fn a_write_goes_through_a_temporary_file() {
         let root = temp_folder("write");
@@ -302,7 +409,7 @@ mod tests {
         write_text(&file, "SELECT 1").unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "SELECT 1");
         // The temporary file is gone once the write ends.
-        assert!(!root.join("out.sql.part").exists());
+        assert!(leftovers(&root).is_empty());
 
         // A second write takes the place of the first.
         write_text(&file, "SELECT 2").unwrap();
@@ -316,7 +423,17 @@ mod tests {
 
         write_bytes(&file, &[0, 1, 2, 255]).unwrap();
         assert_eq!(std::fs::read(&file).unwrap(), vec![0, 1, 2, 255]);
-        assert!(!root.join("out.bin.part").exists());
+        assert!(leftovers(&root).is_empty());
+    }
+
+    #[test]
+    fn a_write_to_a_relative_path_uses_the_current_folder() {
+        let name = "sql-explorer-files-relative.sql";
+        let _ = std::fs::remove_file(name);
+
+        write_text(Path::new(name), "SELECT 1").unwrap();
+        assert_eq!(std::fs::read_to_string(name).unwrap(), "SELECT 1");
+        std::fs::remove_file(name).unwrap();
     }
 
     #[test]
@@ -328,6 +445,50 @@ mod tests {
         std::fs::write(target.join("held.sql"), "SELECT 1").unwrap();
 
         assert!(write_text(&target, "SELECT 1").is_err());
-        assert!(!root.join("busy.part").exists());
+        assert!(leftovers(&root).is_empty());
+    }
+
+    #[test]
+    fn a_write_into_a_folder_that_is_gone_is_reported() {
+        let root = temp_folder("write-gone");
+        assert!(write_text(&root.join("nowhere").join("a.sql"), "SELECT 1").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_that_waits_beside_the_file_is_not_followed() {
+        let root = temp_folder("write-link");
+        let away = temp_folder("write-link-away");
+        let victim = away.join("victim");
+        std::fs::write(&victim, "keep").unwrap();
+        std::os::unix::fs::symlink(&victim, root.join("q.sql.part")).unwrap();
+
+        write_text(&root.join("q.sql"), "SELECT 1").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+        assert_eq!(
+            std::fs::read_to_string(root.join("q.sql")).unwrap(),
+            "SELECT 1"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_write_keeps_the_mode_of_the_file_it_replaces() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = temp_folder("write-mode");
+        let file = root.join("secret.sql");
+        std::fs::write(&file, "SELECT 1").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        write_text(&file, "SELECT 2").unwrap();
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        // A new file is readable by its owner, as a plain create makes it.
+        let fresh = root.join("fresh.sql");
+        write_text(&fresh, "SELECT 3").unwrap();
+        let mode = std::fs::metadata(&fresh).unwrap().permissions().mode();
+        assert_eq!(mode & 0o600, 0o600);
     }
 }

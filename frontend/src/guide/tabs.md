@@ -28,10 +28,16 @@ the connection of the entry when that connection is open.
 ## The file of a tab
 
 The **Save** button writes the statement of the tab to a file, and so do
-`Ctrl` or `Cmd` with `S`. A tab that came from the files panel goes back to
-the same file. A tab without a file opens the save dialog of the operating
-system, which starts in the first folder of the files panel. The tab then
-carries the name of that file and keeps it.
+`Ctrl` or `Cmd` with `S`. A tab that came from a file goes back to the same
+file. A tab without a file opens the save dialog of the operating system,
+which starts in the first folder of the files panel. The tab then takes the
+name of that file and keeps it.
+
+A file that you open or save through a dialog gives the application access
+to that file alone. Its folder does not join the files panel. To see the
+files beside it, open the folder from the **File** menu. The panel does not
+show hidden entries, and the application does not read or write them inside
+an open folder.
 
 The files panel holds no watch on the disk. A file that another program
 writes keeps its old text in the tab, and a save from the tab writes the

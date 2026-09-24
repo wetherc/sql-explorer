@@ -38,19 +38,6 @@ export function baseName(path: string): string {
   return parts[parts.length - 1] || path
 }
 
-/**
- * The folder that holds a file, or `null` when the path names no folder in
- * front of the file. The two marks of a path are both read, because the
- * backend gives the path in the form of the operating system.
- */
-export function folderOf(path: string): string | null {
-  const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
-  if (cut <= 0) {
-    return null
-  }
-  return path.slice(0, cut)
-}
-
 /** Finds one node by its path, wherever it stands in the tree. */
 export function findNode(nodes: FileNode[], path: string): FileNode | undefined {
   for (const node of nodes) {
@@ -231,9 +218,10 @@ export const useFilesStore = defineStore('files', () => {
   }
 
   /**
-   * Asks the user for one statement file and opens it in a tab. The folder
-   * of the file joins the panel, so the work beside that file is one click
-   * away and a later save of the tab reaches the file.
+   * Asks the user for one statement file and opens it in a tab. The backend
+   * admits that one file, so a later save of the tab reaches it. The folder
+   * of the file stays out of the panel, because the user accepted the file
+   * alone.
    */
   async function openFileFromDialog(): Promise<void> {
     loading.value = true
@@ -252,11 +240,6 @@ export const useFilesStore = defineStore('files', () => {
         title: baseName(opened.path),
         filePath: opened.path,
       })
-      const folder = folderOf(opened.path)
-      if (folder !== null) {
-        addRoot(folder)
-        await expand(folder)
-      }
     } catch (error) {
       ui.reportError(error)
     } finally {

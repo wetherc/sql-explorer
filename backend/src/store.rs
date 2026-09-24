@@ -19,13 +19,14 @@ pub const CONNECTIONS_FILE: &str = "connections.json";
 pub const QUERIES_FILE: &str = "queries.json";
 /// The file that holds the open tabs.
 pub const WORKSPACE_FILE: &str = "workspace.json";
-/// The file that holds the folders the user accepted.
+/// The file that holds the folders and the single files the user accepted.
 pub const FOLDERS_FILE: &str = "folders.json";
 
 const HISTORY_KEY: &str = "history";
 const SAVED_KEY: &str = "saved";
 const WORKSPACE_KEY: &str = "workspace";
 const ROOTS_KEY: &str = "roots";
+const GRANTS_KEY: &str = "files";
 
 /// The path of one file of the settings.
 ///
@@ -171,6 +172,22 @@ pub fn read_file_roots<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<String>> {
 pub fn write_file_roots<R: Runtime>(app: &AppHandle<R>, roots: &[String]) -> Result<()> {
     let store = app.store(settings_path(FOLDERS_FILE))?;
     store.set(ROOTS_KEY, serde_json::to_value(roots)?);
+    store.save()?;
+    Ok(())
+}
+
+/// Reads the single files that the user accepted in an earlier session. The
+/// same rule as for the folders applies: only a dialog of the operating
+/// system adds a file to this list.
+pub fn read_file_grants<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<String>> {
+    let store = app.store(settings_path(FOLDERS_FILE))?;
+    Ok(parse_list(store.get(GRANTS_KEY)))
+}
+
+/// Writes the single files that the user accepted.
+pub fn write_file_grants<R: Runtime>(app: &AppHandle<R>, files: &[String]) -> Result<()> {
+    let store = app.store(settings_path(FOLDERS_FILE))?;
+    store.set(GRANTS_KEY, serde_json::to_value(files)?);
     store.save()?;
     Ok(())
 }

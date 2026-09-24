@@ -24,6 +24,8 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 base64 = "0.22"
 bytes = "1"
+# A file write goes through a temporary file with a random name.
+tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 
@@ -118,7 +120,6 @@ default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 
 [dev-dependencies]
-tempfile = "3"
 # The tests of the command layer run against a mock application handle.
 tauri = { version = "2", features = ["test"] }
 # A test of a time limit moves the clock of the runtime instead of waiting.

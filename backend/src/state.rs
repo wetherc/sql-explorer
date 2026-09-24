@@ -153,7 +153,15 @@ pub struct AppState {
     /// system. A command that reads or writes a file refuses every path that
     /// lies outside these folders.
     pub file_roots: Mutex<Vec<std::path::PathBuf>>,
+    /// The single files that the user opened or saved through a dialog, as
+    /// resolved paths, with the most recent last. A grant admits that one
+    /// file and not the folder around it.
+    pub file_grants: Mutex<Vec<std::path::PathBuf>>,
 }
+
+/// The number of single-file grants that the state keeps. A new grant past
+/// this number pushes out the oldest one, so the record stays small.
+pub const MAX_FILE_GRANTS: usize = 200;
 
 impl AppState {
     pub fn new(secrets: Box<dyn SecretStore>) -> Self {
@@ -163,6 +171,7 @@ impl AppState {
             running: Mutex::new(HashMap::new()),
             secrets,
             file_roots: Mutex::new(Vec::new()),
+            file_grants: Mutex::new(Vec::new()),
         }
     }
 
@@ -190,6 +199,27 @@ impl AppState {
     /// The folders that the user accepted.
     pub async fn file_roots(&self) -> Vec<std::path::PathBuf> {
         self.file_roots.lock().await.clone()
+    }
+
+    /// Records a file that the user accepted. A file that is already in the
+    /// list moves to the end, and the oldest grants go past the limit.
+    pub async fn add_file_grant(&self, file: std::path::PathBuf) {
+        let mut grants = self.file_grants.lock().await;
+        grants.retain(|held| held != &file);
+        grants.push(file);
+        let extra = grants.len().saturating_sub(MAX_FILE_GRANTS);
+        grants.drain(..extra);
+    }
+
+    /// Puts the grants of the record of the backend in the place of the
+    /// list. The start of a session calls this once.
+    pub async fn set_file_grants(&self, grants: Vec<std::path::PathBuf>) {
+        *self.file_grants.lock().await = grants;
+    }
+
+    /// The single files that the user accepted.
+    pub async fn file_grants(&self) -> Vec<std::path::PathBuf> {
+        self.file_grants.lock().await.clone()
     }
 
     /// Closes the tab sessions of every open connection that stood idle past
@@ -594,6 +624,33 @@ mod tests {
         state.add_file_root(first.clone()).await;
 
         assert_eq!(state.file_roots().await, vec![first, second]);
+    }
+
+    #[tokio::test]
+    async fn a_file_grant_moves_to_the_end_and_the_oldest_go_past_the_limit() {
+        let state = state();
+        let first = std::path::PathBuf::from("/data/a.sql");
+        let second = std::path::PathBuf::from("/data/b.sql");
+        state.add_file_grant(first.clone()).await;
+        state.add_file_grant(second.clone()).await;
+        state.add_file_grant(first.clone()).await;
+        assert_eq!(
+            state.file_grants().await,
+            vec![second.clone(), first.clone()]
+        );
+
+        for index in 0..MAX_FILE_GRANTS {
+            state
+                .add_file_grant(std::path::PathBuf::from(format!("/data/{index}.sql")))
+                .await;
+        }
+        let grants = state.file_grants().await;
+        assert_eq!(grants.len(), MAX_FILE_GRANTS);
+        assert!(!grants.contains(&first));
+        assert!(!grants.contains(&second));
+
+        state.set_file_grants(vec![first.clone()]).await;
+        assert_eq!(state.file_grants().await, vec![first]);
     }
 
     /// Puts one tab session into the pool of a connection and moves the
