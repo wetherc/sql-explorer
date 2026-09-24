@@ -168,6 +168,79 @@ describe('ResultsGrid', () => {
     expect(wrapper.findAll('[data-test="grid-row"]')).toHaveLength(2)
   })
 
+  it('sorts a row that arrived while the sort stands', async () => {
+    const table = ResultTable.fromRows(columns, records)
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: table, rows: 3 } })
+    await wrapper.findAll('[data-test="grid-header"]')[1]!.trigger('click')
+
+    table.addSegment([], 1)
+    await wrapper.setProps({ rows: 4 })
+    const rows = wrapper.findAll('[data-test="grid-row"]')
+    expect(rows).toHaveLength(4)
+    expect(rows[0]?.text()).toContain('Ada')
+    expect(wrapper.find('[data-test="grid-count"]').text()).toBe('4 rows')
+  })
+
+  it('matches and sorts a row that arrived while a filter and a sort stand', async () => {
+    const table = ResultTable.fromRows(columns, records)
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: table, rows: 3 } })
+    await wrapper.find('[data-test="grid-filter"] input').setValue('null')
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    await wrapper.findAll('[data-test="grid-header"]')[0]!.trigger('click')
+    expect(wrapper.findAll('[data-test="grid-row"]')).toHaveLength(1)
+
+    table.addSegment([], 1)
+    await wrapper.setProps({ rows: 4 })
+    expect(wrapper.findAll('[data-test="grid-row"]')).toHaveLength(2)
+    expect(wrapper.find('[data-test="grid-count"]').text()).toBe('2 of 4 rows')
+  })
+
+  it('makes the sort of new rows wait after a slow sort', async () => {
+    vi.useFakeTimers()
+    // Each read of the clock moves it 100 ms on, so a sort takes 100 ms.
+    let clock = 0
+    const now = vi.spyOn(performance, 'now').mockImplementation(() => (clock += 100))
+    try {
+      const table = ResultTable.fromRows(columns, records)
+      const wrapper = mountWithPlugins(ResultsGrid, { props: { result: table, rows: 3 } })
+      await wrapper.findAll('[data-test="grid-header"]')[0]!.trigger('click')
+
+      table.addSegment([], 1)
+      await wrapper.setProps({ rows: 4 })
+      // The sort waits, so the view holds the rows of the last sort.
+      expect(wrapper.findAll('[data-test="grid-row"]')).toHaveLength(3)
+
+      // A second chunk during the wait adds no second timer.
+      table.addSegment([], 1)
+      await wrapper.setProps({ rows: 5 })
+      await vi.runAllTimersAsync()
+      await wrapper.vm.$nextTick()
+      expect(wrapper.findAll('[data-test="grid-row"]')).toHaveLength(5)
+
+      // A timer that waits when the grid goes away is stopped.
+      table.addSegment([], 1)
+      await wrapper.setProps({ rows: 6 })
+      wrapper.unmount()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      now.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('matches no row of a new result against the text of the old one', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    await wrapper.find('[data-test="grid-filter"] input').setValue('ada')
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findAll('[data-test="grid-row"]')).toHaveLength(1)
+
+    await wrapper.setProps({ result: result({ rows: [[7, 'Linus']] }) })
+    const rows = wrapper.findAll('[data-test="grid-row"]')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.text()).toContain('Linus')
+  })
+
   it('opens the whole value of a cell', async () => {
     const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
     await wrapper.findAll('[data-test="grid-cell"]')[1]!.trigger('dblclick')

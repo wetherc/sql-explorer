@@ -271,7 +271,16 @@
 
 <script setup lang="ts">
 import AppDialog from './AppDialog.vue'
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  shallowRef,
+  triggerRef,
+  watch,
+} from 'vue'
 import type { ComponentPublicInstance } from 'vue'
 import PanelHeader from './PanelHeader.vue'
 import { compareSortKeys, formatCell, isNullCell, sortKey, truncate } from '@/lib/format'
@@ -383,6 +392,7 @@ onBeforeUnmount(() => {
     clearTimeout(filterTimer)
   }
   dropRowTexts()
+  stopSortTimer()
 })
 
 const inspecting = ref(false)
@@ -399,16 +409,25 @@ const selected = ref(new Set<number>())
 const anchor = ref<number | null>(null)
 
 /**
- * The place of every row of the result. The view holds places and not rows,
- * so a result of many rows costs one number for each row and no object.
+ * The place of every row of the result, in the order of the result. The view
+ * holds places and not rows, so a result of many rows costs one number for
+ * each row and no object. A chunk that arrives while the set streams adds the
+ * places of its own rows to the end of the same array, so the rows of a set
+ * of many chunks are counted once and not once for each chunk.
  */
-const sourceOrder = computed(() => {
-  const order = new Array<number>(rowTotal.value)
-  for (let index = 0; index < order.length; index += 1) {
-    order[index] = index
+let sourceOrder: number[] = []
+let sourceOrderTable: ResultTable | null = null
+
+function sourceOrderFor(table: ResultTable, total: number): number[] {
+  if (sourceOrderTable !== table || sourceOrder.length > total) {
+    sourceOrder = []
+    sourceOrderTable = table
   }
-  return order
-})
+  for (let index = sourceOrder.length; index < total; index += 1) {
+    sourceOrder.push(index)
+  }
+  return sourceOrder
+}
 
 /**
  * The text of every row in small letters, which the filter matches against.
@@ -465,6 +484,8 @@ function dropRowTexts(): void {
   rowTexts = []
   rowTextsSource = null
   filterProgress.value = null
+  matches = []
+  matchesSource = null
 }
 
 /**
@@ -519,50 +540,134 @@ function refreshRowTexts(): void {
 
 watch([appliedSearch, rowTotal, () => props.result], refreshRowTexts)
 
-const filteredOrder = computed(() => {
-  const needle = activeFilter.value
-  if (needle === '') {
-    return sourceOrder.value
+/**
+ * The places of the rows that match the active filter. The text of a row that
+ * arrives while the filter stands is matched once, and its place goes on the
+ * end of the array.
+ */
+let matches: number[] = []
+let matchesSource: ResultTable | null = null
+let matchesNeedle = ''
+/** The number of row texts that the matches cover. */
+let matchesRead = 0
+
+function matchesFor(table: ResultTable, needle: string): number[] {
+  if (matchesSource !== table || matchesNeedle !== needle) {
+    matches = []
+    matchesSource = table
+    matchesNeedle = needle
+    matchesRead = 0
   }
-  // The text stands outside the reactivity of Vue, so the count of the
-  // builds carries a new text to this value.
-  void rowTextsVersion.value
-  return sourceOrder.value.filter((row) => rowTexts[row]?.includes(needle))
-})
+  // The texts of a result that has gone stay until the build for the new
+  // result starts, and they do not name the rows of the new result.
+  const texts = rowTextsSource === table ? rowTexts : []
+  for (; matchesRead < texts.length; matchesRead += 1) {
+    if (texts[matchesRead]!.includes(needle)) {
+      matches.push(matchesRead)
+    }
+  }
+  return matches
+}
 
 /**
  * The value of one column for every row, which the sort compares. The keys
  * are built once for a column, so a sort of many rows builds the text of a
- * cell once and not once for each comparison.
+ * cell once and not once for each comparison. The keys of rows that arrive
+ * while the set streams go on the end of the same array.
  */
 let sortKeys: SortKey[] = []
 let sortKeysSource: ResultTable | null = null
 let sortKeysColumn = -1
 
 function sortKeysFor(table: ResultTable, column: number, total: number): SortKey[] {
-  if (sortKeysSource !== table || sortKeysColumn !== column || sortKeys.length !== total) {
-    const keys = new Array<SortKey>(total)
-    for (let index = 0; index < total; index += 1) {
-      keys[index] = sortKey(table.cell(index, column))
-    }
-    sortKeys = keys
+  if (sortKeysSource !== table || sortKeysColumn !== column || sortKeys.length > total) {
+    sortKeys = []
     sortKeysSource = table
     sortKeysColumn = column
+  }
+  for (let index = sortKeys.length; index < total; index += 1) {
+    sortKeys.push(sortKey(table.cell(index, column)))
   }
   return sortKeys
 }
 
-const sortedOrder = computed(() => {
+/** The places of the rows in the view, after the filter and the sort. */
+const sortedOrder = shallowRef<number[]>([])
+/** The rows that the order of the view covers. */
+let orderedCount = 0
+/** The time that the last sort took, and the time at which it ended. */
+let lastSortMs = 0
+let lastSortEnd = Number.NEGATIVE_INFINITY
+/**
+ * A sort after new rows waits until this many times the time of the last sort
+ * has passed since that sort ended. The sort of a set that streams thus takes
+ * at most about a fifth of the main thread. While it waits, the view shows
+ * the rows of the last sort, and the count names the rows that the view holds.
+ */
+const SORT_GAP_FACTOR = 4
+let sortTimer: ReturnType<typeof setTimeout> | null = null
+
+function stopSortTimer(): void {
+  if (sortTimer !== null) {
+    clearTimeout(sortTimer)
+    sortTimer = null
+  }
+}
+
+/** The places of the rows that the filter keeps, in the order of the result. */
+function baseOrder(): number[] {
+  const needle = activeFilter.value
+  return needle === ''
+    ? sourceOrderFor(props.result, rowTotal.value)
+    : matchesFor(props.result, needle)
+}
+
+/** Builds the order of the view again, with the sort when one is active. */
+function updateOrder(): void {
+  stopSortTimer()
+  const base = baseOrder()
+  orderedCount = base.length
   const index = sortIndex.value
   if (index === null) {
-    return filteredOrder.value
+    // The array of the places can be the one that the view holds already, so
+    // the view is told of its new rows.
+    sortedOrder.value = base
+    triggerRef(sortedOrder)
+    return
   }
+  const start = performance.now()
   const direction = sortDescending.value ? -1 : 1
   const keys = sortKeysFor(props.result, index, rowTotal.value)
-  return [...filteredOrder.value].sort(
+  sortedOrder.value = [...base].sort(
     (left, right) => compareSortKeys(keys[left] ?? null, keys[right] ?? null) * direction,
   )
+  lastSortEnd = performance.now()
+  lastSortMs = lastSortEnd - start
+}
+
+/**
+ * Adds rows that arrived to the order of the view. Without a sort this costs
+ * the new rows alone. With a sort, a sort that ended a short time ago makes
+ * the next one wait, so a set of many chunks is not sorted again for each
+ * chunk.
+ */
+function updateOrderLater(): void {
+  if (sortTimer !== null || baseOrder().length === orderedCount) {
+    return
+  }
+  const wait = lastSortEnd + lastSortMs * SORT_GAP_FACTOR - performance.now()
+  if (sortIndex.value === null || wait <= 0) {
+    updateOrder()
+    return
+  }
+  sortTimer = setTimeout(updateOrder, wait)
+}
+
+watch([() => props.result, activeFilter, sortIndex, sortDescending], updateOrder, {
+  flush: 'sync',
+  immediate: true,
 })
+watch([rowTotal, rowTextsVersion], updateOrderLater, { flush: 'sync' })
 
 const hasSelection = computed(() => selected.value.size > 0)
 
