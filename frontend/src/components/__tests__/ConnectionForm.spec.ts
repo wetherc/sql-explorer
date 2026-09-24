@@ -759,15 +759,59 @@ describe('ConnectionForm with every field filled', () => {
     await wrapper.find('[data-test="azure-cli-path-field"] input').setValue('/opt/az')
     await wrapper.find('[data-test="save-button"]').trigger('click')
     await settle()
+    // The Azure CLI needs no secret, so the token typed for the other method
+    // goes out as an empty text, which removes it from the keychain.
     expect(apiStub.saveConnection).toHaveBeenCalledWith(
       expect.objectContaining({
-        password: 'a-token',
+        password: '',
         options: expect.objectContaining({
           mssqlAuth: MssqlAuth.EntraAzureCli,
           azureCliPath: '/opt/az',
         }),
       }),
     )
+  })
+
+  it('sends no password for Windows Authentication', async () => {
+    const wrapper = await mountForm(
+      connectionFixture({
+        password: 'typed-for-sql-login',
+        options: { ...connectionFixture().options, azureCliPath: '/opt/az' },
+      }),
+    )
+    const select = wrapper
+      .findAllComponents({ name: 'VSelect' })
+      .find((item) => item.attributes('data-test') === 'auth-select')
+    await select!.vm.$emit('update:modelValue', MssqlAuth.Integrated)
+    await wrapper.find('[data-test="save-button"]').trigger('click')
+    await settle()
+    expect(apiStub.saveConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        password: '',
+        options: expect.objectContaining({ azureCliPath: null }),
+      }),
+    )
+  })
+
+  it('keeps the fields of a MS SQL Server method away from other engines', async () => {
+    const wrapper = await mountForm(
+      connectionFixture({
+        dbType: DbType.Athena,
+        options: {
+          ...connectionFixture().options,
+          mssqlAuth: MssqlAuth.EntraAzureCli,
+          azureCliPath: '/opt/az',
+        },
+      }),
+    )
+    expect(wrapper.find('[data-test="azure-cli-path-field"]').exists()).toBe(false)
+    await wrapper.setProps({
+      connection: connectionFixture({
+        dbType: DbType.Athena,
+        options: { ...connectionFixture().options, mssqlAuth: MssqlAuth.EntraAccessToken },
+      }),
+    })
+    expect(wrapper.find('[data-test="access-token-field"]').exists()).toBe(false)
   })
 
   it('shows no authentication list for an engine that has one method', async () => {
@@ -924,7 +968,8 @@ describe('ConnectionForm with a token that is too old', () => {
 
     await wrapper.find('[data-test="save-button"]').trigger('click')
     await settle()
-    expect(apiStub.saveConnection).toHaveBeenCalledWith(expect.objectContaining({ password: null }))
+    // The Azure CLI needs no token, so the old token goes from the keychain.
+    expect(apiStub.saveConnection).toHaveBeenCalledWith(expect.objectContaining({ password: '' }))
     wrapper.unmount()
   })
 

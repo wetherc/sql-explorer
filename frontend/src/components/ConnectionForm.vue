@@ -115,7 +115,7 @@
       </v-text-field>
 
       <v-text-field
-        v-if="draft.options.mssqlAuth === MssqlAuth.EntraAzureCli"
+        v-if="usesAzureCli"
         v-model="draft.options.azureCliPath"
         label="Path of the Azure CLI"
         placeholder="az"
@@ -439,10 +439,23 @@ const needsLogin = computed(
   () => draft.value.dbType !== DbType.Mssql || draft.value.options.mssqlAuth === MssqlAuth.SqlLogin,
 )
 
+/**
+ * True when the record is a MS SQL Server record that uses the method. The
+ * method stays in the options after a change of the engine, so a check of
+ * the method alone would show its fields for another engine.
+ */
+function usesMssqlMethod(method: MssqlAuth): boolean {
+  return draft.value.dbType === DbType.Mssql && draft.value.options.mssqlAuth === method
+}
+
 /** True while the chosen method needs a token that the user supplies. */
-const needsAccessToken = computed(
-  () => draft.value.options.mssqlAuth === MssqlAuth.EntraAccessToken,
-)
+const needsAccessToken = computed(() => usesMssqlMethod(MssqlAuth.EntraAccessToken))
+
+/** True while the chosen method asks the Azure CLI for a token. */
+const usesAzureCli = computed(() => usesMssqlMethod(MssqlAuth.EntraAzureCli))
+
+/** True while the Password box or the Access token box is in the form. */
+const usesSecretBox = computed(() => needsLogin.value || needsAccessToken.value)
 
 const authHint = computed(() => {
   switch (draft.value.options.mssqlAuth) {
@@ -508,10 +521,15 @@ function withSecrets(): SavedConnection {
   if (options.tlsMode !== TlsMode.VerifyFull) {
     options.caCertPath = null
   }
+  if (!usesAzureCli.value) {
+    options.azureCliPath = null
+  }
   return {
     ...draft.value,
     options,
-    password: password.value,
+    // A method without a secret sends an empty text, which takes a password
+    // or a token that an earlier method stored away from the keychain.
+    password: usesSecretBox.value ? password.value : '',
     awsSecretAccessKey: awsSecretAccessKey.value,
     awsSessionToken: awsSessionToken.value,
   }
@@ -551,7 +569,7 @@ function recordToSend(): SavedConnection {
   if (props.isNew) {
     return record
   }
-  if (password.value === '') {
+  if (usesSecretBox.value && password.value === '') {
     record.password = null
   }
   if (awsSecretAccessKey.value === '') {

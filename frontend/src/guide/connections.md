@@ -72,6 +72,10 @@ Four methods authenticate against the server:
   valid for about one hour, and the application cannot get another one for it.
   The form asks for a new token once the server refuses the old one.
 
+The account of the user and the Azure CLI need no secret. When you save a
+connection with one of these methods, the application removes the password
+or the token that the keychain holds for it.
+
 ## AWS Athena
 
 An Athena connection needs a region. It can also reuse the result of an
