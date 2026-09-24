@@ -312,8 +312,17 @@ one exchange, and the cancel would end the statements that follow together
 with the one that reached the limit. The driver therefore sends the cancel
 for a script of one statement alone. A larger script reads the rest of the
 result and drops the rows past the limit. The time of that walk counts
-against the time budget of the run. A statement that runs alone, or a
-statement that carries parameters, ends at the limit.
+against the time budget of the run.
+
+A cancel rolls back the statement that it ends. Inside a transaction block
+it also aborts the block, and the `COMMIT` that follows then acts as a
+`ROLLBACK`. The driver therefore sends the cancel only for a statement that
+only reads, and only when the session is outside a transaction block. A
+probe statement before the run tells the driver which case applies. Every
+other statement, such as `INSERT ... RETURNING` or a `SELECT` after `BEGIN`,
+runs to its end, and the walk drops the rows past the limit. The check of
+the text cannot see a function of the server that writes, so a `SELECT` of
+such a function outside a block can still lose its writes at the limit.
 
 ## The row limit ends a whole batch on MS SQL Server
 

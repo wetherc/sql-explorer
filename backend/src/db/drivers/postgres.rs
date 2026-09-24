@@ -18,7 +18,7 @@ use crate::db::{
     SchemaSnapshot, SnapshotColumn, Table, TableFact, TableKind,
 };
 use crate::error::{Error, Result};
-use crate::sql::{split_statements, Dialect};
+use crate::sql::{only_reads, split_statements, Dialect};
 use crate::storage::{SavedConnection, TlsMode};
 use async_trait::async_trait;
 use bytes::BytesMut;
@@ -222,7 +222,7 @@ impl PostgresDriver {
         let limit = Duration::from_secs(connection.options.connect_timeout_secs.max(1));
 
         let tls = tokio_postgres_rustls::MakeRustlsConnect::new(build_tls_config(connection)?);
-        let (client, mut io) = tokio::time::timeout(limit, config.connect(tls))
+        let (client, mut io) = tokio::time::timeout(limit, config.connect(tls.clone()))
             .await
             .map_err(|_| Error::Timeout(limit.as_secs()))??;
 
@@ -252,7 +252,10 @@ impl PostgresDriver {
             }
         });
 
-        let stop: Arc<dyn CancelHandle> = Arc::new(PostgresCancel(client.cancel_token()));
+        let stop: Arc<dyn CancelHandle> = Arc::new(PostgresCancel {
+            token: client.cancel_token(),
+            tls,
+        });
         Ok(Box::new(PostgresDriver {
             client,
             notices,
@@ -702,38 +705,72 @@ fn is_query_cancelled(error: &tokio_postgres::Error) -> bool {
 /// A token that asks the server to stop the statement that runs on this
 /// connection. It opens its own socket, so it works while the connection
 /// is busy.
-struct PostgresCancel(tokio_postgres::CancelToken);
+///
+/// The socket of the cancel asks for TLS in the same mode as the
+/// connection. A server that requires TLS refuses a cancel without it, and
+/// the statement then runs on.
+struct PostgresCancel {
+    token: tokio_postgres::CancelToken,
+    tls: tokio_postgres_rustls::MakeRustlsConnect,
+}
 
 #[async_trait]
 impl CancelHandle for PostgresCancel {
     async fn cancel(&self) -> Result<()> {
-        self.0.cancel_query(tokio_postgres::NoTls).await?;
+        self.token.cancel_query(self.tls.clone()).await?;
         Ok(())
     }
 }
 
+/// The statement that tells whether the session is outside a transaction
+/// block. Outside a block each statement is a transaction of its own, so
+/// the start of the transaction and the start of the statement are the same
+/// moment. Inside a block the transaction started with an earlier statement.
+const OUTSIDE_A_BLOCK: &str = "SELECT now() = statement_timestamp()";
+
 impl PostgresDriver {
+    /// True when a cancel at the row limit loses no work. The statement must
+    /// only read, and the session must be outside a transaction block.
+    ///
+    /// A cancel rolls back the statement it ends, so a cancelled
+    /// `INSERT ... RETURNING` writes no row. Inside a block the cancel also
+    /// aborts the block, and the `COMMIT` that follows then rolls back every
+    /// change of the block. A probe that fails, for example in a block that
+    /// is already aborted, gives false.
+    async fn may_cancel(&self, statement: &str) -> bool {
+        if !only_reads(statement, Dialect::Postgres) {
+            return false;
+        }
+        match self.client.simple_query(OUTSIDE_A_BLOCK).await {
+            Ok(messages) => messages.iter().any(|message| {
+                matches!(message, SimpleQueryMessage::Row(row) if row.get(0) == Some("t"))
+            }),
+            Err(_) => false,
+        }
+    }
+
     /// Runs a script through the simple protocol and feeds the sink one
     /// message at a time.
     ///
-    /// A script of one statement ends at the row limit: the driver sends a
-    /// cancel request on a second socket, and the server stops the statement
-    /// instead of sending the rest of the result. The server answers the
-    /// cancel with the error 57014, which the walk reads as the end of the
-    /// set.
+    /// A script of one statement that [`Self::may_cancel`] accepts ends at
+    /// the row limit: the driver sends a cancel request on a second socket,
+    /// and the server stops the statement instead of sending the rest of the
+    /// result. The server answers the cancel with the error 57014, which the
+    /// walk reads as the end of the set.
     ///
-    /// A script of more than one statement keeps the walk, because the simple
-    /// protocol carries every statement of the script in one exchange and a
-    /// cancel would drop the statements that follow. The driver holds one
-    /// message while it walks, so the memory cost does not grow with the size
-    /// of the answer.
+    /// Every other script keeps the walk and drops the rows past the limit.
+    /// The simple protocol carries every statement of the script in one
+    /// exchange, so a cancel would drop the statements that follow. The
+    /// driver holds one message while it walks, so the memory cost does not
+    /// grow with the size of the answer.
     async fn stream_simple(
         &mut self,
         query: &str,
         options: &ExecOptions,
         sink: &mut dyn RowSink,
     ) -> Result<Option<u64>> {
-        let alone = split_statements(query, Dialect::Postgres).len() <= 1;
+        let alone =
+            split_statements(query, Dialect::Postgres).len() <= 1 && self.may_cancel(query).await;
         let stop = self.stop.clone();
         let messages = self.client.simple_query_raw(query).await?;
         pin_mut!(messages);
@@ -826,9 +863,12 @@ impl PostgresDriver {
     }
 
     /// Runs one statement with bound parameters through the extended
-    /// protocol and streams the rows into the sink one at a time. A stop
-    /// cancels the statement on the server and drops the stream, so the rows
-    /// past the stop do not cross the wire.
+    /// protocol and streams the rows into the sink one at a time. When
+    /// [`Self::may_cancel`] accepts the statement, a stop cancels it on the
+    /// server and drops the stream, so the rows past the stop do not cross
+    /// the wire. Any other statement runs to its end, and the walk drops the
+    /// rows past the stop. A fault that the server reports after those rows
+    /// then still ends the run.
     ///
     /// The statement is prepared first, so the columns of the answer are
     /// known before the first row arrives. A `SELECT` that matches no row
@@ -842,6 +882,7 @@ impl PostgresDriver {
         sink: &mut dyn RowSink,
     ) -> Result<Option<u64>> {
         let bound = bind_params(params)?;
+        let may_cancel = self.may_cancel(query).await;
 
         let statement = self.client.prepare(query).await?;
         let columns: Vec<ColumnInfo> = statement
@@ -861,13 +902,18 @@ impl PostgresDriver {
         let mut count = 0usize;
         let mut truncated = false;
         while let Some(row) = rows.try_next().await? {
+            if truncated {
+                continue;
+            }
             if count >= options.max_rows || sink.row(row_to_json(&row))? == SinkControl::Stop {
                 truncated = true;
                 // The statement holds the rest of its result on the server.
                 // The cancel ends it there, so those rows never cross the
                 // wire.
-                request_stop(&stop).await;
-                break;
+                if may_cancel && request_stop(&stop).await {
+                    break;
+                }
+                continue;
             }
             count += 1;
         }
@@ -1578,6 +1624,17 @@ mod tests {
         out
     }
 
+    /// Reads the probe that asks whether the session is outside a
+    /// transaction block, and answers it.
+    async fn answer_probe(server: &mut DuplexStream, outside: bool) {
+        assert_eq!(read_query(server).await, OUTSIDE_A_BLOCK);
+        let mut answer = row_description(&["?column?"]);
+        answer.extend_from_slice(&data_row(&[Some(if outside { "t" } else { "f" })]));
+        answer.extend_from_slice(&command_complete("SELECT 1"));
+        answer.extend_from_slice(&ready_for_query());
+        server.write_all(&answer).await.unwrap();
+    }
+
     /// Reads the messages of the client up to the one that asks the server
     /// to answer.
     async fn read_until_sync(server: &mut DuplexStream) {
@@ -1750,6 +1807,7 @@ mod tests {
         let waiter = signal.clone();
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
+            answer_probe(&mut server, true).await;
             read_query(&mut server).await;
 
             let mut answer = row_description(&["id"]);
@@ -1791,6 +1849,7 @@ mod tests {
         let (stop, calls, _signal) = test_stop(false);
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
+            answer_probe(&mut server, true).await;
             read_query(&mut server).await;
 
             let mut answer = row_description(&["id"]);
@@ -1830,6 +1889,7 @@ mod tests {
         let waiter = signal.clone();
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
+            answer_probe(&mut server, true).await;
             read_query(&mut server).await;
 
             let mut answer = row_description(&["id"]);
@@ -1866,6 +1926,7 @@ mod tests {
         let waiter = signal.clone();
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
+            answer_probe(&mut server, true).await;
             read_query(&mut server).await;
 
             let mut answer = row_description(&["id"]);
@@ -1905,6 +1966,7 @@ mod tests {
         let (client_end, mut server) = tokio::io::duplex(64 * 1024);
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
+            answer_probe(&mut server, true).await;
             read_until_sync(&mut server).await;
             server
                 .write_all(&prepared(Some(&[("id", 23), ("name", 25)])))
@@ -1957,6 +2019,7 @@ mod tests {
         let (client_end, mut server) = tokio::io::duplex(64 * 1024);
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
+            answer_probe(&mut server, true).await;
             read_until_sync(&mut server).await;
             server
                 .write_all(&prepared(Some(&[("id", 23)])))
@@ -2042,6 +2105,7 @@ mod tests {
         let (stop, calls, _signal) = test_stop(true);
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
+            answer_probe(&mut server, true).await;
             read_until_sync(&mut server).await;
             server
                 .write_all(&prepared(Some(&[("id", 23)])))
@@ -2081,6 +2145,266 @@ mod tests {
         assert!(response.results[0].truncated);
 
         task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_script_of_one_statement_inside_a_block_walks_past_the_row_limit() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let (stop, calls, _signal) = test_stop(true);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            answer_probe(&mut server, false).await;
+            read_query(&mut server).await;
+
+            let mut answer = row_description(&["id"]);
+            for value in ["1", "2", "3"] {
+                answer.extend_from_slice(&data_row(&[Some(value)]));
+            }
+            answer.extend_from_slice(&command_complete("SELECT 3"));
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
+        });
+
+        let mut driver = driver_with_stop(client_end, stop).await;
+        let options = ExecOptions {
+            max_rows: 1,
+            timeout_secs: 30,
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        driver
+            .stream_simple("SELECT id FROM t", &options, &mut sink)
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        // A cancel would abort the open block, so no cancel went out.
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(response.results[0].rows.len(), 1);
+        assert!(response.results[0].truncated);
+
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_probe_that_fails_keeps_the_walk() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let (stop, calls, _signal) = test_stop(true);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            assert_eq!(read_query(&mut server).await, OUTSIDE_A_BLOCK);
+            let mut refusal = error_response("25P02", "current transaction is aborted");
+            refusal.extend_from_slice(&ready_for_query());
+            server.write_all(&refusal).await.unwrap();
+            read_query(&mut server).await;
+
+            let mut answer = row_description(&["id"]);
+            for value in ["1", "2"] {
+                answer.extend_from_slice(&data_row(&[Some(value)]));
+            }
+            answer.extend_from_slice(&command_complete("SELECT 2"));
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
+        });
+
+        let mut driver = driver_with_stop(client_end, stop).await;
+        let options = ExecOptions {
+            max_rows: 1,
+            timeout_secs: 30,
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        driver
+            .stream_simple("SELECT id FROM t", &options, &mut sink)
+            .await
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_write_that_returns_rows_runs_to_its_end() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let (stop, calls, _signal) = test_stop(true);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            // A write needs no probe, so the statement is the first query.
+            assert!(read_query(&mut server).await.starts_with("INSERT"));
+
+            let mut answer = row_description(&["id"]);
+            for value in ["1", "2", "3"] {
+                answer.extend_from_slice(&data_row(&[Some(value)]));
+            }
+            answer.extend_from_slice(&command_complete("INSERT 0 3"));
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
+        });
+
+        let mut driver = driver_with_stop(client_end, stop).await;
+        let options = ExecOptions {
+            max_rows: 1,
+            timeout_secs: 30,
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        driver
+            .stream_simple(
+                "INSERT INTO t SELECT generate_series(1, 3) RETURNING id",
+                &options,
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        // A cancel would roll back the whole INSERT.
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(response.results[0].rows.len(), 1);
+        assert!(response.results[0].truncated);
+
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_parameterised_write_that_returns_rows_reports_a_late_fault() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let (stop, calls, _signal) = test_stop(true);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            read_until_sync(&mut server).await;
+            server
+                .write_all(&prepared(Some(&[("id", 23)])))
+                .await
+                .unwrap();
+
+            read_until_sync(&mut server).await;
+            let mut answer = message(b'2', &[]);
+            for value in 0..3i32 {
+                answer.extend_from_slice(&binary_data_row(&[Some(&value.to_be_bytes())]));
+            }
+            answer.extend_from_slice(&error_response("23505", "duplicate key value"));
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
+        });
+
+        let mut driver = driver_with_stop(client_end, stop).await;
+        let options = ExecOptions {
+            max_rows: 1,
+            timeout_secs: 30,
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        let outcome = driver
+            .stream_with_params(
+                "INSERT INTO t (id) SELECT $1 RETURNING id",
+                &one_param(),
+                &options,
+                &mut sink,
+            )
+            .await;
+
+        // The walk went past the limit and read the fault that rolled back
+        // the INSERT.
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(outcome.is_err());
+
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_parameterised_select_whose_stop_fails_walks_to_the_end() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let (stop, calls, _signal) = test_stop(false);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            answer_probe(&mut server, true).await;
+            read_until_sync(&mut server).await;
+            server
+                .write_all(&prepared(Some(&[("id", 23)])))
+                .await
+                .unwrap();
+
+            read_until_sync(&mut server).await;
+            let mut answer = message(b'2', &[]);
+            for value in 0..3i32 {
+                answer.extend_from_slice(&binary_data_row(&[Some(&value.to_be_bytes())]));
+            }
+            answer.extend_from_slice(&command_complete("SELECT 3"));
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
+        });
+
+        let mut driver = driver_with_stop(client_end, stop).await;
+        let options = ExecOptions {
+            max_rows: 1,
+            timeout_secs: 30,
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        driver
+            .stream_with_params(
+                "SELECT id FROM t WHERE id > $1",
+                &one_param(),
+                &options,
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        // The first stop failed, so the walk read the rest and asked no
+        // second time.
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(response.results[0].rows.len(), 1);
+        assert!(response.results[0].truncated);
+
+        task.await.unwrap();
+    }
+
+    /// Reads the eight bytes of an SSLRequest or the sixteen of a
+    /// CancelRequest and gives back the code that follows the length.
+    async fn read_request_code(socket: &mut tokio::net::TcpStream) -> (i32, Vec<u8>) {
+        let mut length = [0u8; 4];
+        socket.read_exact(&mut length).await.unwrap();
+        let mut body = vec![0u8; i32::from_be_bytes(length) as usize - 4];
+        socket.read_exact(&mut body).await.unwrap();
+        let code = i32::from_be_bytes([body[0], body[1], body[2], body[3]]);
+        (code, body)
+    }
+
+    #[tokio::test]
+    async fn the_cancel_asks_for_tls_in_the_mode_of_the_connection() {
+        const SSL_REQUEST: i32 = 80877103;
+        const CANCEL_REQUEST: i32 = 80877102;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            // The login asks for TLS first, and the server declines it.
+            let (mut login, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_code(&mut login).await.0, SSL_REQUEST);
+            login.write_all(b"N").await.unwrap();
+            read_request_code(&mut login).await;
+            login.write_all(&authentication_ok()).await.unwrap();
+            let mut key = 42i32.to_be_bytes().to_vec();
+            key.extend_from_slice(&7i32.to_be_bytes());
+            login.write_all(&message(b'K', &key)).await.unwrap();
+            login.write_all(&ready_for_query()).await.unwrap();
+
+            // The cancel asks for TLS on its own socket in the same way.
+            let (mut cancel, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_code(&mut cancel).await.0, SSL_REQUEST);
+            cancel.write_all(b"N").await.unwrap();
+            let (code, body) = read_request_code(&mut cancel).await;
+            assert_eq!(code, CANCEL_REQUEST);
+            assert_eq!(&body[4..8], &42i32.to_be_bytes());
+            login
+        });
+
+        let mut input = connection();
+        input.host = Some("127.0.0.1".into());
+        input.port = Some(port);
+        input.options.tls_mode = TlsMode::Prefer;
+        let driver = PostgresDriver::connect(&input).await.unwrap();
+        driver.cancel_handle().unwrap().cancel().await.unwrap();
+
+        drop(server.await.unwrap());
     }
 
     /// Builds the binary form of an array. The lengths name the dimensions,
