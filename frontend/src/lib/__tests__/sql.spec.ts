@@ -252,6 +252,17 @@ describe('statementBounds', () => {
 describe('statementAt', () => {
   const script = 'SELECT 1;\nSELECT 2;\nSELECT 3'
 
+  it('keeps the DELIMITER command around a MySQL routine body', () => {
+    const script =
+      'DELIMITER //\nCREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END//\nSELECT 3//\nDELIMITER ;\nSELECT 4;'
+    expect(statementAt(script, 30, Dialect.MySql)).toBe(
+      'DELIMITER //\nCREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END//',
+    )
+    // A statement without a semicolon stays bare, so a plan can go in front.
+    expect(statementAt(script, script.indexOf('SELECT 3'), Dialect.MySql)).toBe('SELECT 3')
+    expect(statementAt(script, script.length, Dialect.MySql)).toBe('SELECT 4')
+  })
+
   it('finds the statement that holds the position', () => {
     expect(statementAt(script, 0)).toBe('SELECT 1')
     expect(statementAt(script, 12)).toBe('SELECT 2')

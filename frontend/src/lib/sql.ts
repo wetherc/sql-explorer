@@ -96,7 +96,8 @@ export function quoteIfNeeded(name: string, dialect: Dialect): string {
  * it to run the statement under the cursor when nothing is selected. A
  * position that no statement holds gives the statement in front of it, and a
  * script that holds no statement gives an empty text. On MS SQL Server the
- * word GO bounds a statement and never travels with it.
+ * word GO bounds a statement and never travels with it. On MySQL a routine
+ * body under a `DELIMITER` command keeps that command.
  *
  * The split follows the rules of the dialect: the quotes, the comments and
  * the terminator that the backend splitter knows. The backend splits again
@@ -105,8 +106,12 @@ export function quoteIfNeeded(name: string, dialect: Dialect): string {
  */
 export function statementAt(script: string, offset: number, dialect?: Dialect): string {
   const position = Math.max(0, Math.min(offset, script.length))
-  const parts = statementBounds(script, dialect)
-    .map(([start, end]) => ({ start, end, text: script.slice(start, end).trim() }))
+  const parts = statementSpans(script, dialect)
+    .map(({ start, end, delimiter }) => ({
+      start,
+      end,
+      text: withDelimiter(script.slice(start, end).trim(), delimiter),
+    }))
     .filter((part) => part.text !== '')
   const first = parts[0]
   if (!first) {
@@ -121,6 +126,20 @@ export function statementAt(script: string, offset: number, dialect?: Dialect): 
   // after the last semicolon of a script runs the last statement alone.
   const before = parts.filter((part) => part.start <= position)
   return (before[before.length - 1] ?? first).text
+}
+
+/**
+ * Puts a statement that a MySQL `DELIMITER` command bounds back inside that
+ * command. The backend splits the text again on the terminator in force, so
+ * a routine body that holds a semicolon reaches the server whole. A text
+ * without a semicolon stays bare, and a plan request can put its keyword in
+ * front of it.
+ */
+function withDelimiter(text: string, delimiter: string): string {
+  if (delimiter === ';' || !text.includes(';')) {
+    return text
+  }
+  return `DELIMITER ${delimiter}\n${text}${delimiter}`
 }
 
 /**
@@ -343,8 +362,20 @@ function endOfDollarQuoted(script: string, index: number): number {
  * to no statement either.
  */
 export function statementBounds(script: string, dialect?: Dialect): Array<[number, number]> {
+  return statementSpans(script, dialect).map(({ start, end }) => [start, end])
+}
+
+/** One statement of a script and the terminator that was in force for it. */
+interface StatementSpan {
+  start: number
+  end: number
+  delimiter: string
+}
+
+/** The walk behind `statementBounds`, which also keeps the terminator. */
+function statementSpans(script: string, dialect?: Dialect): StatementSpan[] {
   const rules = splitRules(dialect)
-  const bounds: Array<[number, number]> = []
+  const bounds: StatementSpan[] = []
   let delimiter = ';'
   let start = 0
   let index = 0
@@ -372,7 +403,7 @@ export function statementBounds(script: string, dialect?: Dialect): Array<[numbe
     if (rules.batchSeparator && atLineStart) {
       const after = batchSeparatorAt(script, index)
       if (after >= 0) {
-        bounds.push([start, index])
+        bounds.push({ start, end: index, delimiter })
         start = after
         index = after
         codeSeen = false
@@ -412,7 +443,7 @@ export function statementBounds(script: string, dialect?: Dialect): Array<[numbe
       }
     }
     if (script.startsWith(delimiter, index)) {
-      bounds.push([start, index])
+      bounds.push({ start, end: index, delimiter })
       index += delimiter.length
       start = index
       codeSeen = false
@@ -422,10 +453,10 @@ export function statementBounds(script: string, dialect?: Dialect): Array<[numbe
   }
 
   if (start < script.length) {
-    bounds.push([start, script.length])
+    bounds.push({ start, end: script.length, delimiter })
   }
   if (bounds.length === 0) {
-    bounds.push([0, script.length])
+    bounds.push({ start: 0, end: script.length, delimiter })
   }
   return bounds
 }
