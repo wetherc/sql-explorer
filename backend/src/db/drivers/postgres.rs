@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use bytes::BytesMut;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use futures_util::{pin_mut, stream, StreamExt, TryStreamExt};
+use jiff::tz::TimeZone;
 use postgres_types::{to_sql_checked, Field, Format, FromSql, IsNull, Kind, ToSql, Type};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -809,6 +810,25 @@ impl PostgresDriver {
         self.outside_a_block().await.unwrap_or(false)
     }
 
+    /// Reads the time zone of the session. The binary form of a `timestamptz`
+    /// value holds the moment in UTC, and the text form of the simple
+    /// protocol shows it in the zone of the session, so the reader of the
+    /// binary form needs that zone. A zone that the name does not give, or a
+    /// probe that fails, gives UTC.
+    async fn session_zone(&self) -> TimeZone {
+        let name = match self.client.simple_query("SHOW TimeZone").await {
+            Ok(messages) => messages.iter().find_map(|message| match message {
+                SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+                _ => None,
+            }),
+            Err(error) => {
+                log::warn!("The time zone of the session could not be read: {error}");
+                None
+            }
+        };
+        name.map_or(TimeZone::UTC, |name| zone_of(&name))
+    }
+
     /// Runs the probe [`OUTSIDE_A_BLOCK`] and reads its answer.
     async fn outside_a_block(&self) -> std::result::Result<bool, tokio_postgres::Error> {
         let messages = self.client.simple_query(OUTSIDE_A_BLOCK).await?;
@@ -994,6 +1014,15 @@ impl PostgresDriver {
             .map(|column| ColumnInfo::new(column.name(), column.type_().name()))
             .collect();
         let returns_rows = !columns.is_empty();
+        let zone = if statement
+            .columns()
+            .iter()
+            .any(|column| holds_timestamptz(column.type_()))
+        {
+            self.session_zone().await
+        } else {
+            TimeZone::UTC
+        };
 
         let rows = self.client.query_raw(&statement, &bound).await?;
         pin_mut!(rows);
@@ -1008,7 +1037,8 @@ impl PostgresDriver {
             if truncated {
                 continue;
             }
-            if count >= options.max_rows || sink.row(row_to_json(&row))? == SinkControl::Stop {
+            if count >= options.max_rows || sink.row(row_to_json(&row, &zone))? == SinkControl::Stop
+            {
                 truncated = true;
                 // The statement holds the rest of its result on the server.
                 // The cancel ends it there, so those rows never cross the
@@ -1126,9 +1156,9 @@ pub fn bind_params(params: &QueryParams) -> Result<Vec<TextParam>> {
 }
 
 /// Converts one row into an array of JSON values.
-pub fn row_to_json(row: &Row) -> Vec<JsonValue> {
+pub fn row_to_json(row: &Row, zone: &TimeZone) -> Vec<JsonValue> {
     (0..row.columns().len())
-        .map(|index| cell_to_json(row, index))
+        .map(|index| cell_to_json(row, index, zone))
         .collect()
 }
 
@@ -1137,13 +1167,13 @@ pub fn row_to_json(row: &Row) -> Vec<JsonValue> {
 /// type of the column turns them into JSON. A cell shows NULL only when the
 /// server sent no value: bytes that no reader understands show as text when
 /// they are text, and as base64 when they are not.
-fn cell_to_json(row: &Row, index: usize) -> JsonValue {
+fn cell_to_json(row: &Row, index: usize, zone: &TimeZone) -> JsonValue {
     // The type stays in the row, because a copy of it would cost a count on
     // a shared record for each cell of the answer.
     let column_type = row.columns()[index].type_();
     match row.try_get::<_, Option<Raw>>(index) {
         Ok(None) => JsonValue::Null,
-        Ok(Some(Raw(bytes))) => decode_value(column_type, bytes),
+        Ok(Some(Raw(bytes))) => decode_value(column_type, bytes, zone),
         Err(error) => {
             log::debug!("A column gave no value: {error}");
             JsonValue::Null
@@ -1170,22 +1200,22 @@ type BoxError = Box<dyn std::error::Error + Sync + Send>;
 /// Turns the binary form of one value into JSON. The shape of a value that
 /// holds other values comes from the kind of its type, so an array, a
 /// range, and a composite of any element type read the same way.
-fn decode_value(column_type: &Type, bytes: &[u8]) -> JsonValue {
+fn decode_value(column_type: &Type, bytes: &[u8], zone: &TimeZone) -> JsonValue {
     match column_type.kind() {
-        Kind::Array(element) => decode_array(element, bytes),
-        Kind::Range(element) => decode_range(element, bytes),
-        Kind::Multirange(element) => decode_multirange(element, bytes),
+        Kind::Array(element) => decode_array(element, bytes, zone),
+        Kind::Range(element) => decode_range(element, bytes, zone),
+        Kind::Multirange(element) => decode_multirange(element, bytes, zone),
         // A domain carries the value of the type it is built on.
-        Kind::Domain(inner) => decode_value(inner, bytes),
-        Kind::Composite(fields) => decode_composite(fields, bytes),
+        Kind::Domain(inner) => decode_value(inner, bytes, zone),
+        Kind::Composite(fields) => decode_composite(fields, bytes, zone),
         // The value of an enumerated type is the label itself.
         Kind::Enum(_) => text_or_bytes(bytes),
-        _ => decode_scalar(column_type, bytes),
+        _ => decode_scalar(column_type, bytes, zone),
     }
 }
 
 /// Reads one value that holds no other value.
-fn decode_scalar(column_type: &Type, bytes: &[u8]) -> JsonValue {
+fn decode_scalar(column_type: &Type, bytes: &[u8], zone: &TimeZone) -> JsonValue {
     match *column_type {
         Type::BOOL => scalar(column_type, bytes, JsonValue::Bool),
         Type::INT2 => scalar(column_type, bytes, |value: i16| value.into()),
@@ -1232,7 +1262,7 @@ fn decode_scalar(column_type: &Type, bytes: &[u8]) -> JsonValue {
         Type::TIMESTAMPTZ => {
             endless(Reader::new(bytes).i64(), i64::MAX, i64::MIN).unwrap_or_else(|| {
                 scalar(column_type, bytes, |value: DateTime<Utc>| {
-                    JsonValue::String(value.to_rfc3339())
+                    JsonValue::String(zoned_text(value, zone))
                 })
             })
         }
@@ -1282,7 +1312,7 @@ fn base64_text(bytes: &[u8]) -> String {
 /// Reads an array of any element type. The value holds the count of the
 /// dimensions, the type of the elements, the length of each dimension, and
 /// then the elements in row order.
-fn decode_array(element: &Type, bytes: &[u8]) -> JsonValue {
+fn decode_array(element: &Type, bytes: &[u8], zone: &TimeZone) -> JsonValue {
     let mut reader = Reader::new(bytes);
     let Some(dimensions) = reader.i32() else {
         return text_or_bytes(bytes);
@@ -1304,7 +1334,7 @@ fn decode_array(element: &Type, bytes: &[u8]) -> JsonValue {
             _ => return text_or_bytes(bytes),
         }
     }
-    match nested_elements(&mut reader, element, &lengths) {
+    match nested_elements(&mut reader, element, &lengths, zone) {
         Some(value) => value,
         None => text_or_bytes(bytes),
     }
@@ -1316,14 +1346,15 @@ fn nested_elements(
     reader: &mut Reader<'_>,
     element: &Type,
     lengths: &[usize],
+    zone: &TimeZone,
 ) -> Option<JsonValue> {
     let (length, rest) = lengths.split_first()?;
     let mut values = Vec::with_capacity(*length);
     for _ in 0..*length {
         if rest.is_empty() {
-            values.push(reader.value(element)?);
+            values.push(reader.value(element, zone)?);
         } else {
-            values.push(nested_elements(reader, element, rest)?);
+            values.push(nested_elements(reader, element, rest, zone)?);
         }
     }
     Some(JsonValue::Array(values))
@@ -1338,15 +1369,15 @@ const RANGE_UPPER_OPEN_END: u8 = 0x10;
 
 /// Reads a range of any element type and writes it in the form that
 /// PostgreSQL itself writes, such as `[1,10)`.
-fn decode_range(element: &Type, bytes: &[u8]) -> JsonValue {
-    match range_text(element, &mut Reader::new(bytes)) {
+fn decode_range(element: &Type, bytes: &[u8], zone: &TimeZone) -> JsonValue {
+    match range_text(element, &mut Reader::new(bytes), zone) {
         Some(text) => JsonValue::String(text),
         None => text_or_bytes(bytes),
     }
 }
 
 /// Reads one range out of the reader and writes it as text.
-fn range_text(element: &Type, reader: &mut Reader<'_>) -> Option<String> {
+fn range_text(element: &Type, reader: &mut Reader<'_>, zone: &TimeZone) -> Option<String> {
     let flags = reader.u8()?;
     if flags & RANGE_EMPTY != 0 {
         return Some("empty".to_string());
@@ -1354,12 +1385,12 @@ fn range_text(element: &Type, reader: &mut Reader<'_>) -> Option<String> {
     let lower = if flags & RANGE_LOWER_OPEN_END != 0 {
         String::new()
     } else {
-        render(&reader.value(element)?)
+        render(&reader.value(element, zone)?)
     };
     let upper = if flags & RANGE_UPPER_OPEN_END != 0 {
         String::new()
     } else {
-        render(&reader.value(element)?)
+        render(&reader.value(element, zone)?)
     };
     let open = if flags & RANGE_LOWER_CLOSED != 0 {
         '['
@@ -1375,7 +1406,7 @@ fn range_text(element: &Type, reader: &mut Reader<'_>) -> Option<String> {
 }
 
 /// Reads a multirange, which holds a count and then the ranges.
-fn decode_multirange(element: &Type, bytes: &[u8]) -> JsonValue {
+fn decode_multirange(element: &Type, bytes: &[u8], zone: &TimeZone) -> JsonValue {
     let mut reader = Reader::new(bytes);
     let Some(count) = reader.i32() else {
         return text_or_bytes(bytes);
@@ -1384,7 +1415,7 @@ fn decode_multirange(element: &Type, bytes: &[u8]) -> JsonValue {
     for _ in 0..count.max(0) {
         let Some(part) = reader.i32().and_then(|length| {
             let mut inner = Reader::new(reader.take(length.max(0) as usize)?);
-            range_text(element, &mut inner)
+            range_text(element, &mut inner, zone)
         }) else {
             return text_or_bytes(bytes);
         };
@@ -1395,7 +1426,7 @@ fn decode_multirange(element: &Type, bytes: &[u8]) -> JsonValue {
 
 /// Reads a composite value and writes it in the form that PostgreSQL itself
 /// writes, such as `(1,two)`.
-fn decode_composite(fields: &[Field], bytes: &[u8]) -> JsonValue {
+fn decode_composite(fields: &[Field], bytes: &[u8], zone: &TimeZone) -> JsonValue {
     let mut reader = Reader::new(bytes);
     let Some(count) = reader.i32() else {
         return text_or_bytes(bytes);
@@ -1407,7 +1438,7 @@ fn decode_composite(fields: &[Field], bytes: &[u8]) -> JsonValue {
     for field in fields {
         // The type of the field arrives with the value, and the type of the
         // column holds the same one.
-        let Some(value) = reader.u32().and_then(|_| reader.value(field.type_())) else {
+        let Some(value) = reader.u32().and_then(|_| reader.value(field.type_(), zone)) else {
             return text_or_bytes(bytes);
         };
         parts.push(render(&value));
@@ -1436,6 +1467,59 @@ fn money_text(bytes: &[u8]) -> JsonValue {
     let sign = if amount < 0 { "-" } else { "" };
     let units = amount.unsigned_abs();
     JsonValue::String(format!("{sign}{}.{:02}", units / 100, units % 100))
+}
+
+/// True when a value of the type holds a `timestamptz` value, alone or inside
+/// an array, a range, a domain or a composite.
+fn holds_timestamptz(column_type: &Type) -> bool {
+    match column_type.kind() {
+        Kind::Array(inner) | Kind::Range(inner) | Kind::Multirange(inner) | Kind::Domain(inner) => {
+            holds_timestamptz(inner)
+        }
+        Kind::Composite(fields) => fields.iter().any(|field| holds_timestamptz(field.type_())),
+        _ => *column_type == Type::TIMESTAMPTZ,
+    }
+}
+
+/// The zone that a PostgreSQL name of a time zone gives. The name is a zone
+/// of the IANA database, such as `Europe/Paris`, or a POSIX rule, such as
+/// `<+05>-05`, which `SET TIME ZONE '+5'` gives.
+fn zone_of(name: &str) -> TimeZone {
+    TimeZone::get(name)
+        .or_else(|_| TimeZone::posix(name))
+        .unwrap_or_else(|error| {
+            log::warn!("The time zone '{name}' is not known, so UTC applies: {error}");
+            TimeZone::UTC
+        })
+}
+
+/// Writes a `timestamptz` value in the zone of the session, in the form that
+/// PostgreSQL writes under the ISO date style, such as
+/// `2024-01-01 09:00:00.25-05`. A moment that the zone database cannot
+/// place keeps the RFC 3339 form in UTC.
+fn zoned_text(value: DateTime<Utc>, zone: &TimeZone) -> String {
+    let Ok(moment) = jiff::Timestamp::from_microsecond(value.timestamp_micros()) else {
+        return value.to_rfc3339();
+    };
+    let offset = zone.to_offset(moment).seconds();
+    let local = value.naive_utc() + chrono::TimeDelta::seconds(i64::from(offset));
+    let mut text = local.format("%Y-%m-%d %H:%M:%S").to_string();
+    let micros = local.and_utc().timestamp_subsec_micros();
+    if micros > 0 {
+        let fraction = format!("{micros:06}");
+        text.push('.');
+        text.push_str(fraction.trim_end_matches('0'));
+    }
+    let sign = if offset < 0 { '-' } else { '+' };
+    let whole = offset.unsigned_abs();
+    text.push_str(&format!("{sign}{:02}", whole / 3600));
+    if whole % 3600 != 0 {
+        text.push_str(&format!(":{:02}", whole % 3600 / 60));
+    }
+    if whole % 60 != 0 {
+        text.push_str(&format!(":{:02}", whole % 60));
+    }
+    text
 }
 
 /// Gives `infinity` or `-infinity` for a date or a timestamp that holds one
@@ -1666,13 +1750,13 @@ impl<'a> Reader<'a> {
     /// Reads one value that carries its own length, as the elements of an
     /// array and the bounds of a range do. A length of minus one means a
     /// value that is null.
-    fn value(&mut self, column_type: &Type) -> Option<JsonValue> {
+    fn value(&mut self, column_type: &Type, zone: &TimeZone) -> Option<JsonValue> {
         let length = self.i32()?;
         if length < 0 {
             return Some(JsonValue::Null);
         }
         let bytes = self.take(length as usize)?;
-        Some(decode_value(column_type, bytes))
+        Some(decode_value(column_type, bytes, zone))
     }
 }
 
@@ -2501,6 +2585,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_parameterised_select_of_a_timestamptz_reads_the_zone_of_the_session() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            answer_probe(&mut server, true).await;
+            read_until_sync(&mut server).await;
+            server
+                .write_all(&prepared(Some(&[("at", 1184)])))
+                .await
+                .unwrap();
+
+            let mut zone = row_description(&["TimeZone"]);
+            zone.extend_from_slice(&data_row(&[Some("<-05>+05")]));
+            zone.extend_from_slice(&command_complete("SHOW"));
+            answer_query(&mut server, "SHOW TimeZone", &[zone]).await;
+
+            read_until_sync(&mut server).await;
+            let mut answer = message(b'2', &[]);
+            answer.extend_from_slice(&binary_data_row(&[Some(&0i64.to_be_bytes())]));
+            answer.extend_from_slice(&command_complete("SELECT 1"));
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
+        });
+
+        let mut driver = driver_on(client_end).await;
+        let mut sink = BufferSink::new(100);
+        driver
+            .stream_with_params(
+                "SELECT $1::timestamptz",
+                &one_param(),
+                &no_limit(),
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        assert_eq!(
+            response.results[0].rows[0][0],
+            JsonValue::String("1999-12-31 19:00:00-05".into())
+        );
+
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_zone_probe_that_fails_gives_utc() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            answer_query(
+                &mut server,
+                "SHOW TimeZone",
+                &[error_response("42501", "permission denied")],
+            )
+            .await;
+            answer_query(&mut server, "SHOW TimeZone", &[command_complete("SHOW")]).await;
+        });
+
+        let driver = driver_on(client_end).await;
+        assert_eq!(driver.session_zone().await, TimeZone::UTC);
+        // An answer with no row gives UTC as well.
+        assert_eq!(driver.session_zone().await, TimeZone::UTC);
+
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn a_parameterised_select_that_matches_no_row_still_shows_its_columns() {
         let (client_end, mut server) = tokio::io::duplex(64 * 1024);
         let task = tokio::spawn(async move {
@@ -2949,7 +3101,7 @@ mod tests {
     }
 
     fn decoded(column_type: &Type, bytes: &[u8]) -> JsonValue {
-        decode_value(column_type, bytes)
+        decode_value(column_type, bytes, &TimeZone::UTC)
     }
 
     #[test]
@@ -3097,8 +3249,66 @@ mod tests {
         );
         assert_eq!(
             decoded(&Type::TIMESTAMPTZ, &0i64.to_be_bytes()),
-            JsonValue::String("2000-01-01T00:00:00+00:00".into())
+            JsonValue::String("2000-01-01 00:00:00+00".into())
         );
+    }
+
+    #[test]
+    fn a_timestamptz_value_shows_in_the_zone_of_the_session() {
+        let moment = |micros: i64| DateTime::<Utc>::from_timestamp_micros(micros).unwrap();
+        // 2024-01-01 14:00:00 UTC.
+        let base = 1_704_117_600_000_000;
+        let five_west = zone_of("<-05>+05");
+        assert_eq!(
+            zoned_text(moment(base), &five_west),
+            "2024-01-01 09:00:00-05"
+        );
+        assert_eq!(
+            zoned_text(moment(base + 250_000), &five_west),
+            "2024-01-01 09:00:00.25-05"
+        );
+        assert_eq!(
+            zoned_text(moment(base + 1), &TimeZone::UTC),
+            "2024-01-01 14:00:00.000001+00"
+        );
+        // An offset with minutes and one with seconds show them.
+        let india = TimeZone::fixed(jiff::tz::Offset::from_seconds(19_800).unwrap());
+        assert_eq!(
+            zoned_text(moment(base), &india),
+            "2024-01-01 19:30:00+05:30"
+        );
+        let odd = TimeZone::fixed(jiff::tz::Offset::from_seconds(-3_661).unwrap());
+        assert_eq!(
+            zoned_text(moment(base), &odd),
+            "2024-01-01 12:58:59-01:01:01"
+        );
+        // A zone of the IANA database follows its summer time.
+        let paris = zone_of("Europe/Paris");
+        assert_eq!(zoned_text(moment(base), &paris), "2024-01-01 15:00:00+01");
+        // A name that is no zone gives UTC.
+        assert_eq!(
+            zoned_text(moment(base), &zone_of("Nowhere/At all")),
+            "2024-01-01 14:00:00+00"
+        );
+        // A moment past the range of the zone database keeps the RFC 3339 form.
+        let far = DateTime::<Utc>::MAX_UTC;
+        assert_eq!(zoned_text(far, &TimeZone::UTC), far.to_rfc3339());
+    }
+
+    #[test]
+    fn a_type_that_holds_a_timestamptz_is_found() {
+        assert!(holds_timestamptz(&Type::TIMESTAMPTZ));
+        assert!(holds_timestamptz(&Type::TIMESTAMPTZ_ARRAY));
+        assert!(holds_timestamptz(&Type::TSTZ_RANGE));
+        assert!(!holds_timestamptz(&Type::TIMESTAMP));
+        assert!(!holds_timestamptz(&Type::INT4_ARRAY));
+        let composite = Type::new(
+            "pair".into(),
+            0,
+            Kind::Composite(vec![Field::new("at".into(), Type::TIMESTAMPTZ)]),
+            "public".into(),
+        );
+        assert!(holds_timestamptz(&composite));
     }
 
     #[test]

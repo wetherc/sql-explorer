@@ -348,6 +348,13 @@ domains of any element type. Bytes that no reader understands show as text
 if the bytes are text, and as base64 if they are not. A geometric type, a
 string of bits, and `tsvector` reach the grid this way.
 
+The binary form of a `timestamptz` value holds the moment in UTC. When the
+statement returns such a value, the driver reads `SHOW TimeZone` before the
+rows and writes each value in that zone, in the form of the `ISO` date
+style, such as `2024-01-01 09:00:00-05`. A session with another date style
+shows other text on the simple protocol, so the two paths then differ. A
+zone name that the zone database does not know gives UTC.
+
 The values that go out take the other direction. The driver writes each
 bound value in the text format, so the server converts the text to the type
 that the statement asks for. A whole number binds against `int2`, `int4`,

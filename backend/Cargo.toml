@@ -21,6 +21,8 @@ anyhow = "1.0"
 async-trait = "0.1"
 futures-util = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
+# The time zone of a PostgreSQL session names a zone of the IANA database.
+jiff = "0.2"
 uuid = { version = "1", features = ["v4", "serde"] }
 base64 = "0.22"
 bytes = "1"
