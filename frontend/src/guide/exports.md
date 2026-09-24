@@ -20,6 +20,11 @@ A `FOR UPDATE` clause on PostgreSQL and MySQL is accepted.
 An Excel sheet holds 1048576 rows, the row of the column names among them, so
 an export of more rows than that stops there and reports the stop.
 
+An Excel cell gets a number when the value has at most 15 significant
+digits, because Excel keeps no more. A longer number goes in as text. A text
+of more than 32767 characters is cut at that bound, which is the largest
+cell that Excel accepts.
+
 ## The two limits
 
 The settings hold two separate limits, and they are separate by design:

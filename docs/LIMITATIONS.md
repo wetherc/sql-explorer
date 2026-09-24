@@ -328,6 +328,16 @@ An Excel sheet holds 1048576 rows, the row of the column names among them.
 An export of more rows than that stops at the bound and reports the result
 as truncated. The CSV and the JSON forms have no such bound.
 
+Excel keeps 15 significant digits in a number. A number, or a text that
+holds only a number, goes into the sheet as a number when it has at most 15
+significant digits. A longer number, such as a `bigint` of 19 digits or a
+`DECIMAL(38,10)` value, goes in as text, so that no digit changes. `SUM`
+does not read such a cell.
+
+Excel accepts at most 32767 characters in one cell. Both writers cut a
+longer text at that bound, and the file does not mark the cut. The CSV and
+the JSON forms keep the whole text.
+
 ## The export of every row reads the text of the statement
 
 **Write every row** runs the statement a second time. The backend accepts a

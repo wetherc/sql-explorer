@@ -79,9 +79,77 @@ pub fn escape_xml(text: &str) -> String {
 pub fn strip_forbidden_xml(text: &str) -> String {
     text.chars()
         .filter(|character| {
-            !matches!(character, '\u{0}'..='\u{8}' | '\u{B}' | '\u{C}' | '\u{E}'..='\u{1F}')
+            !matches!(
+                character,
+                '\u{0}'..='\u{8}' | '\u{B}' | '\u{C}' | '\u{E}'..='\u{1F}' | '\u{FFFE}' | '\u{FFFF}'
+            )
         })
         .collect()
+}
+
+/// The largest number of significant digits that Excel keeps in a number.
+const EXCEL_DIGITS: usize = 15;
+
+/// The largest number of characters, counted in UTF-16 units, that Excel
+/// accepts in one cell. A longer text makes Excel repair the file.
+const MAX_CELL_UNITS: usize = 32_767;
+
+/// True when the whole text is a decimal number: an optional sign, digits
+/// with at most one decimal point, and an optional exponent. A spreadsheet
+/// reads such a text as a number.
+pub fn is_plain_number(text: &str) -> bool {
+    let body = text.strip_prefix(['+', '-']).unwrap_or(text);
+    let (mantissa, exponent) = match body.find(['e', 'E']) {
+        Some(at) => (&body[..at], Some(&body[at + 1..])),
+        None => (body, None),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+    let exponent_ok = exponent.is_none_or(|power| {
+        let power = power.strip_prefix(['+', '-']).unwrap_or(power);
+        !power.is_empty() && digits(power)
+    });
+    !(whole.is_empty() && fraction.is_empty()) && digits(whole) && digits(fraction) && exponent_ok
+}
+
+/// Gives the text of a number cell when Excel can keep the value exactly:
+/// a decimal number with at most 15 significant digits whose value is
+/// finite. A longer number goes in as text, because Excel would round
+/// 1234567890123456789 to 1234567890123456800.
+fn excel_number(text: &str) -> Option<String> {
+    if !is_plain_number(text) {
+        return None;
+    }
+    let mantissa = text.split(['e', 'E']).next().unwrap_or(text);
+    let significant = mantissa
+        .trim_start_matches(['+', '-'])
+        .replace('.', "")
+        .trim_matches('0')
+        .len();
+    let value = text.parse::<f64>().ok().filter(|value| value.is_finite())?;
+    // The display form is the shortest decimal text that gives the same
+    // value, with no exponent.
+    (significant <= EXCEL_DIGITS).then(|| value.to_string())
+}
+
+/// Cuts a text to the number of characters that one cell accepts.
+fn cell_text(text: &str) -> &str {
+    let mut units = 0;
+    for (at, character) in text.char_indices() {
+        units += character.len_utf16();
+        if units > MAX_CELL_UNITS {
+            return &text[..at];
+        }
+    }
+    text
+}
+
+/// Writes a cell that holds a text.
+fn text_cell(reference: &str, text: &str) -> String {
+    let text = escape_xml(cell_text(&strip_forbidden_xml(text)));
+    format!(
+        "<c r=\"{reference}\" t=\"inlineStr\"><is><t xml:space=\"preserve\">{text}</t></is></c>"
+    )
 }
 
 /// Names a column of a spreadsheet: 1 gives A, 27 gives AA.
@@ -131,25 +199,27 @@ fn workbook_xml(sheet: &str) -> String {
 
 /// Writes one cell of the sheet. A cell that holds no value is left out of
 /// the row, which is the form a spreadsheet reads as an empty cell.
+///
+/// A number, and a text that holds only a number, go in as a number when
+/// Excel can keep the value exactly, so that `SUM` reads a DECIMAL column
+/// and every PostgreSQL column of the simple protocol. Any other number goes
+/// in as text.
 pub fn cell_xml(reference: &str, value: &JsonValue) -> String {
-    match value {
-        JsonValue::Null => String::new(),
-        JsonValue::Number(number) => format!("<c r=\"{reference}\"><v>{number}</v></c>"),
+    let text = match value {
+        JsonValue::Null => return String::new(),
         JsonValue::Bool(flag) => {
             let digit = u8::from(*flag);
-            format!("<c r=\"{reference}\" t=\"b\"><v>{digit}</v></c>")
+            return format!("<c r=\"{reference}\" t=\"b\"><v>{digit}</v></c>");
         }
-        other => {
-            let text = match other {
-                JsonValue::String(text) => text.clone(),
-                other => other.to_string(),
-            };
-            let text = escape_xml(&strip_forbidden_xml(&text));
-            format!(
-                "<c r=\"{reference}\" t=\"inlineStr\"><is><t xml:space=\"preserve\">{text}</t></is></c>"
-            )
+        JsonValue::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    if matches!(value, JsonValue::Number(_) | JsonValue::String(_)) {
+        if let Some(number) = excel_number(&text) {
+            return format!("<c r=\"{reference}\"><v>{number}</v></c>");
         }
     }
+    text_cell(reference, &text)
 }
 
 /// Writes one row of the sheet, at the given number of the row.
@@ -160,6 +230,17 @@ pub fn row_xml(values: &[JsonValue], number: usize) -> String {
             &format!("{}{number}", column_name(index + 1)),
             value,
         ));
+    }
+    out.push_str("</row>");
+    out
+}
+
+/// Writes the row of the column names, each as a text, so that a column
+/// named `2024` keeps its name as text.
+fn header_xml(columns: &[String]) -> String {
+    let mut out = "<row r=\"1\">".to_string();
+    for (index, name) in columns.iter().enumerate() {
+        out.push_str(&text_cell(&format!("{}1", column_name(index + 1)), name));
     }
     out.push_str("</row>");
     out
@@ -204,13 +285,8 @@ impl<W: Write + Seek> SheetWriter<W> {
             .as_bytes(),
         )?;
 
-        let mut writer = Self { zip, rows: 0 };
-        let header: Vec<JsonValue> = columns
-            .iter()
-            .map(|name| JsonValue::String(name.clone()))
-            .collect();
-        writer.write_row(&header)?;
-        Ok(writer)
+        zip.write_all(header_xml(columns).as_bytes())?;
+        Ok(Self { zip, rows: 1 })
     }
 
     /// Writes one row of data. Returns false when the sheet is full, and
@@ -272,6 +348,10 @@ mod tests {
     fn the_characters_that_xml_forbids_are_dropped() {
         let text = "a\u{0}b\u{8}c\u{B}d\u{C}e\u{E}f\u{1F}g";
         assert_eq!(strip_forbidden_xml(text), "abcdefg");
+        assert_eq!(
+            strip_forbidden_xml("a\u{FFFE}b\u{FFFF}c\u{FFFD}"),
+            "abc\u{FFFD}"
+        );
         // A tab, a newline and a return are allowed and stay.
         assert_eq!(strip_forbidden_xml("a\tb\nc\rd"), "a\tb\nc\rd");
     }
@@ -314,6 +394,55 @@ mod tests {
         assert_eq!(
             cell_xml("D1", &json!({ "a": 1 })),
             "<c r=\"D1\" t=\"inlineStr\"><is><t xml:space=\"preserve\">{&quot;a&quot;:1}</t></is></c>"
+        );
+    }
+
+    #[test]
+    fn a_number_goes_in_as_a_number_when_excel_keeps_it_exactly() {
+        let number = |text: &str| format!("<c r=\"A1\"><v>{text}</v></c>");
+        let text = |text: &str| {
+            format!("<c r=\"A1\" t=\"inlineStr\"><is><t xml:space=\"preserve\">{text}</t></is></c>")
+        };
+        for (value, expected) in [
+            ("-5", "-5"),
+            ("-10.00", "-10"),
+            ("1.25", "1.25"),
+            ("+.5", "0.5"),
+            ("0", "0"),
+            ("1e21", "1000000000000000000000"),
+            ("123456789012345", "123456789012345"),
+            ("0.000123456789012345", "0.000123456789012345"),
+        ] {
+            assert_eq!(cell_xml("A1", &json!(value)), number(expected), "{value}");
+        }
+        // Sixteen significant digits, an infinite value and a text that is
+        // not a number stay text.
+        for value in ["1234567890123456", "1e400", "12a", "-"] {
+            assert_eq!(cell_xml("A1", &json!(value)), text(value), "{value}");
+        }
+        assert_eq!(
+            cell_xml("A1", &json!(1234567890123456789_i64)),
+            text("1234567890123456789")
+        );
+        assert_eq!(cell_xml("A1", &json!(-7)), number("-7"));
+    }
+
+    #[test]
+    fn a_long_text_is_cut_to_the_bound_of_a_cell() {
+        let long = "a".repeat(MAX_CELL_UNITS + 5);
+        assert_eq!(cell_text(&long).len(), MAX_CELL_UNITS);
+        // A character outside the basic plane counts as two units and is
+        // never split.
+        let wide = format!("{}\u{1F600}", "a".repeat(MAX_CELL_UNITS - 1));
+        assert_eq!(cell_text(&wide), "a".repeat(MAX_CELL_UNITS - 1));
+        assert_eq!(cell_text("short"), "short");
+    }
+
+    #[test]
+    fn the_header_keeps_a_name_that_looks_like_a_number_as_text() {
+        assert_eq!(
+            header_xml(&["2024".to_string()]),
+            "<row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t xml:space=\"preserve\">2024</t></is></c></row>"
         );
     }
 

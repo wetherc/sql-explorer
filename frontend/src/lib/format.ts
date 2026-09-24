@@ -20,6 +20,15 @@ export function formatCell(value: CellValue): string {
   return JSON.stringify(value)
 }
 
+/**
+ * True when the whole text is a decimal number: an optional sign, digits
+ * with at most one decimal point, and an optional exponent. A spreadsheet
+ * reads such a text as a number.
+ */
+export function isPlainNumber(text: string): boolean {
+  return /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(text)
+}
+
 /** True when the cell holds no value. */
 export function isNullCell(value: CellValue): boolean {
   return value === null || value === undefined

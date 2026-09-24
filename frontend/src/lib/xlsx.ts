@@ -9,7 +9,7 @@
  */
 import { zipSync, strToU8 } from 'fflate'
 import type { CellValue, ResultSet } from '@/types/api'
-import { formatCell, isNullCell } from './format'
+import { formatCell, isNullCell, isPlainNumber } from './format'
 
 /** Escapes the five characters that XML reserves. */
 export function escapeXml(text: string): string {
@@ -27,7 +27,53 @@ export function escapeXml(text: string): string {
  */
 export function stripForbiddenXml(text: string): string {
   // eslint-disable-next-line no-control-regex
-  return text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+  return text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g, '')
+}
+
+/** The largest number of significant digits that Excel keeps in a number. */
+const EXCEL_DIGITS = 15
+
+/**
+ * The largest number of characters, counted in UTF-16 units, that Excel
+ * accepts in one cell. A longer text makes Excel repair the file.
+ */
+export const MAX_CELL_UNITS = 32767
+
+/**
+ * The text of a number cell when Excel can keep the value exactly: a decimal
+ * number with at most 15 significant digits whose value is finite. A longer
+ * number goes in as text, because Excel would round 1234567890123456789 to
+ * 1234567890123456800.
+ */
+function excelNumber(text: string): string | null {
+  if (!isPlainNumber(text)) {
+    return null
+  }
+  const digits = text
+    .split(/[eE]/)[0]!
+    .replace(/^[+-]/, '')
+    .replace('.', '')
+    .replace(/^0+|0+$/g, '')
+  const value = Number(text)
+  return Number.isFinite(value) && digits.length <= EXCEL_DIGITS ? String(value) : null
+}
+
+/** Cuts a text to the number of characters that one cell accepts. */
+export function cellText(text: string): string {
+  if (text.length <= MAX_CELL_UNITS) {
+    return text
+  }
+  // A cut between the two halves of a surrogate pair would leave half a
+  // character.
+  const last = text.charCodeAt(MAX_CELL_UNITS - 1)
+  const end = last >= 0xd800 && last <= 0xdbff ? MAX_CELL_UNITS - 1 : MAX_CELL_UNITS
+  return text.slice(0, end)
+}
+
+/** Writes a cell that holds a text. */
+function textCell(reference: string, text: string): string {
+  const escaped = escapeXml(cellText(stripForbiddenXml(text)))
+  return `<c r="${reference}" t="inlineStr"><is><t xml:space="preserve">${escaped}</t></is></c>`
 }
 
 /** Names a column of a spreadsheet: 1 gives A, 27 gives AA. */
@@ -42,19 +88,22 @@ export function columnName(index: number): string {
   return name
 }
 
-/** Writes one cell of the sheet. */
+/**
+ * Writes one cell of the sheet. A number, and a text that holds only a
+ * number, go in as a number when Excel can keep the value exactly, so that
+ * `SUM` reads a DECIMAL column and every PostgreSQL column of the simple
+ * protocol. Any other number goes in as text.
+ */
 function cellXml(reference: string, value: CellValue): string {
   if (isNullCell(value)) {
     return ''
   }
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return `<c r="${reference}"><v>${value}</v></c>`
-  }
   if (typeof value === 'boolean') {
     return `<c r="${reference}" t="b"><v>${value ? 1 : 0}</v></c>`
   }
-  const text = escapeXml(stripForbiddenXml(formatCell(value)))
-  return `<c r="${reference}" t="inlineStr"><is><t xml:space="preserve">${text}</t></is></c>`
+  const text = formatCell(value)
+  const number = typeof value === 'number' || typeof value === 'string' ? excelNumber(text) : null
+  return number === null ? textCell(reference, text) : `<c r="${reference}"><v>${number}</v></c>`
 }
 
 /** Writes one row of the sheet. */
@@ -67,10 +116,11 @@ function rowXml(values: CellValue[], rowNumber: number): string {
 
 /** Writes the sheet part, with the column names on the first row. */
 export function sheetXml(result: ResultSet): string {
-  const header = rowXml(
-    result.columns.map((column) => column.name),
-    1,
+  // Each name goes in as a text, so a column named 2024 keeps its name.
+  const names = result.columns.map((column, index) =>
+    textCell(`${columnName(index + 1)}1`, column.name),
   )
+  const header = `<row r="1">${names.join('')}</row>`
   const body = result.rows.map((row, index) => rowXml(row, index + 2)).join('')
   return (
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +

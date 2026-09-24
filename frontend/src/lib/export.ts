@@ -1,5 +1,5 @@
 import type { CellValue, Dialect, ResultSet } from '@/types/api'
-import { formatCell, isNullCell } from './format'
+import { formatCell, isNullCell, isPlainNumber } from './format'
 import { quoteIdentifier } from './sql'
 
 /**
@@ -15,19 +15,14 @@ const CSV_LINE_END = '\r\n'
 /**
  * True when a spreadsheet would read the text as a formula. A cell that
  * begins with one of these marks runs as a formula in Excel, so the export
- * puts an apostrophe in front of it.
+ * puts an apostrophe in front of it. A number that arrives as text, such as
+ * a DECIMAL value or a PostgreSQL value of the simple protocol, keeps its
+ * sign, because a spreadsheet reads `-5` as a number and an apostrophe would
+ * stay in the value that a loader reads.
  */
 export function startsAFormula(text: string): boolean {
-  return text.length > 0 && '=+-@\t\r'.includes(text[0]!) && !PLAIN_NUMBER.test(text)
+  return text.length > 0 && '=+-@\t\r'.includes(text[0]!) && !isPlainNumber(text)
 }
-
-/**
- * A decimal number with an optional sign and exponent. A number that arrives
- * as text, such as a DECIMAL value or a PostgreSQL value of the simple
- * protocol, keeps its sign, because a spreadsheet reads `-5` as a number and
- * an apostrophe would stay in the value that a loader reads.
- */
-const PLAIN_NUMBER = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/
 
 /**
  * Writes one field of a comma separated file. A field that holds a comma,

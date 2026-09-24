@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { unzipSync, strFromU8 } from 'fflate'
 import {
   bytesToBase64,
+  cellText,
   columnName,
+  MAX_CELL_UNITS,
   escapeXml,
   sheetName,
   sheetXml,
@@ -10,7 +12,7 @@ import {
   toXlsx,
   workbookXml,
 } from '@/lib/xlsx'
-import type { ResultSet } from '@/types/api'
+import type { CellValue, ResultSet } from '@/types/api'
 
 const result: ResultSet = {
   columns: [
@@ -36,6 +38,7 @@ describe('stripForbiddenXml', () => {
   it('drops a control character and keeps a tab and a line break', () => {
     expect(stripForbiddenXml('a\u0000b\u0007c\u001fd')).toBe('abcd')
     expect(stripForbiddenXml('a\tb\nc')).toBe('a\tb\nc')
+    expect(stripForbiddenXml('a\uFFFEb\uFFFFc')).toBe('abc')
   })
 })
 
@@ -83,6 +86,45 @@ describe('sheetXml', () => {
   it('writes a number that is not finite as a text', () => {
     const xml = sheetXml(result)
     expect(xml).toContain('<c r="A4" t="inlineStr">')
+  })
+
+  it('writes a number as a number when Excel keeps it exactly', () => {
+    const cells: CellValue[] = [
+      '-5',
+      '-10.00',
+      '+.5',
+      '0.000123456789012345',
+      1e21,
+      '1234567890123456',
+      '1e400',
+      '12a',
+      1234567890123456,
+      [1],
+    ]
+    const xml = sheetXml({
+      columns: cells.map((_cell, index) => ({ name: String(2024 + index), typeName: 'x' })),
+      rows: [cells],
+      truncated: false,
+    })
+    expect(xml).toContain('<c r="A1" t="inlineStr"><is><t xml:space="preserve">2024</t>')
+    expect(xml).toContain('<c r="A2"><v>-5</v></c>')
+    expect(xml).toContain('<c r="B2"><v>-10</v></c>')
+    expect(xml).toContain('<c r="C2"><v>0.5</v></c>')
+    expect(xml).toContain('<c r="D2"><v>0.000123456789012345</v></c>')
+    expect(xml).toContain('<c r="E2"><v>1e+21</v></c>')
+    for (const column of ['F', 'G', 'H', 'I', 'J']) {
+      expect(xml).toContain(`<c r="${column}2" t="inlineStr">`)
+    }
+  })
+})
+
+describe('cellText', () => {
+  it('cuts a long text to the bound of a cell', () => {
+    expect(cellText('a'.repeat(MAX_CELL_UNITS + 5))).toHaveLength(MAX_CELL_UNITS)
+    expect(cellText('short')).toBe('short')
+    // A character outside the basic plane is never split.
+    const wide = `${'a'.repeat(MAX_CELL_UNITS - 1)}\u{1F600}`
+    expect(cellText(wide)).toBe('a'.repeat(MAX_CELL_UNITS - 1))
   })
 })
 

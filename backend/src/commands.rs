@@ -2090,24 +2090,7 @@ fn starts_a_formula(text: &str) -> bool {
     matches!(
         text.chars().next(),
         Some('=') | Some('+') | Some('-') | Some('@') | Some('\t') | Some('\r')
-    ) && !is_plain_number(text)
-}
-
-/// True when the whole text is a decimal number: an optional sign, digits
-/// with at most one decimal point, and an optional exponent.
-fn is_plain_number(text: &str) -> bool {
-    let body = text.strip_prefix(['+', '-']).unwrap_or(text);
-    let (mantissa, exponent) = match body.find(['e', 'E']) {
-        Some(at) => (&body[..at], Some(&body[at + 1..])),
-        None => (body, None),
-    };
-    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-    let digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
-    let exponent_ok = exponent.is_none_or(|power| {
-        let power = power.strip_prefix(['+', '-']).unwrap_or(power);
-        !power.is_empty() && digits(power)
-    });
-    !(whole.is_empty() && fraction.is_empty()) && digits(whole) && digits(fraction) && exponent_ok
+    ) && !crate::xlsx::is_plain_number(text)
 }
 
 /// Reports the engines this build supports, so the connection form can
