@@ -724,7 +724,16 @@ fn stream_statement(
     let column_count = statement.column_count();
 
     if column_count == 0 {
-        let affected = statement.execute(rusqlite::params_from_iter(params.iter()))? as u64;
+        // `sqlite3_changes()` keeps the count of the last INSERT, UPDATE or
+        // DELETE, so a CREATE, a BEGIN or a COMMIT after a write gives that
+        // count again. Such a statement leaves the total count as it was.
+        let before = connection.total_changes();
+        let changed = statement.execute(rusqlite::params_from_iter(params.iter()))? as u64;
+        let affected = if connection.total_changes() == before {
+            0
+        } else {
+            changed
+        };
         *rows_affected = Some(rows_affected.unwrap_or(0) + affected);
         send_event(sender, RowEvent::Message(rows_affected_message(affected)))?;
         return Ok(());
@@ -1094,6 +1103,34 @@ mod tests {
             .messages
             .iter()
             .any(|message| message.text == "2 rows affected."));
+    }
+
+    #[tokio::test]
+    async fn a_statement_that_changes_no_row_counts_no_row() {
+        let mut driver = open_memory().await;
+        let response = driver
+            .execute_query(
+                "CREATE TABLE people (name TEXT); \
+                 INSERT INTO people VALUES ('Ada'), ('Grace'); \
+                 CREATE TABLE places (name TEXT); \
+                 BEGIN; COMMIT;",
+                None,
+                &ExecOptions::default(),
+            )
+            .await
+            .unwrap();
+        let counts: Vec<&str> = response.messages.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(
+            counts,
+            vec![
+                "0 rows affected.",
+                "2 rows affected.",
+                "0 rows affected.",
+                "0 rows affected.",
+                "0 rows affected.",
+            ]
+        );
+        assert_eq!(response.rows_affected, Some(2));
     }
 
     #[tokio::test]
