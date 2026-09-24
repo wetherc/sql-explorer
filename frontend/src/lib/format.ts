@@ -62,30 +62,103 @@ export function formatRowCount(count: number): string {
 }
 
 /**
- * The value a sort compares. A cell without a value gives null, a number
- * stays a number, and every other cell gives its text. One collator serves
- * every comparison, because a new collator for each pair costs more than
- * the comparison itself.
+ * A decimal number that arrived as text, held so that two of them compare
+ * exactly. `digits` holds the significant digits without leading and
+ * trailing zeros, and `point` is the place of the decimal point among them,
+ * so 0.05 gives the digits 5 and the point -1. Zero has no digits.
  */
-export type SortKey = number | string | null
+export interface DecimalKey {
+  text: string
+  negative: boolean
+  digits: string
+  point: number
+}
+
+/**
+ * The value a sort compares. A cell without a value gives null, a number
+ * stays a number, a text that holds only a decimal number gives a decimal
+ * key, and every other cell gives its text. One collator serves every
+ * comparison, because a new collator for each pair costs more than the
+ * comparison itself.
+ */
+export type SortKey = number | string | DecimalKey | null
 
 const collator = new Intl.Collator(undefined, { numeric: true })
+
+/** Reads a text that `isPlainNumber` accepts as a decimal key. */
+function decimalKey(text: string): DecimalKey {
+  const [, sign, whole, fraction, power] = /^([+-]?)(\d*)\.?(\d*)(?:[eE]([+-]?\d+))?$/.exec(text)!
+  const all = `${whole}${fraction}`
+  const trimmed = all.replace(/^0+/, '')
+  const digits = trimmed.replace(/0+$/, '')
+  const point = whole!.length + Number(power ?? 0) - (all.length - trimmed.length)
+  return { text, negative: sign === '-' && digits !== '', digits, point }
+}
 
 /**
  * Builds the value a sort compares from one cell. A sort of many rows builds
  * one key for each row and then compares the keys, so the text of a cell is
  * built once and not once for each comparison.
+ *
+ * PostgreSQL values of the simple protocol and DECIMAL values arrive as
+ * text. A collator compares runs of digits and ignores the sign, so it puts
+ * -5.00 in front of -10.00 and 1.5 in front of 1.25. A decimal key compares
+ * the value.
  */
 export function sortKey(value: CellValue): SortKey {
   if (isNullCell(value)) {
     return null
   }
-  return typeof value === 'number' ? value : formatCell(value)
+  if (typeof value === 'number') {
+    return value
+  }
+  const text = formatCell(value)
+  return typeof value === 'string' && isPlainNumber(text) ? decimalKey(text) : text
+}
+
+/** Compares the size of two decimal keys and ignores their signs. */
+function compareMagnitudes(left: DecimalKey, right: DecimalKey): number {
+  if (left.digits === '' || right.digits === '') {
+    return Number(left.digits !== '') - Number(right.digits !== '')
+  }
+  if (left.point !== right.point) {
+    return left.point < right.point ? -1 : 1
+  }
+  // Both digit strings start with a digit that is not zero at the same
+  // place, so the order of the texts is the order of the values.
+  return left.digits < right.digits ? -1 : left.digits > right.digits ? 1 : 0
+}
+
+/** Compares two decimal keys by value. */
+function compareDecimals(left: DecimalKey, right: DecimalKey): number {
+  if (left.negative !== right.negative) {
+    return left.negative ? -1 : 1
+  }
+  const order = compareMagnitudes(left, right)
+  // A subtraction gives 0 for two equal keys, where a negation gives -0.
+  return left.negative ? 0 - order : order
+}
+
+/**
+ * The decimal key of a key that holds a number, or null. A number that is
+ * not finite has no decimal form.
+ */
+function asDecimal(key: SortKey): DecimalKey | null {
+  if (typeof key === 'number') {
+    return Number.isFinite(key) ? decimalKey(String(key)) : null
+  }
+  return typeof key === 'object' ? key : null
+}
+
+/** The text of a key, for a comparison as text. */
+function keyText(key: Exclude<SortKey, null>): string {
+  return typeof key === 'object' ? key.text : String(key)
 }
 
 /**
  * Compares two sort keys. Keys without a value go to the end, two numbers
- * compare as numbers, and every other pair compares as text.
+ * compare as numbers, a number and a decimal key compare by value, and every
+ * other pair compares as text.
  */
 export function compareSortKeys(left: SortKey, right: SortKey): number {
   if (left === null && right === null) {
@@ -100,7 +173,12 @@ export function compareSortKeys(left: SortKey, right: SortKey): number {
   if (typeof left === 'number' && typeof right === 'number') {
     return left - right
   }
-  return collator.compare(String(left), String(right))
+  const leftDecimal = asDecimal(left)
+  const rightDecimal = asDecimal(right)
+  if (leftDecimal && rightDecimal) {
+    return compareDecimals(leftDecimal, rightDecimal)
+  }
+  return collator.compare(keyText(left), keyText(right))
 }
 
 /**

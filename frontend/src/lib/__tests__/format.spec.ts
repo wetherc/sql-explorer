@@ -131,8 +131,41 @@ describe('sortKey', () => {
     expect(sortKey('Ada')).toBe('Ada')
   })
 
-  it('compares the keys of two cells of different kinds as text', () => {
+  it('compares a number and a text that holds a number by value', () => {
     expect(compareSortKeys(sortKey(2), sortKey('10'))).toBeLessThan(0)
+    expect(compareSortKeys(sortKey('10'), sortKey(2))).toBeGreaterThan(0)
+    expect(compareSortKeys(sortKey(-0.05), sortKey('-5e-2'))).toBe(0)
+  })
+
+  it('compares texts that hold decimal numbers by value', () => {
+    const texts = ['1.5', '-10.00', '1.25', '0', '-5.00', '.5', '-0.0', '1e3', '999', '0.05', '+2']
+    const sorted = [...texts].sort((left, right) => compareSortKeys(sortKey(left), sortKey(right)))
+    expect(sorted).toEqual([
+      '-10.00',
+      '-5.00',
+      '0',
+      '-0.0',
+      '0.05',
+      '.5',
+      '1.25',
+      '1.5',
+      '+2',
+      '999',
+      '1e3',
+    ])
+    // A decimal key keeps every digit.
+    expect(
+      compareSortKeys(sortKey('12345678901234567.1'), sortKey('12345678901234567.2')),
+    ).toBeLessThan(0)
+    expect(compareSortKeys(sortKey('-1.5'), sortKey('-1.25'))).toBeLessThan(0)
+    expect(compareSortKeys(sortKey('2'), sortKey('2.0'))).toBe(0)
+  })
+
+  it('compares a decimal text with other text and with an infinite number as text', () => {
+    expect(compareSortKeys(sortKey('5'), sortKey('abc'))).toBeLessThan(0)
+    expect(compareSortKeys(sortKey(Infinity), sortKey('5'))).toBeGreaterThan(0)
+    // A text of another cell kind stays text.
+    expect(sortKey([1])).toBe('[1]')
   })
 })
 
