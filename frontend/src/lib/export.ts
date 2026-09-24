@@ -18,8 +18,16 @@ const CSV_LINE_END = '\r\n'
  * puts an apostrophe in front of it.
  */
 export function startsAFormula(text: string): boolean {
-  return text.length > 0 && '=+-@\t'.includes(text[0]!)
+  return text.length > 0 && '=+-@\t\r'.includes(text[0]!) && !PLAIN_NUMBER.test(text)
 }
+
+/**
+ * A decimal number with an optional sign and exponent. A number that arrives
+ * as text, such as a DECIMAL value or a PostgreSQL value of the simple
+ * protocol, keeps its sign, because a spreadsheet reads `-5` as a number and
+ * an apostrophe would stay in the value that a loader reads.
+ */
+const PLAIN_NUMBER = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/
 
 /**
  * Writes one field of a comma separated file. A field that holds a comma,

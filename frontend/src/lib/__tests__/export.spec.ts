@@ -53,7 +53,8 @@ describe('toCsvField', () => {
 
   it('puts an apostrophe in front of a text that starts a formula', () => {
     expect(toCsvField('=SUM(A1:A9)')).toBe("'=SUM(A1:A9)")
-    expect(toCsvField('+1')).toBe("'+1")
+    expect(toCsvField('+cmd')).toBe("'+cmd")
+    expect(toCsvField('\rcmd')).toBe(`"'\rcmd"`)
     expect(toCsvField('-cmd')).toBe("'-cmd")
     expect(toCsvField('@name')).toBe("'@name")
     expect(toCsvField('\tpad')).toBe("'\tpad")
@@ -61,6 +62,12 @@ describe('toCsvField', () => {
 
   it('leaves a number as it is', () => {
     expect(toCsvField(-5)).toBe('-5')
+    for (const number of ['-5', '+1', '-10.00', '-.5', '-5.', '-1e10', '+2.5E-3']) {
+      expect(toCsvField(number)).toBe(number)
+    }
+    for (const text of ['-', '-.', '-1e', '-1.2.3', '-1x', '-e5', '-1-2']) {
+      expect(toCsvField(text)).toBe(`'${text}`)
+    }
     expect(toCsvField('a=b')).toBe('a=b')
   })
 })

@@ -2082,12 +2082,32 @@ fn csv_field(value: &serde_json::Value) -> String {
     }
 }
 
-/// True when a spreadsheet would read the text as a formula.
+/// True when a spreadsheet would read the text as a formula. A number that
+/// arrives as text, such as a DECIMAL value or a PostgreSQL value of the
+/// simple protocol, keeps its sign, because a spreadsheet reads `-5` as a
+/// number, and an apostrophe would stay in the value that a loader reads.
 fn starts_a_formula(text: &str) -> bool {
     matches!(
         text.chars().next(),
-        Some('=') | Some('+') | Some('-') | Some('@') | Some('\t')
-    )
+        Some('=') | Some('+') | Some('-') | Some('@') | Some('\t') | Some('\r')
+    ) && !is_plain_number(text)
+}
+
+/// True when the whole text is a decimal number: an optional sign, digits
+/// with at most one decimal point, and an optional exponent.
+fn is_plain_number(text: &str) -> bool {
+    let body = text.strip_prefix(['+', '-']).unwrap_or(text);
+    let (mantissa, exponent) = match body.find(['e', 'E']) {
+        Some(at) => (&body[..at], Some(&body[at + 1..])),
+        None => (body, None),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+    let exponent_ok = exponent.is_none_or(|power| {
+        let power = power.strip_prefix(['+', '-']).unwrap_or(power);
+        !power.is_empty() && digits(power)
+    });
+    !(whole.is_empty() && fraction.is_empty()) && digits(whole) && digits(fraction) && exponent_ok
 }
 
 /// Reports the engines this build supports, so the connection form can
@@ -3071,9 +3091,19 @@ mod tests {
     fn a_field_that_starts_a_formula_gets_an_apostrophe() {
         use serde_json::json;
         assert_eq!(csv_field(&json!("=SUM(A1:A9)")), "'=SUM(A1:A9)");
-        assert_eq!(csv_field(&json!("+1")), "'+1");
+        assert_eq!(csv_field(&json!("+cmd")), "'+cmd");
         assert_eq!(csv_field(&json!("-cmd")), "'-cmd");
         assert_eq!(csv_field(&json!("@name")), "'@name");
+        assert_eq!(csv_field(&json!("\rcmd")), "\"'\rcmd\"");
+        // A number that arrives as text keeps its sign too.
+        for number in ["-5", "+1", "-10.00", "-.5", "-5.", "-1e10", "+2.5E-3"] {
+            assert_eq!(csv_field(&json!(number)), number);
+        }
+        for text in [
+            "-", "-.", "-1e", "-1e+", "-1.2.3", "-1x", "-e5", "-1e5x", "-1-2",
+        ] {
+            assert_eq!(csv_field(&json!(text)), format!("'{text}"));
+        }
         // A number keeps its sign, because a spreadsheet reads it as a
         // number and not as a formula.
         assert_eq!(csv_field(&json!(-5)), "-5");
