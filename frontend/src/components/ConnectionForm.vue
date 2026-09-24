@@ -260,6 +260,8 @@
                   v-model.number="draft.options.maxRows"
                   label="Row limit"
                   type="number"
+                  hint="The Row limit of the settings also holds, and the smaller one wins."
+                  persistent-hint
                 />
               </div>
 

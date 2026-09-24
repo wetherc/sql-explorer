@@ -5,7 +5,7 @@ import { makeApiStub, connectionFixture, streamed } from './helpers'
 const apiStub = makeApiStub()
 vi.mock('@/lib/api', () => ({ api: apiStub, CONNECTION_STATUS_EVENT: 'connection-status' }))
 
-const { newQueryState, totalRows, useQueryStore } = await import('@/stores/query')
+const { newQueryState, runRowLimit, totalRows, useQueryStore } = await import('@/stores/query')
 const { ResultTable } = await import('@/lib/results')
 const { useConnectionsStore } = await import('@/stores/connections')
 const { useHistoryStore } = await import('@/stores/history')
@@ -66,6 +66,15 @@ describe('totalRows', () => {
   })
 })
 
+describe('runRowLimit', () => {
+  it('keeps the smaller of the two limits', () => {
+    expect(runRowLimit(10000, 500)).toBe(500)
+    expect(runRowLimit(25, 10000)).toBe(25)
+    expect(runRowLimit(25, undefined)).toBe(25)
+    expect(runRowLimit(25, 0)).toBe(25)
+  })
+})
+
 describe('query store', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -94,6 +103,20 @@ describe('query store', () => {
     expect(await queries.execute('t1', 'c1', '   ')).toBe(false)
     expect(apiStub.executeQuery).not.toHaveBeenCalled()
     expect(useUiStore().notices[0]?.message).toBe('There is no statement to run.')
+  })
+
+  it('sends the row limit of the connection when it is the smaller one', async () => {
+    apiStub.executeQuery.mockImplementation(streamed(response()))
+    const fixture = connectionFixture()
+    fixture.options.maxRows = 7
+    apiStub.getConnections.mockResolvedValue([fixture])
+    await useConnectionsStore().load()
+
+    await useQueryStore().execute('t1', 'c1', 'SELECT 1')
+    expect(apiStub.executeQuery).toHaveBeenCalledWith(
+      expect.objectContaining({ options: { maxRows: 7, timeoutSecs: 300 } }),
+      expect.anything(),
+    )
   })
 
   it('sends the statement to the backend and keeps the result', async () => {

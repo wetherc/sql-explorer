@@ -39,7 +39,8 @@ The settings hold two separate limits, and they are separate by design:
 | Export row limit | The rows that **Write every row** writes | 1000000 |
 
 The grid limit keeps the interface quick, because every row it holds lives in
-the memory of the interface. The export limit is far higher, because those
+the memory of the interface. Each connection also holds a Row limit in the
+advanced part of its form, and a run uses the smaller of the two. The export limit is far higher, because those
 rows go straight to the file.
 
 A result that meets its limit reports the stop as a warning above the grid.

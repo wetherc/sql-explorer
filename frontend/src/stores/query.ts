@@ -94,6 +94,18 @@ export function newQueryState(): QueryState {
   }
 }
 
+/**
+ * The row limit of one run. The settings and the connection each hold a
+ * limit, and the smaller one holds, so a connection can keep its results
+ * smaller than the other connections. A connection limit that is not a
+ * positive number counts as absent.
+ */
+export function runRowLimit(settingsLimit: number, connectionLimit: number | undefined): number {
+  return connectionLimit !== undefined && connectionLimit > 0
+    ? Math.min(settingsLimit, connectionLimit)
+    : settingsLimit
+}
+
 /** Counts the rows of every result set of one execution. */
 export function totalRows(results: ResultTable[]): number {
   return results.reduce((sum, result) => sum + result.rowCount, 0)
@@ -243,7 +255,10 @@ export const useQueryStore = defineStore('query', () => {
       await call(
         requestId,
         {
-          maxRows: settings.settings.maxRows,
+          maxRows: runRowLimit(
+            settings.settings.maxRows,
+            connections.byId(connectionId)?.options.maxRows,
+          ),
           timeoutSecs: connections.byId(connectionId)?.options.queryTimeoutSecs ?? 300,
         },
         {
