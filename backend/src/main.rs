@@ -107,3 +107,21 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("The application could not start.");
 }
+
+#[cfg(test)]
+mod tests {
+    /// The backend trusts the host of a saved connection and the list of
+    /// folder roots. A grant of the store plugin would let script in the
+    /// webview rewrite those files and send a keychain password to its own
+    /// server.
+    #[test]
+    fn the_webview_has_no_grant_of_the_store_plugin() {
+        let text = include_str!("../capabilities/default.json");
+        let json: serde_json::Value = serde_json::from_str(text).unwrap();
+        let grants = json["permissions"].as_array().unwrap();
+        assert!(!grants.is_empty());
+        assert!(grants
+            .iter()
+            .all(|grant| !grant.as_str().unwrap().starts_with("store:")));
+    }
+}
