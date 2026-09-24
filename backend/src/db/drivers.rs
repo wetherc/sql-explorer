@@ -448,20 +448,45 @@ pub fn add_index_column(
     primary: bool,
     column: Option<String>,
 ) {
-    let entry = match indexes.iter_mut().find(|index| index.name == name) {
-        Some(entry) => entry,
+    let entry = index_entry(indexes, name, unique, primary);
+    if let Some(column) = column {
+        entry.columns.push(column);
+    }
+}
+
+/// Adds one `INCLUDE` column to the record of its index, and starts a record
+/// when the index is new.
+pub fn add_included_column(
+    indexes: &mut Vec<IndexInfo>,
+    name: String,
+    unique: bool,
+    primary: bool,
+    column: String,
+) {
+    index_entry(indexes, name, unique, primary)
+        .included
+        .push(column);
+}
+
+/// Finds the record of an index by its name, or adds a record with no column.
+fn index_entry(
+    indexes: &mut Vec<IndexInfo>,
+    name: String,
+    unique: bool,
+    primary: bool,
+) -> &mut IndexInfo {
+    match indexes.iter().position(|index| index.name == name) {
+        Some(position) => &mut indexes[position],
         None => {
             indexes.push(IndexInfo {
                 name,
                 columns: Vec::new(),
                 unique,
                 primary,
+                included: Vec::new(),
             });
             indexes.last_mut().expect("the record was just added")
         }
-    };
-    if let Some(column) = column {
-        entry.columns.push(column);
     }
 }
 
@@ -681,6 +706,17 @@ mod tests {
         assert_eq!(indexes[0].columns, vec!["a".to_string(), "b".to_string()]);
         assert!(indexes[0].unique);
         assert!(indexes[1].columns.is_empty());
+    }
+
+    #[test]
+    fn an_include_column_goes_after_the_key_of_its_index() {
+        let mut indexes: Vec<IndexInfo> = Vec::new();
+        add_included_column(&mut indexes, "cover".into(), false, false, "c".into());
+        add_index_column(&mut indexes, "cover".into(), false, false, Some("a".into()));
+        add_included_column(&mut indexes, "cover".into(), false, false, "d".into());
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(indexes[0].columns, vec!["a".to_string()]);
+        assert_eq!(indexes[0].included, vec!["c".to_string(), "d".to_string()]);
     }
 
     #[test]

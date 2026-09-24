@@ -62,7 +62,7 @@
             <tbody>
               <tr v-for="index of details.indexes" :key="index.name" data-test="property-index">
                 <td>{{ index.name }}</td>
-                <td>{{ index.columns.join(', ') }}</td>
+                <td>{{ indexColumns(index) }}</td>
                 <td class="text-medium-emphasis">{{ indexRule(index) }}</td>
               </tr>
               <tr v-if="details.indexes.length === 0">
@@ -115,7 +115,7 @@ import AppDialog from './AppDialog.vue'
 import { computed, ref, watch } from 'vue'
 import { api } from '@/lib/api'
 import { toErrorPayload } from '@/lib/errors'
-import { constraintHint, type ExplorerNode } from '@/stores/explorer'
+import { constraintHint, indexColumns, type ExplorerNode } from '@/stores/explorer'
 import type { ErrorPayload, IndexRef, TableDetails } from '@/types/api'
 
 const props = defineProps<{ open: boolean; node: ExplorerNode | null }>()

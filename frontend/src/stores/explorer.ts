@@ -10,6 +10,7 @@ import {
   type ColumnRef,
   type SchemaSnapshot,
   type ConstraintRef,
+  type IndexRef,
   type DriverCapabilities,
   type TableRef,
 } from '@/types/api'
@@ -193,6 +194,12 @@ export function constraintHint(constraint: ConstraintRef): string {
     parts.push(constraint.detail)
   }
   return parts.join(' · ')
+}
+
+/** Names the key columns of an index, and then its `INCLUDE` columns. */
+export function indexColumns(index: IndexRef): string {
+  const key = index.columns.join(', ')
+  return index.included.length > 0 ? `${key} include (${index.included.join(', ')})` : key
 }
 
 /**
@@ -690,7 +697,7 @@ export const useExplorerStore = defineStore('explorer', () => {
             index.name,
             'index',
             node,
-            [index.columns.join(', '), index.primary ? 'primary key' : index.unique ? 'unique' : '']
+            [indexColumns(index), index.primary ? 'primary key' : index.unique ? 'unique' : '']
               .filter(Boolean)
               .join(' · '),
           ),

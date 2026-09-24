@@ -9,6 +9,7 @@ const {
   FILTER_DELAY_MS,
   columnNode,
   constraintHint,
+  indexColumns,
   filterNodes,
   folderNode,
   iconFor,
@@ -88,6 +89,14 @@ describe('folderNode and leafNode', () => {
     expect(leaf.children).toBeUndefined()
     expect(leaf.hint).toBe('total')
     expect(leaf.schema).toBe('dbo')
+  })
+})
+
+describe('indexColumns', () => {
+  it('names the key columns, and then the included columns', () => {
+    const index = { name: 'cover', columns: ['a', 'b'], unique: false, primary: false }
+    expect(indexColumns({ ...index, included: [] })).toBe('a, b')
+    expect(indexColumns({ ...index, included: ['c', 'd'] })).toBe('a, b include (c, d)')
   })
 })
 
@@ -409,9 +418,9 @@ describe('explorer store', () => {
 
   it('names the columns and the rule of each index and each constraint', async () => {
     apiStub.listIndexes.mockResolvedValue([
-      { name: 'pk_orders', columns: ['id'], unique: true, primary: true },
-      { name: 'by_region', columns: ['region'], unique: true, primary: false },
-      { name: 'by_total', columns: ['total'], unique: false, primary: false },
+      { name: 'pk_orders', columns: ['id'], unique: true, primary: true, included: [] },
+      { name: 'by_region', columns: ['region'], unique: true, primary: false, included: [] },
+      { name: 'by_total', columns: ['total'], unique: false, primary: false, included: [] },
     ])
     apiStub.listConstraints.mockResolvedValue([
       { name: 'pk_orders', kind: 'primaryKey', columns: ['id'], detail: null },

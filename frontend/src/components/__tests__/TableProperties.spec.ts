@@ -41,9 +41,9 @@ const details = {
     { name: 'note', dataType: 'text', nullable: true, isPrimaryKey: false },
   ],
   indexes: [
-    { name: 'pk_orders', columns: ['id'], unique: true, primary: true },
-    { name: 'by_note', columns: ['note'], unique: true, primary: false },
-    { name: 'by_all', columns: ['id', 'note'], unique: false, primary: false },
+    { name: 'pk_orders', columns: ['id'], unique: true, primary: true, included: [] },
+    { name: 'by_note', columns: ['note'], unique: true, primary: false, included: [] },
+    { name: 'by_all', columns: ['id', 'note'], unique: false, primary: false, included: [] },
   ],
   constraints: [{ name: 'pk_orders', kind: 'primaryKey' as const, columns: ['id'], detail: null }],
 }

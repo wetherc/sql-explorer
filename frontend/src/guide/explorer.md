@@ -7,6 +7,9 @@ of its own, and each column shows its type.
 Folders hold the tables, the views, the routines, the indexes, the constraints
 and the partitions of a schema or a relation.
 
+An index shows its key columns in key order. On MS SQL Server, the `INCLUDE`
+columns of an index follow the key, as in `a, b include (c)`.
+
 The filter box keeps the path down to each match, so a name deep in the tree
 stays reachable. A name that is wider than the panel scrolls across.
 

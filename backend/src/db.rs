@@ -297,6 +297,10 @@ pub struct IndexInfo {
     pub unique: bool,
     /// True when the index carries the primary key of the relation.
     pub primary: bool,
+    /// The columns that an MS SQL Server index stores in its leaf rows with
+    /// `INCLUDE`. These columns are not part of the key.
+    #[serde(default)]
+    pub included: Vec<String>,
 }
 
 /// The kind of a constraint of a relation.

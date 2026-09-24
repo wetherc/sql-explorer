@@ -294,6 +294,8 @@ export interface IndexRef {
   columns: string[]
   unique: boolean
   primary: boolean
+  /** The `INCLUDE` columns of an MS SQL Server index, which are not in the key. */
+  included: string[]
 }
 
 export const ConstraintKind = {

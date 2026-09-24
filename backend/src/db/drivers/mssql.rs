@@ -6,10 +6,10 @@
 //! loses any password that holds a semicolon or a brace.
 
 use crate::db::drivers::{
-    add_constraint_column, add_index_column, add_snapshot_column, bytes_to_json, constraint_kind,
-    f32_to_json, f64_to_json, number_out_of_range, number_value, parameter_type_refused,
-    routine_kind, rows_affected_message, rows_returned_message, single_statement, size_text,
-    table_kind, CancelHandle, DatabaseDriver, NumberValue,
+    add_constraint_column, add_included_column, add_index_column, add_snapshot_column,
+    bytes_to_json, constraint_kind, f32_to_json, f64_to_json, number_out_of_range, number_value,
+    parameter_type_refused, routine_kind, rows_affected_message, rows_returned_message,
+    single_statement, size_text, table_kind, CancelHandle, DatabaseDriver, NumberValue,
 };
 use crate::db::sink::{BufferSink, RowSink, RunSummary, SinkControl};
 use crate::db::{
@@ -1083,13 +1083,15 @@ impl DatabaseDriver for MssqlDriver {
         let mut indexes = Vec::new();
         while let Some(item) = stream.try_next().await? {
             if let QueryItem::Row(row) = item {
-                add_index_column(
-                    &mut indexes,
-                    row.try_get::<&str, _>(0)?.unwrap_or_default().to_string(),
-                    row.try_get::<bool, _>(2)?.unwrap_or(false),
-                    row.try_get::<bool, _>(3)?.unwrap_or(false),
-                    row.try_get::<&str, _>(1)?.map(str::to_string),
-                );
+                let name = row.try_get::<&str, _>(0)?.unwrap_or_default().to_string();
+                let column = row.try_get::<&str, _>(1)?.unwrap_or_default().to_string();
+                let unique = row.try_get::<bool, _>(2)?.unwrap_or(false);
+                let primary = row.try_get::<bool, _>(3)?.unwrap_or(false);
+                if row.try_get::<bool, _>(4)?.unwrap_or(false) {
+                    add_included_column(&mut indexes, name, unique, primary, column);
+                } else {
+                    add_index_column(&mut indexes, name, unique, primary, Some(column));
+                }
             }
         }
         Ok(indexes)
@@ -1178,17 +1180,19 @@ fn routine_query(catalog: &str) -> String {
 }
 
 /// Reads one column of one index for each row. The name of the relation
-/// reaches `OBJECT_ID` as a parameter.
+/// reaches `OBJECT_ID` as a parameter. An `INCLUDE` column has the key
+/// ordinal 0, so the key columns come first in key order, and the included
+/// columns follow in the order of the statement that made the index.
 fn index_query(catalog: &str) -> String {
     format!(
-        "SELECT i.name, c.name, i.is_unique, i.is_primary_key \
+        "SELECT i.name, c.name, i.is_unique, i.is_primary_key, ic.is_included_column \
          FROM {catalog}.sys.indexes AS i \
          JOIN {catalog}.sys.index_columns AS ic \
            ON ic.object_id = i.object_id AND ic.index_id = i.index_id \
          JOIN {catalog}.sys.columns AS c \
            ON c.object_id = ic.object_id AND c.column_id = ic.column_id \
          WHERE i.object_id = OBJECT_ID(@P1) AND i.name IS NOT NULL \
-         ORDER BY i.name, ic.key_ordinal"
+         ORDER BY i.name, ic.is_included_column, ic.key_ordinal, ic.index_column_id"
     )
 }
 
@@ -2649,7 +2653,10 @@ mod tests {
         let indexes = index_query("[Sales]");
         assert!(indexes.contains("FROM [Sales].sys.indexes AS i"));
         assert!(indexes.contains("OBJECT_ID(@P1)"));
-        assert!(indexes.contains("ORDER BY i.name, ic.key_ordinal"));
+        assert!(indexes.contains("ic.is_included_column FROM"));
+        assert!(indexes.contains(
+            "ORDER BY i.name, ic.is_included_column, ic.key_ordinal, ic.index_column_id"
+        ));
 
         let constraints = constraint_query("[Sales]");
         assert!(constraints.contains("FROM [Sales].INFORMATION_SCHEMA.TABLE_CONSTRAINTS AS tc"));
