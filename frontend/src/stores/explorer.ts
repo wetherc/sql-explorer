@@ -521,15 +521,32 @@ export const useExplorerStore = defineStore('explorer', () => {
   /**
    * Reads the children of a node again, also while a read of the same node
    * runs. The newer read wins, and the answer of the older one is dropped.
+   *
+   * The read gives new child nodes with no children of their own. `open`
+   * holds the keys of the branches that the tree shows open, and each such
+   * branch below the node is read again, so it does not stand open and
+   * empty.
    */
-  async function refresh(given: ExplorerNode): Promise<void> {
+  async function refresh(
+    given: ExplorerNode,
+    open: ReadonlySet<string> = new Set(),
+  ): Promise<void> {
     const node = nodeByKey(given.key) ?? given
     if (!isExpandable(node)) {
       return
     }
     node.loaded = false
     node.children = []
-    await load(node)
+    await reopen(await load(node), open)
+  }
+
+  /** Reads each open branch among the children that a read just gave. */
+  async function reopen(children: ExplorerNode[], open: ReadonlySet<string>): Promise<void> {
+    for (const child of children) {
+      if (open.has(child.key) && isExpandable(child)) {
+        await reopen(await load(child), open)
+      }
+    }
   }
 
   /**
@@ -538,8 +555,11 @@ export const useExplorerStore = defineStore('explorer', () => {
    * Each read carries a number of its own. An answer whose number is no
    * longer the last one of the node is dropped, because a refresh has since
    * started a newer read of the same node.
+   *
+   * Returns the children that the read wrote, and an empty list for a read
+   * that failed or that a newer read passed.
    */
-  async function load(node: ExplorerNode): Promise<void> {
+  async function load(node: ExplorerNode): Promise<ExplorerNode[]> {
     const generation = (loadGeneration.get(node.key) ?? 0) + 1
     loadGeneration.set(node.key, generation)
     const isLast = () => loadGeneration.get(node.key) === generation
@@ -548,7 +568,7 @@ export const useExplorerStore = defineStore('explorer', () => {
     try {
       const children = await childrenOf(node)
       if (!isLast()) {
-        return
+        return []
       }
       node.children = children
       node.loaded = true
@@ -558,13 +578,14 @@ export const useExplorerStore = defineStore('explorer', () => {
         // and the tree does not wait for it.
         void readSnapshot(node.connectionId, node.database ?? node.label, snapshotOptions())
       }
+      return children
     } catch (error) {
-      if (!isLast()) {
-        return
+      if (isLast()) {
+        ui.reportError(error)
+        node.children = []
+        node.loaded = false
       }
-      ui.reportError(error)
-      node.children = []
-      node.loaded = false
+      return []
     } finally {
       if (isLast()) {
         node.loading = false

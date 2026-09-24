@@ -156,20 +156,53 @@ export const useFilesStore = defineStore('files', () => {
     }
   }
 
+  /**
+   * The number of the last read of each folder. A refresh starts a read
+   * while an older one runs, and the answer of the older read is dropped.
+   */
+  const loadGeneration = new Map<string, number>()
+
   /** Reads the entries of one folder, unless they are already read. */
   async function loadFolder(node: FileNode): Promise<void> {
     if (node.loaded || node.loading) {
       return
     }
+    await readFolder(node)
+  }
+
+  /**
+   * Reads the entries of one folder and writes them into it. The entries
+   * are new nodes, so each folder below that the panel shows open is read
+   * too, and it does not stand open and empty.
+   */
+  async function readFolder(node: FileNode): Promise<void> {
+    const generation = (loadGeneration.get(node.path) ?? 0) + 1
+    loadGeneration.set(node.path, generation)
+    const isLast = () => loadGeneration.get(node.path) === generation
     node.loading = true
+    let children: FileNode[]
     try {
       const entries = await api.listFolder(node.path)
-      node.children = entries.map((entry) => nodeOfEntry(entry, node.depth + 1))
+      if (!isLast()) {
+        return
+      }
+      children = entries.map((entry) => nodeOfEntry(entry, node.depth + 1))
+      node.children = children
       node.loaded = true
     } catch (error) {
-      ui.reportError(error)
+      if (isLast()) {
+        ui.reportError(error)
+      }
+      return
     } finally {
-      node.loading = false
+      if (isLast()) {
+        node.loading = false
+      }
+    }
+    for (const child of children) {
+      if (child.kind === 'folder' && openPaths.value.has(child.path)) {
+        await readFolder(child)
+      }
     }
   }
 
@@ -189,14 +222,16 @@ export const useFilesStore = defineStore('files', () => {
     openPaths.value = open
   }
 
-  /** Reads the entries of one folder again, whether they were read or not. */
+  /**
+   * Reads the entries of one folder again, whether they were read or not,
+   * and also while a read of the folder runs.
+   */
   async function refresh(path: string): Promise<void> {
     const node = findNode(roots.value, path)
     if (!node || node.kind !== 'folder') {
       return
     }
-    node.loaded = false
-    await loadFolder(node)
+    await readFolder(node)
   }
 
   /**

@@ -95,7 +95,7 @@
           prepend-icon="mdi-refresh"
           title="Read this branch again"
           data-test="menu-refresh"
-          @click="explorer.refresh(menuNode)"
+          @click="explorer.refresh(menuNode, openKeys)"
         />
         <v-list-item
           v-if="menuNode.kind === 'connection'"
@@ -222,7 +222,7 @@ function onContext({ x, y, node }: { x: number; y: number; node: ExplorerNode })
 
 async function refreshRoots(): Promise<void> {
   for (const root of explorer.roots) {
-    await explorer.refresh(root)
+    await explorer.refresh(root, openKeys.value)
   }
 }
 

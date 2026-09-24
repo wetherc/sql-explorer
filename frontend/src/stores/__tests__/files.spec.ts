@@ -144,6 +144,65 @@ describe('files store', () => {
     expect(apiStub.listFolder).toHaveBeenCalledTimes(2)
   })
 
+  it('reads the open folders below a refreshed folder again', async () => {
+    const files = useFilesStore()
+    apiStub.fileRoots.mockResolvedValue(['/data'])
+    await files.restoreRoots()
+    apiStub.listFolder.mockResolvedValue([entry('reports', 'folder'), entry('shut', 'folder')])
+    await files.expand('/data')
+    apiStub.listFolder.mockResolvedValue([entry('a.sql', 'file', '/data/reports')])
+    await files.expand('/data/reports')
+
+    apiStub.listFolder.mockImplementation(async (path: string) =>
+      path === '/data'
+        ? [entry('reports', 'folder'), entry('shut', 'folder')]
+        : [entry('a.sql', 'file', '/data/reports'), entry('b.sql', 'file', '/data/reports')],
+    )
+    await files.refresh('/data')
+    expect(files.rows.map((row) => row.name)).toEqual(['data', 'reports', 'a.sql', 'b.sql', 'shut'])
+    // A closed folder waits for its own expand.
+    expect(apiStub.listFolder).not.toHaveBeenCalledWith('/data/shut')
+  })
+
+  it('reads a folder again while an older read of it runs', async () => {
+    const files = useFilesStore()
+    apiStub.fileRoots.mockResolvedValue(['/data'])
+    await files.restoreRoots()
+    let releaseFirst: (value: ReturnType<typeof entry>[]) => void = () => {}
+    apiStub.listFolder.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseFirst = resolve
+      }),
+    )
+    const first = files.expand('/data')
+
+    apiStub.listFolder.mockResolvedValue([entry('new.sql')])
+    await files.refresh('/data')
+    releaseFirst([entry('old.sql')])
+    await first
+    expect(files.rows.map((row) => row.name)).toEqual(['data', 'new.sql'])
+    expect(files.roots[0]?.loading).toBe(false)
+  })
+
+  it('says nothing about a failure of a read that a refresh passed', async () => {
+    const files = useFilesStore()
+    apiStub.fileRoots.mockResolvedValue(['/data'])
+    await files.restoreRoots()
+    let refuseFirst: (error: unknown) => void = () => {}
+    apiStub.listFolder.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        refuseFirst = reject
+      }),
+    )
+    const first = files.expand('/data')
+
+    apiStub.listFolder.mockResolvedValue([entry('new.sql')])
+    await files.refresh('/data')
+    refuseFirst({ kind: 'io', message: 'gone', detail: null })
+    await first
+    expect(useUiStore().notices).toEqual([])
+  })
+
   it('opens no folder that the panel does not hold', async () => {
     const files = useFilesStore()
     apiStub.fileRoots.mockResolvedValue(['/data'])

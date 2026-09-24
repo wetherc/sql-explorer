@@ -714,6 +714,25 @@ describe('explorer store', () => {
     expect(root.children).toHaveLength(2)
   })
 
+  it('reads the open branches below a refreshed node again', async () => {
+    apiStub.listDatabases.mockResolvedValue([{ name: 'Sales' }, { name: 'Shut' }])
+    apiStub.listSchemas.mockResolvedValue([{ name: 'dbo' }])
+    const explorer = await readyStore(true)
+    const root = explorer.addRoot('c1')
+    await explorer.expand(root)
+    const sales = root.children![0]!
+    await explorer.expand(sales)
+    const open = new Set([root.key, sales.key, `${sales.key}/dbo`])
+
+    apiStub.listSchemas.mockResolvedValue([{ name: 'dbo' }, { name: 'audit' }])
+    await explorer.refresh(root, open)
+    const fresh = root.children![0]!
+    expect(fresh).not.toBe(sales)
+    expect(fresh.children?.map((child) => child.label)).toEqual(['dbo', 'audit'])
+    // A branch that the tree shows closed waits for its own expand.
+    expect(root.children![1]!.loaded).toBe(false)
+  })
+
   it('drops the answer of a read that a refresh passed', async () => {
     let releaseFirst: (value: { name: string }[]) => void = () => {}
     apiStub.listDatabases.mockReturnValueOnce(
