@@ -1643,6 +1643,7 @@ mod tests {
         let options = ExecOptions {
             max_rows: 2,
             timeout_secs: 30,
+            one_statement: false,
         };
         let mut sink = BufferSink::new(options.max_rows);
         let stopped = driver
@@ -1737,6 +1738,7 @@ mod tests {
         let options = ExecOptions {
             max_rows: 2,
             timeout_secs: 30,
+            one_statement: false,
         };
         let response = driver
             .explain("SELECT a FROM b", None, PlanKind::Actual, &options)
@@ -1793,6 +1795,7 @@ mod tests {
         let options = ExecOptions {
             max_rows: 10,
             timeout_secs: 30,
+            one_statement: false,
         };
         let mut sink = BufferSink::new(options.max_rows);
 
@@ -1819,6 +1822,7 @@ mod tests {
         let options = ExecOptions {
             max_rows: 10,
             timeout_secs: 30,
+            one_statement: false,
         };
         let mut sink = BufferSink::new(options.max_rows);
 
@@ -1921,6 +1925,7 @@ mod tests {
         let options = ExecOptions {
             max_rows: 2,
             timeout_secs: 30,
+            one_statement: false,
         };
         let mut sink = BufferSink::new(options.max_rows);
         let summary = driver
@@ -2009,6 +2014,7 @@ mod tests {
         let options = ExecOptions {
             max_rows: 10,
             timeout_secs: 30,
+            one_statement: false,
         };
         let mut sink = BufferSink::new(sink_rows);
         let summary = driver
@@ -2128,6 +2134,7 @@ mod tests {
         let options = ExecOptions {
             max_rows: 10,
             timeout_secs: 30,
+            one_statement: false,
         };
         let mut sink = BufferSink::new(options.max_rows);
         let params = vec![crate::db::QueryParam {
@@ -2174,6 +2181,7 @@ mod tests {
         let options = ExecOptions {
             max_rows: 10,
             timeout_secs: 30,
+            one_statement: false,
         };
         let mut sink = BufferSink::new(options.max_rows);
         driver
@@ -2219,6 +2227,7 @@ mod tests {
         let options = ExecOptions {
             max_rows: 10,
             timeout_secs: 30,
+            one_statement: false,
         };
         let mut sink = BufferSink::new(options.max_rows);
         driver
@@ -2377,6 +2386,7 @@ mod tests {
         let options = ExecOptions {
             max_rows: 2,
             timeout_secs: 30,
+            one_statement: false,
         };
         let mut sink = BufferSink::new(options.max_rows);
         driver
@@ -2414,6 +2424,7 @@ mod tests {
         let options = ExecOptions {
             max_rows: 10,
             timeout_secs: 30,
+            one_statement: false,
         };
         let mut sink = BufferSink::new(2);
         let stopped = driver

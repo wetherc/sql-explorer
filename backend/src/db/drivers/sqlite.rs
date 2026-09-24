@@ -1049,6 +1049,7 @@ mod tests {
                 &ExecOptions {
                     max_rows: 2,
                     timeout_secs: 10,
+                    one_statement: false,
                 },
             )
             .await
@@ -1551,6 +1552,7 @@ mod tests {
                 &ExecOptions {
                     max_rows: 100_000,
                     timeout_secs: 300,
+                    one_statement: false,
                 },
                 &mut sink,
             )

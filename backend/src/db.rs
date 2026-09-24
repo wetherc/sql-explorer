@@ -202,6 +202,13 @@ pub struct ExecOptions {
     pub max_rows: usize,
     /// The number of seconds after which the driver stops waiting.
     pub timeout_secs: u64,
+    /// True when the server must refuse a text that holds more than one
+    /// statement. The export to a file sets it. Its read-only check splits
+    /// the text with the splitter of the application, and a server that
+    /// splits the text at a different place can run a statement that the
+    /// check did not read. The interface cannot set the flag.
+    #[serde(skip)]
+    pub one_statement: bool,
 }
 
 impl Default for ExecOptions {
@@ -209,6 +216,7 @@ impl Default for ExecOptions {
         Self {
             max_rows: 10_000,
             timeout_secs: 300,
+            one_statement: false,
         }
     }
 }

@@ -265,6 +265,7 @@ impl SavedConnection {
         crate::db::ExecOptions {
             max_rows: self.options.max_rows,
             timeout_secs: self.options.query_timeout_secs,
+            one_statement: false,
         }
     }
 

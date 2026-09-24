@@ -1803,6 +1803,7 @@ mod tests {
         let options = ExecOptions {
             max_rows: 100,
             timeout_secs: 30,
+            one_statement: false,
         };
         let mut sink = BufferSink::new(options.max_rows);
         let rows_affected = driver
@@ -1848,6 +1849,7 @@ mod tests {
         let options = ExecOptions {
             max_rows: 1,
             timeout_secs: 30,
+            one_statement: false,
         };
         let mut sink = BufferSink::new(options.max_rows);
         let rows_affected = driver
@@ -1896,6 +1898,7 @@ mod tests {
         let options = ExecOptions {
             max_rows: 1,
             timeout_secs: 30,
+            one_statement: false,
         };
         let mut sink = BufferSink::new(options.max_rows);
         driver
@@ -1934,6 +1937,7 @@ mod tests {
         let options = ExecOptions {
             max_rows: 1,
             timeout_secs: 30,
+            one_statement: false,
         };
         let mut sink = BufferSink::new(options.max_rows);
         driver
@@ -1977,6 +1981,7 @@ mod tests {
         let options = ExecOptions {
             max_rows: 1,
             timeout_secs: 30,
+            one_statement: false,
         };
         let mut sink = BufferSink::new(options.max_rows);
         let outcome = driver
@@ -2014,6 +2019,7 @@ mod tests {
         let options = ExecOptions {
             max_rows: 100,
             timeout_secs: 30,
+            one_statement: false,
         };
         // The sink holds one row and asks the walk to stop after it.
         let mut sink = BufferSink::new(1);
@@ -2055,6 +2061,7 @@ mod tests {
         let options = ExecOptions {
             max_rows: 100,
             timeout_secs: 30,
+            one_statement: false,
         };
         let mut sink = BufferSink::new(options.max_rows);
         let rows_affected = driver
@@ -2106,6 +2113,7 @@ mod tests {
         let options = ExecOptions {
             max_rows: 100,
             timeout_secs: 30,
+            one_statement: false,
         };
         let mut sink = BufferSink::new(options.max_rows);
         driver
@@ -2145,6 +2153,7 @@ mod tests {
         let options = ExecOptions {
             max_rows: 100,
             timeout_secs: 30,
+            one_statement: false,
         };
         let mut sink = BufferSink::new(options.max_rows);
         let rows_affected = driver
@@ -2195,6 +2204,7 @@ mod tests {
         let options = ExecOptions {
             max_rows: 1,
             timeout_secs: 30,
+            one_statement: false,
         };
         let mut sink = BufferSink::new(options.max_rows);
         driver
@@ -2238,6 +2248,7 @@ mod tests {
         let options = ExecOptions {
             max_rows: 1,
             timeout_secs: 30,
+            one_statement: false,
         };
         let mut sink = BufferSink::new(options.max_rows);
         driver
@@ -2279,6 +2290,7 @@ mod tests {
         let options = ExecOptions {
             max_rows: 1,
             timeout_secs: 30,
+            one_statement: false,
         };
         let mut sink = BufferSink::new(options.max_rows);
         driver
@@ -2313,6 +2325,7 @@ mod tests {
         let options = ExecOptions {
             max_rows: 1,
             timeout_secs: 30,
+            one_statement: false,
         };
         let mut sink = BufferSink::new(options.max_rows);
         driver
@@ -2359,6 +2372,7 @@ mod tests {
         let options = ExecOptions {
             max_rows: 1,
             timeout_secs: 30,
+            one_statement: false,
         };
         let mut sink = BufferSink::new(options.max_rows);
         let outcome = driver
@@ -2405,6 +2419,7 @@ mod tests {
         let options = ExecOptions {
             max_rows: 1,
             timeout_secs: 30,
+            one_statement: false,
         };
         let mut sink = BufferSink::new(options.max_rows);
         driver

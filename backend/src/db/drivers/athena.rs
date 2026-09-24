@@ -495,6 +495,7 @@ impl AthenaDriver {
         let options = ExecOptions {
             max_rows: 100_000,
             timeout_secs: 60,
+            one_statement: false,
         };
         let (set, _) = self.run_statement(statement, &options).await?;
         Ok(set)

@@ -190,6 +190,13 @@ pub fn bind_params(params: Option<&QueryParams>) -> Result<mysql_async::Params> 
 /// it. A set that passed the row limit or a stop of the sink drains one row
 /// at a time, so the connection stays fit for the next set.
 ///
+/// A statement without parameters goes through the text protocol. MySQL
+/// refuses `CREATE PROCEDURE`, `CREATE TRIGGER`, `USE` and some other
+/// statements in the prepared protocol with error 1295, and a prepared
+/// statement costs a second round trip. A statement with parameters, or a
+/// run that sets `one_statement`, goes through the prepared protocol,
+/// because there the server refuses a text with a second statement.
+///
 /// MySQL holds no packet that ends a statement on the connection that runs
 /// it. Its stop runs `KILL QUERY` from a second connection, which ends the
 /// statement with a fault of the server and leaves the session unfit for the
@@ -207,8 +214,24 @@ async fn stream_statement(
     rows_affected: &mut Option<u64>,
     stopped: &mut bool,
 ) -> Result<()> {
-    let mut result = conn.exec_iter(statement, params).await?;
+    if options.one_statement || !matches!(params, mysql_async::Params::Empty) {
+        let result = conn.exec_iter(statement, params).await?;
+        read_sets(result, options, sink, rows_affected, stopped).await
+    } else {
+        let result = conn.query_iter(statement).await?;
+        read_sets(result, options, sink, rows_affected, stopped).await
+    }
+}
 
+/// Reads each set of one statement into the sink, as `stream_statement`
+/// describes.
+async fn read_sets<P: Protocol>(
+    mut result: mysql_async::QueryResult<'_, 'static, P>,
+    options: &ExecOptions,
+    sink: &mut dyn RowSink,
+    rows_affected: &mut Option<u64>,
+    stopped: &mut bool,
+) -> Result<()> {
     loop {
         let columns: Vec<ColumnInfo> = result.columns().map_or_else(Vec::new, |columns| {
             columns
@@ -248,9 +271,9 @@ async fn stream_statement(
             continue;
         }
 
-        let date_only: Vec<bool> = columns
+        let kinds: Vec<ValueKind> = columns
             .iter()
-            .map(|column| is_date_only(&column.type_name))
+            .map(|column| value_kind(&column.type_name))
             .collect();
         sink.begin_set(columns.clone())?;
         let mut count = 0usize;
@@ -263,7 +286,7 @@ async fn stream_statement(
                 truncated = true;
                 continue;
             }
-            if sink.row(row_to_json(&row, &date_only))? == SinkControl::Stop {
+            if sink.row(row_to_json(&row, &kinds))? == SinkControl::Stop {
                 truncated = true;
                 *stopped = true;
                 continue;
@@ -680,31 +703,68 @@ fn create_query_text(database: Option<&str>, table: &str, kind: TableKind) -> Cr
     CreateQuery::new(format!("SHOW CREATE {word} {name};"), 1)
 }
 
-/// True when the type of a column holds a date and no time. The driver
-/// gives the same value shape for DATE, DATETIME and TIMESTAMP, so the type
-/// of the column decides whether the text carries a time.
-pub fn is_date_only(type_name: &str) -> bool {
-    matches!(type_name, "mysql_type_date" | "mysql_type_newdate")
+/// The kind of value that a column holds, as far as the conversion to JSON
+/// needs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueKind {
+    /// A DATE column. The driver gives the same value for DATE, DATETIME
+    /// and TIMESTAMP, so the kind decides whether the text has a time.
+    DateOnly,
+    /// A whole number. The text protocol sends it as text.
+    Integer,
+    /// A floating-point number. The text protocol sends it as text.
+    Float,
+    /// Any other column.
+    Other,
+}
+
+/// Finds the kind of value from the type name of a column.
+pub fn value_kind(type_name: &str) -> ValueKind {
+    match type_name {
+        "mysql_type_date" | "mysql_type_newdate" => ValueKind::DateOnly,
+        "mysql_type_tiny"
+        | "mysql_type_short"
+        | "mysql_type_int24"
+        | "mysql_type_long"
+        | "mysql_type_longlong"
+        | "mysql_type_year" => ValueKind::Integer,
+        "mysql_type_float" | "mysql_type_double" => ValueKind::Float,
+        _ => ValueKind::Other,
+    }
 }
 
 /// Converts one row into an array of JSON values. The values stay in the row
 /// while they are read, so a row of text costs no copy of that text.
 ///
-/// `date_only` holds one flag for each column, as `is_date_only` reads it.
-pub fn row_to_json(row: &MysqlRow, date_only: &[bool]) -> Vec<JsonValue> {
-    date_only
+/// `kinds` holds one kind for each column, as `value_kind` reads it.
+pub fn row_to_json(row: &MysqlRow, kinds: &[ValueKind]) -> Vec<JsonValue> {
+    kinds
         .iter()
         .enumerate()
-        .map(|(index, date_only)| {
+        .map(|(index, kind)| {
             row.as_ref(index)
-                .map_or(JsonValue::Null, |value| value_to_json(value, *date_only))
+                .map_or(JsonValue::Null, |value| value_to_json(value, *kind))
         })
         .collect()
 }
 
-/// Converts one value of the driver into JSON. `date_only` says that the
-/// column holds a date alone, so the text carries no time.
-pub fn value_to_json(value: &MysqlValue, date_only: bool) -> JsonValue {
+/// Converts a number that the text protocol sends as text. Text that does
+/// not parse stays text.
+fn number_text_to_json(text: &str, kind: ValueKind) -> Option<JsonValue> {
+    match kind {
+        ValueKind::Integer => text
+            .parse::<i64>()
+            .map(JsonValue::from)
+            .or_else(|_| text.parse::<u64>().map(JsonValue::from))
+            .ok(),
+        ValueKind::Float => text.parse::<f64>().ok().map(f64_to_json),
+        ValueKind::DateOnly | ValueKind::Other => None,
+    }
+}
+
+/// Converts one value of the driver into JSON. `kind` is the kind of value
+/// of the column.
+pub fn value_to_json(value: &MysqlValue, kind: ValueKind) -> JsonValue {
     match value {
         MysqlValue::NULL => JsonValue::Null,
         MysqlValue::Int(number) => JsonValue::from(*number),
@@ -714,7 +774,9 @@ pub fn value_to_json(value: &MysqlValue, date_only: bool) -> JsonValue {
         // The server sends text, decimals and binary data as bytes. Text
         // that is not valid UTF-8 is binary, so it becomes base64.
         MysqlValue::Bytes(bytes) => match std::str::from_utf8(bytes) {
-            Ok(text) => JsonValue::String(text.to_string()),
+            Ok(text) => {
+                number_text_to_json(text, kind).unwrap_or_else(|| JsonValue::String(text.into()))
+            }
             Err(_) => bytes_to_json(bytes),
         },
         MysqlValue::Date(year, month, day, hour, minute, second, microsecond) => {
@@ -726,7 +788,7 @@ pub fn value_to_json(value: &MysqlValue, date_only: bool) -> JsonValue {
                 *minute,
                 *second,
                 *microsecond,
-                date_only,
+                kind == ValueKind::DateOnly,
             ))
         }
         MysqlValue::Time(negative, days, hours, minutes, seconds, microseconds) => {
@@ -1014,30 +1076,33 @@ mod tests {
 
     #[test]
     fn every_value_type_becomes_json() {
-        assert_eq!(value_to_json(&MysqlValue::NULL, false), JsonValue::Null);
         assert_eq!(
-            value_to_json(&MysqlValue::Int(-4), false),
+            value_to_json(&MysqlValue::NULL, ValueKind::Other),
+            JsonValue::Null
+        );
+        assert_eq!(
+            value_to_json(&MysqlValue::Int(-4), ValueKind::Other),
             serde_json::json!(-4)
         );
         assert_eq!(
-            value_to_json(&MysqlValue::UInt(4), false),
+            value_to_json(&MysqlValue::UInt(4), ValueKind::Other),
             serde_json::json!(4)
         );
         assert_eq!(
-            value_to_json(&MysqlValue::Double(1.25), false),
+            value_to_json(&MysqlValue::Double(1.25), ValueKind::Other),
             serde_json::json!(1.25)
         );
         assert_eq!(
-            value_to_json(&MysqlValue::Float(0.5), false),
+            value_to_json(&MysqlValue::Float(0.5), ValueKind::Other),
             serde_json::json!(0.5)
         );
         assert_eq!(
-            value_to_json(&MysqlValue::Bytes(b"hello".to_vec()), false),
+            value_to_json(&MysqlValue::Bytes(b"hello".to_vec()), ValueKind::Other),
             serde_json::json!("hello")
         );
         // Bytes that are not valid text become base64.
         assert_eq!(
-            value_to_json(&MysqlValue::Bytes(vec![0xff, 0xfe]), false),
+            value_to_json(&MysqlValue::Bytes(vec![0xff, 0xfe]), ValueKind::Other),
             serde_json::json!("//4=")
         );
     }
@@ -1046,40 +1111,84 @@ mod tests {
     fn a_date_shows_only_the_parts_that_carry_information() {
         // A DATE column gives the date alone.
         assert_eq!(
-            value_to_json(&MysqlValue::Date(2026, 8, 10, 0, 0, 0, 0), true),
+            value_to_json(
+                &MysqlValue::Date(2026, 8, 10, 0, 0, 0, 0),
+                ValueKind::DateOnly
+            ),
             serde_json::json!("2026-08-10")
         );
         // A DATETIME column keeps the time, also at midnight.
         assert_eq!(
-            value_to_json(&MysqlValue::Date(2026, 8, 10, 0, 0, 0, 0), false),
+            value_to_json(&MysqlValue::Date(2026, 8, 10, 0, 0, 0, 0), ValueKind::Other),
             serde_json::json!("2026-08-10 00:00:00")
         );
         assert_eq!(
-            value_to_json(&MysqlValue::Date(2026, 8, 10, 13, 5, 6, 0), false),
+            value_to_json(
+                &MysqlValue::Date(2026, 8, 10, 13, 5, 6, 0),
+                ValueKind::Other
+            ),
             serde_json::json!("2026-08-10 13:05:06")
         );
         assert_eq!(
-            value_to_json(&MysqlValue::Date(2026, 8, 10, 13, 5, 6, 123456), false),
+            value_to_json(
+                &MysqlValue::Date(2026, 8, 10, 13, 5, 6, 123456),
+                ValueKind::Other
+            ),
             serde_json::json!("2026-08-10 13:05:06.123456")
         );
     }
 
     #[test]
-    fn the_type_of_a_column_says_whether_it_holds_a_time() {
-        assert!(is_date_only("mysql_type_date"));
-        assert!(is_date_only("mysql_type_newdate"));
-        assert!(!is_date_only("mysql_type_datetime"));
-        assert!(!is_date_only("mysql_type_timestamp"));
+    fn the_type_of_a_column_gives_the_kind_of_value() {
+        assert_eq!(value_kind("mysql_type_date"), ValueKind::DateOnly);
+        assert_eq!(value_kind("mysql_type_newdate"), ValueKind::DateOnly);
+        assert_eq!(value_kind("mysql_type_datetime"), ValueKind::Other);
+        assert_eq!(value_kind("mysql_type_timestamp"), ValueKind::Other);
+        for name in [
+            "mysql_type_tiny",
+            "mysql_type_short",
+            "mysql_type_int24",
+            "mysql_type_long",
+            "mysql_type_longlong",
+            "mysql_type_year",
+        ] {
+            assert_eq!(value_kind(name), ValueKind::Integer);
+        }
+        assert_eq!(value_kind("mysql_type_float"), ValueKind::Float);
+        assert_eq!(value_kind("mysql_type_double"), ValueKind::Float);
+        assert_eq!(value_kind("mysql_type_newdecimal"), ValueKind::Other);
+    }
+
+    #[test]
+    fn a_number_in_the_text_protocol_becomes_a_json_number() {
+        let text = |value: &str, kind| value_to_json(&MysqlValue::Bytes(value.into()), kind);
+        assert_eq!(text("-4", ValueKind::Integer), serde_json::json!(-4));
+        assert_eq!(
+            text("18446744073709551615", ValueKind::Integer),
+            serde_json::json!(u64::MAX)
+        );
+        assert_eq!(text("0.1", ValueKind::Float), serde_json::json!(0.1));
+        assert_eq!(text("1e20", ValueKind::Float), serde_json::json!(1e20));
+        // A DECIMAL keeps its text, so no digit is lost.
+        assert_eq!(text("1.50", ValueKind::Other), serde_json::json!("1.50"));
+        // A date in the text protocol is already text.
+        assert_eq!(
+            text("2026-08-10", ValueKind::DateOnly),
+            serde_json::json!("2026-08-10")
+        );
+        // Text that does not parse stays text.
+        assert_eq!(text("x", ValueKind::Integer), serde_json::json!("x"));
+        assert_eq!(text("x", ValueKind::Float), serde_json::json!("x"));
     }
 
     #[test]
     fn an_interval_folds_the_days_into_the_hours() {
         assert_eq!(
-            value_to_json(&MysqlValue::Time(false, 1, 2, 3, 4, 0), false),
+            value_to_json(&MysqlValue::Time(false, 1, 2, 3, 4, 0), ValueKind::Other),
             serde_json::json!("26:03:04")
         );
         assert_eq!(
-            value_to_json(&MysqlValue::Time(true, 0, 2, 3, 4, 500), false),
+            value_to_json(&MysqlValue::Time(true, 0, 2, 3, 4, 500), ValueKind::Other),
             serde_json::json!("-02:03:04.000500")
         );
     }
@@ -1093,7 +1202,7 @@ mod tests {
         ];
         let json: Vec<JsonValue> = values
             .iter()
-            .map(|value| value_to_json(value, false))
+            .map(|value| value_to_json(value, ValueKind::Other))
             .collect();
         assert_eq!(
             json,

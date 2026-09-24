@@ -1812,6 +1812,7 @@ pub async fn export_query<R: Runtime>(
     let options = ExecOptions {
         max_rows,
         timeout_secs: open.descriptor.exec_options().timeout_secs,
+        one_statement: true,
     };
     let (query, bound) = prepare_parameters(&query, open.dialect, query_params.as_ref())?;
     let token = state
