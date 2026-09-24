@@ -25,6 +25,11 @@ Each statement that runs goes into the history panel, with its connection and
 the time of its run. A click on an entry opens that statement in a new tab, on
 the connection of the entry when that connection is open.
 
+The history keeps the last 500 statements. It also keeps at most about 4
+million characters of statement text and error text. When a new entry passes
+that amount, the history drops the oldest entries. The newest entry always
+stays, also when its text alone is larger.
+
 ## The file of a tab
 
 The **Save** button writes the statement of the tab to a file, and so do

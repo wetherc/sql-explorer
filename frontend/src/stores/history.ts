@@ -11,6 +11,28 @@ import type { HistoryEntry, SavedQuery } from '@/types/api'
  */
 export const HISTORY_LIMIT = 500
 
+/**
+ * The most text that the statements and the error texts of the list hold
+ * together, in UTF-16 units. The backend file keeps the same budget, so 500
+ * runs of a large script do not make a file of hundreds of megabytes.
+ */
+export const HISTORY_TEXT_BUDGET = 4 * 1024 * 1024
+
+/**
+ * The entries of a list that stay under the limit and under the budget of the
+ * text, newest first. The newest entry stays also when its text alone passes
+ * the budget.
+ */
+export function trimHistory(entries: HistoryEntry[]): HistoryEntry[] {
+  let total = 0
+  const kept = entries.slice(0, HISTORY_LIMIT)
+  const over = kept.findIndex((entry) => {
+    total += entry.query.length + (entry.error?.length ?? 0)
+    return total > HISTORY_TEXT_BUDGET
+  })
+  return over === -1 ? kept : kept.slice(0, Math.max(1, over))
+}
+
 /** What the query store reports after one execution. */
 export interface HistoryInput {
   connectionId: string
@@ -76,8 +98,8 @@ export const useHistoryStore = defineStore('history', () => {
 
   /**
    * Puts one entry at the front of the list and drops the entries above the
-   * limit. An entry that repeats the statement at the front replaces it. The
-   * backend file follows the same two rules.
+   * limit and the budget of the text. An entry that repeats the statement at
+   * the front replaces it. The backend file follows the same rules.
    */
   function putEntry(entry: HistoryEntry): void {
     const first = entries.value[0]
@@ -85,7 +107,7 @@ export const useHistoryStore = defineStore('history', () => {
       first && first.query === entry.query && first.connectionId === entry.connectionId
         ? entries.value.slice(1)
         : entries.value
-    entries.value = [entry, ...rest].slice(0, HISTORY_LIMIT)
+    entries.value = trimHistory([entry, ...rest])
   }
 
   /** Adds one execution to the history. */

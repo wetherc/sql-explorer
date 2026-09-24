@@ -5,7 +5,7 @@
 //! whole list from loading.
 
 use crate::error::{Error, Result};
-use crate::history::{push_entry, HistoryEntry, SavedQuery};
+use crate::history::{push_entry, trim_history, HistoryEntry, SavedQuery};
 use crate::storage::SavedConnection;
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
@@ -104,9 +104,13 @@ pub fn delete_connection<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<()>
     Ok(())
 }
 
+/// Reads the history. A file that holds more than the limits allow gives the
+/// newer entries alone, and the next write of the file drops the others.
 pub fn read_history<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<HistoryEntry>> {
     let store = app.store(settings_path(QUERIES_FILE))?;
-    Ok(parse_list(store.get(HISTORY_KEY)))
+    let mut history = parse_list(store.get(HISTORY_KEY));
+    trim_history(&mut history);
+    Ok(history)
 }
 
 /// Writes one entry to the history file. The caller keeps its own copy of the

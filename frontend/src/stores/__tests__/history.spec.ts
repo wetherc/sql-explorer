@@ -5,7 +5,8 @@ import { makeApiStub } from './helpers'
 const apiStub = makeApiStub()
 vi.mock('@/lib/api', () => ({ api: apiStub, CONNECTION_STATUS_EVENT: 'connection-status' }))
 
-const { useHistoryStore, HISTORY_LIMIT } = await import('@/stores/history')
+const { useHistoryStore, HISTORY_LIMIT, HISTORY_TEXT_BUDGET, trimHistory } =
+  await import('@/stores/history')
 const { useUiStore } = await import('@/stores/ui')
 
 function entry(id: string, query: string, connectionName = 'Server') {
@@ -172,6 +173,35 @@ describe('history store', () => {
     expect(history.entries).toHaveLength(HISTORY_LIMIT)
     expect(history.entries[0]?.query).toBe('SELECT new')
     expect(history.entries[HISTORY_LIMIT - 1]?.query).toBe(`SELECT ${HISTORY_LIMIT - 2}`)
+  })
+
+  it('drops the older entries whose text passes the budget', async () => {
+    apiStub.addHistoryEntry.mockResolvedValue(undefined)
+    const quarter = 'x'.repeat(HISTORY_TEXT_BUDGET / 4)
+    apiStub.getHistory.mockResolvedValue(
+      ['a', 'b', 'c'].map((name) => entry(`h${name}`, `${name}${quarter}`)),
+    )
+    const history = useHistoryStore()
+    await history.load()
+    await history.record({
+      connectionId: 'c1',
+      connectionName: 'Server',
+      query: 'SELECT 1',
+      elapsedMs: 5,
+      rowCount: 0,
+      succeeded: false,
+      error: quarter,
+    })
+    // The new entry and two of the old ones fit, because the error text
+    // counts against the budget too.
+    expect(history.entries).toHaveLength(3)
+    expect(history.entries.slice(1).map((item) => item.id)).toEqual(['ha', 'hb'])
+  })
+
+  it('keeps the newest entry when its text alone passes the budget', () => {
+    const huge = entry('big', 'x'.repeat(HISTORY_TEXT_BUDGET + 1))
+    expect(trimHistory([huge, entry('h1', 'SELECT 1')])).toEqual([huge])
+    expect(trimHistory([])).toEqual([])
   })
 
   it('keeps an entry for this session when it cannot be written', async () => {
