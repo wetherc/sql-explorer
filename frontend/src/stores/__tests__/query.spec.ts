@@ -44,7 +44,6 @@ describe('newQueryState', () => {
       running: false,
       requestId: null,
       requestConnectionId: null,
-      lastRun: null,
       error: null,
       panes: [],
       messages: [],
@@ -321,22 +320,21 @@ describe('query store', () => {
     await running
   })
 
-  it('remembers the statement and the values of the last run', async () => {
+  it('keeps with each result the statement, the values and the connection of its run', async () => {
     apiStub.executeQuery.mockImplementation(streamed(response()))
     apiStub.explainQuery.mockResolvedValue(response())
     const queries = useQueryStore()
 
     await queries.execute('t1', 'c1', ' SELECT :id ', { id: 7 })
-    expect(queries.stateFor('t1').lastRun).toEqual({ query: 'SELECT :id', params: { id: 7 } })
+    expect(queries.stateFor('t1').panes[0]?.run).toEqual({
+      connectionId: 'c1',
+      query: 'SELECT :id',
+      params: { id: 7 },
+    })
 
-    // A plan is not a run, so it does not replace the last run.
+    // A plan is not a run, so its result has no statement to run again.
     await queries.explain('t1', 'c1', 'SELECT 2', 'estimated')
-    expect(queries.stateFor('t1').lastRun?.query).toBe('SELECT :id')
-
-    // A run that failed leaves the last good run in place.
-    apiStub.executeQuery.mockRejectedValue({ kind: 'database', message: 'no', detail: null })
-    await queries.execute('t1', 'c1', 'SELECT bad')
-    expect(queries.stateFor('t1').lastRun?.query).toBe('SELECT :id')
+    expect(queries.stateFor('t1').panes[0]?.run).toBeNull()
   })
 
   it('sends the stop to the connection of the run', async () => {

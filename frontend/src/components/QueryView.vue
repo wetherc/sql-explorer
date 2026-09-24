@@ -300,7 +300,7 @@
                 :truncated="pane.truncated"
                 :busy="state.running && pane.pinned"
                 @export="onExport"
-                @export-all="onExportAll"
+                @export-all="(format: ExportAllFormat) => onExportAll(pane, format)"
                 @copied="onCopied"
               />
             </template>
@@ -930,32 +930,28 @@ function confirmInsertExport(): void {
 }
 
 /**
- * Writes every row of the statement to a file. The backend runs the
- * statement again with a higher row limit and writes the file itself, so a
- * large result never passes through the interface.
+ * Writes every row of the statement of one result to a file. The backend
+ * runs the statement again with a higher row limit and writes the file
+ * itself, so a large result never passes through the interface.
  */
-async function onExportAll(format: ExportAllFormat): Promise<void> {
-  const connectionId = props.tab.connectionId
-  if (!connectionId) {
-    return
-  }
-  // The export runs the statement of the last run, and not the text of the
-  // editor, which the user may have changed since that run.
-  const lastRun = state.value.lastRun
-  if (!lastRun) {
-    ui.warn('Run the statement first. The export writes the rows of a run.')
+async function onExportAll(pane: ResultPane, format: ExportAllFormat): Promise<void> {
+  // The export runs the statement that made this result, on the connection
+  // of that run. A kept result of an older run thus writes its own rows.
+  const run = pane.run
+  if (!run) {
+    ui.warn('A plan has no rows to write again. Run the statement first.')
     return
   }
   try {
     const summary = await api.exportQuery({
-      connectionId,
+      connectionId: run.connectionId,
       requestId: `export-${props.tab.id}-${Date.now()}`,
-      query: lastRun.query,
+      query: run.query,
       defaultName: exportFileName(props.tab.title, format),
       format,
       maxRows: settings.settings.exportRowLimit,
       tabId: props.tab.id,
-      queryParams: lastRun.params,
+      queryParams: run.params,
     })
     if (!summary) {
       return

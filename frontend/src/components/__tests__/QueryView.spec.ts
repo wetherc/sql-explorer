@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type { ResultPane } from '@/stores/query'
 import {
   makeApiStub,
   connectionFixture,
@@ -1730,10 +1731,13 @@ describe('QueryView edge paths', () => {
     expect(useUiStore().notices.some((notice) => notice.level === 'warning')).toBe(true)
   })
 
-  it('asks for a run before it exports the whole result', async () => {
+  it('writes no whole export for a plan', async () => {
     const wrapper = await mountView()
     await settle()
-    await (wrapper.vm as unknown as { onExportAll: (f: 'csv') => Promise<void> }).onExportAll('csv')
+    const pane = { run: null } as unknown as ResultPane
+    await (
+      wrapper.vm as unknown as { onExportAll: (p: ResultPane, f: 'csv') => Promise<void> }
+    ).onExportAll(pane, 'csv')
     expect(apiStub.exportQuery).not.toHaveBeenCalled()
     expect(
       useUiStore().notices.some((notice) => notice.message.includes('Run the statement first')),
@@ -1760,24 +1764,28 @@ describe('QueryView edge paths', () => {
     expect(useUiStore().notices.some((notice) => notice.level === 'error')).toBe(true)
   })
 
-  it('writes no whole export for a tab without a connection', async () => {
-    const wrapper = mountWithPlugins(QueryView, {
-      props: {
-        tab: {
-          id: 't9',
-          title: 'Query 9',
-          query: 'SELECT 1',
-          connectionId: null,
-          dirty: false,
-          savedQueryId: null,
-          params: [],
-          filePath: null,
-        },
-      },
+  it('writes every row of a kept result with its own statement and connection', async () => {
+    apiStub.exportQuery.mockResolvedValue({ rows: 1, truncated: false, path: '/tmp/all.csv' })
+    const wrapper = await mountedWithResult()
+    await wrapper.find('[data-test="pin-result"]').trigger('click')
+    await wrapper.vm.$nextTick()
+    // The tab now names another statement and another connection.
+    await wrapper.setProps({
+      tab: { ...wrapper.props('tab'), query: 'SELECT 2', connectionId: 'c2' },
     })
+    await wrapper.find('[data-test="run-button"]').trigger('click')
     await settle()
-    await (wrapper.vm as unknown as { onExportAll: (f: 'csv') => Promise<void> }).onExportAll('csv')
-    expect(apiStub.exportQuery).not.toHaveBeenCalled()
+
+    const grids = wrapper.findAllComponents({ name: 'ResultsGrid' })
+    const kept = grids.find(
+      (grid) => grid.props('result') === useQueryStore().stateFor('t1').panes[0]!.result,
+    )!
+    await kept.vm.$emit('export-all', 'csv')
+    await settle()
+
+    expect(apiStub.exportQuery).toHaveBeenCalledWith(
+      expect.objectContaining({ connectionId: 'c1', query: 'SELECT 1' }),
+    )
   })
 
   it('closes the table dialog when the overlay reports it', async () => {

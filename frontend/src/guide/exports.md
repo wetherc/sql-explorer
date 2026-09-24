@@ -12,6 +12,10 @@ The menu of the grid holds two kinds of export:
   entries stand in the menu only when the row limit stopped the read, and they
   offer a CSV file, a JSON file and an Excel file.
 
+**Write every row** runs the statement that made the result, on the
+connection of that run. A kept result of an older run thus writes its own
+rows, also after a change of the text or of the connection of the tab.
+
 **Write every row** accepts a statement that only reads, because it runs the
 statement again. The backend refuses a statement that has a word such as
 `INSERT`, `UPDATE`, `DELETE`, `INTO` or `EXEC` outside a string or a comment.

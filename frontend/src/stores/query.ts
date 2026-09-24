@@ -39,6 +39,18 @@ export interface ResultPane {
   pinned: boolean
   /** The name of the result, for a result that is not a plain result set. */
   label?: string
+  /** The statement, the values and the connection that made the result, or
+   *  null for a plan. The export of every row runs this again, and not the
+   *  text of the editor or the connection that the tab names now, which the
+   *  user may have changed since the run. */
+  run: PaneRun | null
+}
+
+/** What the export of every row needs to run a statement again. */
+export interface PaneRun {
+  connectionId: string
+  query: string
+  params?: Record<string, unknown>
 }
 
 export interface QueryState {
@@ -48,10 +60,6 @@ export interface QueryState {
   /** The connection the running statement was sent to. A stop must reach
    *  that connection, whatever the tab names at the moment of the stop. */
   requestConnectionId: string | null
-  /** The statement and the values of the last run that gave a result. The
-   *  export of every row runs this again, and not the text of the editor,
-   *  which the user may have changed since the run. */
-  lastRun: { query: string; params?: Record<string, unknown> } | null
   error: ErrorPayload | null
   panes: ResultPane[]
   messages: Message[]
@@ -74,7 +82,6 @@ export function newQueryState(): QueryState {
     running: false,
     requestId: null,
     requestConnectionId: null,
-    lastRun: null,
     error: null,
     panes: [],
     messages: [],
@@ -228,6 +235,7 @@ export const useQueryStore = defineStore('query', () => {
             ranAt,
             pinned: false,
             label,
+            run: label === undefined ? { connectionId, query: trimmed, params: queryParams } : null,
           },
         ]
         state.activePaneId = lastPane(state.panes)?.id ?? null
@@ -269,9 +277,6 @@ export const useQueryStore = defineStore('query', () => {
       )
       recordScan(state.stats)
       succeeded = true
-      if (label === undefined) {
-        state.lastRun = { query: trimmed, params: queryParams }
-      }
       if (fresh.some((table) => table.truncated)) {
         ui.warn('The row limit stopped the read. Raise it in the settings to see more rows.')
       }

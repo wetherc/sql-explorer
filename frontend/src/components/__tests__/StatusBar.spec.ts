@@ -149,6 +149,7 @@ describe('StatusBar', () => {
         number: 1,
         ranAt: 0,
         pinned: false,
+        run: null,
       },
     ]
     state.lastRunAt = 0
@@ -174,6 +175,7 @@ describe('StatusBar', () => {
         number: 1,
         ranAt: 100,
         pinned: true,
+        run: null,
       },
       {
         id: 'fresh',
@@ -183,6 +185,7 @@ describe('StatusBar', () => {
         number: 1,
         ranAt: 200,
         pinned: false,
+        run: null,
       },
     ]
     state.lastRunAt = 200
@@ -204,6 +207,7 @@ describe('StatusBar', () => {
         number: 1,
         ranAt: 100,
         pinned: true,
+        run: null,
       },
     ]
     state.lastRunAt = 200
