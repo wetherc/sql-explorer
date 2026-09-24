@@ -714,6 +714,9 @@ pub enum ValueKind {
     Integer,
     /// A floating-point number. The text protocol sends it as text.
     Float,
+    /// A BIT column. The server sends its bits as bytes in both protocols,
+    /// and those bytes as text would show control characters.
+    Bit,
     /// Any other column.
     Other,
 }
@@ -729,6 +732,7 @@ pub fn value_kind(type_name: &str) -> ValueKind {
         | "mysql_type_longlong"
         | "mysql_type_year" => ValueKind::Integer,
         "mysql_type_float" | "mysql_type_double" => ValueKind::Float,
+        "mysql_type_bit" => ValueKind::Bit,
         _ => ValueKind::Other,
     }
 }
@@ -758,7 +762,7 @@ fn number_text_to_json(text: &str, kind: ValueKind) -> Option<JsonValue> {
             .or_else(|_| text.parse::<u64>().map(JsonValue::from))
             .ok(),
         ValueKind::Float => text.parse::<f64>().ok().map(f64_to_json),
-        ValueKind::DateOnly | ValueKind::Other => None,
+        ValueKind::DateOnly | ValueKind::Bit | ValueKind::Other => None,
     }
 }
 
@@ -771,6 +775,14 @@ pub fn value_to_json(value: &MysqlValue, kind: ValueKind) -> JsonValue {
         MysqlValue::UInt(number) => JsonValue::from(*number),
         MysqlValue::Float(number) => f64_to_json(*number as f64),
         MysqlValue::Double(number) => f64_to_json(*number),
+        // A BIT value is a whole number of at most 64 bits, first byte
+        // highest, so BIT(1) that holds 1 gives 1 and BIT(8) gives 65, not
+        // "A".
+        MysqlValue::Bytes(bytes) if kind == ValueKind::Bit && bytes.len() <= 8 => JsonValue::from(
+            bytes
+                .iter()
+                .fold(0u64, |value, byte| (value << 8) | u64::from(*byte)),
+        ),
         // The server sends text, decimals and binary data as bytes. Text
         // that is not valid UTF-8 is binary, so it becomes base64.
         MysqlValue::Bytes(bytes) => match std::str::from_utf8(bytes) {
@@ -853,6 +865,22 @@ pub fn format_time(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bit_column_gives_a_whole_number() {
+        use serde_json::json;
+        assert_eq!(value_kind("mysql_type_bit"), ValueKind::Bit);
+        let bit = |bytes: &[u8]| value_to_json(&MysqlValue::Bytes(bytes.to_vec()), ValueKind::Bit);
+        assert_eq!(bit(&[1]), json!(1));
+        assert_eq!(bit(&[0x41]), json!(65));
+        assert_eq!(bit(&[0x01, 0x00]), json!(256));
+        assert_eq!(bit(&[0xFF; 8]), json!(u64::MAX));
+        // Another column that holds the same bytes keeps its text.
+        assert_eq!(
+            value_to_json(&MysqlValue::Bytes(vec![0x41]), ValueKind::Other),
+            json!("A")
+        );
+    }
 
     #[test]
     fn the_analysed_plan_runs_the_statement() {
