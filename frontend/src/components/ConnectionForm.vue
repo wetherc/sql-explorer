@@ -300,7 +300,7 @@
                 v-model="draft.options.connectionUrl"
                 label="Connection string"
                 rows="2"
-                hint="When this holds a value it replaces the fields above."
+                hint="When this holds a value, it replaces the host, the port and the database. Type the password in the Password box and not in the string."
                 persistent-hint
                 data-test="connection-url-field"
               />

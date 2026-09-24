@@ -34,7 +34,7 @@ pub struct MysqlDriver {
 /// Builds the connection options from a saved connection.
 pub fn build_opts(connection: &SavedConnection) -> Result<Opts> {
     if let Some(url) = connection.options.connection_url.as_deref() {
-        let builder = OptsBuilder::from_opts(Opts::from_url(url.trim())?);
+        let builder = add_fields_of_record(Opts::from_url(url.trim())?, connection);
         return Ok(Opts::from(read_only_setup(builder, connection)));
     }
 
@@ -57,6 +57,34 @@ pub fn build_opts(connection: &SavedConnection) -> Result<Opts> {
     builder = builder.ssl_opts(ssl_opts(connection));
 
     Ok(Opts::from(read_only_setup(builder, connection)))
+}
+
+/// True when a connection string gives a password.
+pub fn string_has_password(url: &str) -> Result<bool> {
+    Ok(Opts::from_url(url.trim())?
+        .pass()
+        .is_some_and(|password| !password.is_empty()))
+}
+
+/// Adds the fields of the record that a connection string does not give.
+/// The keychain keeps the password, so the string does not give one. The
+/// transport mode of the form also applies when the string names no TLS.
+fn add_fields_of_record(opts: Opts, connection: &SavedConnection) -> OptsBuilder {
+    let mut builder = OptsBuilder::from_opts(opts.clone());
+    if opts.user().is_none() {
+        if let Some(user) = connection.user.as_deref().filter(|v| !v.is_empty()) {
+            builder = builder.user(Some(user.to_string()));
+        }
+    }
+    if opts.pass().is_none() {
+        if let Some(password) = connection.password.as_deref().filter(|v| !v.is_empty()) {
+            builder = builder.pass(Some(password.to_string()));
+        }
+    }
+    if opts.ssl_opts().is_none() {
+        builder = builder.ssl_opts(ssl_opts(connection));
+    }
+    builder
 }
 
 /// The statement that makes every later transaction of the session read-only.
@@ -845,6 +873,42 @@ mod tests {
         assert_eq!(build_opts(&input).unwrap().setup(), expected);
         input.options.connection_url = Some("mysql://user@other.example.com/other".into());
         assert_eq!(build_opts(&input).unwrap().setup(), expected);
+    }
+
+    #[test]
+    fn a_connection_string_takes_the_fields_that_it_does_not_give() {
+        let mut input = connection();
+        input.options.connection_url = Some("mysql://other.example.com/other".into());
+        let opts = build_opts(&input).unwrap();
+        assert_eq!(opts.user(), input.user.as_deref());
+        assert_eq!(opts.pass(), input.password.as_deref());
+        assert!(opts.ssl_opts().is_some());
+
+        // The values of the string win over the fields of the record.
+        input.options.connection_url =
+            Some("mysql://u:own@other.example.com/other?require_ssl=true".into());
+        input.options.tls_mode = TlsMode::Disable;
+        let opts = build_opts(&input).unwrap();
+        assert_eq!(opts.user(), Some("u"));
+        assert_eq!(opts.pass(), Some("own"));
+        assert!(opts.ssl_opts().is_some());
+
+        // Empty fields of the record add nothing.
+        input.options.connection_url = Some("mysql://other.example.com/other".into());
+        input.user = Some(String::new());
+        input.password = None;
+        let opts = build_opts(&input).unwrap();
+        assert_eq!(opts.user(), None);
+        assert_eq!(opts.pass(), None);
+        assert!(opts.ssl_opts().is_none());
+    }
+
+    #[test]
+    fn a_password_in_a_connection_string_is_found() {
+        assert!(string_has_password("mysql://u:p@h/d").unwrap());
+        assert!(!string_has_password("mysql://u@h/d").unwrap());
+        assert!(!string_has_password("mysql://u:@h/d").unwrap());
+        assert!(string_has_password("not-a-url").is_err());
     }
 
     #[test]

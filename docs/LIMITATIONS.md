@@ -7,7 +7,7 @@ the cause and the state of any fix.
 
 `backend/vendor/tiberius` holds a copy of `tiberius` 0.12.3, which is the
 newest release. Cargo is pointed at the copy through `[patch.crates-io]` in
-`backend/Cargo.toml`. The copy carries four changes that the release does not.
+`backend/Cargo.toml`. The copy carries five changes that the release does not.
 Read this list before an upgrade, because an upgrade drops the copy and brings
 each defect back.
 
@@ -66,6 +66,24 @@ take gives a protocol error, which the application shows as a query error.
 The change is in `src/tds/codec/column_data/variant.rs`, in
 `src/tds/codec/type_info.rs` and in
 `src/tds/codec/token/token_col_metadata.rs`.
+
+### The client can read its authentication method
+
+The release gives no way to read the user and the password out of a
+configuration that a connection string built. The copy adds
+`Config::get_authentication`, `AuthMethod::user` and `AuthMethod::password`.
+The driver uses them to find a password in a connection string, and to add
+the password of the keychain to a string that gives none. The change is in
+`src/client/config.rs` and in `src/client/auth.rs`.
+
+## A saved connection string can still hold a password
+
+The application refuses to save a connection string that holds a password,
+because the settings file keeps the string as plain text. A record that the
+settings file already holds is not changed when the application starts. Such
+a record still opens, and its password stays in the file until the user
+edits the record. The next save then refuses the string until the user moves
+the password to the Password box.
 
 ## MS SQL Server shows the text of PRINT for a batch that can hold rows
 

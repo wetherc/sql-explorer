@@ -44,12 +44,9 @@ pub struct MssqlDriver {
 /// Builds the `tiberius` configuration from a saved connection.
 pub async fn build_config(connection: &SavedConnection) -> Result<Config> {
     let mut config = if let Some(url) = connection.options.connection_url.as_deref() {
-        let trimmed = url.trim();
-        if trimmed.starts_with("jdbc:") {
-            Config::from_jdbc_string(trimmed)?
-        } else {
-            Config::from_ado_string(trimmed)?
-        }
+        let mut config = parse_string(url)?;
+        add_login_of_record(&mut config, connection);
+        config
     } else {
         Config::new()
     };
@@ -87,6 +84,48 @@ pub async fn build_config(connection: &SavedConnection) -> Result<Config> {
     }
 
     Ok(config)
+}
+
+/// Reads an ADO.NET or a JDBC connection string.
+fn parse_string(url: &str) -> Result<Config> {
+    let trimmed = url.trim();
+    Ok(if trimmed.starts_with("jdbc:") {
+        Config::from_jdbc_string(trimmed)?
+    } else {
+        Config::from_ado_string(trimmed)?
+    })
+}
+
+/// True when a connection string gives a password.
+pub fn string_has_password(url: &str) -> Result<bool> {
+    let config = parse_string(url)?;
+    Ok(config
+        .get_authentication()
+        .password()
+        .is_some_and(|password| !password.is_empty()))
+}
+
+/// Puts the password of the record into the SQL login of a connection
+/// string. The keychain keeps the password, so the string does not give one.
+/// A string that names no user takes the user of the record. A string that
+/// gives its own password, or that names another method, stays as it is.
+fn add_login_of_record(config: &mut Config, connection: &SavedConnection) {
+    if connection.effective_auth() != MssqlAuth::SqlLogin {
+        return;
+    }
+    let Some(password) = connection.password.as_deref().filter(|v| !v.is_empty()) else {
+        return;
+    };
+    let auth = config.get_authentication();
+    let own_password = auth.password().is_some_and(|given| !given.is_empty());
+    if !matches!(auth, AuthMethod::SqlServer(_)) || own_password {
+        return;
+    }
+    let user = match auth.user().filter(|user| !user.is_empty()) {
+        Some(user) => user.to_string(),
+        None => connection.user.clone().unwrap_or_default(),
+    };
+    config.authentication(AuthMethod::sql_server(user, password));
 }
 
 /// Returns the text when it holds something other than blank space.
@@ -2382,6 +2421,68 @@ mod tests {
         let mut input = connection();
         input.options.connection_url = Some("server=a,b,c".into());
         assert!(build_config(&input).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_connection_string_takes_the_login_of_the_record() {
+        let login = |config: &Config| {
+            let auth = config.get_authentication();
+            (
+                auth.user().unwrap_or("-").to_string(),
+                auth.password().unwrap_or("-").to_string(),
+            )
+        };
+        let mut input = connection();
+        input.options.connection_url = Some("server=tcp:a,1433".into());
+        let config = build_config(&input).await.unwrap();
+        assert_eq!(login(&config), ("sa".into(), "p;a{s}s".into()));
+
+        // The user of the string wins over the user of the record.
+        input.options.connection_url = Some("server=tcp:a,1433;User ID=app".into());
+        let config = build_config(&input).await.unwrap();
+        assert_eq!(login(&config), ("app".into(), "p;a{s}s".into()));
+
+        // A string that gives its own password keeps it.
+        input.options.connection_url = Some("server=tcp:a,1433;uid=app;pwd=own".into());
+        let config = build_config(&input).await.unwrap();
+        assert_eq!(login(&config), ("app".into(), "own".into()));
+
+        // With no password in the record, the string stays as it is.
+        input.options.connection_url = Some("server=tcp:a,1433".into());
+        input.password = Some(String::new());
+        let config = build_config(&input).await.unwrap();
+        assert_eq!(login(&config), ("".into(), "".into()));
+
+        // A record without a user gives an empty user.
+        input.password = Some("secret".into());
+        input.user = None;
+        let config = build_config(&input).await.unwrap();
+        assert_eq!(login(&config), ("".into(), "secret".into()));
+    }
+
+    #[tokio::test]
+    async fn a_connection_string_keeps_a_method_other_than_the_sql_login() {
+        let mut input = connection();
+        input.options.connection_url = Some("server=tcp:a,1433".into());
+        input.options.mssql_auth = MssqlAuth::Integrated;
+        let config = build_config(&input).await.unwrap();
+        assert_eq!(config.get_authentication().password(), Some(""));
+
+        // The string names a method that sends no password.
+        input.options.mssql_auth = MssqlAuth::SqlLogin;
+        let mut config = parse_string("server=tcp:a,1433").unwrap();
+        config.authentication(AuthMethod::aad_token("t"));
+        add_login_of_record(&mut config, &input);
+        assert_eq!(config.get_authentication(), &AuthMethod::aad_token("t"));
+    }
+
+    #[test]
+    fn a_password_in_a_connection_string_is_found() {
+        assert!(string_has_password("server=tcp:a,1433;uid=u;Password=x").unwrap());
+        assert!(string_has_password("jdbc:sqlserver://a:1433;pwd=x").unwrap());
+        assert!(!string_has_password("server=tcp:a,1433;uid=u").unwrap());
+        assert!(!string_has_password("server=tcp:a,1433;pwd=").unwrap());
+        assert!(string_has_password("server=a,b,c").is_err());
     }
 
     #[tokio::test]

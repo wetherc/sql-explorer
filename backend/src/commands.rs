@@ -2,8 +2,8 @@
 
 use crate::db::columnar::ChunkSink;
 use crate::db::drivers::{
-    athena::AthenaDriver, mssql::MssqlDriver, mysql::MysqlDriver, postgres::PostgresDriver,
-    sqlite::SqliteDriver,
+    athena::AthenaDriver, mssql, mssql::MssqlDriver, mysql, mysql::MysqlDriver, postgres,
+    postgres::PostgresDriver, sqlite::SqliteDriver,
 };
 use crate::db::{
     self, drivers::DatabaseDriver, AppColumn, Constraint, Database, ExecOptions, IndexInfo,
@@ -95,6 +95,31 @@ fn store_secret(state: &AppState, key: &str, value: Option<&str>) -> Result<bool
         }
         None => Ok(state.secrets.get(key)?.is_some()),
     }
+}
+
+/// Refuses a connection string that gives a password. The settings file
+/// keeps the connection string as plain text, and the keychain keeps the
+/// password of the Password box. A string that cannot be read is refused
+/// too, because the connection cannot open with it.
+fn refuse_password_in_string(connection: &SavedConnection) -> Result<()> {
+    let Some(url) = connection.options.connection_url.as_deref() else {
+        return Ok(());
+    };
+    let found = match connection.db_type {
+        DbType::Mssql => mssql::string_has_password(url)?,
+        DbType::Postgres => postgres::string_has_password(url)?,
+        DbType::Mysql => mysql::string_has_password(url)?,
+        DbType::Athena | DbType::Sqlite => false,
+    };
+    if found {
+        return Err(Error::Configuration(
+            "Remove the password from the connection string and type it in the Password box. \
+             The settings file keeps the connection string as plain text, and the keychain \
+             keeps the password."
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// The saved record of one connection, out of the file of connections.
@@ -1233,6 +1258,7 @@ pub async fn save_connection<R: Runtime>(
     state: tauri::State<'_, AppState>,
 ) -> Result<()> {
     connection.validate().map_err(Error::Configuration)?;
+    refuse_password_in_string(&connection)?;
 
     store_secret(&state, &connection.id, connection.password.as_deref())?;
     store_secret(
@@ -2459,6 +2485,42 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(driver.dialect(), crate::sql::Dialect::Sqlite);
+    }
+
+    #[test]
+    fn a_connection_string_with_a_password_is_refused() {
+        let mut connection = sqlite_connection("/tmp/a.db");
+        assert!(refuse_password_in_string(&connection).is_ok());
+        // SQLite and Athena do not read a connection string.
+        connection.options.connection_url = Some("password=x".into());
+        assert!(refuse_password_in_string(&connection).is_ok());
+
+        let cases = [
+            (
+                DbType::Mssql,
+                "server=tcp:a,1433;pwd=x",
+                "server=tcp:a,1433",
+            ),
+            (
+                DbType::Postgres,
+                "postgresql://u:x@h/d",
+                "postgresql://u@h/d",
+            ),
+            (DbType::Mysql, "mysql://u:x@h/d", "mysql://u@h/d"),
+        ];
+        for (db_type, with_password, without) in cases {
+            connection.db_type = db_type;
+            connection.options.connection_url = Some(with_password.into());
+            let error = refuse_password_in_string(&connection).unwrap_err();
+            assert_eq!(error.kind(), crate::error::ErrorKind::Configuration);
+            assert!(error.to_string().contains("Password box"));
+            connection.options.connection_url = Some(without.into());
+            assert!(refuse_password_in_string(&connection).is_ok());
+        }
+
+        // A string that cannot be read is refused.
+        connection.options.connection_url = Some("not-a-url".into());
+        assert!(refuse_password_in_string(&connection).is_err());
     }
 
     #[tokio::test]

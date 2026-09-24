@@ -49,10 +49,8 @@ pub struct PostgresDriver {
 /// Builds the connection configuration from a saved connection.
 pub fn build_config(connection: &SavedConnection) -> Result<PgConfig> {
     if let Some(url) = connection.options.connection_url.as_deref() {
-        let mut config = url
-            .trim()
-            .parse::<PgConfig>()
-            .map_err(|error| Error::Configuration(error.to_string()))?;
+        let mut config = parse_string(url)?;
+        add_fields_of_record(&mut config, url, connection);
         add_read_only_option(&mut config, connection);
         return Ok(config);
     }
@@ -85,6 +83,47 @@ pub fn build_config(connection: &SavedConnection) -> Result<PgConfig> {
     ));
     add_read_only_option(&mut config, connection);
     Ok(config)
+}
+
+/// Reads a connection string, in the URL form or in the key and value form.
+fn parse_string(url: &str) -> Result<PgConfig> {
+    url.trim()
+        .parse::<PgConfig>()
+        .map_err(|error| Error::Configuration(error.to_string()))
+}
+
+/// True when a connection string gives a password.
+pub fn string_has_password(url: &str) -> Result<bool> {
+    Ok(parse_string(url)?
+        .get_password()
+        .is_some_and(|password| !password.is_empty()))
+}
+
+/// Adds the fields of the record that a connection string does not give.
+/// The keychain keeps the password, so the string does not give one. The
+/// time limit of the connection and the transport mode of the form also
+/// apply when the string names no value for them.
+fn add_fields_of_record(config: &mut PgConfig, url: &str, connection: &SavedConnection) {
+    if config.get_user().is_none() {
+        if let Some(user) = connection.user.as_deref().filter(|v| !v.is_empty()) {
+            config.user(user);
+        }
+    }
+    if config.get_password().is_none() {
+        if let Some(password) = connection.password.as_deref().filter(|v| !v.is_empty()) {
+            config.password(password);
+        }
+    }
+    if config.get_connect_timeout().is_none() {
+        config.connect_timeout(Duration::from_secs(
+            connection.options.connect_timeout_secs.max(1),
+        ));
+    }
+    // The parser gives `Prefer` also when the string names no mode, so the
+    // text of the string decides.
+    if !url.contains("sslmode") {
+        config.ssl_mode(ssl_mode(connection.options.tls_mode));
+    }
 }
 
 /// The server option that makes each transaction of the session read-only.
@@ -2998,6 +3037,44 @@ mod tests {
         let config = build_config(&input).unwrap();
         assert_eq!(config.get_ports(), &[5555]);
         assert_eq!(config.get_dbname(), Some("other"));
+    }
+
+    #[test]
+    fn a_connection_string_takes_the_fields_that_it_does_not_give() {
+        use tokio_postgres::config::SslMode;
+        let mut input = connection();
+        input.options.connection_url = Some("postgresql://h/d".into());
+        let config = build_config(&input).unwrap();
+        assert_eq!(config.get_user(), Some("app"));
+        assert_eq!(config.get_password(), Some(&b"p@ss word"[..]));
+        assert_eq!(config.get_connect_timeout(), Some(&Duration::from_secs(15)));
+        assert_eq!(config.get_ssl_mode(), SslMode::Require);
+
+        // The values of the string win over the fields of the record.
+        input.options.connection_url =
+            Some("postgresql://u:own@h/d?connect_timeout=3&sslmode=disable".into());
+        let config = build_config(&input).unwrap();
+        assert_eq!(config.get_user(), Some("u"));
+        assert_eq!(config.get_password(), Some(&b"own"[..]));
+        assert_eq!(config.get_connect_timeout(), Some(&Duration::from_secs(3)));
+        assert_eq!(config.get_ssl_mode(), SslMode::Disable);
+
+        // Empty fields of the record add nothing.
+        input.options.connection_url = Some("host=h dbname=d".into());
+        input.user = Some(String::new());
+        input.password = None;
+        let config = build_config(&input).unwrap();
+        assert_eq!(config.get_user(), None);
+        assert_eq!(config.get_password(), None);
+    }
+
+    #[test]
+    fn a_password_in_a_connection_string_is_found() {
+        assert!(string_has_password("postgresql://u:p@h/d").unwrap());
+        assert!(string_has_password("host=h password=p").unwrap());
+        assert!(!string_has_password("postgresql://u@h/d").unwrap());
+        assert!(!string_has_password("host=h password=''").unwrap());
+        assert!(string_has_password("host=").is_err());
     }
 
     #[test]

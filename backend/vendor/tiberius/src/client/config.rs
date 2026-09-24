@@ -164,6 +164,11 @@ impl Config {
         self.auth = auth;
     }
 
+    /// Returns the authentication method.
+    pub fn get_authentication(&self) -> &AuthMethod {
+        &self.auth
+    }
+
     /// Sets ApplicationIntent readonly.
     ///
     /// - Defaults to `false`.

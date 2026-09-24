@@ -16,6 +16,14 @@ A password goes into the keychain of the operating system. The settings file
 holds no password. Leave the password box empty when you edit a record, and
 the stored password stays as it is.
 
+The advanced part of the form accepts a connection string, for an option that
+the form does not show. The string replaces the host, the port and the
+database. The user, the password and the connection time limit of the form
+apply when the string does not give them. On PostgreSQL and MySQL, the
+transport mode of the form also applies when the string names no mode. The
+settings file keeps the string as plain text, so the application does not save
+a string that holds a password. Type the password in the Password box.
+
 ## Transport
 
 A connection encrypts its traffic in one of four ways:

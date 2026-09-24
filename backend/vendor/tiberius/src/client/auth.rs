@@ -103,4 +103,24 @@ impl AuthMethod {
     pub fn aad_token(token: impl ToString) -> Self {
         Self::AADToken(token.to_string())
     }
+
+    /// The user of a method that sends a user and a password.
+    pub fn user(&self) -> Option<&str> {
+        match self {
+            Self::SqlServer(auth) => Some(auth.user()),
+            #[cfg(all(windows, feature = "winauth"))]
+            Self::Windows(auth) => Some(&auth.user),
+            _ => None,
+        }
+    }
+
+    /// The password of a method that sends a user and a password.
+    pub fn password(&self) -> Option<&str> {
+        match self {
+            Self::SqlServer(auth) => Some(auth.password()),
+            #[cfg(all(windows, feature = "winauth"))]
+            Self::Windows(auth) => Some(&auth.password),
+            _ => None,
+        }
+    }
 }
