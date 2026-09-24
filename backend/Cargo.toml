@@ -154,5 +154,9 @@ strip = true
 # The copy also reads a `sql_variant` column. The release holds `todo!()` in
 # the decode of that type, so one such column caused a panic in the task that
 # runs the query.
+#
+# The copy also refuses a connection string that sets both
+# `TrustServerCertificate=true` and `TrustServerCertificateCA`. The release
+# calls `trust_cert` and then `trust_cert_ca`, and the second call panics.
 [patch.crates-io]
 tiberius = { path = "vendor/tiberius" }

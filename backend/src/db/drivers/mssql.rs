@@ -2424,6 +2424,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_connection_string_with_both_trust_options_gives_an_error() {
+        let url = "server=tcp:a,1433;TrustServerCertificate=true;TrustServerCertificateCA=ca.crt";
+        let mut input = connection();
+        input.options.connection_url = Some(url.into());
+        assert!(build_config(&input).await.is_err());
+        assert!(string_has_password(url).is_err());
+    }
+
+    #[tokio::test]
     async fn a_connection_string_takes_the_login_of_the_record() {
         let login = |config: &Config| {
             let auth = config.get_authentication();

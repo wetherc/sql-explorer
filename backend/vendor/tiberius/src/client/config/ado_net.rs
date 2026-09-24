@@ -321,6 +321,21 @@ mod tests {
     }
 
     #[test]
+    fn trust_cert_and_trust_cert_ca_give_an_error() {
+        let test_str = "server=tcp:my-server.com;TrustServerCertificate=true;TrustServerCertificateCA=someca.crt;";
+
+        assert!(crate::Config::from_ado_string(test_str).is_err());
+    }
+
+    #[test]
+    fn trust_cert_ca_alone_builds() -> crate::Result<()> {
+        let test_str = "server=tcp:my-server.com;TrustServerCertificateCA=someca.crt;";
+        crate::Config::from_ado_string(test_str)?;
+
+        Ok(())
+    }
+
+    #[test]
     fn parsing_sql_server_authentication() -> crate::Result<()> {
         let test_str = "uid=Musti; pwd=Naukio;";
         let ado: AdoNetConfig = test_str.parse()?;

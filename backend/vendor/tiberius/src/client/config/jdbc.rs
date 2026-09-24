@@ -187,6 +187,21 @@ mod tests {
     }
 
     #[test]
+    fn trust_cert_and_trust_cert_ca_give_an_error() {
+        let test_str = "jdbc:sqlserver://my-server.com:4200;TrustServerCertificate=true;TrustServerCertificateCA=someca.crt;";
+
+        assert!(crate::Config::from_jdbc_string(test_str).is_err());
+    }
+
+    #[test]
+    fn trust_cert_ca_alone_builds() -> crate::Result<()> {
+        let test_str = "jdbc:sqlserver://my-server.com:4200;TrustServerCertificateCA=someca.crt;";
+        crate::Config::from_jdbc_string(test_str)?;
+
+        Ok(())
+    }
+
+    #[test]
     fn parsing_sql_server_authentication() -> crate::Result<()> {
         let test_str = "jdbc:sqlserver://my-server.com:4200;User ID=Musti;pwd=Naukio;";
         let jdbc: JdbcConfig = test_str.parse()?;

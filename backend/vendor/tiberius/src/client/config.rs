@@ -262,12 +262,18 @@ impl Config {
             builder.application_name(name);
         }
 
-        if s.trust_cert()? {
-            builder.trust_cert();
-        }
-
-        if let Some(ca) = s.trust_cert_ca() {
-            builder.trust_cert_ca(ca);
+        // `trust_cert` and `trust_cert_ca` panic when they get both, so a
+        // string that sets both gives an error in place of the panic.
+        match (s.trust_cert()?, s.trust_cert_ca()) {
+            (true, Some(_)) => {
+                return Err(crate::Error::Conversion(
+                    "TrustServerCertificate and TrustServerCertificateCA are mutually exclusive"
+                        .into(),
+                ))
+            }
+            (true, None) => builder.trust_cert(),
+            (false, Some(ca)) => builder.trust_cert_ca(ca),
+            (false, None) => {}
         }
 
         builder.encryption(s.encrypt()?);
