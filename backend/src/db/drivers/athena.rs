@@ -189,6 +189,13 @@ fn typed_credentials(connection: &SavedConnection) -> Result<Option<Credentials>
     )))
 }
 
+/// The moment after which the wait for a statement stops. A time limit of
+/// zero means no limit, as it does for the other engines, so it gives no
+/// moment.
+fn deadline_of(timeout_secs: u64) -> Option<Instant> {
+    (timeout_secs > 0).then(|| Instant::now() + Duration::from_secs(timeout_secs))
+}
+
 impl AthenaDriver {
     pub async fn connect(connection: &SavedConnection) -> Result<Box<dyn DatabaseDriver>> {
         let region = connection
@@ -315,7 +322,7 @@ impl AthenaDriver {
     /// step by step, so that a short statement answers quickly and a long
     /// statement does not flood the service with requests.
     async fn wait_for(&self, execution_id: &str, options: &ExecOptions) -> Result<QueryStats> {
-        let deadline = Instant::now() + Duration::from_secs(options.timeout_secs.max(1));
+        let deadline = deadline_of(options.timeout_secs);
         let mut wait = Duration::from_millis(200);
 
         loop {
@@ -350,7 +357,7 @@ impl AthenaDriver {
                 _ => {}
             }
 
-            if Instant::now() >= deadline {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 let _ = self.stop(execution_id).await;
                 return Err(Error::Timeout(options.timeout_secs));
             }
@@ -1035,6 +1042,12 @@ pub fn typed_value(text: &str, type_name: &str) -> JsonValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_time_limit_of_zero_sets_no_deadline() {
+        assert!(deadline_of(0).is_none());
+        assert!(deadline_of(5).is_some_and(|deadline| deadline > Instant::now()));
+    }
 
     #[test]
     fn the_driver_needs_no_check_and_keeps_its_connection() {
