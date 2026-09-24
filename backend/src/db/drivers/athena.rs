@@ -978,12 +978,13 @@ pub fn next_wait(current: Duration) -> Duration {
 }
 
 /// True when the statement puts the column names into the first row of its
-/// result. Athena does this for the statements that read rows, and not for
-/// a utility statement such as `SHOW CREATE TABLE`.
+/// result. Athena does this for the statements that read rows, such as
+/// `SELECT`, `VALUES` and `TABLE t`, and not for a utility statement such as
+/// `SHOW CREATE TABLE`.
 pub fn statement_repeats_names(statement: &str) -> bool {
     matches!(
         crate::sql::leading_keyword(statement, crate::sql::Dialect::Athena).as_str(),
-        "select" | "with" | "explain"
+        "select" | "with" | "explain" | "values" | "table"
     )
 }
 
@@ -1187,6 +1188,8 @@ mod tests {
         assert!(statement_repeats_names("SELECT 1"));
         assert!(statement_repeats_names("  with x as (select 1) select 1"));
         assert!(statement_repeats_names("EXPLAIN SELECT 1"));
+        assert!(statement_repeats_names("VALUES (1, 'a')"));
+        assert!(statement_repeats_names("TABLE orders"));
         assert!(!statement_repeats_names("SHOW CREATE TABLE t"));
         assert!(!statement_repeats_names("DESCRIBE t"));
     }
