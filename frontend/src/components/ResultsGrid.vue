@@ -1144,9 +1144,9 @@ watch(
   white-space: nowrap;
   border-bottom: var(--app-divider);
   /* A column that the user made narrow cuts its own name. The grip of the
-     column sits against the right edge of this element. */
+     column sits against the right edge of this element, because a sticky
+     element also places its children that have an absolute position. */
   overflow: hidden;
-  position: relative;
 }
 
 /* The grip sits on the right edge of the header of a column. */
