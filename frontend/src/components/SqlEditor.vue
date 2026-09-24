@@ -35,6 +35,8 @@ const emit = defineEmits<{
   (event: 'update:modelValue', value: string): void
   (event: 'format-failed', message: string): void
   (event: 'show-keys'): void
+  (event: 'run-statement'): void
+  (event: 'run-all'): void
 }>()
 
 const host = ref<HTMLElement | null>(null)
@@ -146,9 +148,24 @@ onMounted(() => {
     emit('update:modelValue', instance.getValue())
   })
 
-  // The keys of the application are bound once by the shell. The editor
-  // therefore binds only the two keys that the editor itself already holds
-  // for something else, so that they reach the command of this application.
+  // The shell binds the keys of the application on the window. Monaco stops
+  // each key that it binds itself, so the window does not see that key. The
+  // editor therefore binds the keys that Monaco holds for something else, so
+  // that they reach the command of this application.
+  instance.addAction({
+    id: 'sql-explorer.run',
+    label: 'Run the statement',
+    keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter],
+    run: () => emit('run-statement'),
+  })
+
+  instance.addAction({
+    id: 'sql-explorer.runAll',
+    label: 'Run the whole script',
+    keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter],
+    run: () => emit('run-all'),
+  })
+
   instance.addAction({
     id: 'sql-explorer.keys',
     label: 'Show the key list',

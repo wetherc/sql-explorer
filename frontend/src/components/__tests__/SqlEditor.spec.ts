@@ -81,6 +81,8 @@ function stubEditor(value = 'SELECT 1;\nSELECT 2') {
 
 const FORMAT_ACTION = 'sql-explorer.format'
 const KEYS_ACTION = 'sql-explorer.keys'
+const RUN_ACTION = 'sql-explorer.run'
+const RUN_ALL_ACTION = 'sql-explorer.runAll'
 
 describe('SqlEditor', () => {
   beforeEach(() => {
@@ -169,6 +171,29 @@ describe('SqlEditor', () => {
     )
     stub.actions[KEYS_ACTION]?.()
     expect(wrapper.emitted('show-keys')).toHaveLength(1)
+  })
+
+  it('binds the run keys, which the editor otherwise keeps for itself', () => {
+    const stub = stubEditor()
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
+    const wrapper = mount(SqlEditor, { props: { modelValue: '' } })
+
+    expect(stub.editor.addAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: RUN_ACTION,
+        keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter],
+      }),
+    )
+    expect(stub.editor.addAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: RUN_ALL_ACTION,
+        keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter],
+      }),
+    )
+    stub.actions[RUN_ACTION]?.()
+    stub.actions[RUN_ALL_ACTION]?.()
+    expect(wrapper.emitted('run-statement')).toHaveLength(1)
+    expect(wrapper.emitted('run-all')).toHaveLength(1)
   })
 
   it('writes a new text into the editor and reports nothing back', async () => {

@@ -187,6 +187,23 @@ describe('QueryView', () => {
     )
   })
 
+  it('runs the statement or the script when the editor reports a run key', async () => {
+    apiStub.executeQuery.mockImplementation(streamed(response))
+    const wrapper = await mountView()
+    const editor = wrapper.findComponent({ name: 'SqlEditor' })
+
+    editor.vm.$emit('run-statement')
+    await settle()
+    editor.vm.$emit('run-all')
+    await settle()
+
+    expect(apiStub.executeQuery).toHaveBeenCalledTimes(2)
+    expect(apiStub.executeQuery).toHaveBeenLastCalledWith(
+      expect.objectContaining({ connectionId: 'c1', query: 'SELECT 1' }),
+      expect.anything(),
+    )
+  })
+
   it('asks for a value before it runs a statement that holds a name', async () => {
     apiStub.queryParameters.mockResolvedValue(['id'])
     apiStub.executeQuery.mockImplementation(streamed(response))

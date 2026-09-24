@@ -172,6 +172,8 @@
           @update:model-value="onQueryChange"
           @format-failed="onFormatFailed"
           @show-keys="ui.setKeyboardHelpOpen(true)"
+          @run-statement="runStatement()"
+          @run-all="runAll()"
         />
       </pane>
       <!-- The pane keeps its content while the panel is away, so the grid
