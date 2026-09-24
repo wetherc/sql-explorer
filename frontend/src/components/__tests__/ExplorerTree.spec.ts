@@ -489,6 +489,30 @@ function tabStop(wrapper: ReturnType<typeof mountTree>): number {
     .findIndex((row) => row.attributes('tabindex') === '0')
 }
 
+describe('ExplorerTree width', () => {
+  it('takes the width of the widest row, also when the row is not drawn', () => {
+    const nodes = Array.from({ length: 300 }, (_, index) =>
+      node({ key: `n${index}`, label: index === 250 ? 'x'.repeat(100) : 'short' }),
+    )
+    nodes[1]!.kind = 'column'
+    nodes[1]!.hint = 'y'.repeat(20)
+    const wrapper = mountTree(nodes)
+    expect(wrapper.findAll('[data-test="tree-row"]').length).toBeLessThan(300)
+    const body = wrapper.find('[data-test="tree-body"]').element as HTMLElement
+    // The indent, the offset of the label, 100 characters of 7 pixels, and
+    // the end of the row.
+    expect(body.style.getPropertyValue('--tree-width')).toBe(`${6 + 46 + 700 + 8}px`)
+  })
+
+  it('counts the hint of a row', async () => {
+    const wrapper = mountTree([node({ kind: 'column', label: 'id', hint: 'y'.repeat(100) })])
+    // Both fonts are known, so a new drawing reads them no more.
+    await wrapper.setProps({ selectedKey: 'db' })
+    const body = wrapper.find('[data-test="tree-body"]').element as HTMLElement
+    expect(body.style.getPropertyValue('--tree-width')).toBe(`${6 + 46 + 14 + 8 + 10 + 700}px`)
+  })
+})
+
 describe('ExplorerTree with a branch that holds no list', () => {
   it('says so when a branch that was read holds no list at all', () => {
     const wrapper = mountTree([node({ loaded: true, children: undefined })], new Set(['db']))

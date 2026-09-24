@@ -51,6 +51,10 @@ Object.defineProperty(globalThis, 'ResizeObserver', {
   value: StubResizeObserver,
 })
 
+// The test environment draws nothing, and its canvas reports each call as a
+// missing feature. A canvas without a context gives the same answer quietly.
+HTMLCanvasElement.prototype.getContext = (() => null) as unknown as HTMLCanvasElement['getContext']
+
 // The editor is loaded only when the real application runs. The tests
 // replace it, because the worker of the editor has no place in a test
 // environment.

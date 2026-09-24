@@ -11,9 +11,15 @@
     <!-- The tree scrolls in the element above, and it draws only the rows
          around the visible part. Two empty blocks hold the space of the rows
          above and below, so the bar of the scroll answers for the whole
-         tree. The block here carries the width of the widest row. It stands
-         outside the reading, so the rows belong to the tree itself. -->
-    <div class="explorer-tree" role="presentation">
+         tree. The block here carries the width of the widest row, drawn or
+         not. It stands outside the reading, so the rows belong to the tree
+         itself. -->
+    <div
+      class="explorer-tree"
+      role="presentation"
+      :style="{ '--tree-width': `${treeWidth}px` }"
+      data-test="tree-body"
+    >
       <div v-if="topPad > 0" :style="{ height: `${topPad}px` }" aria-hidden="true"></div>
       <template v-for="row in windowRows" :key="row.key">
         <div
@@ -76,10 +82,12 @@ import {
   nextTick,
   onBeforeUnmount,
   onMounted,
+  onUpdated,
   ref,
   type ComponentPublicInstance,
 } from 'vue'
 import { isExpandable, type ExplorerNode } from '@/stores/explorer'
+import { canvasContext, createTextMeter, fontOf } from '@/lib/textWidth'
 
 /** The width of one step of the indent. */
 const INDENT_STEP = 14
@@ -91,6 +99,11 @@ const ROW_PADDING = 6
  * the place of a child begins under the label of a child.
  */
 const LABEL_OFFSET = 46
+
+/** The space between a label and its hint: the gap of the row and the pad of the hint. */
+const HINT_GAP = 10
+/** The space to the right of the last part of a row. */
+const ROW_END = 8
 
 /** How long a type-ahead holds its letters before it starts again. */
 const TYPE_AHEAD_MS = 800
@@ -199,6 +212,58 @@ const rows = computed<Row[]>(() => {
   }
   walk(props.nodes, 0)
   return out
+})
+
+/**
+ * The fonts of a label and of a hint. The view reads them from the first
+ * drawn row that has each one, because the style sheet sets them.
+ */
+const labelFont = ref('')
+const hintFont = ref('')
+let meter: ReturnType<typeof createTextMeter> | null = null
+
+function readFonts(): void {
+  const label = scrollArea.value?.querySelector('.node-label')
+  const hint = scrollArea.value?.querySelector('.node-hint')
+  if (label) {
+    labelFont.value = fontOf(label)
+  }
+  if (hint) {
+    hintFont.value = fontOf(hint)
+  }
+}
+
+onMounted(readFonts)
+onUpdated(() => {
+  if (labelFont.value === '' || hintFont.value === '') {
+    readFonts()
+  }
+})
+
+/**
+ * The width of the widest row of the whole tree. The view draws the rows
+ * near the visible part alone, so a width from the drawn rows would change
+ * on each scroll. The width comes from a measure of each label and hint.
+ */
+const treeWidth = computed(() => {
+  meter ??= createTextMeter(canvasContext())
+  let widest = 0
+  for (const row of rows.value) {
+    if (row.kind !== 'node') {
+      continue
+    }
+    let width =
+      row.depth * INDENT_STEP +
+      ROW_PADDING +
+      LABEL_OFFSET +
+      meter(row.node.label, labelFont.value) +
+      ROW_END
+    if (row.node.hint) {
+      width += HINT_GAP + meter(row.node.hint, hintFont.value)
+    }
+    widest = Math.max(widest, width)
+  }
+  return Math.ceil(widest)
 })
 
 /** The rows a key can reach, which leaves out the note of an empty branch. */
@@ -464,11 +529,12 @@ defineExpose({ focusRow })
 
 /* Each row takes the width of the widest row, so a long name reaches past
    the panel and the scroll of the panel brings it into view. A tree that is
-   narrower than the panel still fills the panel. */
+   narrower than the panel still fills the panel. The view sets a smallest
+   width from the measure of every row, drawn or not. */
 .explorer-tree {
   outline: none;
   width: max-content;
-  min-width: 100%;
+  min-width: max(100%, var(--tree-width));
 }
 
 /* Every row is as tall as every other one, because the window of the drawn
