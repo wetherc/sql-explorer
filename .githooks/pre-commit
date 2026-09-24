@@ -1,8 +1,18 @@
 #!/bin/sh
 # The hook that guards a commit.
 #
-# It runs the linters and the unit tests of both halves of the project. A
-# commit stops when one of them fails.
+# It runs the linters and the unit tests of both halves of the project, with
+# the coverage gate of each half. A commit stops when one of them fails.
+#
+# The checks run on the staged files alone. The hook puts the changes that
+# are not staged, and the files that git does not track, into a stash for the
+# run, and puts them back after it. A change that is not in the commit then
+# cannot make a check pass or fail.
+#
+# The backend gate needs cargo-llvm-cov:
+#
+#     rustup component add llvm-tools-preview
+#     cargo install cargo-llvm-cov
 #
 # Git points at this folder through `core.hooksPath`, which the `prepare`
 # script of the root package sets during `pnpm install`. To set it by hand:
@@ -14,11 +24,42 @@ set -e
 root=$(git rev-parse --show-toplevel)
 cd "$root"
 
+# The smallest line coverage of the backend, in percent. The drivers need a
+# live server for much of their code, and the unit tests reach no server.
+# The value is the whole percent below the coverage that the unit tests give.
+BACKEND_MIN_LINES=87
+
 fail() {
     printf '\n\033[31mThe commit stopped: %s\033[0m\n' "$1" >&2
     printf 'Correct the fault, or use --no-verify when you know why.\n' >&2
     exit 1
 }
+
+stashed=0
+
+# Puts the changes of the stash back into the working tree and the index. The
+# checks write no tracked file, so the reset drops nothing of the user's.
+restore() {
+    if [ "$stashed" = 1 ]; then
+        git reset --hard --quiet
+        if ! git stash pop --index --quiet; then
+            printf '\n\033[31mThe hook could not put back the changes that were not staged.\033[0m\n' >&2
+            printf 'They are in the top entry of git stash. Use: git stash pop --index\n' >&2
+        fi
+    fi
+}
+
+# A merge keeps its state beside the index, and a stash would lose that
+# state, so a merge commit runs the checks on the working tree.
+if [ -f "$(git rev-parse --git-path MERGE_HEAD)" ]; then
+    printf '\033[33mA merge is in progress, so the checks run on the working tree.\033[0m\n'
+elif ! git diff --quiet || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+    git stash push --keep-index --include-untracked --quiet \
+        --message 'pre-commit: changes that are not staged'
+    stashed=1
+    trap restore EXIT
+    trap 'exit 1' INT TERM
+fi
 
 printf '\033[36m[1/5]\033[0m Formatting of the frontend\n'
 pnpm --filter frontend format:check || fail 'the frontend is not formatted'
@@ -27,15 +68,17 @@ printf '\033[36m[2/5]\033[0m Linting and types of the frontend\n'
 pnpm --filter frontend lint || fail 'the frontend has a lint fault'
 pnpm --filter frontend typecheck || fail 'the frontend has a type fault'
 
-printf '\033[36m[3/5]\033[0m Unit tests of the frontend\n'
-pnpm --filter frontend test:unit || fail 'a frontend test failed'
+printf '\033[36m[3/5]\033[0m Unit tests and coverage of the frontend\n'
+pnpm --filter frontend test:coverage || fail 'a frontend test failed, or the coverage is too low'
 
 printf '\033[36m[4/5]\033[0m Formatting and linting of the backend\n'
 (cd backend && cargo fmt --check) || fail 'the backend is not formatted'
 (cd backend && cargo clippy --all-targets -- -D warnings) || fail 'the backend has a lint fault'
 
-printf '\033[36m[5/5]\033[0m Unit tests of the backend\n'
-(cd backend && cargo test) || fail 'a backend test failed'
+printf '\033[36m[5/5]\033[0m Unit tests and coverage of the backend\n'
+command -v cargo-llvm-cov >/dev/null 2>&1 || fail 'cargo-llvm-cov is not installed'
+(cd backend && cargo llvm-cov --summary-only --fail-under-lines "$BACKEND_MIN_LINES") ||
+    fail 'a backend test failed, or the coverage is too low'
 (cd backend && cargo test --manifest-path vendor/tiberius/Cargo.toml --no-default-features --features tds73 --lib) || fail 'a test of the vendored tiberius failed'
 
 printf '\n\033[32mEvery check passed.\033[0m\n'

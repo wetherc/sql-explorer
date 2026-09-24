@@ -388,6 +388,67 @@ describe('ResultsGrid', () => {
     expect(wrapper.findAll('[data-test="grid-row"]')[0]?.text()).toContain('89')
   })
 
+  it('waits for the last of two quick changes of the filter', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    const field = wrapper.find('[data-test="grid-filter"] input')
+    await field.setValue('gr')
+    await field.setValue('ada')
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findAll('[data-test="grid-row"]')).toHaveLength(1)
+    expect(wrapper.find('[data-test="grid-row"]').text()).toContain('Ada')
+  })
+
+  it('follows the height of its area, and works without a watcher of it', async () => {
+    const many = ResultTable.fromRows(
+      [{ name: 'n', typeName: 'int' }],
+      Array.from({ length: 500 }, (_unused, index) => [index]),
+    )
+    // The library draws parts that watch their own size, so each call gets
+    // an empty list of entries.
+    const callbacks: Array<(entries: unknown[]) => void> = []
+    class ObserverStub {
+      constructor(callback: (entries: unknown[]) => void) {
+        callbacks.push(callback)
+      }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    }
+    const held = globalThis.ResizeObserver
+    globalThis.ResizeObserver = ObserverStub as unknown as typeof ResizeObserver
+    try {
+      const wrapper = mountWithPlugins(ResultsGrid, { props: { result: many } })
+      const tall = wrapper.findAll('[data-test="grid-row"]').length
+      const scroller = wrapper.find('.grid-scroll').element
+
+      // A height of none says nothing, so the window stays as it was.
+      Object.defineProperty(scroller, 'clientHeight', { value: 0, configurable: true })
+      callbacks.forEach((callback) => callback([]))
+      await nextTick()
+      expect(wrapper.findAll('[data-test="grid-row"]').length).toBe(tall)
+
+      // A short area draws fewer rows than a tall one.
+      Object.defineProperty(scroller, 'clientHeight', { value: 60, configurable: true })
+      callbacks.forEach((callback) => callback([]))
+      await nextTick()
+      expect(wrapper.findAll('[data-test="grid-row"]').length).toBeLessThan(tall)
+      wrapper.unmount()
+    } finally {
+      globalThis.ResizeObserver = held
+    }
+
+    // @ts-expect-error the test takes the watcher away from the host.
+    delete globalThis.ResizeObserver
+    try {
+      const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+      expect(wrapper.findAll('[data-test="grid-row"]')).toHaveLength(3)
+      wrapper.unmount()
+    } finally {
+      globalThis.ResizeObserver = held
+    }
+  })
+
   it('keeps the height it knows when the host reports none', async () => {
     const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
     const scroller = wrapper.find('.grid-scroll')
@@ -744,6 +805,17 @@ describe('ResultsGrid as a grid a reader can follow', () => {
     await nextTick()
     expect(area.position).toBe(reached)
     expect(document.activeElement?.textContent).toContain('498')
+  })
+
+  it('does nothing with a key that arrives after the grid went away', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    const element = grid(wrapper).element
+    wrapper.unmount()
+    // The area and the cells are gone, so the move reaches no scroll and no
+    // cell takes the focus.
+    element.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+    await nextTick()
+    expect(document.activeElement?.getAttribute('data-test')).not.toBe('grid-cell')
   })
 
   it('holds the row clear of the header when it scrolls up to it', async () => {

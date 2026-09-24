@@ -194,6 +194,54 @@ describe('ResultTable from plain rows', () => {
     expect(one.cell(0, 7)).toBeNull()
   })
 
+  it('reads a chunk whose arrays are shorter than its rows as empty', () => {
+    const table = new ResultTable([
+      { name: 'i', typeName: 'int' },
+      { name: 'f', typeName: 'float' },
+      { name: 'd', typeName: 'text' },
+      { name: 'e', typeName: 'text' },
+      { name: 't', typeName: 'text' },
+    ])
+    const empty = new Uint8Array(0)
+    // A list that names a length but holds no values, as a damaged frame
+    // could give.
+    const hollow = { length: 2 } as unknown as Uint32Array
+    table.addSegment(
+      [
+        { kind: 'int32', nulls: empty, values: Int32Array.of(4) },
+        { kind: 'float64', nulls: empty, values: Float64Array.of(1.5) },
+        {
+          kind: 'dict',
+          nulls: empty,
+          codes: new Uint32Array(0),
+          ends: hollow,
+          bytes: empty,
+          cache: [],
+        },
+        {
+          kind: 'dict',
+          nulls: empty,
+          codes: Uint32Array.of(1),
+          ends: hollow,
+          bytes: empty,
+          cache: [],
+        },
+        { kind: 'text', nulls: empty, ends: new Uint32Array(0), bytes: empty, cache: [] },
+      ],
+      2,
+    )
+    expect(table.row(0)).toEqual([4, 1.5, '', '', ''])
+    expect(table.row(1)).toEqual([null, null, '', '', ''])
+
+    // A set bit of the mask marks a number that holds no value.
+    const floats = new ResultTable([{ name: 'f', typeName: 'float' }])
+    floats.addSegment(
+      [{ kind: 'float64', nulls: Uint8Array.of(1), values: Float64Array.of(2.5) }],
+      1,
+    )
+    expect(floats.cell(0, 0)).toBeNull()
+  })
+
   it('finds the row of any chunk of a table of many chunks', () => {
     const table = new ResultTable([{ name: 'n', typeName: 'int' }])
     // The chunks have lengths of 1 to 4 rows, and some chunks hold no row.

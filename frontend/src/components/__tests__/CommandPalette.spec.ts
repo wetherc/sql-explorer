@@ -160,6 +160,10 @@ describe('CommandPalette as a list a reader can follow', () => {
     expect(document.querySelector('[data-test="palette-empty"]')?.getAttribute('role')).toBe(
       'presentation',
     )
+
+    // A key that moves the choice finds no row to choose.
+    await press('Home')
+    expect(field().getAttribute('aria-activedescendant')).toBeNull()
   })
 
   it('reaches the first row and the last row', async () => {

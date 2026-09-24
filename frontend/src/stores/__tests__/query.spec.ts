@@ -204,6 +204,16 @@ describe('query store', () => {
     expect(marks).toEqual([false, true])
   })
 
+  it('passes over rows for a set that it never opened', async () => {
+    apiStub.executeQuery.mockImplementation(async (_request, handlers) => {
+      handlers.onRows?.(ResultTable.fromRows([], [[1]]))
+      handlers.onEnd({ messages: [], rowsAffected: null, elapsedMs: 1, stats: null })
+    })
+    const queries = useQueryStore()
+    expect(await queries.execute('t1', 'c1', 'SELECT 1')).toBe(true)
+    expect(queries.stateFor('t1').panes).toEqual([])
+  })
+
   it('uses the default time limit for a connection it does not know', async () => {
     apiStub.executeQuery.mockImplementation(streamed(response()))
     const queries = useQueryStore()

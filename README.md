@@ -261,14 +261,27 @@ build on macOS makes the NSIS installer and not the MSI installer.
 pnpm test           # every unit test, both halves
 pnpm test:unit      # the frontend only
 pnpm test:coverage  # the frontend with a coverage report
+pnpm test:coverage:backend  # the backend with a coverage report
 pnpm lint           # ESLint, clippy and the formatters
 pnpm format         # Prettier and rustfmt
 pnpm verify         # the linters and then the tests
 ```
 
-A pre-commit hook runs the formatters, the linters and the unit tests, and it
-stops a commit that does not pass. Run `git commit --no-verify` to step past it
-when you know why.
+A pre-commit hook runs the formatters, the linters and the unit tests with
+the coverage gate of each half, and it stops a commit that does not pass. The
+frontend gate is the set of thresholds in `frontend/vitest.config.ts`. The
+backend gate is a line coverage of 87%, which `.githooks/pre-commit` sets. The
+hook runs the checks on the staged files alone: it puts the changes that are
+not staged, and the files that git does not track, into a stash for the run,
+and puts them back after it. Run `git commit --no-verify` to step past the
+hook when you know why.
+
+The backend gate needs `cargo-llvm-cov`:
+
+```sh
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov
+```
 
 ### Tests against a live server
 

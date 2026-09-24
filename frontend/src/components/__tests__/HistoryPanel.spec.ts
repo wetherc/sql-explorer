@@ -224,3 +224,63 @@ describe('HistoryPanel asking before it takes something away', () => {
     expect(apiStub.deleteSavedQuery).not.toHaveBeenCalled()
   })
 })
+
+describe('HistoryPanel height', () => {
+  beforeEach(() => {
+    Object.values(apiStub).forEach((fn) => fn.mockReset())
+    apiStub.getConnections.mockResolvedValue([connectionFixture()])
+    apiStub.listActiveConnections.mockResolvedValue([infoFixture()])
+    apiStub.getHistory.mockResolvedValue([entry])
+    apiStub.getSavedQueries.mockResolvedValue([])
+  })
+
+  it('follows the height of its body, and works without a watcher of it', async () => {
+    // The library draws parts that watch their own size, so each call gets
+    // an empty list of entries.
+    const callbacks: Array<(entries: unknown[]) => void> = []
+    class ObserverStub {
+      constructor(callback: (entries: unknown[]) => void) {
+        callbacks.push(callback)
+      }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    }
+    const held = globalThis.ResizeObserver
+    globalThis.ResizeObserver = ObserverStub as unknown as typeof ResizeObserver
+    try {
+      const wrapper = mountWithPlugins(HistoryPanel)
+      await useHistoryStore().load()
+      await wrapper.vm.$nextTick()
+      const body = wrapper.find('.body').element
+      const list = () => wrapper.findComponent({ name: 'VVirtualScroll' })
+
+      Object.defineProperty(body, 'clientHeight', { value: 300, configurable: true })
+      callbacks.forEach((callback) => callback([]))
+      await wrapper.vm.$nextTick()
+      expect(list().props('height')).toBe(300)
+
+      // A height of none says nothing, so the list keeps the height it knows.
+      Object.defineProperty(body, 'clientHeight', { value: 0, configurable: true })
+      callbacks.forEach((callback) => callback([]))
+      await wrapper.vm.$nextTick()
+      expect(list().props('height')).toBe(300)
+      wrapper.unmount()
+    } finally {
+      globalThis.ResizeObserver = held
+    }
+
+    // A host without the watcher opens the panel all the same. The list of
+    // the library needs the watcher, so the history here is empty.
+    apiStub.getHistory.mockResolvedValue([])
+    // @ts-expect-error the test takes the watcher away from the host.
+    delete globalThis.ResizeObserver
+    try {
+      const wrapper = mountWithPlugins(HistoryPanel)
+      expect(wrapper.text()).toContain('No statement has run yet')
+      wrapper.unmount()
+    } finally {
+      globalThis.ResizeObserver = held
+    }
+  })
+})

@@ -11,6 +11,7 @@
     "test": "pnpm --filter frontend test:unit && cd backend && cargo test",
     "test:unit": "pnpm --filter frontend test:unit",
     "test:coverage": "pnpm --filter frontend test:coverage",
+    "test:coverage:backend": "cd backend && cargo llvm-cov --summary-only",
     "lint": "pnpm --filter frontend lint && cd backend && cargo clippy --all-targets -- -D warnings && cargo fmt --check",
     "format": "pnpm --filter frontend format && cd backend && cargo fmt",
     "verify": "pnpm lint && pnpm test",

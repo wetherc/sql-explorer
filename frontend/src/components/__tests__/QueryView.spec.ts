@@ -1170,6 +1170,15 @@ describe('QueryView', () => {
     await settle()
   })
 
+  it('writes the file when a command of the shell asks', async () => {
+    apiStub.writeTextFile.mockResolvedValue(undefined)
+    await mountView('SELECT 1', '/data/report.sql')
+
+    tabActions('t1')?.save()
+    await settle()
+    expect(apiStub.writeTextFile).toHaveBeenCalledWith('/data/report.sql', 'SELECT 1')
+  })
+
   it('forgets its actions when the tab goes away', async () => {
     const wrapper = await mountView()
     wrapper.unmount()

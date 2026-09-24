@@ -232,25 +232,23 @@ export const useQueryStore = defineStore('query', () => {
       state.lastRunAt = ranAt
       const openPane = (table: ResultTable): void => {
         fresh.push(table)
-        state.panes = [
-          ...state.panes,
-          {
-            id: createId(),
-            // The table holds the bytes of the rows and changes only while
-            // the set streams, so the raw form keeps it at its own size and
-            // Vue builds no proxy around it. The count of the rows beside it
-            // carries the growth to the grid.
-            result: markRaw(table),
-            rows: table.rowCount,
-            truncated: table.truncated,
-            number: fresh.length,
-            ranAt,
-            pinned: false,
-            label,
-            run: label === undefined ? { connectionId, query: trimmed, params: queryParams } : null,
-          },
-        ]
-        state.activePaneId = lastPane(state.panes)?.id ?? null
+        const pane: ResultPane = {
+          id: createId(),
+          // The table holds the bytes of the rows and changes only while
+          // the set streams, so the raw form keeps it at its own size and
+          // Vue builds no proxy around it. The count of the rows beside it
+          // carries the growth to the grid.
+          result: markRaw(table),
+          rows: table.rowCount,
+          truncated: table.truncated,
+          number: fresh.length,
+          ranAt,
+          pinned: false,
+          label,
+          run: label === undefined ? { connectionId, query: trimmed, params: queryParams } : null,
+        }
+        state.panes = [...state.panes, pane]
+        state.activePaneId = pane.id
       }
       await call(
         requestId,
