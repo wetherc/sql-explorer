@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { computed, markRaw, ref, shallowRef, watch } from 'vue'
+import { computed, markRaw, ref, shallowRef, watch, type ComputedRef } from 'vue'
 import { api } from '@/lib/api'
 import { useConnectionsStore } from './connections'
 import { useSettingsStore } from './settings'
@@ -306,6 +306,18 @@ export const useExplorerStore = defineStore('explorer', () => {
     }
   }
 
+  /**
+   * The count of the drops of the snapshots of each connection, and of the
+   * drops of all of them. A read that started before a drop gives an answer
+   * for a connection that the user closed, so the store drops that answer.
+   */
+  const forgetCounts = new Map<string, number>()
+  let clearCount = 0
+
+  function forgetStamp(connectionId: string): string {
+    return `${clearCount}/${forgetCounts.get(connectionId) ?? 0}`
+  }
+
   /** The key one snapshot lives under. */
   function snapshotKey(connectionId: string, database: string): string {
     return `${connectionId}/${database}`
@@ -326,6 +338,7 @@ export const useExplorerStore = defineStore('explorer', () => {
     if (!force && snapshots.value[key]) {
       return snapshots.value[key]
     }
+    const stamp = forgetStamp(connectionId)
     try {
       const snapshot = await api.schemaSnapshot({
         connectionId,
@@ -333,9 +346,10 @@ export const useExplorerStore = defineStore('explorer', () => {
         maxColumns: options.maxColumns,
         ownConnection: options.ownConnection,
       })
-      if (!Array.isArray(snapshot?.relations)) {
+      if (!Array.isArray(snapshot?.relations) || forgetStamp(connectionId) !== stamp) {
         // An answer of another shape is left out, so that the names of the
-        // editor stay a list this store can read.
+        // editor stay a list this store can read. An answer for a connection
+        // that closed during the read is left out too.
         return null
       }
       snapshots.value = { ...snapshots.value, [key]: markRaw(snapshot) }
@@ -356,6 +370,8 @@ export const useExplorerStore = defineStore('explorer', () => {
 
   /** Drops the snapshots of one connection. */
   function forgetSnapshots(connectionId: string): void {
+    forgetCounts.set(connectionId, (forgetCounts.get(connectionId) ?? 0) + 1)
+    schemaIndexes.delete(connectionId)
     const kept: Record<string, SchemaSnapshot> = {}
     for (const [key, snapshot] of Object.entries(snapshots.value)) {
       if (!key.startsWith(`${connectionId}/`)) {
@@ -365,21 +381,33 @@ export const useExplorerStore = defineStore('explorer', () => {
     snapshots.value = kept
   }
 
-  /**
-   * The part of the index that the snapshots hold, with the names it saw.
-   * It lives apart from `schemaIndex` so that a change of the tree leaves
-   * this part cached, because the snapshots hold most of the names.
-   */
-  const snapshotIndex = computed(() => {
-    const index = emptySchemaIndex()
-    const seen = {
-      databases: new Set<string>(),
-      schemas: new Set<string>(),
-      tables: new Set<string>(),
+  /** An empty part of the index, with the names it saw. */
+  function emptyPart(): {
+    index: SchemaIndex
+    seen: Record<'databases' | 'schemas' | 'tables', Set<string>>
+  } {
+    return {
+      index: emptySchemaIndex(),
+      seen: { databases: new Set(), schemas: new Set(), tables: new Set() },
     }
+  }
 
+  /**
+   * The part of the index that the snapshots hold, with the names it saw, by
+   * the identifier of the connection. It lives apart from the whole index so
+   * that a change of the tree leaves this part cached, because the snapshots
+   * hold most of the names.
+   */
+  const snapshotParts = computed(() => {
+    const parts = new Map<string, ReturnType<typeof emptyPart>>()
     for (const [key, snapshot] of Object.entries(snapshots.value)) {
       const connectionId = key.slice(0, key.indexOf('/'))
+      let part = parts.get(connectionId)
+      if (!part) {
+        part = emptyPart()
+        parts.set(connectionId, part)
+      }
+      const { index, seen } = part
       if (!seen.databases.has(snapshot.database)) {
         seen.databases.add(snapshot.database)
         index.databases.push(snapshot.database)
@@ -390,7 +418,7 @@ export const useExplorerStore = defineStore('explorer', () => {
           index.schemas.push(relation.schema)
         }
         const qualifier = [snapshot.database, relation.schema].filter(Boolean).join('.')
-        const identity = `${connectionId}/${qualifier}/${relation.name}`
+        const identity = `${qualifier}/${relation.name}`
         if (seen.tables.has(identity)) {
           continue
         }
@@ -406,16 +434,16 @@ export const useExplorerStore = defineStore('explorer', () => {
         }
       }
     }
-    return { index, seen }
+    return parts
   })
 
-  /** The names the editor offers as completions. */
-  const schemaIndex = computed<SchemaIndex>(() => {
+  /** Builds the names that the editor offers for one connection. */
+  function buildSchemaIndex(connectionId: string): SchemaIndex {
     // The snapshots come first, because they hold the whole database. The
     // copies hold references to the entries of the cached part, so a change
     // of the tree pays for the copies and the walk, not for a rebuild of
     // the snapshot part.
-    const base = snapshotIndex.value
+    const base = snapshotParts.value.get(connectionId) ?? emptyPart()
     const index: SchemaIndex = {
       databases: [...base.index.databases],
       schemas: [...base.index.schemas],
@@ -431,9 +459,10 @@ export const useExplorerStore = defineStore('explorer', () => {
     // The tree adds what the user has opened and the snapshots do not hold.
     // The walk reads the set of the cached part and mutates the copies only.
     const fromSnapshot = base.seen.tables
-    walk(roots.value, (node) => {
+    const own = roots.value.filter((root) => root.connectionId === connectionId)
+    walk(own, (node) => {
       const qualifier = [node.database, node.schema].filter(Boolean).join('.')
-      const identity = `${node.connectionId}/${qualifier}/${node.table ?? node.label}`
+      const identity = `${qualifier}/${node.table ?? node.label}`
       if (node.kind === 'database' && !seen.databases.has(node.label)) {
         seen.databases.add(node.label)
         index.databases.push(node.label)
@@ -457,7 +486,28 @@ export const useExplorerStore = defineStore('explorer', () => {
       }
     })
     return index
-  })
+  }
+
+  /** The cached index of each connection that an editor asked for. */
+  const schemaIndexes = new Map<string, ComputedRef<SchemaIndex>>()
+  const noNames = emptySchemaIndex()
+
+  /**
+   * The names that the editor offers for one connection. A tab sends its
+   * statement to one connection, so the names of the other connections
+   * stay out. A tab with no connection gets no names.
+   */
+  function schemaIndexFor(connectionId: string | null): SchemaIndex {
+    if (connectionId === null) {
+      return noNames
+    }
+    let index = schemaIndexes.get(connectionId)
+    if (!index) {
+      index = computed(() => buildSchemaIndex(connectionId))
+      schemaIndexes.set(connectionId, index)
+    }
+    return index.value
+  }
 
   /** Builds the root node of one connection. */
   function rootFor(connectionId: string): ExplorerNode {
@@ -496,6 +546,8 @@ export const useExplorerStore = defineStore('explorer', () => {
     // The watch of the field runs later, and the tree is empty now.
     applyFilter('')
     snapshots.value = {}
+    clearCount += 1
+    schemaIndexes.clear()
   }
 
   /** Finds the node with the given key in the tree itself. */
@@ -753,7 +805,7 @@ export const useExplorerStore = defineStore('explorer', () => {
     filter,
     loading,
     visibleNodes,
-    schemaIndex,
+    schemaIndexFor,
     snapshots,
     snapshotOptions,
     readSnapshot,

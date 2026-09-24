@@ -29,7 +29,8 @@ indexes and its constraints, and it reads them in one call.
 
 ## Completion
 
-The editor completes the names that the tree has opened. A full stop after an
+The editor completes the names that the tree has opened on the connection
+of the tab. The names of the other open connections stay out. A full stop after an
 alias offers the columns of the table that the alias names.
 
 One command reads every relation of a database at once. The completion then

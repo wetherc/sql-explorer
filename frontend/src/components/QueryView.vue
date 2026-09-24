@@ -167,7 +167,7 @@
           :font-size="settings.settings.fontSize"
           :word-wrap="settings.settings.wordWrap"
           :show-line-numbers="settings.settings.showLineNumbers"
-          :schema-index="explorer.schemaIndex"
+          :schema-index="schemaIndex"
           :dialect="dialect"
           @update:model-value="onQueryChange"
           @format-failed="onFormatFailed"
@@ -566,6 +566,8 @@ watch(
   { immediate: true },
 )
 const state = computed(() => queries.states[props.tab.id] ?? newQueryState())
+/** The names that the editor offers, from the connection of the tab alone. */
+const schemaIndex = computed(() => explorer.schemaIndexFor(props.tab.connectionId))
 
 /**
  * The connections the tab can run on, and the one it names when that one is

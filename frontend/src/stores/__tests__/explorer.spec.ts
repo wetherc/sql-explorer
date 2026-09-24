@@ -23,6 +23,7 @@ type ExplorerNode = import('@/stores/explorer').ExplorerNode
 const { useConnectionsStore } = await import('@/stores/connections')
 const { useUiStore } = await import('@/stores/ui')
 const { TableKind } = await import('@/types/api')
+const { emptySchemaIndex } = await import('@/lib/sql')
 
 /** Waits for the pause that the filter of the tree holds. */
 async function afterTheFilterPause(): Promise<void> {
@@ -546,13 +547,13 @@ describe('explorer store', () => {
     const explorer = await readyStore()
     await explorer.readSnapshot('c1', 'Sales', { maxColumns: 100, ownConnection: true })
 
-    expect(explorer.schemaIndex.databases).toEqual(['Sales'])
-    expect(explorer.schemaIndex.schemas).toEqual(['dbo', 'staging'])
-    expect(explorer.schemaIndex.tables).toEqual([
+    expect(explorer.schemaIndexFor('c1').databases).toEqual(['Sales'])
+    expect(explorer.schemaIndexFor('c1').schemas).toEqual(['dbo', 'staging'])
+    expect(explorer.schemaIndexFor('c1').tables).toEqual([
       { name: 'orders', qualifier: 'Sales.dbo' },
       { name: 'orders', qualifier: 'Sales.staging' },
     ])
-    expect(explorer.schemaIndex.columns).toEqual([
+    expect(explorer.schemaIndexFor('c1').columns).toEqual([
       { name: 'id', table: 'orders', qualifier: 'Sales.dbo', dataType: 'int' },
       { name: 'raw', table: 'orders', qualifier: 'Sales.staging', dataType: 'text' },
     ])
@@ -578,22 +579,22 @@ describe('explorer store', () => {
     await explorer.readSnapshot('c1', 'Sales', { maxColumns: 20_000, ownConnection: true })
 
     const firstStart = performance.now()
-    expect(explorer.schemaIndex.columns).toHaveLength(20_000)
+    expect(explorer.schemaIndexFor('c1').columns).toHaveLength(20_000)
     const fromSnapshot = performance.now() - firstStart
 
     // A new root invalidates the index, so the next read walks the tree
     // and the snapshot again.
     explorer.addRoot('c1')
     const secondStart = performance.now()
-    expect(explorer.schemaIndex.tables).toHaveLength(200)
+    expect(explorer.schemaIndexFor('c1').tables).toHaveLength(200)
     const afterTreeChange = performance.now() - secondStart
 
     console.warn(
       `schemaIndex with 20000 columns: ${fromSnapshot.toFixed(1)} ms from the snapshot, ` +
         `${afterTreeChange.toFixed(1)} ms after a change of the tree`,
     )
-    expect(explorer.schemaIndex.databases).toEqual(['Sales'])
-    expect(explorer.schemaIndex.schemas).toEqual(['dbo'])
+    expect(explorer.schemaIndexFor('c1').databases).toEqual(['Sales'])
+    expect(explorer.schemaIndexFor('c1').schemas).toEqual(['dbo'])
   })
 
   it('warns when the bound stopped the read of a schema', async () => {
@@ -655,6 +656,54 @@ describe('explorer store', () => {
     expect(explorer.snapshots).toEqual({})
   })
 
+  it('offers the names of one connection alone', async () => {
+    const explorer = await readyStore()
+    apiStub.schemaSnapshot.mockResolvedValue(snapshotFixture('Sales'))
+    await explorer.readSnapshot('c1', 'Sales', { maxColumns: 10, ownConnection: true })
+    apiStub.schemaSnapshot.mockResolvedValue(snapshotFixture('Other'))
+    await explorer.readSnapshot('c2', 'Other', { maxColumns: 10, ownConnection: true })
+    explorer.roots = [
+      node({ key: 'c1', kind: 'connection', label: 'One', connectionId: 'c1' }),
+      node({ key: 'c2', kind: 'connection', label: 'Two', connectionId: 'c2' }),
+    ]
+    explorer.roots[1]!.children = [
+      node({ key: 'c2/Archive', label: 'Archive', database: 'Archive', connectionId: 'c2' }),
+    ]
+
+    expect(explorer.schemaIndexFor('c1').databases).toEqual(['Sales'])
+    expect(explorer.schemaIndexFor('c2').databases).toEqual(['Other', 'Archive'])
+    expect(explorer.schemaIndexFor(null)).toEqual(emptySchemaIndex())
+
+    explorer.forgetSnapshots('c2')
+    expect(explorer.schemaIndexFor('c2').databases).toEqual(['Archive'])
+    explorer.clear()
+    expect(explorer.schemaIndexFor('c1')).toEqual(emptySchemaIndex())
+  })
+
+  it('drops a snapshot whose connection closed during the read', async () => {
+    const explorer = await readyStore()
+    let answer: (value: unknown) => void = () => {}
+    apiStub.schemaSnapshot.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          answer = resolve
+        }),
+    )
+    const options = { maxColumns: 10, ownConnection: true }
+
+    const read = explorer.readSnapshot('c1', 'Sales', options)
+    explorer.forgetSnapshots('c1')
+    answer(snapshotFixture())
+    expect(await read).toBe(null)
+    expect(explorer.snapshots).toEqual({})
+
+    const second = explorer.readSnapshot('c1', 'Sales', options)
+    explorer.clear()
+    answer(snapshotFixture())
+    expect(await second).toBe(null)
+    expect(explorer.snapshots).toEqual({})
+  })
+
   it('names the bounds the settings hold', async () => {
     const explorer = await readyStore()
     expect(explorer.snapshotOptions()).toEqual({ maxColumns: 20000, ownConnection: true })
@@ -667,7 +716,7 @@ describe('explorer store', () => {
     // The same database read again under another key gives the same names.
     apiStub.schemaSnapshot.mockResolvedValue(snapshotFixture())
     await explorer.readSnapshot('c1', 'Sales2', { maxColumns: 10, ownConnection: true })
-    expect(explorer.schemaIndex.tables).toEqual([
+    expect(explorer.schemaIndexFor('c1').tables).toEqual([
       { name: 'orders', qualifier: 'Sales.dbo' },
       { name: 'orders', qualifier: 'Sales.staging' },
     ])
@@ -821,7 +870,7 @@ describe('explorer store', () => {
     const columns = table.children![0]!
     await explorer.expand(columns)
 
-    expect(explorer.schemaIndex).toEqual({
+    expect(explorer.schemaIndexFor('c1')).toEqual({
       databases: ['Sales'],
       schemas: ['dbo'],
       tables: [{ name: 'orders', qualifier: 'Sales.dbo' }],
@@ -830,13 +879,13 @@ describe('explorer store', () => {
 
     // A second root over the same names adds nothing new.
     explorer.roots = [...explorer.roots, ...explorer.roots]
-    expect(explorer.schemaIndex.databases).toEqual(['Sales'])
+    expect(explorer.schemaIndexFor('c1').databases).toEqual(['Sales'])
   })
 
   it('reports a column without a type as one without a hint', async () => {
     const explorer = useExplorerStore()
     explorer.roots = [node({ kind: 'column', label: 'id', hint: undefined, table: undefined })]
-    expect(explorer.schemaIndex.columns).toEqual([
+    expect(explorer.schemaIndexFor('c1').columns).toEqual([
       { name: 'id', table: '', qualifier: '', dataType: '' },
     ])
   })
