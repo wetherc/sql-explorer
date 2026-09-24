@@ -24,6 +24,7 @@ describe('PARAMETER_RULES', () => {
 
   it('marks nothing when a colon carries no name', () => {
     expect(match(': 1')).toBeNull()
+    expect(match(':2]')).toBeNull()
     expect(match('SELECT 1')).toBeNull()
   })
 })

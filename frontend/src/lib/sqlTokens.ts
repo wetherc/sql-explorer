@@ -3,12 +3,14 @@
  *
  * They follow the scanner of the backend: two colons together are the cast of
  * PostgreSQL and carry no name, and a name holds letters, numbers and the low
- * line. The backend stays the judge of what runs, so a drift between the two
- * shows a wrong colour and never a wrong statement.
+ * line and does not start with a number. The backend stays the judge of what
+ * runs, so a drift between the two shows a wrong colour and never a wrong
+ * statement. The backend also reads no name in the slice `a[lo:hi]` of a
+ * PostgreSQL array, and the editor marks `:hi` there.
  */
 export const PARAMETER_RULES: [RegExp, string][] = [
   [/::/, 'operator'],
-  [/:\w+/, 'variable'],
+  [/:[A-Za-z_]\w*/, 'variable'],
 ]
 
 /** The mark of a rule that brings in another group of rules. */

@@ -636,6 +636,9 @@ fn scan_parameters(sql: &str, dialect: Dialect, mut emit: impl FnMut(&str) -> St
     let chars: Vec<char> = sql.chars().collect();
     let mut out = String::with_capacity(sql.len());
     let mut index = 0usize;
+    // The depth of the subscripts of PostgreSQL arrays. A colon inside one,
+    // as in `a[lo:hi]`, marks a slice and carries no name.
+    let mut subscripts = 0usize;
 
     while index < chars.len() {
         let c = chars[index];
@@ -677,7 +680,14 @@ fn scan_parameters(sql: &str, dialect: Dialect, mut emit: impl FnMut(&str) -> St
             }
         }
 
-        if c == ':' {
+        if dialect == Dialect::Postgres {
+            match c {
+                '[' => subscripts += 1,
+                ']' => subscripts = subscripts.saturating_sub(1),
+                _ => {}
+            }
+        }
+        if c == ':' && subscripts == 0 {
             // The cast of PostgreSQL holds two colons.
             if chars.get(index + 1) == Some(&':') {
                 out.push(':');
@@ -685,8 +695,13 @@ fn scan_parameters(sql: &str, dialect: Dialect, mut emit: impl FnMut(&str) -> St
                 index += 2;
                 continue;
             }
+            // A name starts with a letter or a low line, so the `:30` of a
+            // time or the `:2` of a slice carries no name.
             let mut end = index + 1;
-            while chars.get(end).is_some_and(|&c| holds_a_name(c)) {
+            while chars
+                .get(end)
+                .is_some_and(|&c| holds_a_name(c) && (end > index + 1 || !c.is_ascii_digit()))
+            {
                 end += 1;
             }
             if end > index + 1 {
@@ -1034,6 +1049,32 @@ mod tests {
         let prepared = rewrite_parameters("SELECT a : b", Dialect::MsSql);
         assert_eq!(prepared.sql, "SELECT a : b");
         assert!(prepared.order.is_empty());
+    }
+
+    #[test]
+    fn a_slice_of_an_array_carries_no_name() {
+        let prepared = rewrite_parameters(
+            "SELECT a[1:2], a[lo:hi], a[b[1]:n] WHERE x = :id",
+            Dialect::Postgres,
+        );
+        assert_eq!(
+            prepared.sql,
+            "SELECT a[1:2], a[lo:hi], a[b[1]:n] WHERE x = $1"
+        );
+        assert_eq!(prepared.order, vec!["id".to_string()]);
+        // A closing bracket without an opening one leaves the count at zero.
+        assert_eq!(find_parameters("SELECT ] :a", Dialect::Postgres), vec!["a"]);
+        // A name starts with a letter or a low line, on every engine.
+        assert!(find_parameters("SELECT 10:30", Dialect::MySql).is_empty());
+        assert_eq!(
+            find_parameters("SELECT :_1, :a1", Dialect::MySql),
+            vec!["_1", "a1"]
+        );
+        // Brackets quote a name on MS SQL Server, so they count no slice.
+        assert_eq!(
+            find_parameters("SELECT [a] WHERE b = :c", Dialect::MsSql),
+            vec!["c"]
+        );
     }
 
     #[test]

@@ -6,8 +6,11 @@ Write `:name` in a statement to make a parameter:
 SELECT * FROM orders WHERE customer_id = :id AND city = :city
 ```
 
-Each name takes a colour of its own in the editor. Two colons together stay
-the cast of PostgreSQL and hold no name.
+Each name takes a colour of its own in the editor. A name starts with a
+letter or a low line, so the `:30` of `10:30` holds no name. Two colons
+together stay the cast of PostgreSQL and hold no name. A colon inside the
+brackets of a PostgreSQL array, as in `a[lo:hi]`, marks a slice and holds no
+name, but the editor still gives `:hi` the colour of a name.
 
 The bar above the editor names each parameter that the statement holds and the
 value it carries. A value that is still missing reads as `unset`. A click on a
