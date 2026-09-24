@@ -94,7 +94,9 @@ of an info token to the caller as a `QueryItem::Message`. It gives each `DONE`
 and `DONEINPROC` token as a `QueryItem::Done`, with the count of rows when the
 server sets the count flag. The first read of a request stops at the first of
 these items, so a message or a count before the first result set also reaches
-the caller. The changes are in `src/tds/stream/query.rs` and
+the caller. The copy also gives each error token as a `QueryItem::Error`
+where it stands in the answer, and the stream still ends with the first
+error of the batch. The changes are in `src/tds/stream/query.rs` and
 `src/tds/codec/token/token_done.rs`.
 
 The driver sends every batch through the path that keeps rows, so the rows of
@@ -105,7 +107,12 @@ affected.". A statement under `SET NOCOUNT ON`, and a statement such as
 `CREATE TABLE`, sends no count and adds no message.
 
 An error of the server carries its number, its severity, its state, its line
-and its procedure, and those reach the user beside the text of the error.
+and its procedure, and those reach the user beside the text of the error. A
+batch can go on after an error, for example after a division by zero with
+`XACT_ABORT` off. The first error of the batch is the error of the run. Each
+later error goes to the Messages tab with its number, severity, state and
+line, and the counts and the result sets of the statements between them
+stay.
 
 PostgreSQL is the same: a `NOTICE`, a `WARNING` and an `INFO` arrive on the
 connection and reach the Messages tab with the severity, the code, the detail

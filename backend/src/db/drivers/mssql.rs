@@ -14,8 +14,8 @@ use crate::db::drivers::{
 use crate::db::sink::{BufferSink, RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, Message, PlanKind, QueryParams, QueryResponse, ResultSet, Routine, Schema,
-    SchemaSnapshot, SnapshotColumn, Table, TableFact, TableKind,
+    IndexInfo, Message, MessageLevel, PlanKind, QueryParams, QueryResponse, ResultSet, Routine,
+    Schema, SchemaSnapshot, SnapshotColumn, Table, TableFact, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::{only_reads, split_batches, split_statements, Dialect};
@@ -391,6 +391,7 @@ impl MssqlDriver {
         // True when the row limit brought the end, and not the sink.
         let mut ended_at_limit = false;
         let mut rows_affected: Option<u64> = None;
+        let mut errors = 0usize;
 
         loop {
             let item = match stream.try_next().await {
@@ -428,6 +429,15 @@ impl MssqlDriver {
                 // stands beside the rows, as the server sends it.
                 QueryItem::Message(message) => {
                     sink.message(Message::info(message.text().to_string()));
+                }
+                // A batch can go on after an error. The stream ends with the
+                // first error, which reaches the user as the error of the
+                // run. Each later error goes among the messages.
+                QueryItem::Error(error) => {
+                    errors += 1;
+                    if errors > 1 {
+                        sink.message(later_error(&error));
+                    }
                 }
                 QueryItem::Done(done_rows) => {
                     if open {
@@ -629,6 +639,23 @@ pub fn select_plan_sets(sets: Vec<ResultSet>) -> (Vec<ResultSet>, bool) {
         (sets.into_iter().filter(is_plan_set).collect(), true)
     } else {
         (sets, false)
+    }
+}
+
+/// The message for an error that the server sent after the first error of a
+/// batch, with the number, the severity, the state and the line that SQL
+/// Server Management Studio shows.
+fn later_error(error: &tiberius::error::TokenError) -> Message {
+    Message {
+        level: MessageLevel::Error,
+        text: error.message().to_string(),
+        detail: Some(format!(
+            "Msg {}, Level {}, State {}, Line {}",
+            error.code(),
+            error.class(),
+            error.state(),
+            error.line()
+        )),
     }
 }
 
@@ -1486,6 +1513,25 @@ mod tests {
         token.extend_from_slice(&status.to_le_bytes());
         token.extend_from_slice(&0u16.to_le_bytes());
         token.extend_from_slice(&rows.to_le_bytes());
+        token
+    }
+
+    /// An `ERROR` token of severity 16 with the given number and text.
+    fn error_token(code: u32, text: &str) -> Vec<u8> {
+        let mut body = code.to_le_bytes().to_vec();
+        body.push(1);
+        body.push(16);
+        let units: Vec<u16> = text.encode_utf16().collect();
+        body.extend_from_slice(&(units.len() as u16).to_le_bytes());
+        units
+            .iter()
+            .for_each(|unit| body.extend_from_slice(&unit.to_le_bytes()));
+        body.push(0);
+        body.push(0);
+        body.extend_from_slice(&2u32.to_le_bytes());
+        let mut token = vec![0xAA];
+        token.extend_from_slice(&(body.len() as u16).to_le_bytes());
+        token.extend(body);
         token
     }
 
@@ -2403,6 +2449,68 @@ mod tests {
             .messages
             .iter()
             .any(|message| message.text == ENDED_AT_THE_LIMIT_MESSAGE));
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_error_after_the_first_one_of_a_batch_goes_among_the_messages() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            accept_login(&mut socket).await;
+            read_message(&mut socket).await;
+            let mut answer = error_token(8134, "Divide by zero error encountered.");
+            answer.extend_from_slice(&done_token(0x02, 0));
+            answer.extend_from_slice(&done_token(0x10, 3));
+            answer.extend_from_slice(&error_token(547, "The DELETE statement conflicted."));
+            answer.extend_from_slice(&done_token(0x02, 0));
+            write_packet(&mut socket, END_OF_MESSAGE, &answer).await;
+        });
+
+        let tcp = TcpStream::connect(address).await.unwrap();
+        let client = Client::connect(test_config(), tcp.compat_write())
+            .await
+            .unwrap();
+        let mut driver = MssqlDriver { client };
+        let options = ExecOptions {
+            max_rows: 100,
+            timeout_secs: 30,
+            one_statement: false,
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        let outcome = driver
+            .stream_sets(
+                "INSERT INTO t VALUES (1/0); UPDATE t SET a = 1; DELETE FROM u",
+                &[],
+                &options,
+                &mut sink,
+                false,
+            )
+            .await;
+        let response = sink.into_response(RunSummary::default());
+
+        // The first error is the error of the run.
+        let error = outcome.err().unwrap();
+        assert!(error.to_string().contains("Divide by zero"));
+        // The count of the statement between the errors and the later error
+        // stand among the messages.
+        assert!(response
+            .messages
+            .iter()
+            .any(|message| message.text == rows_affected_message(3).text));
+        let later = response
+            .messages
+            .iter()
+            .find(|message| message.level == MessageLevel::Error)
+            .unwrap();
+        assert_eq!(later.text, "The DELETE statement conflicted.");
+        assert_eq!(
+            later.detail.as_deref(),
+            Some("Msg 547, Level 16, State 1, Line 2")
+        );
 
         server.await.unwrap();
     }

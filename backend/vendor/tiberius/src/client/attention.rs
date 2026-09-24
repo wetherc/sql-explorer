@@ -51,7 +51,7 @@ impl AttentionHandle {
 #[cfg(test)]
 mod tests {
     use crate::tds::codec::{Encode, PacketHeader, PacketStatus, PacketType, PreloginMessage};
-    use crate::{AuthMethod, Client, Config, EncryptionLevel, Error};
+    use crate::{AuthMethod, Client, Config, EncryptionLevel, Error, QueryItem};
     use bytes::BytesMut;
     use futures_util::TryStreamExt;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
@@ -314,6 +314,93 @@ mod tests {
 
         let answered = client.execute("SELECT 1", &[]).await;
         assert!(answered.is_ok());
+
+        server_task.await.unwrap();
+    }
+
+    /// An `ERROR` token with the given number and text.
+    fn error_token(code: u32, text: &str) -> Vec<u8> {
+        let mut body = code.to_le_bytes().to_vec();
+        body.push(1); // the state
+        body.push(16); // the class
+        let units: Vec<u16> = text.encode_utf16().collect();
+        body.extend_from_slice(&(units.len() as u16).to_le_bytes());
+        units.iter().for_each(|unit| body.extend_from_slice(&unit.to_le_bytes()));
+        body.push(0); // no server name
+        body.push(0); // no procedure name
+        body.extend_from_slice(&1u32.to_le_bytes()); // the line
+        let mut buf = vec![0xAA];
+        buf.extend_from_slice(&(body.len() as u16).to_le_bytes());
+        buf.extend(body);
+        buf
+    }
+
+    #[tokio::test]
+    async fn a_batch_gives_each_error_where_it_stands_and_ends_with_the_first() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+
+        let server_task = tokio::spawn(async move {
+            accept_login(&mut server).await;
+            let (ty, _) = read_message(&mut server).await;
+            assert_eq!(ty, PacketType::SQLBatch as u8);
+
+            // The first statement fails, the second one answers, and the
+            // third one fails again.
+            let mut answer = error_token(8134, "first");
+            answer.extend(done_token(0, 0));
+            answer.extend(one_int_row(7));
+            answer.extend(done_token(0x10, 1));
+            answer.extend(error_token(8134, "second"));
+            answer.extend(done_token(0, 0));
+            write_message(&mut server, &answer).await;
+        });
+
+        let mut client = Client::connect(config(), client_end.compat())
+            .await
+            .unwrap();
+        let mut stream = client.simple_query("SELECT 1/0").await.unwrap();
+
+        let mut errors = Vec::new();
+        let mut rows = 0;
+        let end = loop {
+            match stream.try_next().await {
+                Ok(Some(QueryItem::Error(error))) => errors.push(error.message().to_string()),
+                Ok(Some(QueryItem::Row(_))) => rows += 1,
+                Ok(Some(_)) => {}
+                Ok(None) => break None,
+                Err(error) => break Some(error),
+            }
+        };
+
+        assert_eq!(errors, ["first", "second"]);
+        assert_eq!(rows, 1);
+        assert!(matches!(end, Some(Error::Server(ref error)) if error.message() == "first"));
+
+        drop(stream);
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_rows_of_a_batch_with_an_error_are_collected() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+
+        let server_task = tokio::spawn(async move {
+            accept_login(&mut server).await;
+            read_message(&mut server).await;
+            let mut answer = one_int_row(7);
+            answer.extend(done_token(0x10, 1));
+            answer.extend(error_token(8134, "late"));
+            answer.extend(done_token(0, 0));
+            write_message(&mut server, &answer).await;
+        });
+
+        let mut client = Client::connect(config(), client_end.compat())
+            .await
+            .unwrap();
+        let stream = client.simple_query("SELECT 7; SELECT 1/0").await.unwrap();
+
+        // The collection still fails with the error of the batch.
+        assert!(stream.into_results().await.is_err());
 
         server_task.await.unwrap();
     }

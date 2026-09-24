@@ -1,5 +1,5 @@
 use crate::tds::stream::ReceivedToken;
-use crate::{row::ColumnType, Column, Row};
+use crate::{row::ColumnType, tds::codec::TokenError, Column, Row};
 use futures_util::{
     ready,
     stream::{BoxStream, Peekable, Stream, StreamExt, TryStreamExt},
@@ -133,7 +133,8 @@ impl<'a> QueryStream<'a> {
                     ReceivedToken::NewResultset(_)
                     | ReceivedToken::Info(_)
                     | ReceivedToken::Done(_)
-                    | ReceivedToken::DoneInProc(_),
+                    | ReceivedToken::DoneInProc(_)
+                    | ReceivedToken::Error(_),
                 ) => break,
                 Some(_) => {
                     self.token_stream.try_next().await?;
@@ -250,6 +251,7 @@ impl<'a> QueryStream<'a> {
                 // place among the results.
                 (QueryItem::Message(_), _) => {}
                 (QueryItem::Done(_), _) => {}
+                (QueryItem::Error(_), _) => {}
             }
         }
 
@@ -365,6 +367,10 @@ pub enum QueryItem {
     /// It is `None` when the server sent no count, as with `SET NOCOUNT ON`
     /// or a statement that changes no rows, such as `CREATE TABLE`.
     Done(Option<u64>),
+    /// An error that the server sent. The batch can go on after an error, so
+    /// the stream gives each one where it stands. The stream still ends with
+    /// the first error of the batch.
+    Error(TokenError),
 }
 
 impl QueryItem {
@@ -486,6 +492,7 @@ impl<'a> Stream for QueryStream<'a> {
                 ReceivedToken::Done(done) | ReceivedToken::DoneInProc(done) => {
                     Poll::Ready(Some(Ok(QueryItem::Done(done.count()))))
                 }
+                ReceivedToken::Error(error) => Poll::Ready(Some(Ok(QueryItem::Error(error)))),
                 _ => continue,
             };
         }
