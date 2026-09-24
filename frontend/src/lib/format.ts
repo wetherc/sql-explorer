@@ -116,6 +116,18 @@ export function sortKey(value: CellValue): SortKey {
   return typeof value === 'string' && isPlainNumber(text) ? decimalKey(text) : text
 }
 
+/**
+ * True when a JavaScript number holds the value of the decimal text with
+ * every digit. `9007199254740993` gives false, because the nearest double is
+ * 9007199254740992.
+ */
+export function exactAsNumber(text: string): boolean {
+  const value = Number(text)
+  return (
+    Number.isFinite(value) && compareDecimals(decimalKey(text), decimalKey(String(value))) === 0
+  )
+}
+
 /** Compares the size of two decimal keys and ignores their signs. */
 function compareMagnitudes(left: DecimalKey, right: DecimalKey): number {
   if (left.digits === '' || right.digits === '') {

@@ -8,6 +8,7 @@ import {
   formatClockTime,
   compareCells,
   compareSortKeys,
+  exactAsNumber,
   sortKey,
   formatCell,
   formatDuration,
@@ -117,6 +118,17 @@ describe('compareCells', () => {
     expect(compareCells('a', 'b')).toBeLessThan(0)
     expect(compareCells('item2', 'item10')).toBeLessThan(0)
     expect(compareCells({ a: 1 }, { a: 1 })).toBe(0)
+  })
+})
+
+describe('exactAsNumber', () => {
+  it('tells whether a double keeps every digit of a decimal text', () => {
+    for (const text of ['1', '-2.50', '1e21', '100000000000000000000', '0.1', '9007199254740991']) {
+      expect(exactAsNumber(text)).toBe(true)
+    }
+    for (const text of ['9007199254740993', '1e400', '0.1000000000000000000001']) {
+      expect(exactAsNumber(text)).toBe(false)
+    }
   })
 })
 

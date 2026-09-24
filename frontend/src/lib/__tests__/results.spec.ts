@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { ResultStream, ResultTable, type RunEnd } from '../results'
+import { parseJsonCell, ResultStream, ResultTable, type RunEnd } from '../results'
 import type { CellValue, ColumnInfo } from '@/types/api'
 
 const FRAME_BEGIN_SET = 1
@@ -138,6 +138,28 @@ function collect(): {
   })
   return { stream, sets, ends }
 }
+
+describe('parseJsonCell', () => {
+  it('reads a JSON value whose numbers a JavaScript number holds', () => {
+    expect(parseJsonCell('[1, -2.5, 1e21, 9007199254740991]')).toEqual([
+      1, -2.5, 1e21, 9007199254740991,
+    ])
+    expect(parseJsonCell('{"n": "9007199254740993"}')).toEqual({ n: '9007199254740993' })
+  })
+
+  it('keeps the text of a value with a number that would lose digits', () => {
+    for (const text of [
+      '[9007199254740993]',
+      '{"a": {"b": -12345678901234567890}}',
+      '[1.00000000000000000001]',
+      '[1e400]',
+    ]) {
+      expect(parseJsonCell(text)).toBe(text)
+    }
+    // A quote inside a string does not end the string.
+    expect(parseJsonCell('["a\\"9007199254740993", 1]')).toEqual(['a"9007199254740993', 1])
+  })
+})
 
 describe('ResultTable from plain rows', () => {
   const columns: ColumnInfo[] = [

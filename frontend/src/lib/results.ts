@@ -10,6 +10,7 @@
  */
 
 import type { CellValue, ColumnInfo, Message, QueryStats } from '@/types/api'
+import { exactAsNumber } from './format'
 
 const FRAME_BEGIN_SET = 1
 const FRAME_CHUNK = 2
@@ -212,6 +213,21 @@ function dictValue(column: Extract<SegmentColumn, { kind: 'dict' }>, row: number
   return text
 }
 
+/**
+ * Reads one JSON value. A value that holds a number that a JavaScript number
+ * cannot hold with every digit stays the text that the server sent, so an
+ * array of bigint values or a jsonb document shows its digits.
+ */
+export function parseJsonCell(text: string): CellValue {
+  // A string in quotes is skipped, and each number outside one is checked.
+  for (const [token] of text.matchAll(/"(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g)) {
+    if (!token.startsWith('"') && !exactAsNumber(token)) {
+      return text
+    }
+  }
+  return JSON.parse(text) as CellValue
+}
+
 /** Reads one value of a column of text or of JSON, and keeps it. */
 function textValue(
   column: Extract<SegmentColumn, { kind: 'text' | 'json' }>,
@@ -228,7 +244,7 @@ function textValue(
   const end = column.ends[row] ?? 0
   const start = row === 0 ? 0 : (column.ends[row - 1] ?? 0)
   const text = decoder.decode(column.bytes.subarray(start, end))
-  const value: CellValue = column.kind === 'json' ? (JSON.parse(text) as CellValue) : text
+  const value: CellValue = column.kind === 'json' ? parseJsonCell(text) : text
   column.cache[row] = value
   return value
 }

@@ -277,6 +277,15 @@ to the type that the statement asks for. Each engine makes that conversion for
 a number column. A text with an exponent, such as `1e3`, stays a number,
 because the server does not read that form in each type.
 
+## A JSON value with a large number stays text
+
+The grid reads an array, an object and a `jsonb` value as JSON. A JavaScript
+number keeps about 17 digits, so a number such as `9007199254740993` would
+change on the read. A value that holds such a number stays the text that the
+server sent. The grid shows its digits, and a copy and an export write the
+text. A JSON export writes that value as a string, not as an array or an
+object.
+
 ## Athena takes no bound parameters
 
 The client gives no way to bind a value, so the values of the named parameters
