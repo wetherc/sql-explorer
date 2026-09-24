@@ -277,14 +277,8 @@ impl AthenaDriver {
             .query_string(statement)
             .set_work_group(self.workgroup.clone());
 
-        if let Some(database) = &self.database {
-            start = start.query_execution_context(
-                QueryExecutionContext::builder()
-                    .database(database)
-                    .catalog(&self.catalog)
-                    .build(),
-            );
-        }
+        start = start
+            .query_execution_context(execution_context(&self.catalog, self.database.as_deref()));
         if let Some(location) = &self.output_location {
             start = start.result_configuration(
                 ResultConfiguration::builder()
@@ -993,6 +987,16 @@ pub fn statement_repeats_names(statement: &str) -> bool {
     )
 }
 
+/// Names the catalog of a statement, and its database when the connection
+/// names one. A statement without the catalog runs in `AwsDataCatalog`, so
+/// the catalog goes to the service even when no database is named.
+pub fn execution_context(catalog: &str, database: Option<&str>) -> QueryExecutionContext {
+    QueryExecutionContext::builder()
+        .catalog(catalog)
+        .set_database(database.map(str::to_string))
+        .build()
+}
+
 /// The number of rows that a statement changed, from one page of its result.
 /// The service puts an update count of 0 on each page of a statement that
 /// reads rows, so a page with columns gives no count.
@@ -1159,6 +1163,15 @@ mod tests {
             builder = builder.data(datum.build());
         }
         builder.build()
+    }
+
+    #[test]
+    fn the_catalog_goes_to_the_service_without_a_database() {
+        let context = execution_context("lake", None);
+        assert_eq!(context.catalog(), Some("lake"));
+        assert_eq!(context.database(), None);
+        let context = execution_context("lake", Some("sales"));
+        assert_eq!(context.database(), Some("sales"));
     }
 
     #[test]
