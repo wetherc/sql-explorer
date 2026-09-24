@@ -16,7 +16,7 @@ use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
 use crate::storage::{SavedConnection, TlsMode};
 use async_trait::async_trait;
-use mysql_async::consts::StatusFlags;
+use mysql_async::consts::{ColumnType, StatusFlags};
 use mysql_async::prelude::*;
 use mysql_async::{Conn, Opts, OptsBuilder, Row as MysqlRow, SslOpts, Value as MysqlValue};
 use serde_json::Value as JsonValue;
@@ -284,17 +284,16 @@ async fn read_sets<P: Protocol>(
     stopped: &mut bool,
 ) -> Result<()> {
     loop {
-        let columns: Vec<ColumnInfo> = result.columns().map_or_else(Vec::new, |columns| {
-            columns
-                .iter()
-                .map(|column| {
-                    ColumnInfo::new(
-                        column.name_str().to_string(),
-                        format!("{:?}", column.column_type()).to_lowercase(),
-                    )
-                })
-                .collect()
-        });
+        let wire = result.columns().unwrap_or_default();
+        let columns: Vec<ColumnInfo> = wire
+            .iter()
+            .map(|column| {
+                ColumnInfo::new(
+                    column.name_str().to_string(),
+                    format!("{:?}", column.column_type()).to_lowercase(),
+                )
+            })
+            .collect();
 
         if columns.is_empty() {
             // The statement changed rows instead of returning them.
@@ -322,9 +321,9 @@ async fn read_sets<P: Protocol>(
             continue;
         }
 
-        let kinds: Vec<ValueKind> = columns
+        let kinds: Vec<ValueKind> = wire
             .iter()
-            .map(|column| value_kind(&column.type_name))
+            .map(|column| value_kind(column.column_type(), column.character_set()))
             .collect();
         sink.begin_set(columns.clone())?;
         let mut count = 0usize;
@@ -768,22 +767,39 @@ pub enum ValueKind {
     /// A BIT column. The server sends its bits as bytes in both protocols,
     /// and those bytes as text would show control characters.
     Bit,
+    /// A BINARY, VARBINARY or BLOB column. Its bytes become base64 even when
+    /// they happen to be valid UTF-8, so one column does not mix text and
+    /// base64.
+    Binary,
     /// Any other column.
     Other,
 }
 
-/// Finds the kind of value from the type name of a column.
-pub fn value_kind(type_name: &str) -> ValueKind {
-    match type_name {
-        "mysql_type_date" | "mysql_type_newdate" => ValueKind::DateOnly,
-        "mysql_type_tiny"
-        | "mysql_type_short"
-        | "mysql_type_int24"
-        | "mysql_type_long"
-        | "mysql_type_longlong"
-        | "mysql_type_year" => ValueKind::Integer,
-        "mysql_type_float" | "mysql_type_double" => ValueKind::Float,
-        "mysql_type_bit" => ValueKind::Bit,
+/// The number of the `binary` character set. The server gives it to BINARY,
+/// VARBINARY and BLOB columns, and also to numbers and dates.
+const BINARY_CHARSET: u16 = 63;
+
+/// Finds the kind of value from the wire type and the character set of a
+/// column.
+pub fn value_kind(column_type: ColumnType, charset: u16) -> ValueKind {
+    use ColumnType::*;
+    match column_type {
+        MYSQL_TYPE_DATE | MYSQL_TYPE_NEWDATE => ValueKind::DateOnly,
+        MYSQL_TYPE_TINY | MYSQL_TYPE_SHORT | MYSQL_TYPE_INT24 | MYSQL_TYPE_LONG
+        | MYSQL_TYPE_LONGLONG | MYSQL_TYPE_YEAR => ValueKind::Integer,
+        MYSQL_TYPE_FLOAT | MYSQL_TYPE_DOUBLE => ValueKind::Float,
+        MYSQL_TYPE_BIT => ValueKind::Bit,
+        MYSQL_TYPE_STRING
+        | MYSQL_TYPE_VAR_STRING
+        | MYSQL_TYPE_VARCHAR
+        | MYSQL_TYPE_BLOB
+        | MYSQL_TYPE_TINY_BLOB
+        | MYSQL_TYPE_MEDIUM_BLOB
+        | MYSQL_TYPE_LONG_BLOB
+            if charset == BINARY_CHARSET =>
+        {
+            ValueKind::Binary
+        }
         _ => ValueKind::Other,
     }
 }
@@ -813,7 +829,7 @@ fn number_text_to_json(text: &str, kind: ValueKind) -> Option<JsonValue> {
             .or_else(|_| text.parse::<u64>().map(JsonValue::from))
             .ok(),
         ValueKind::Float => text.parse::<f64>().ok().map(f64_to_json),
-        ValueKind::DateOnly | ValueKind::Bit | ValueKind::Other => None,
+        ValueKind::DateOnly | ValueKind::Bit | ValueKind::Binary | ValueKind::Other => None,
     }
 }
 
@@ -834,8 +850,9 @@ pub fn value_to_json(value: &MysqlValue, kind: ValueKind) -> JsonValue {
                 .iter()
                 .fold(0u64, |value, byte| (value << 8) | u64::from(*byte)),
         ),
-        // The server sends text, decimals and binary data as bytes. Text
-        // that is not valid UTF-8 is binary, so it becomes base64.
+        MysqlValue::Bytes(bytes) if kind == ValueKind::Binary => bytes_to_json(bytes),
+        // The server sends text and decimals as bytes. Text that is not
+        // valid UTF-8 becomes base64.
         MysqlValue::Bytes(bytes) => match std::str::from_utf8(bytes) {
             Ok(text) => {
                 number_text_to_json(text, kind).unwrap_or_else(|| JsonValue::String(text.into()))
@@ -920,7 +937,10 @@ mod tests {
     #[test]
     fn a_bit_column_gives_a_whole_number() {
         use serde_json::json;
-        assert_eq!(value_kind("mysql_type_bit"), ValueKind::Bit);
+        assert_eq!(
+            value_kind(ColumnType::MYSQL_TYPE_BIT, BINARY_CHARSET),
+            ValueKind::Bit
+        );
         let bit = |bytes: &[u8]| value_to_json(&MysqlValue::Bytes(bytes.to_vec()), ValueKind::Bit);
         assert_eq!(bit(&[1]), json!(1));
         assert_eq!(bit(&[0x41]), json!(65));
@@ -1272,23 +1292,70 @@ mod tests {
 
     #[test]
     fn the_type_of_a_column_gives_the_kind_of_value() {
-        assert_eq!(value_kind("mysql_type_date"), ValueKind::DateOnly);
-        assert_eq!(value_kind("mysql_type_newdate"), ValueKind::DateOnly);
-        assert_eq!(value_kind("mysql_type_datetime"), ValueKind::Other);
-        assert_eq!(value_kind("mysql_type_timestamp"), ValueKind::Other);
-        for name in [
-            "mysql_type_tiny",
-            "mysql_type_short",
-            "mysql_type_int24",
-            "mysql_type_long",
-            "mysql_type_longlong",
-            "mysql_type_year",
+        use ColumnType::*;
+        let text = 255;
+        assert_eq!(
+            value_kind(MYSQL_TYPE_DATE, BINARY_CHARSET),
+            ValueKind::DateOnly
+        );
+        assert_eq!(
+            value_kind(MYSQL_TYPE_NEWDATE, BINARY_CHARSET),
+            ValueKind::DateOnly
+        );
+        assert_eq!(
+            value_kind(MYSQL_TYPE_DATETIME, BINARY_CHARSET),
+            ValueKind::Other
+        );
+        assert_eq!(
+            value_kind(MYSQL_TYPE_TIMESTAMP, BINARY_CHARSET),
+            ValueKind::Other
+        );
+        for kind in [
+            MYSQL_TYPE_TINY,
+            MYSQL_TYPE_SHORT,
+            MYSQL_TYPE_INT24,
+            MYSQL_TYPE_LONG,
+            MYSQL_TYPE_LONGLONG,
+            MYSQL_TYPE_YEAR,
         ] {
-            assert_eq!(value_kind(name), ValueKind::Integer);
+            assert_eq!(value_kind(kind, BINARY_CHARSET), ValueKind::Integer);
         }
-        assert_eq!(value_kind("mysql_type_float"), ValueKind::Float);
-        assert_eq!(value_kind("mysql_type_double"), ValueKind::Float);
-        assert_eq!(value_kind("mysql_type_newdecimal"), ValueKind::Other);
+        assert_eq!(
+            value_kind(MYSQL_TYPE_FLOAT, BINARY_CHARSET),
+            ValueKind::Float
+        );
+        assert_eq!(
+            value_kind(MYSQL_TYPE_DOUBLE, BINARY_CHARSET),
+            ValueKind::Float
+        );
+        assert_eq!(
+            value_kind(MYSQL_TYPE_NEWDECIMAL, BINARY_CHARSET),
+            ValueKind::Other
+        );
+        for kind in [
+            MYSQL_TYPE_STRING,
+            MYSQL_TYPE_VAR_STRING,
+            MYSQL_TYPE_VARCHAR,
+            MYSQL_TYPE_BLOB,
+            MYSQL_TYPE_TINY_BLOB,
+            MYSQL_TYPE_MEDIUM_BLOB,
+            MYSQL_TYPE_LONG_BLOB,
+        ] {
+            assert_eq!(value_kind(kind, BINARY_CHARSET), ValueKind::Binary);
+            assert_eq!(value_kind(kind, text), ValueKind::Other);
+        }
+    }
+
+    #[test]
+    fn a_binary_column_gives_base64_for_every_value() {
+        assert_eq!(
+            value_to_json(&MysqlValue::Bytes(b"AB".to_vec()), ValueKind::Binary),
+            serde_json::json!("QUI=")
+        );
+        assert_eq!(
+            value_to_json(&MysqlValue::Bytes(vec![0xFF]), ValueKind::Binary),
+            value_to_json(&MysqlValue::Bytes(vec![0xFF]), ValueKind::Other)
+        );
     }
 
     #[test]
