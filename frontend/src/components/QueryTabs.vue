@@ -221,8 +221,6 @@ function renameActiveTab(): void {
   }
 }
 
-defineExpose({ renameActiveTab })
-
 /** The tab that waits on an answer, while its changes are not saved. */
 const pendingClose = ref<QueryTab | null>(null)
 
@@ -245,6 +243,19 @@ function confirmClose(): void {
     tabs.close(tab.id)
   }
 }
+
+/**
+ * Closes the tab that stands open, with the same question as the close
+ * button. The key of the command and the palette use it.
+ */
+function closeActiveTab(): void {
+  const tab = tabs.tabs.find((item) => item.id === tabs.activeTabId)
+  if (tab) {
+    askClose(tab)
+  }
+}
+
+defineExpose({ renameActiveTab, closeActiveTab })
 </script>
 
 <style scoped>

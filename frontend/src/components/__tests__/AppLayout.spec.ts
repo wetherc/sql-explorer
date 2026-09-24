@@ -798,6 +798,21 @@ describe('AppLayout keys', () => {
     wrapper.unmount()
   })
 
+  it('asks before the key closes a tab whose changes are not saved', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const tabs = useTabsStore()
+    const tab = tabs.add({ query: 'SELECT 1' })
+    tabs.setQuery(tab.id, 'SELECT 2')
+    await settle()
+
+    press('KeyW')
+    await settle()
+    expect(tabs.tabs).toHaveLength(1)
+    expect(document.body.textContent).toContain('Close this tab?')
+    wrapper.unmount()
+  })
+
   it('moves between the four panels', async () => {
     const wrapper = mountWithPlugins(AppLayout)
     await settle()

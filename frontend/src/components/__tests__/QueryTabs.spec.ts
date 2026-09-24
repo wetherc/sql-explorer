@@ -314,6 +314,23 @@ describe('QueryTabs asking before it loses work', () => {
     expect(tabs.tabs).toHaveLength(1)
   })
 
+  it('asks the same question when the command closes the open tab', async () => {
+    const wrapper = mountWithPlugins(QueryTabs)
+    const tabs = useTabsStore()
+    const exposed = wrapper.vm as unknown as { closeActiveTab: () => void }
+    // No open tab gives nothing to close.
+    exposed.closeActiveTab()
+    const tab = tabs.add({ query: 'SELECT 1' })
+    tabs.setQuery(tab.id, 'SELECT 2')
+    await settle()
+
+    exposed.closeActiveTab()
+    await settle()
+
+    expect(tabs.tabs).toHaveLength(1)
+    expect(document.body.textContent).toContain('Close this tab?')
+  })
+
   it('asks the same question when the Delete key closes a changed tab', async () => {
     const wrapper = mountWithPlugins(QueryTabs)
     const tabs = useTabsStore()

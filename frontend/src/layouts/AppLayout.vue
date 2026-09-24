@@ -456,12 +456,6 @@ function hasActiveTab(): boolean {
   return tabs.activeTabId !== null
 }
 
-function closeActiveTab(): void {
-  if (tabs.activeTabId) {
-    tabs.close(tabs.activeTabId)
-  }
-}
-
 /**
  * Every command of the application. The key handler below reads this list,
  * and so does the palette, so a new command needs one record here.
@@ -545,7 +539,7 @@ const commands: Command[] = [
     group: 'Tabs',
     key: 'mod+w',
     enabled: hasActiveTab,
-    run: closeActiveTab,
+    run: () => queryTabs.value?.closeActiveTab(),
   },
   {
     id: 'view.connections',
