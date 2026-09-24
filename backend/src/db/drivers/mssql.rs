@@ -18,7 +18,7 @@ use crate::db::{
     SchemaSnapshot, SnapshotColumn, Table, TableFact, TableKind,
 };
 use crate::error::{Error, Result};
-use crate::sql::{split_batches, split_statements, Dialect};
+use crate::sql::{only_reads, split_batches, split_statements, Dialect};
 use crate::storage::{MssqlAuth, SavedConnection, TlsMode};
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
@@ -144,13 +144,17 @@ const EXPIRED_TOKEN_MESSAGE: &str = "The access token has expired. Paste a new o
                                      Azure CLI method, which reads a fresh token on each \
                                      connection.";
 
-/// The words that report a statement which the row limit ended. The server
-/// stops the whole batch, so a statement that answers with more than one
-/// result set gives back no set after the one that reached the limit.
+/// The words that report a statement which the row limit ended.
 const ENDED_AT_THE_LIMIT_MESSAGE: &str =
-    "The read reached the row limit, so the statement was ended on the server. A statement that \
-     answers with more than one result set gives back no set after this one. Raise the row limit \
-     in the settings to read further.";
+    "The read reached the row limit, so the statement was ended on the server. Raise the row \
+     limit in the settings to read further.";
+
+/// The statement that tells whether an attention packet keeps the work of
+/// the session. The packet rolls back the statement that it ends. When the
+/// session is inside a transaction and `XACT_ABORT` is on (bit 16384 of
+/// `@@OPTIONS`), the packet also rolls back the whole transaction.
+const ATTENTION_KEEPS_WORK: &str =
+    "SELECT CASE WHEN @@TRANCOUNT = 0 OR @@OPTIONS & 16384 = 0 THEN 1 ELSE 0 END";
 
 /// True when the token names a moment that is more than the allowance in the
 /// past. A token that cannot be read is not refused here.
@@ -305,9 +309,9 @@ impl MssqlDriver {
     /// the session waits for the acknowledgement of the attention packet
     /// before it starts.
     ///
-    /// The packet ends the whole batch, so a batch that holds more than one
-    /// statement arrives with `may_end_early` false and keeps the walk. No
-    /// statement of such a batch then loses its result set.
+    /// The packet ends the whole batch and rolls back the statement that it
+    /// ends, so a batch that [`Self::may_end_early`] refuses arrives with
+    /// `may_end_early` false and keeps the walk.
     ///
     /// Returns true when the sink stopped the run.
     async fn stream_sets(
@@ -402,6 +406,26 @@ impl MssqlDriver {
             sink.message(Message::info(ENDED_AT_THE_LIMIT_MESSAGE.to_string()));
         }
         Ok(stopped)
+    }
+
+    /// True when an attention packet at the row limit loses no work. The
+    /// batch must hold one statement that only reads, and the probe
+    /// [`ATTENTION_KEEPS_WORK`] must accept the state of the session.
+    ///
+    /// The packet ends the whole batch, so a batch of several statements
+    /// would lose the statements after the one that reached the limit. The
+    /// packet also rolls back the statement it ends, so an
+    /// `INSERT ... OUTPUT` would write no row. A probe that fails gives
+    /// false.
+    async fn may_end_early(&mut self, statements: &[String]) -> bool {
+        if statements.len() != 1 || !only_reads(&statements[0], Dialect::MsSql) {
+            return false;
+        }
+        let row = match self.client.simple_query(ATTENTION_KEEPS_WORK).await {
+            Ok(stream) => stream.into_row().await,
+            Err(error) => Err(error),
+        };
+        matches!(row, Ok(Some(row)) if row.get::<i32, _>(0) == Some(1))
     }
 
     /// Runs one statement of the session that carries no rows back, such as
@@ -645,15 +669,14 @@ impl DatabaseDriver for MssqlDriver {
         }
 
         'batches: for batch in batches {
-            // The attention packet of the row limit ends a whole batch, so a
-            // batch that holds more than one statement keeps the walk. No
-            // statement of such a batch then loses its result set.
             let statements = split_statements(&batch.text, Dialect::MsSql);
-            let may_end_early = statements.len() <= 1;
             // A batch whose statements all change data goes through the path
             // that counts the changed rows. Every other batch can answer with
             // rows, so it goes through the path that keeps them.
             let keeps_rows = statements.iter().any(|statement| returns_rows(statement));
+            // A statement that only reads leaves the state of the session as
+            // it found it, so one probe serves every run of the batch.
+            let may_end_early = keeps_rows && self.may_end_early(&statements).await;
 
             for _ in 0..batch.runs {
                 let bound = bind_params(params)?;
@@ -723,6 +746,8 @@ impl DatabaseDriver for MssqlDriver {
         self.run_switch(&format!("SET {switch} ON")).await?;
         // The plan sets are filtered after the run, so the rows buffer here.
         let mut sink = BufferSink::new(options.max_rows);
+        // The server does not run a statement under the estimated plan, so
+        // an attention packet there rolls back no work.
         let may_end_early = kind == PlanKind::Estimated;
         let outcome = self
             .stream_sets(
@@ -1717,8 +1742,9 @@ mod tests {
             .unwrap();
 
         // The two statements of the first batch travel together, so the
-        // variable of the first holds for the second.
-        assert_eq!(server.await.unwrap(), 2);
+        // variable of the first holds for the second. The second batch reads
+        // alone, so the probe of the row limit goes before it.
+        assert_eq!(server.await.unwrap(), 3);
         assert_eq!(sink.into_response(summary).results.len(), 2);
     }
 
@@ -1736,7 +1762,149 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(server.await.unwrap(), 3);
+        // One probe serves the three runs of the batch.
+        assert_eq!(server.await.unwrap(), 4);
+    }
+
+    /// An `ERROR` token with the given text and a `DONE` token with the
+    /// error flag after it.
+    fn error_answer(text: &str) -> Vec<u8> {
+        let utf16: Vec<u8> = text
+            .encode_utf16()
+            .flat_map(|unit| unit.to_le_bytes())
+            .collect();
+        let mut body = Vec::new();
+        body.extend_from_slice(&50000u32.to_le_bytes());
+        body.push(1);
+        body.push(16);
+        body.extend_from_slice(&((utf16.len() / 2) as u16).to_le_bytes());
+        body.extend_from_slice(&utf16);
+        body.push(0);
+        body.push(0);
+        body.extend_from_slice(&1u32.to_le_bytes());
+        let mut token = vec![0xAA];
+        token.extend_from_slice(&(body.len() as u16).to_le_bytes());
+        token.extend_from_slice(&body);
+        token.extend_from_slice(&done_token(2, 0));
+        token
+    }
+
+    /// How the fake server answers the probe of the row limit.
+    enum Probe {
+        Absent,
+        Answer(i32),
+        Fault,
+    }
+
+    /// Answers the probe as told, then answers the statement with five rows.
+    /// With `attention`, the server keeps the statement running until the
+    /// attention packet arrives. Without it, the whole answer arrives at
+    /// once, and a test that sends the packet leaves it unread.
+    async fn serve_probe_then_rows(listener: TcpListener, probe: Probe, attention: bool) {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        accept_login(&mut socket).await;
+
+        match probe {
+            Probe::Absent => {}
+            Probe::Answer(value) => {
+                assert_eq!(read_message(&mut socket).await, PACKET_SQL_BATCH);
+                let mut answer = int_metadata();
+                answer.extend_from_slice(&int_row(value));
+                answer.extend_from_slice(&done_token(0, 1));
+                write_packet(&mut socket, END_OF_MESSAGE, &answer).await;
+            }
+            Probe::Fault => {
+                assert_eq!(read_message(&mut socket).await, PACKET_SQL_BATCH);
+                write_packet(&mut socket, END_OF_MESSAGE, &error_answer("no")).await;
+            }
+        }
+
+        let kind = read_message(&mut socket).await;
+        assert!(kind == PACKET_RPC || kind == PACKET_SQL_BATCH);
+        let mut answer = int_metadata();
+        for value in 0..5 {
+            answer.extend_from_slice(&int_row(value));
+        }
+        if attention {
+            write_packet(&mut socket, 0, &answer).await;
+            assert_eq!(read_message(&mut socket).await, PACKET_ATTENTION);
+            write_packet(&mut socket, END_OF_MESSAGE, &done_token(DONE_ATTENTION, 0)).await;
+        } else {
+            answer.extend_from_slice(&done_token(0, 5));
+            write_packet(&mut socket, END_OF_MESSAGE, &answer).await;
+        }
+    }
+
+    /// Runs the query against a fake server that answers the probe as told,
+    /// and gives back the response.
+    async fn run_with_probe(query: &str, probe: Probe, attention: bool) -> QueryResponse {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_probe_then_rows(listener, probe, attention));
+        let tcp = TcpStream::connect(address).await.unwrap();
+        let client = Client::connect(test_config(), tcp.compat_write())
+            .await
+            .unwrap();
+        let mut driver = MssqlDriver { client };
+
+        let options = ExecOptions {
+            max_rows: 2,
+            timeout_secs: 30,
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        let summary = driver
+            .execute_stream(query, None, &options, &mut sink)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        sink.into_response(summary)
+    }
+
+    fn ended_at_the_limit(response: &QueryResponse) -> bool {
+        response
+            .messages
+            .iter()
+            .any(|message| message.text == ENDED_AT_THE_LIMIT_MESSAGE)
+    }
+
+    #[tokio::test]
+    async fn a_read_outside_a_transaction_ends_at_the_row_limit() {
+        let response = run_with_probe("SELECT a FROM b", Probe::Answer(1), true).await;
+
+        assert_eq!(response.results[0].rows.len(), 2);
+        assert!(response.results[0].truncated);
+        assert!(ended_at_the_limit(&response));
+    }
+
+    #[tokio::test]
+    async fn a_read_that_would_roll_back_the_transaction_walks_to_its_end() {
+        let response = run_with_probe("SELECT a FROM b", Probe::Answer(0), false).await;
+
+        assert_eq!(response.results[0].rows.len(), 2);
+        assert!(response.results[0].truncated);
+        assert!(!ended_at_the_limit(&response));
+    }
+
+    #[tokio::test]
+    async fn a_probe_that_fails_keeps_the_walk() {
+        let response = run_with_probe("SELECT a FROM b", Probe::Fault, false).await;
+
+        assert_eq!(response.results[0].rows.len(), 2);
+        assert!(!ended_at_the_limit(&response));
+    }
+
+    #[tokio::test]
+    async fn a_write_that_returns_rows_needs_no_probe_and_walks_to_its_end() {
+        let response = run_with_probe(
+            "SELECT a INTO c FROM b; SELECT a FROM c",
+            Probe::Absent,
+            false,
+        )
+        .await;
+        assert!(!ended_at_the_limit(&response));
+
+        let response = run_with_probe("SELECT a INTO c FROM b", Probe::Absent, false).await;
+        assert!(!ended_at_the_limit(&response));
     }
 
     #[tokio::test]

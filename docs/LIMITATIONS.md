@@ -294,8 +294,8 @@ file, brings the text of the disk back.
 
 ## MySQL walks the rest of a result that passes the row limit
 
-The MS SQL Server driver sends an attention packet when the read reaches
-the row limit, so the server ends the statement and the walk covers the
+The MS SQL Server driver sends an attention packet when a reading
+statement reaches the row limit, so the server ends the statement and the walk covers the
 rows in flight alone. MySQL offers no such packet. Its stop runs `KILL
 QUERY` from a second connection, which ends the statement with a fault of
 the server instead of a clean end and leaves the session of the pool unfit
@@ -324,14 +324,19 @@ runs to its end, and the walk drops the rows past the limit. The check of
 the text cannot see a function of the server that writes, so a `SELECT` of
 such a function outside a block can still lose its writes at the limit.
 
-## The row limit ends a whole batch on MS SQL Server
+## MS SQL Server walks past the row limit for most batches
 
-The attention packet ends the whole batch, not one result set of it. A batch
-that holds more than one statement therefore keeps the walk, so no statement
-of it loses its result set. A batch of one statement that answers with more
-than one result set, such as a call of a procedure, gives back no set after
-the one that reached the limit. The messages of the run say so. A higher row
-limit in the settings brings the later sets back.
+The attention packet ends the whole batch, not one result set of it. It
+also rolls back the statement that it ends. When the session is inside a
+transaction and `XACT_ABORT` is on, it rolls back the whole transaction.
+The driver therefore sends the packet only for a batch of one statement
+that only reads. A probe statement before the batch reads `@@TRANCOUNT` and
+`@@OPTIONS`, and the driver sends no packet when the transaction would roll
+back. Every other batch, such as a call of a procedure, an
+`INSERT ... OUTPUT` or a batch of several statements, runs to its end, and
+the walk drops the rows past the limit. The time of that walk counts
+against the time budget of the run. The probe costs one extra round trip
+for each run of a batch of one reading statement.
 
 ## A batch that both changes rows and reads rows reports no count
 
