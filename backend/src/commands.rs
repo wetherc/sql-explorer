@@ -234,6 +234,9 @@ pub async fn disconnect<R: Runtime>(
     state: tauri::State<'_, AppState>,
 ) -> Result<()> {
     if state.remove(&connection_id).await {
+        // A statement that still runs would pass its limit later and open a
+        // session of a connection that is closed.
+        stop_requests(state.take_requests_of(&connection_id).await).await;
         announce(&app, &connection_id, ConnectionHealth::Disconnected, None);
         log::info!("The connection '{connection_id}' is closed.");
     }
@@ -552,6 +555,34 @@ async fn stopped_by_the_user(token: &CancellationToken, grace: std::time::Durati
     }
 }
 
+/// Takes the driver of a session for one request, and then gives the
+/// request the handle that stops its statement.
+///
+/// Another request of the same session can keep the driver, for example a
+/// statement of a second tab on the one session of an SQLite database in
+/// memory. A Stop during the wait ends the wait alone. The handle comes only
+/// with the driver, because before that it stops the statement of the other
+/// request.
+async fn driver_for_request<'s>(
+    state: &AppState,
+    request_id: &str,
+    session: &'s Session,
+    token: &CancellationToken,
+) -> Result<tokio::sync::MutexGuard<'s, Box<dyn DatabaseDriver>>> {
+    let guard = tokio::select! {
+        guard = session.driver.lock() => guard,
+        () = token.cancelled() => return Err(Error::Cancelled),
+    };
+    if token.is_cancelled()
+        || !state
+            .arm_request(request_id, session.cancel_handle.clone())
+            .await
+    {
+        return Err(Error::Cancelled);
+    }
+    Ok(guard)
+}
+
 /// Runs one exchange with a server under the two limits that apply to it: the
 /// Stop button of the user, and the time limit of the connection.
 ///
@@ -680,6 +711,9 @@ pub async fn execute_query<R: Runtime>(
         options,
     } = request;
     let started = std::time::Instant::now();
+    // The record goes in first, so a Stop while the session opens still
+    // reaches the run.
+    let token = state.start_request(&request_id, &connection_id).await;
     let prepared = async {
         let (open, session, key) =
             session_for(&app, &state, &connection_id, tab_id.as_deref()).await?;
@@ -691,26 +725,26 @@ pub async fn execute_query<R: Runtime>(
     let (open, session, key, options, query, bound) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => {
+            state.end_request(&request_id).await;
             // The window waits for the end frame of every run, so a run that
             // fails before it starts sends one too.
             let _ = ChunkSink::new(on_chunk, 0).fail(started.elapsed().as_millis() as u64);
             return Err(error);
         }
     };
-    let token = state
-        .start_request(&request_id, session.cancel_handle.clone())
-        .await;
 
     let mut sink = ChunkSink::new(on_chunk, options.max_rows);
-    let outcome = {
-        let mut guard = session.driver.lock().await;
-        run_bounded(
-            guard.execute_stream(&query, bound.as_ref(), &options, &mut sink),
-            &token,
-            options.timeout_secs,
-            stop_grace(&session),
-        )
-        .await
+    let outcome = match driver_for_request(&state, &request_id, &session, &token).await {
+        Ok(mut guard) => {
+            run_bounded(
+                guard.execute_stream(&query, bound.as_ref(), &options, &mut sink),
+                &token,
+                options.timeout_secs,
+                stop_grace(&session),
+            )
+            .await
+        }
+        Err(error) => Bounded::Answered(Err(error)),
     };
 
     state.end_request(&request_id).await;
@@ -760,24 +794,36 @@ pub async fn explain_query<R: Runtime>(
         query_params,
         options,
     } = request;
-    let (open, session, key) = session_for(&app, &state, &connection_id, tab_id.as_deref()).await?;
-    let options = options.unwrap_or_else(|| open.descriptor.exec_options());
-    // A plan needs the values of the parameters, because the plan of a
-    // statement depends on the values it holds.
-    let (query, bound) = prepare_parameters(&query, open.dialect, query_params.as_ref())?;
-    let token = state
-        .start_request(&request_id, session.cancel_handle.clone())
-        .await;
+    let token = state.start_request(&request_id, &connection_id).await;
+    let prepared = async {
+        let (open, session, key) =
+            session_for(&app, &state, &connection_id, tab_id.as_deref()).await?;
+        let options = options.unwrap_or_else(|| open.descriptor.exec_options());
+        // A plan needs the values of the parameters, because the plan of a
+        // statement depends on the values it holds.
+        let (query, bound) = prepare_parameters(&query, open.dialect, query_params.as_ref())?;
+        Ok::<_, Error>((open, session, key, options, query, bound))
+    }
+    .await;
+    let (open, session, key, options, query, bound) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            state.end_request(&request_id).await;
+            return Err(error);
+        }
+    };
 
-    let outcome = {
-        let mut guard = session.driver.lock().await;
-        run_bounded(
-            guard.explain(&query, bound.as_ref(), kind, &options),
-            &token,
-            options.timeout_secs,
-            stop_grace(&session),
-        )
-        .await
+    let outcome = match driver_for_request(&state, &request_id, &session, &token).await {
+        Ok(mut guard) => {
+            run_bounded(
+                guard.explain(&query, bound.as_ref(), kind, &options),
+                &token,
+                options.timeout_secs,
+                stop_grace(&session),
+            )
+            .await
+        }
+        Err(error) => Bounded::Answered(Err(error)),
     };
 
     state.end_request(&request_id).await;
@@ -819,9 +865,33 @@ async fn finish_run<R: Runtime, T>(
             // at once, so the user is not left with a tab that cannot run
             // anything. The other sessions of the connection stay as they
             // are, because the server itself is healthy.
-            reopen_after_stop(app, state, connection_id, open, session_key, &error).await;
+            if still_in_use(state, connection_id, open, session_key, session).await {
+                reopen_after_stop(app, state, connection_id, open, session_key, &error).await;
+            }
             Err(error)
         }
+    }
+}
+
+/// True when the connection is still open and the tab still holds the
+/// session. A disconnect or a closed tab during a long stop leaves nothing to
+/// open again.
+async fn still_in_use(
+    state: &AppState,
+    connection_id: &str,
+    open: &OpenConnection,
+    session_key: &str,
+    session: &Arc<Session>,
+) -> bool {
+    let Ok(current) = state.connection(connection_id).await else {
+        return false;
+    };
+    if !Arc::ptr_eq(&current.sessions, &open.sessions) {
+        return false;
+    }
+    match open.sessions.get(session_key).await {
+        Some(held) => Arc::ptr_eq(&held, session),
+        None => false,
     }
 }
 
@@ -885,13 +955,9 @@ async fn reopen_after_stop<R: Runtime>(
 /// it, so the stop reaches the correct session. The identifier of the
 /// connection stays in the call for older callers, but the lookup does not
 /// need it.
-#[tauri::command]
-pub async fn cancel_query(
-    #[allow(unused_variables)] connection_id: String,
-    request_id: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<()> {
-    if let Some(request) = state.take_request(&request_id).await {
+/// Asks the server to stop each statement, and stops waiting for it.
+async fn stop_requests(requests: Vec<crate::state::RunningRequest>) {
+    for request in requests {
         // The handle does not need the lock of the driver, so it works
         // while the statement runs.
         if let Some(handle) = request.cancel_handle {
@@ -901,6 +967,15 @@ pub async fn cancel_query(
         }
         request.token.cancel();
     }
+}
+
+#[tauri::command]
+pub async fn cancel_query(
+    #[allow(unused_variables)] connection_id: String,
+    request_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<()> {
+    stop_requests(state.take_request(&request_id).await.into_iter().collect()).await;
     Ok(())
 }
 
@@ -1900,37 +1975,47 @@ pub async fn export_query<R: Runtime>(
         return Ok(None);
     };
 
-    let (open, session, key) = session_for(&app, &state, &connection_id, tab_id.as_deref()).await?;
-    if !crate::sql::only_reads(&query, open.dialect) {
-        return Err(Error::Unsupported(
-            "An export to a file runs the statement again, so it accepts a statement that only reads."
-                .to_string(),
-        ));
+    let token = state.start_request(&request_id, &connection_id).await;
+    let prepared = async {
+        let (open, session, key) =
+            session_for(&app, &state, &connection_id, tab_id.as_deref()).await?;
+        if !crate::sql::only_reads(&query, open.dialect) {
+            return Err(Error::Unsupported(
+                "An export to a file runs the statement again, so it accepts a statement that only reads."
+                    .to_string(),
+            ));
+        }
+        let options = ExecOptions {
+            max_rows,
+            timeout_secs: open.descriptor.exec_options().timeout_secs,
+            one_statement: true,
+        };
+        let (query, bound) = prepare_parameters(&query, open.dialect, query_params.as_ref())?;
+        // The sink writes to a temporary path. An error, a stop or a time
+        // limit leaves the run before `finish`, and the drop of the sink then
+        // removes the part that was written.
+        let sink = FileSink::create(&path, format)?;
+        Ok::<_, Error>((open, session, key, options, query, bound, sink))
     }
-
-    let options = ExecOptions {
-        max_rows,
-        timeout_secs: open.descriptor.exec_options().timeout_secs,
-        one_statement: true,
+    .await;
+    let (open, session, key, options, query, bound, mut sink) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            state.end_request(&request_id).await;
+            return Err(error);
+        }
     };
-    let (query, bound) = prepare_parameters(&query, open.dialect, query_params.as_ref())?;
-    let token = state
-        .start_request(&request_id, session.cancel_handle.clone())
-        .await;
-
-    // The sink writes to a temporary path. An error, a stop or a time limit
-    // leaves the run before `finish`, and the drop of the sink then removes
-    // the part that was written.
-    let mut sink = FileSink::create(&path, format)?;
-    let outcome = {
-        let mut guard = session.driver.lock().await;
-        run_bounded(
-            guard.execute_stream(&query, bound.as_ref(), &options, &mut sink),
-            &token,
-            options.timeout_secs,
-            stop_grace(&session),
-        )
-        .await
+    let outcome = match driver_for_request(&state, &request_id, &session, &token).await {
+        Ok(mut guard) => {
+            run_bounded(
+                guard.execute_stream(&query, bound.as_ref(), &options, &mut sink),
+                &token,
+                options.timeout_secs,
+                stop_grace(&session),
+            )
+            .await
+        }
+        Err(error) => Bounded::Answered(Err(error)),
     };
     state.end_request(&request_id).await;
     finish_run(&app, &state, &connection_id, &open, &key, &session, outcome).await?;
@@ -3675,6 +3760,131 @@ mod tests {
     }
 
     const SHORT: std::time::Duration = std::time::Duration::from_millis(20);
+
+    #[tokio::test]
+    async fn a_request_with_the_driver_gets_the_handle_of_its_session() {
+        let state = state();
+        let (driver, calls) = catalog_driver(Some(false));
+        let session = Session::new(driver);
+        let token = state.start_request("r1", "s1").await;
+
+        let guard = driver_for_request(&state, "r1", &session, &token).await;
+
+        assert!(guard.is_ok());
+        let request = state.take_request("r1").await.unwrap();
+        request.cancel_handle.unwrap().cancel().await.unwrap();
+        assert_eq!(stops(&calls), 1);
+    }
+
+    #[tokio::test]
+    async fn a_stop_during_the_wait_for_the_driver_leaves_the_other_statement() {
+        let state = state();
+        let (driver, calls) = catalog_driver(Some(false));
+        let session = Session::new(driver);
+        let _other = session.driver.lock().await;
+        let token = state.start_request("r1", "s1").await;
+
+        let waiting = driver_for_request(&state, "r1", &session, &token);
+        let stop = async {
+            tokio::time::sleep(SHORT).await;
+            let request = state.take_request("r1").await.unwrap();
+            assert!(request.cancel_handle.is_none());
+            request.token.cancel();
+        };
+        let (outcome, ()) = tokio::join!(waiting, stop);
+
+        assert!(matches!(outcome, Err(Error::Cancelled)));
+        assert_eq!(stops(&calls), 0);
+    }
+
+    #[tokio::test]
+    async fn a_request_that_a_stop_took_before_the_driver_came_does_not_run() {
+        let state = state();
+        let (driver, _calls) = catalog_driver(None);
+        let session = Session::new(driver);
+        let token = state.start_request("r1", "s1").await;
+        state.take_request("r1").await.unwrap();
+
+        let outcome = driver_for_request(&state, "r1", &session, &token).await;
+        assert!(matches!(outcome, Err(Error::Cancelled)));
+
+        let token = state.start_request("r2", "s1").await;
+        token.cancel();
+        let outcome = driver_for_request(&state, "r2", &session, &token).await;
+        assert!(matches!(outcome, Err(Error::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn a_stop_opens_no_session_for_a_tab_that_closed() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (app, state) = state_with_sqlite(descriptor).await;
+        let open = state.connection("s1").await.unwrap();
+        let (driver, _calls) = catalog_driver(None);
+        let session = open.sessions.insert("t1", Session::new(driver)).await;
+        open.sessions.release("t1").await;
+
+        let outcome: Bounded<()> = Bounded::Stopped(Error::Cancelled);
+        let result = finish_run(app.handle(), &state, "s1", &open, "t1", &session, outcome).await;
+
+        assert!(result.is_err());
+        assert!(open.sessions.get("t1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_stop_opens_no_session_for_a_connection_that_closed() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (app, state) = state_with_sqlite(descriptor).await;
+        let open = state.connection("s1").await.unwrap();
+        let (driver, _calls) = catalog_driver(None);
+        let session = open.sessions.insert("t1", Session::new(driver)).await;
+        state.remove("s1").await;
+
+        let outcome: Bounded<()> = Bounded::Stopped(Error::Cancelled);
+        let result = finish_run(app.handle(), &state, "s1", &open, "t1", &session, outcome).await;
+
+        assert!(result.is_err());
+        assert!(state.connection("s1").await.is_err());
+        let held = open.sessions.get("t1").await.unwrap();
+        assert!(Arc::ptr_eq(&held, &session));
+    }
+
+    #[tokio::test]
+    async fn a_stop_opens_no_session_in_a_connection_that_opened_again() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (app, state) = state_with_sqlite(descriptor.clone()).await;
+        let open = state.connection("s1").await.unwrap();
+        let (driver, _calls) = catalog_driver(None);
+        let session = open.sessions.insert("t1", Session::new(driver)).await;
+        let driver = open_driver(&descriptor).await.unwrap();
+        state
+            .insert("s1", OpenConnection::new(descriptor, driver))
+            .await;
+
+        let outcome: Bounded<()> = Bounded::Stopped(Error::Cancelled);
+        let result = finish_run(app.handle(), &state, "s1", &open, "t1", &session, outcome).await;
+
+        assert!(result.is_err());
+        let current = state.connection("s1").await.unwrap();
+        assert!(current.sessions.get("t1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_stop_of_a_connection_stops_each_of_its_statements() {
+        let state = state();
+        let (driver, calls) = catalog_driver(Some(true));
+        let session = Session::new(driver);
+        let armed = state.start_request("r1", "c1").await;
+        state.arm_request("r1", session.cancel_handle.clone()).await;
+        let waiting = state.start_request("r2", "c1").await;
+        let other = state.start_request("r3", "c2").await;
+
+        stop_requests(state.take_requests_of("c1").await).await;
+
+        assert!(armed.is_cancelled());
+        assert!(waiting.is_cancelled());
+        assert!(!other.is_cancelled());
+        assert_eq!(stops(&calls), 1);
+    }
 
     #[tokio::test]
     async fn a_catalog_read_that_answers_in_time_gives_its_answer() {

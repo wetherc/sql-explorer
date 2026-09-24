@@ -127,6 +127,8 @@ pub struct ConnectionInfo {
 
 /// One statement that runs, with the means to stop it.
 pub struct RunningRequest {
+    /// The connection that runs the statement.
+    pub connection_id: String,
     /// Ends the wait for the statement.
     pub token: CancellationToken,
     /// Asks the server to stop the statement, on the session that runs it.
@@ -327,22 +329,40 @@ impl AppState {
             .is_some()
     }
 
-    /// Registers a statement that runs, together with the handle that stops
-    /// it on its own session, and returns its token.
-    pub async fn start_request(
-        &self,
-        request_id: &str,
-        cancel_handle: Option<Arc<dyn CancelHandle>>,
-    ) -> CancellationToken {
+    /// Registers a statement of a connection that runs, and returns its
+    /// token.
+    ///
+    /// The record gets no handle of a stop yet. A request that still waits
+    /// for the driver of its session must not have one, because the handle
+    /// stops the statement that keeps the driver. `arm_request` adds the
+    /// handle once the request has the driver.
+    pub async fn start_request(&self, request_id: &str, connection_id: &str) -> CancellationToken {
         let token = CancellationToken::new();
         self.running.lock().await.insert(
             request_id.to_string(),
             RunningRequest {
+                connection_id: connection_id.to_string(),
                 token: token.clone(),
-                cancel_handle,
+                cancel_handle: None,
             },
         );
         token
+    }
+
+    /// Gives the handle of its session to a request that now has the driver.
+    /// Returns false when a stop already took the record of the request.
+    pub async fn arm_request(
+        &self,
+        request_id: &str,
+        cancel_handle: Option<Arc<dyn CancelHandle>>,
+    ) -> bool {
+        match self.running.lock().await.get_mut(request_id) {
+            Some(request) => {
+                request.cancel_handle = cancel_handle;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Removes the record of a statement that ended.
@@ -354,6 +374,17 @@ impl AppState {
     /// stop it. Returns `None` when the identifier belongs to no statement.
     pub async fn take_request(&self, request_id: &str) -> Option<RunningRequest> {
         self.running.lock().await.remove(request_id)
+    }
+
+    /// Takes the records of every statement that runs on one connection.
+    pub async fn take_requests_of(&self, connection_id: &str) -> Vec<RunningRequest> {
+        let mut running = self.running.lock().await;
+        let ids: Vec<String> = running
+            .iter()
+            .filter(|(_, request)| request.connection_id == connection_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.iter().filter_map(|id| running.remove(id)).collect()
     }
 }
 
@@ -574,18 +605,19 @@ mod tests {
     #[tokio::test]
     async fn a_statement_can_be_registered_and_taken() {
         let state = state();
-        let token = state.start_request("r1", None).await;
+        let token = state.start_request("r1", "c1").await;
         assert!(!token.is_cancelled());
 
         let request = state.take_request("r1").await.expect("the statement runs");
         assert!(request.cancel_handle.is_none());
+        assert_eq!(request.connection_id, "c1");
         request.token.cancel();
         assert!(token.is_cancelled());
         assert!(state.take_request("r1").await.is_none());
     }
 
     #[tokio::test]
-    async fn a_statement_keeps_the_handle_of_its_session() {
+    async fn a_request_gets_its_handle_when_it_has_the_driver() {
         struct NoopCancel;
         #[async_trait]
         impl crate::db::drivers::CancelHandle for NoopCancel {
@@ -595,15 +627,36 @@ mod tests {
         }
 
         let state = state();
-        state.start_request("r1", Some(Arc::new(NoopCancel))).await;
+        state.start_request("r1", "c1").await;
+        assert!(state.arm_request("r1", Some(Arc::new(NoopCancel))).await);
         let request = state.take_request("r1").await.expect("the statement runs");
         assert!(request.cancel_handle.is_some());
+        assert!(!state.arm_request("r1", None).await);
+    }
+
+    #[tokio::test]
+    async fn the_statements_of_one_connection_are_taken_together() {
+        let state = state();
+        state.start_request("r1", "c1").await;
+        state.start_request("r2", "c2").await;
+        state.start_request("r3", "c1").await;
+
+        let mut taken: Vec<String> = state
+            .take_requests_of("c1")
+            .await
+            .into_iter()
+            .map(|request| request.connection_id)
+            .collect();
+        taken.sort();
+        assert_eq!(taken, ["c1", "c1"]);
+        assert!(state.take_request("r2").await.is_some());
+        assert!(state.take_requests_of("c1").await.is_empty());
     }
 
     #[tokio::test]
     async fn a_statement_that_ended_leaves_no_record() {
         let state = state();
-        state.start_request("r2", None).await;
+        state.start_request("r2", "c1").await;
         state.end_request("r2").await;
         assert!(state.take_request("r2").await.is_none());
     }
