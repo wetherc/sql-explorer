@@ -832,12 +832,21 @@ impl PostgresDriver {
     /// exchange, so a cancel would drop the statements that follow. The
     /// driver holds one message while it walks, so the memory cost does not
     /// grow with the size of the answer.
+    ///
+    /// A run that sets `one_statement` prepares the text first. The server
+    /// refuses to prepare a text of more than one statement, so the run then
+    /// stops before the simple protocol runs any part of it. The prepared
+    /// statement closes at once, and the rows keep the text form of the
+    /// simple protocol.
     async fn stream_simple(
         &mut self,
         query: &str,
         options: &ExecOptions,
         sink: &mut dyn RowSink,
     ) -> Result<Option<u64>> {
+        if options.one_statement {
+            self.client.prepare(query).await?;
+        }
         let alone =
             split_statements(query, Dialect::Postgres).len() <= 1 && self.may_cancel(query).await;
         let stop = self.stop.clone();
@@ -1912,6 +1921,95 @@ mod tests {
         assert_eq!(response.results[0].rows.len(), 1);
         assert!(response.results[0].truncated);
 
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_run_of_one_statement_prepares_the_text_before_it_runs_it() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            read_until_sync(&mut server).await;
+            let mut answer = message(b'1', &[]);
+            answer.extend_from_slice(&message(b't', &0i16.to_be_bytes()));
+            answer.extend_from_slice(&typed_row_description(&[("id", 25)]));
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
+
+            // The client closes the prepared statement at once.
+            read_until_sync(&mut server).await;
+            let mut closed = message(b'3', &[]);
+            closed.extend_from_slice(&ready_for_query());
+            server.write_all(&closed).await.unwrap();
+
+            answer_probe(&mut server, true).await;
+            assert_eq!(read_query(&mut server).await, "SELECT id FROM t");
+            let mut answer = row_description(&["id"]);
+            answer.extend_from_slice(&data_row(&[Some("1")]));
+            answer.extend_from_slice(&command_complete("SELECT 1"));
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
+        });
+
+        let mut driver = driver_on(client_end).await;
+        let options = ExecOptions {
+            max_rows: 100,
+            timeout_secs: 30,
+            one_statement: true,
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        driver
+            .stream_simple("SELECT id FROM t", &options, &mut sink)
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        // The rows keep the text form of the simple protocol.
+        assert_eq!(
+            response.results[0].rows[0][0],
+            JsonValue::String("1".into())
+        );
+
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_run_of_one_statement_refuses_a_text_that_the_server_cannot_prepare() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            read_until_sync(&mut server).await;
+            let mut answer = error_response(
+                "42601",
+                "cannot insert multiple commands into a prepared statement",
+            );
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
+
+            // The client sends nothing more, so the read finds the end of
+            // the pipe.
+            let mut rest = Vec::new();
+            server.read_to_end(&mut rest).await.unwrap();
+            assert!(!rest.contains(&b'Q'));
+        });
+
+        let mut driver = driver_on(client_end).await;
+        let options = ExecOptions {
+            max_rows: 100,
+            timeout_secs: 30,
+            one_statement: true,
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        let error = driver
+            .stream_simple("SELECT 1; DELETE FROM t", &options, &mut sink)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::Postgres(ref error) if error.code() == Some(&SqlState::SYNTAX_ERROR)
+        ));
+        drop(driver);
         task.await.unwrap();
     }
 
