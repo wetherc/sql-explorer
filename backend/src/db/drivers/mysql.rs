@@ -29,6 +29,8 @@ pub struct MysqlDriver {
     /// uses it to stop a statement that runs.
     connection_id: u32,
     opts: Opts,
+    /// The connect time limit of the record, which the stop also obeys.
+    connect_limit: Duration,
 }
 
 /// Builds the connection options from a saved connection.
@@ -190,6 +192,7 @@ impl MysqlDriver {
             conn: Some(conn),
             connection_id,
             opts,
+            connect_limit: limit,
         }))
     }
 
@@ -706,31 +709,39 @@ impl DatabaseDriver for MysqlDriver {
         Some(Arc::new(MysqlCancel {
             opts: self.opts.clone(),
             connection_id: self.connection_id,
+            limit: self.connect_limit,
         }))
     }
 }
 
 /// Opens a second connection and asks the server to stop the statement of
-/// the first session.
+/// the first session. The login and the `KILL QUERY` together obey the
+/// connect time limit, so on a lost network a stop gives up after that
+/// limit and not after the connect timeout of the operating system, which
+/// is about 75 s.
 struct MysqlCancel {
     opts: Opts,
     connection_id: u32,
+    limit: Duration,
 }
 
 #[async_trait]
 impl CancelHandle for MysqlCancel {
     async fn cancel(&self) -> Result<()> {
-        let mut conn = Conn::new(self.opts.clone()).await?;
-        let outcome = conn
-            .query_drop(format!("KILL QUERY {}", self.connection_id))
-            .await;
-        let _ = conn.disconnect().await;
-        outcome?;
-        Ok(())
+        let kill = async {
+            let mut conn = Conn::new(self.opts.clone()).await?;
+            let outcome = conn
+                .query_drop(format!("KILL QUERY {}", self.connection_id))
+                .await;
+            let _ = conn.disconnect().await;
+            outcome.map_err(Error::from)
+        };
+        tokio::time::timeout(self.limit, kill)
+            .await
+            .map_err(|_| Error::Timeout(self.limit.as_secs()))?
     }
 }
 
-/// Converts one row into an array of JSON values.
 /// The keyword that asks MySQL or MariaDB for a plan. `EXPLAIN ANALYZE` runs
 /// the statement, and it needs MySQL 8.0.18 or MariaDB 10.1 or a later
 /// version.
@@ -997,6 +1008,32 @@ pub fn format_time(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_stop_gives_up_at_the_connect_limit() {
+        // The server takes the socket and never sends its greeting.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+            drop(socket);
+        });
+        let cancel = MysqlCancel {
+            opts: Opts::from(
+                OptsBuilder::default()
+                    .ip_or_hostname("127.0.0.1")
+                    .tcp_port(port),
+            ),
+            connection_id: 7,
+            limit: Duration::from_millis(200),
+        };
+        let started = std::time::Instant::now();
+        let error = cancel.cancel().await.unwrap_err();
+        assert_eq!(error.kind(), crate::error::ErrorKind::Timeout);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        server.abort();
+    }
 
     #[test]
     fn a_bit_column_gives_a_whole_number() {
