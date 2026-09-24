@@ -115,6 +115,13 @@ export interface ConnectionInfo {
   dialect: Dialect
 }
 
+/**
+ * What the read-only switch does on one engine. `session` makes the server
+ * refuse a write, `intent` asks for a readable replica, and `none` hides the
+ * switch.
+ */
+export type ReadOnlyKind = 'session' | 'intent' | 'none'
+
 export interface EngineInfo {
   dbType: DbType
   label: string
@@ -128,6 +135,7 @@ export interface EngineInfo {
   usesAws: boolean
   supportsSchemas: boolean
   supportsIntegratedSecurity: boolean
+  readOnly: ReadOnlyKind
 }
 
 export interface ColumnInfo {

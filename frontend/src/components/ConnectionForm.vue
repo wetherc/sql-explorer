@@ -280,7 +280,14 @@
                 data-test="max-sessions-field"
               />
 
-              <v-switch v-model="draft.options.readOnly" label="Open a read-only session" />
+              <v-switch
+                v-if="readOnlySwitch"
+                v-model="draft.options.readOnly"
+                :label="readOnlySwitch.label"
+                :hint="readOnlySwitch.hint"
+                persistent-hint
+                data-test="read-only-switch"
+              />
 
               <v-text-field
                 v-model="draft.options.applicationName"
@@ -458,6 +465,27 @@ const passwordHint = computed(() =>
 
 const awsTokenHint = computed(() => {
   return 'Not required for static IAM keys.'
+})
+
+/** The label and the hint of the read-only switch, or null to hide it. */
+const readOnlySwitch = computed(() => {
+  switch (engine.value?.readOnly) {
+    case 'session':
+      return {
+        label: 'Open a read-only session',
+        hint:
+          draft.value.dbType === DbType.Sqlite
+            ? 'The file opens read-only.'
+            : 'The server refuses writes. A SET statement in the session can turn this off.',
+      }
+    case 'intent':
+      return {
+        label: 'Ask for a read-only replica',
+        hint: 'The login goes to a readable secondary of an availability group. A primary or a standalone server still accepts writes.',
+      }
+    default:
+      return null
+  }
 })
 
 const problems = computed(() => validateConnection(withSecrets()))

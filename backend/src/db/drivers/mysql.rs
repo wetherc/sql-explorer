@@ -34,7 +34,8 @@ pub struct MysqlDriver {
 /// Builds the connection options from a saved connection.
 pub fn build_opts(connection: &SavedConnection) -> Result<Opts> {
     if let Some(url) = connection.options.connection_url.as_deref() {
-        return Ok(Opts::from_url(url.trim())?);
+        let builder = OptsBuilder::from_opts(Opts::from_url(url.trim())?);
+        return Ok(Opts::from(read_only_setup(builder, connection)));
     }
 
     let mut builder = OptsBuilder::default()
@@ -55,7 +56,22 @@ pub fn build_opts(connection: &SavedConnection) -> Result<Opts> {
     }
     builder = builder.ssl_opts(ssl_opts(connection));
 
-    Ok(Opts::from(builder))
+    Ok(Opts::from(read_only_setup(builder, connection)))
+}
+
+/// The statement that makes every later transaction of the session read-only.
+const READ_ONLY_SESSION: &str = "SET SESSION TRANSACTION READ ONLY";
+
+/// Adds the read-only statement to the setup of a read-only connection. The
+/// driver runs the setup on each new login and after each reset of the
+/// session, so a reset does not give back write access.
+fn read_only_setup(builder: OptsBuilder, connection: &SavedConnection) -> OptsBuilder {
+    if !connection.options.read_only {
+        return builder;
+    }
+    let mut setup = Opts::from(builder.clone()).setup().to_vec();
+    setup.push(READ_ONLY_SESSION.to_string());
+    builder.setup(setup)
 }
 
 /// Selects the transport settings. `mysql_async` has no setting that tries
@@ -818,6 +834,17 @@ mod tests {
         assert_eq!(opts.ip_or_hostname(), "other.example.com");
         assert_eq!(opts.tcp_port(), 3399);
         assert_eq!(opts.db_name(), Some("other"));
+    }
+
+    #[test]
+    fn a_read_only_connection_sets_the_session_read_only() {
+        let mut input = connection();
+        assert!(build_opts(&input).unwrap().setup().is_empty());
+        input.options.read_only = true;
+        let expected = ["SET SESSION TRANSACTION READ ONLY".to_string()];
+        assert_eq!(build_opts(&input).unwrap().setup(), expected);
+        input.options.connection_url = Some("mysql://user@other.example.com/other".into());
+        assert_eq!(build_opts(&input).unwrap().setup(), expected);
     }
 
     #[test]

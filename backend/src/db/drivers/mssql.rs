@@ -77,7 +77,13 @@ pub async fn build_config(connection: &SavedConnection) -> Result<Config> {
         } else if let Some(path) = non_empty(connection.options.ca_cert_path.as_deref()) {
             config.trust_cert_ca(path);
         }
-        config.readonly(connection.options.read_only);
+    }
+    // The flag sets `ApplicationIntent=ReadOnly`, which sends the login to a
+    // readable secondary of an availability group. It does not stop a write
+    // on a primary or on a standalone server. A connection string can set
+    // the same intent, and a switch that is off leaves that value as it is.
+    if connection.options.read_only {
+        config.readonly(true);
     }
 
     Ok(config)
@@ -2387,6 +2393,22 @@ mod tests {
         input.database = Some(String::new());
         input.options.application_name = Some("  ".into());
         assert!(build_config(&input).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn the_read_only_switch_sets_the_intent_also_with_a_connection_string() {
+        let mut input = connection();
+        input.options.read_only = true;
+        let debug = |config: Config| format!("{config:?}");
+        assert!(debug(build_config(&input).await.unwrap()).contains("readonly: true"));
+        input.options.connection_url = Some("server=tcp:a,1433".into());
+        assert!(debug(build_config(&input).await.unwrap()).contains("readonly: true"));
+        // A switch that is off keeps the intent that the string gives.
+        input.options.read_only = false;
+        input.options.connection_url = Some("server=tcp:a,1433;ApplicationIntent=ReadOnly".into());
+        assert!(debug(build_config(&input).await.unwrap()).contains("readonly: true"));
+        input.options.connection_url = Some("server=tcp:a,1433".into());
+        assert!(debug(build_config(&input).await.unwrap()).contains("readonly: false"));
     }
 
     #[tokio::test]

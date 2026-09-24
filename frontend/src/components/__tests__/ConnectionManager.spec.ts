@@ -27,6 +27,7 @@ const engines: EngineInfo[] = [
     usesAws: false,
     supportsSchemas: true,
     supportsIntegratedSecurity: true,
+    readOnly: 'intent',
   },
 ]
 

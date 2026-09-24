@@ -31,6 +31,7 @@ const engines: EngineInfo[] = [
     usesAws: false,
     supportsSchemas: true,
     supportsIntegratedSecurity: true,
+    readOnly: 'intent',
   },
   {
     dbType: DbType.Sqlite,
@@ -45,6 +46,7 @@ const engines: EngineInfo[] = [
     usesAws: false,
     supportsSchemas: false,
     supportsIntegratedSecurity: false,
+    readOnly: 'session',
   },
   {
     dbType: DbType.Athena,
@@ -59,6 +61,7 @@ const engines: EngineInfo[] = [
     usesAws: true,
     supportsSchemas: false,
     supportsIntegratedSecurity: false,
+    readOnly: 'none',
   },
 ]
 
@@ -424,12 +427,38 @@ describe('ConnectionForm advanced options', () => {
     )
   })
 
+  it('names what the read-only switch does on each engine', async () => {
+    const switchText = async (connection: ReturnType<typeof connectionFixture>) => {
+      const wrapper = await openAdvanced(await mountForm(connection))
+      const found = wrapper.find('[data-test="read-only-switch"]')
+      return found.exists() ? found.text() : null
+    }
+    const mssql = await switchText(connectionFixture())
+    expect(mssql).toContain('Ask for a read-only replica')
+    expect(mssql).toContain('still accepts writes')
+    const sqlite = await switchText(connectionFixture({ dbType: DbType.Sqlite }))
+    expect(sqlite).toContain('Open a read-only session')
+    expect(sqlite).toContain('The file opens read-only.')
+    expect(await switchText(connectionFixture({ dbType: DbType.Athena }))).toBeNull()
+
+    // A server engine gives the hint of a server session.
+    const postgres = await mountForm(connectionFixture({ dbType: DbType.Postgres }))
+    useConnectionsStore().engines = [
+      ...engines,
+      { ...engines[1]!, dbType: DbType.Postgres, label: 'PostgreSQL' },
+    ]
+    const wrapper = await openAdvanced(postgres)
+    expect(wrapper.find('[data-test="read-only-switch"]').text()).toContain('A SET statement')
+  })
+
   it('keeps a read-only session and a colour', async () => {
     apiStub.saveConnection.mockResolvedValue(undefined)
     const wrapper = await openAdvanced(await mountForm())
 
-    const switches = wrapper.findAllComponents({ name: 'VSwitch' })
-    await switches[switches.length - 1]!.vm.$emit('update:modelValue', true)
+    const readOnly = wrapper
+      .findAllComponents({ name: 'VSwitch' })
+      .find((item) => item.attributes('data-test') === 'read-only-switch')
+    await readOnly!.vm.$emit('update:modelValue', true)
 
     const selects = wrapper.findAllComponents({ name: 'VSelect' })
     await selects[selects.length - 1]!.vm.$emit('update:modelValue', 'error')

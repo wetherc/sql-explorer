@@ -198,6 +198,24 @@ passes the limit is dropped in the middle of the exchange whatever the engine.
 A replacement touches one session alone: the tab that lost its session takes
 a new one at once, and the sessions of the other tabs run on.
 
+## MS SQL Server and Athena have no read-only session
+
+MS SQL Server has no setting that makes one session refuse writes. The
+read-only switch sets `ApplicationIntent=ReadOnly` on the login. An
+availability group sends such a login to a readable secondary, and that
+secondary refuses writes. A primary or a standalone server ignores the
+intent and accepts writes. The form names this in the hint of the switch.
+The only server-side stop is a login without write permissions.
+
+Athena has no read-only mode for a query, so the form hides the switch.
+The permissions of the IAM identity and of the workgroup decide what a
+statement can change.
+
+On PostgreSQL and MySQL the switch sets the default of the session. A
+statement such as `SET default_transaction_read_only = off` or
+`SET SESSION TRANSACTION READ WRITE` turns it off again, so the switch
+stops an accidental write only.
+
 ## The sessions of the tabs
 
 Each tab holds one server session, up to the limit in the options of the

@@ -108,7 +108,8 @@ commands with the keys that reach them.
 - An Athena connection can reuse the result of an earlier run up to an age that
   the user gives, which costs nothing because the engine scans no data.
 - Timeouts for the connection and for a statement, a row limit, a read-only
-  session, an application name, folders and colours.
+  session on PostgreSQL, MySQL and SQLite, a read-only replica on MS SQL
+  Server, an application name, folders and colours.
 - One server session for each tab, so the statements of two tabs run at the
   same time. The temporary tables, the `SET` options and the transactions of
   a tab stay with the session of that tab. A session limit in the options of

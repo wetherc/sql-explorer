@@ -49,10 +49,12 @@ pub struct PostgresDriver {
 /// Builds the connection configuration from a saved connection.
 pub fn build_config(connection: &SavedConnection) -> Result<PgConfig> {
     if let Some(url) = connection.options.connection_url.as_deref() {
-        return url
+        let mut config = url
             .trim()
             .parse::<PgConfig>()
-            .map_err(|error| Error::Configuration(error.to_string()));
+            .map_err(|error| Error::Configuration(error.to_string()))?;
+        add_read_only_option(&mut config, connection);
+        return Ok(config);
     }
 
     let mut config = PgConfig::new();
@@ -81,10 +83,25 @@ pub fn build_config(connection: &SavedConnection) -> Result<PgConfig> {
     config.connect_timeout(Duration::from_secs(
         connection.options.connect_timeout_secs.max(1),
     ));
-    if connection.options.read_only {
-        config.options("-c default_transaction_read_only=on");
-    }
+    add_read_only_option(&mut config, connection);
     Ok(config)
+}
+
+/// The server option that makes each transaction of the session read-only.
+const READ_ONLY_OPTION: &str = "-c default_transaction_read_only=on";
+
+/// Adds the read-only option of a read-only connection to the options that
+/// the configuration has. A connection string can give options of its own,
+/// such as a search path, and the read-only option goes after them.
+fn add_read_only_option(config: &mut PgConfig, connection: &SavedConnection) {
+    if !connection.options.read_only {
+        return;
+    }
+    let options = match config.get_options() {
+        Some(existing) if !existing.trim().is_empty() => format!("{existing} {READ_ONLY_OPTION}"),
+        _ => READ_ONLY_OPTION.to_string(),
+    };
+    config.options(options);
 }
 
 /// Maps the transport setting of the application onto the mode of the
@@ -2981,6 +2998,28 @@ mod tests {
         let config = build_config(&input).unwrap();
         assert_eq!(config.get_ports(), &[5555]);
         assert_eq!(config.get_dbname(), Some("other"));
+    }
+
+    #[test]
+    fn a_connection_string_keeps_the_read_only_option() {
+        let mut input = connection();
+        input.options.read_only = true;
+        input.options.connection_url = Some("postgresql://u@h/d".into());
+        assert_eq!(
+            build_config(&input).unwrap().get_options(),
+            Some("-c default_transaction_read_only=on")
+        );
+        input.options.connection_url =
+            Some("postgresql://u@h/d?options=-c%20search_path%3Dx".into());
+        assert_eq!(
+            build_config(&input).unwrap().get_options(),
+            Some("-c search_path=x -c default_transaction_read_only=on")
+        );
+        input.options.read_only = false;
+        assert_eq!(
+            build_config(&input).unwrap().get_options(),
+            Some("-c search_path=x")
+        );
     }
 
     #[test]

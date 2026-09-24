@@ -27,6 +27,19 @@ A connection encrypts its traffic in one of four ways:
 - No encryption. The credentials and the results then cross the network in
   clear text.
 
+## Read-only sessions
+
+The read-only switch in the advanced part of the form does a different thing
+on each engine:
+
+- PostgreSQL and MySQL: the server refuses a write in the session. A `SET`
+  statement in the session can turn this off again.
+- SQLite: the file opens read-only.
+- MS SQL Server: the login asks for a readable secondary of an availability
+  group. A primary or a standalone server still accepts writes. Give the user
+  a login without write permissions to stop writes on such a server.
+- AWS Athena: the form does not show the switch.
+
 ## MS SQL Server
 
 A named instance finds its port through the SQL Browser service. Give the name
