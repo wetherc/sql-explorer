@@ -14,7 +14,7 @@ use crate::db::{
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
-use crate::storage::SavedConnection;
+use crate::storage::{SavedConnection, TlsMode};
 use async_trait::async_trait;
 use mysql_async::consts::StatusFlags;
 use mysql_async::prelude::*;
@@ -102,11 +102,12 @@ fn read_only_setup(builder: OptsBuilder, connection: &SavedConnection) -> OptsBu
     builder.setup(setup)
 }
 
-/// Selects the transport settings. `mysql_async` has no setting that tries
-/// TLS and then continues without it, so a preference is served without
-/// TLS and a demand is served with it.
+/// Selects the transport settings. A preference asks for TLS and accepts
+/// any certificate, as a demand without verification does. `mysql_async`
+/// has no setting that tries TLS and then continues without it, so
+/// `clear_text_opts` gives the options of the second login.
 pub fn ssl_opts(connection: &SavedConnection) -> Option<SslOpts> {
-    if !connection.options.tls_mode.is_required() {
+    if connection.options.tls_mode == TlsMode::Disable {
         return None;
     }
     let mut opts = SslOpts::default();
@@ -126,14 +127,56 @@ pub fn ssl_opts(connection: &SavedConnection) -> Option<SslOpts> {
     Some(opts)
 }
 
+/// Gives the options of a login in clear text when the record prefers TLS
+/// and the TLS settings come from the record. A connection string that
+/// names its own TLS settings gets no second login.
+pub fn clear_text_opts(connection: &SavedConnection) -> Result<Option<Opts>> {
+    if connection.options.tls_mode != TlsMode::Prefer {
+        return Ok(None);
+    }
+    if let Some(url) = connection.options.connection_url.as_deref() {
+        if Opts::from_url(url.trim())?.ssl_opts().is_some() {
+            return Ok(None);
+        }
+    }
+    let builder = OptsBuilder::from_opts(build_opts(connection)?).ssl_opts(None::<SslOpts>);
+    Ok(Some(Opts::from(builder)))
+}
+
+/// True when the login failed because the server offers no TLS.
+fn server_refuses_tls(error: &mysql_async::Error) -> bool {
+    matches!(
+        error,
+        mysql_async::Error::Driver(mysql_async::DriverError::NoClientSslFlagFromServer)
+    )
+}
+
+/// Opens a login and gives the options that it used. When the record
+/// prefers TLS and the server offers none, the driver logs in again in
+/// clear text.
+async fn open_login(connection: &SavedConnection) -> Result<(Conn, Opts)> {
+    let opts = build_opts(connection)?;
+    match Conn::new(opts.clone()).await {
+        Ok(conn) => Ok((conn, opts)),
+        Err(error) if server_refuses_tls(&error) => match clear_text_opts(connection)? {
+            Some(plain) => {
+                let conn = Conn::new(plain.clone())
+                    .await
+                    .map_err(describe_connect_error)?;
+                Ok((conn, plain))
+            }
+            None => Err(describe_connect_error(error)),
+        },
+        Err(error) => Err(describe_connect_error(error)),
+    }
+}
+
 impl MysqlDriver {
     pub async fn connect(connection: &SavedConnection) -> Result<Box<dyn DatabaseDriver>> {
-        let opts = build_opts(connection)?;
         let limit = Duration::from_secs(connection.options.connect_timeout_secs.max(1));
-        let conn = tokio::time::timeout(limit, Conn::new(opts.clone()))
+        let (conn, opts) = tokio::time::timeout(limit, open_login(connection))
             .await
-            .map_err(|_| Error::Timeout(limit.as_secs()))?
-            .map_err(describe_connect_error)?;
+            .map_err(|_| Error::Timeout(limit.as_secs()))??;
         let connection_id = conn.id();
         Ok(Box::new(MysqlDriver {
             conn: Some(conn),
@@ -897,7 +940,7 @@ mod tests {
         let view = create_query_text(None, "v", TableKind::View);
         assert_eq!(view.sql, "SHOW CREATE VIEW `v`;");
     }
-    use crate::storage::{ConnectionOptions, DbType, TlsMode};
+    use crate::storage::{ConnectionOptions, DbType};
 
     fn connection() -> SavedConnection {
         SavedConnection {
@@ -1016,7 +1059,9 @@ mod tests {
         assert!(ssl_opts(&input).is_none());
 
         input.options.tls_mode = TlsMode::Prefer;
-        assert!(ssl_opts(&input).is_none());
+        let opts = ssl_opts(&input).unwrap();
+        assert!(opts.accept_invalid_certs());
+        assert!(opts.skip_domain_validation());
 
         input.options.tls_mode = TlsMode::Require;
         let opts = ssl_opts(&input).unwrap();
@@ -1031,6 +1076,46 @@ mod tests {
 
         input.options.ca_cert_path = Some("  ".into());
         assert!(ssl_opts(&input).unwrap().root_certs().is_empty());
+    }
+
+    #[test]
+    fn a_preference_for_tls_gives_a_second_login_in_clear_text() {
+        let mut input = connection();
+        input.options.read_only = true;
+        for mode in [TlsMode::Disable, TlsMode::Require, TlsMode::VerifyFull] {
+            input.options.tls_mode = mode;
+            assert!(clear_text_opts(&input).unwrap().is_none());
+        }
+
+        input.options.tls_mode = TlsMode::Prefer;
+        let plain = clear_text_opts(&input).unwrap().unwrap();
+        assert!(plain.ssl_opts().is_none());
+        assert_eq!(plain.ip_or_hostname(), "mysql.example.com");
+        assert_eq!(plain.setup(), ["SET SESSION TRANSACTION READ ONLY"]);
+
+        // A string without TLS settings takes the preference of the record.
+        input.options.connection_url = Some("mysql://other.example.com/other".into());
+        let plain = clear_text_opts(&input).unwrap().unwrap();
+        assert!(plain.ssl_opts().is_none());
+        assert_eq!(plain.ip_or_hostname(), "other.example.com");
+
+        // A string with its own TLS settings keeps them.
+        input.options.connection_url =
+            Some("mysql://other.example.com/other?require_ssl=true".into());
+        assert!(clear_text_opts(&input).unwrap().is_none());
+
+        input.options.connection_url = Some("not-a-url".into());
+        assert!(clear_text_opts(&input).is_err());
+    }
+
+    #[test]
+    fn only_a_server_without_tls_starts_the_second_login() {
+        assert!(server_refuses_tls(&mysql_async::Error::Driver(
+            mysql_async::DriverError::NoClientSslFlagFromServer
+        )));
+        assert!(!server_refuses_tls(&mysql_async::Error::Driver(
+            mysql_async::DriverError::ConnectionClosed
+        )));
     }
 
     #[test]

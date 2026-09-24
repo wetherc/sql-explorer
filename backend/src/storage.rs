@@ -58,11 +58,6 @@ pub enum TlsMode {
 }
 
 impl TlsMode {
-    /// True when the connection must not continue without TLS.
-    pub fn is_required(&self) -> bool {
-        matches!(self, TlsMode::Require | TlsMode::VerifyFull)
-    }
-
     /// True when the driver checks the certificate of the server.
     pub fn verifies_certificate(&self) -> bool {
         matches!(self, TlsMode::VerifyFull)
@@ -377,16 +372,9 @@ mod tests {
 
     #[test]
     fn the_tls_mode_reports_what_it_demands() {
-        assert!(!TlsMode::Disable.is_required());
         assert!(!TlsMode::Disable.verifies_certificate());
-
-        assert!(!TlsMode::Prefer.is_required());
         assert!(!TlsMode::Prefer.verifies_certificate());
-
-        assert!(TlsMode::Require.is_required());
         assert!(!TlsMode::Require.verifies_certificate());
-
-        assert!(TlsMode::VerifyFull.is_required());
         assert!(TlsMode::VerifyFull.verifies_certificate());
 
         assert_eq!(TlsMode::default(), TlsMode::VerifyFull);
