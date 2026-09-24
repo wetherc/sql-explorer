@@ -468,9 +468,15 @@ function clone(connection: SavedConnection): SavedConnection {
 
 /** The draft with every secret that the user typed. */
 function withSecrets(): SavedConnection {
+  const options = { ...draft.value.options }
+  // The field hides for the other modes, so a path typed earlier is not
+  // saved with a mode that does not use it.
+  if (options.tlsMode !== TlsMode.VerifyFull) {
+    options.caCertPath = null
+  }
   return {
     ...draft.value,
-    options: { ...draft.value.options },
+    options,
     password: password.value,
     awsSecretAccessKey: awsSecretAccessKey.value,
     awsSessionToken: awsSessionToken.value,

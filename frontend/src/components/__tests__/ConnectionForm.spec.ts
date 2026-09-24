@@ -342,6 +342,42 @@ describe('ConnectionForm advanced options', () => {
     expect(wrapper.text()).not.toContain('Certificate authority file')
   })
 
+  it('drops the certificate authority file when the mode does not check the certificate', async () => {
+    apiStub.saveConnection.mockResolvedValue(undefined)
+    const wrapper = await openAdvanced(
+      await mountForm(
+        connectionFixture({
+          options: { ...connectionFixture().options, caCertPath: '/etc/ca.pem' },
+        }),
+      ),
+    )
+    const tlsSelect = wrapper
+      .findAllComponents({ name: 'VSelect' })
+      .find((item) => item.attributes('data-test') === 'tls-select')
+    await tlsSelect?.vm.$emit('update:modelValue', TlsMode.Require)
+    await wrapper.find('[data-test="save-button"]').trigger('click')
+    await settle()
+    expect(apiStub.saveConnection).toHaveBeenCalledWith(
+      expect.objectContaining({ options: expect.objectContaining({ caCertPath: null }) }),
+    )
+  })
+
+  it('keeps the certificate authority file when the mode checks the certificate', async () => {
+    apiStub.saveConnection.mockResolvedValue(undefined)
+    const wrapper = await mountForm(
+      connectionFixture({
+        options: { ...connectionFixture().options, caCertPath: '/etc/ca.pem' },
+      }),
+    )
+    await wrapper.find('[data-test="save-button"]').trigger('click')
+    await settle()
+    expect(apiStub.saveConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        options: expect.objectContaining({ caCertPath: '/etc/ca.pem' }),
+      }),
+    )
+  })
+
   it('hides the transport options for an engine that has none', async () => {
     const wrapper = await openAdvanced(
       await mountForm(connectionFixture({ dbType: DbType.Sqlite })),

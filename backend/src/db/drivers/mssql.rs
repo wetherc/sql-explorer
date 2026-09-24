@@ -70,10 +70,11 @@ pub async fn build_config(connection: &SavedConnection) -> Result<Config> {
         }
         config.authentication(auth_method(connection).await?);
         config.encryption(encryption_level(connection.options.tls_mode));
+        // `tiberius` panics when it gets both `trust_cert` and
+        // `trust_cert_ca`, so a CA file applies only to a mode that verifies.
         if !connection.options.tls_mode.verifies_certificate() {
             config.trust_cert();
-        }
-        if let Some(path) = non_empty(connection.options.ca_cert_path.as_deref()) {
+        } else if let Some(path) = non_empty(connection.options.ca_cert_path.as_deref()) {
             config.trust_cert_ca(path);
         }
         config.readonly(connection.options.read_only);
@@ -2207,6 +2208,14 @@ mod tests {
         input.options.read_only = true;
         input.database = Some(String::new());
         input.options.application_name = Some("  ".into());
+        assert!(build_config(&input).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_ca_file_is_ignored_when_the_mode_does_not_verify() {
+        let mut input = connection();
+        input.options.tls_mode = TlsMode::Require;
+        input.options.ca_cert_path = Some("/etc/ca.pem".into());
         assert!(build_config(&input).await.is_ok());
     }
 
