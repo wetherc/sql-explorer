@@ -400,8 +400,11 @@ impl AthenaDriver {
                 .await
                 .map_err(|error| describe(error, "The result could not be read"))?;
 
-            if let Some(changed) = page.update_count() {
-                let changed = changed.max(0) as u64;
+            let has_columns = page
+                .result_set()
+                .and_then(|set| set.result_set_metadata())
+                .is_some_and(|metadata| !metadata.column_info().is_empty());
+            if let Some(changed) = changed_rows(has_columns, page.update_count()) {
                 *rows_affected = Some(rows_affected.unwrap_or(0) + changed);
                 sink.message(rows_affected_message(changed));
             }
@@ -990,6 +993,15 @@ pub fn statement_repeats_names(statement: &str) -> bool {
     )
 }
 
+/// The number of rows that a statement changed, from one page of its result.
+/// The service puts an update count of 0 on each page of a statement that
+/// reads rows, so a page with columns gives no count.
+pub fn changed_rows(has_columns: bool, update_count: Option<i64>) -> Option<u64> {
+    update_count
+        .filter(|_| !has_columns)
+        .map(|count| count.max(0) as u64)
+}
+
 /// True when the row repeats the column names. Athena puts such a row at
 /// the top of the first page of a `SELECT` result.
 pub fn is_header(row: &AthenaRow, columns: &[ColumnInfo]) -> bool {
@@ -1147,6 +1159,14 @@ mod tests {
             builder = builder.data(datum.build());
         }
         builder.build()
+    }
+
+    #[test]
+    fn only_a_page_without_columns_counts_changed_rows() {
+        assert_eq!(changed_rows(false, Some(12)), Some(12));
+        assert_eq!(changed_rows(false, Some(-1)), Some(0));
+        assert_eq!(changed_rows(false, None), None);
+        assert_eq!(changed_rows(true, Some(0)), None);
     }
 
     #[test]
