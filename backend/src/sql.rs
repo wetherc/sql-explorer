@@ -490,13 +490,17 @@ pub fn split_statements(script: &str, dialect: Dialect) -> Vec<String> {
     let mut delimiter: Vec<char> = vec![';'];
     let mut index = 0usize;
     let mut at_line_start = true;
+    // True when the statement in the buffer holds more than blank space and
+    // comments. A comment above a `DELIMITER` line, as in a dump file, does
+    // not hide the command.
+    let mut code_seen = false;
 
     while index < chars.len() {
         let c = chars[index];
 
         // A `DELIMITER` command occupies a whole line and is not sent to
-        // the server.
-        if at_line_start && current.trim().is_empty() && dialect == Dialect::MySql {
+        // the server. A comment in front of it is dropped with it.
+        if at_line_start && !code_seen && dialect == Dialect::MySql {
             if let Some((new_delimiter, next_index)) = read_delimiter_command(&chars, index) {
                 delimiter = new_delimiter.chars().collect();
                 current.clear();
@@ -507,21 +511,22 @@ pub fn split_statements(script: &str, dialect: Dialect) -> Vec<String> {
         }
         at_line_start = c == '\n';
 
-        // A line comment runs to the end of the line.
-        if c == '-' && chars.get(index + 1) == Some(&'-') {
-            let end = copy_to_end_of_line(&chars, index, &mut current);
-            index = end;
-            continue;
-        }
-        if dialect.hash_comments() && c == '#' {
-            let end = copy_to_end_of_line(&chars, index, &mut current);
-            index = end;
+        // A line comment runs to the end of the line, and its line break
+        // starts the next line.
+        if c == '-' && chars.get(index + 1) == Some(&'-') || dialect.hash_comments() && c == '#' {
+            index = copy_to_end_of_line(&chars, index, &mut current);
+            at_line_start = chars[index - 1] == '\n';
             continue;
         }
         if c == '/' && chars.get(index + 1) == Some(&'*') {
+            // MySQL runs the text of `/*!` and `/*M!` comments as code.
+            code_seen |= executable_comment_body(&chars, index, dialect).is_some();
             index =
                 copy_block_comment(&chars, index, &mut current, dialect.nested_block_comments());
             continue;
+        }
+        if !c.is_whitespace() {
+            code_seen = true;
         }
 
         // Quoted regions.
@@ -564,6 +569,7 @@ pub fn split_statements(script: &str, dialect: Dialect) -> Vec<String> {
         if starts_with(&chars, index, &delimiter) {
             push_statement(&mut statements, &mut current);
             index += delimiter.len();
+            code_seen = false;
             continue;
         }
 
@@ -1287,6 +1293,40 @@ mod tests {
         assert_eq!(
             split_statements("SELECT 1;\nDELIMITER //\nSELECT 2//", Dialect::MySql),
             vec!["SELECT 1", "SELECT 2"]
+        );
+        // Text in front of the word on the same statement keeps it as text.
+        assert_eq!(
+            split_statements("SELECT 1\nDELIMITER //\nSELECT 2;", Dialect::MySql),
+            vec!["SELECT 1\nDELIMITER //\nSELECT 2"]
+        );
+    }
+
+    #[test]
+    fn a_comment_in_front_of_the_delimiter_command_does_not_hide_it() {
+        let script =
+            "-- make p\nDELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; END$$\nDELIMITER ;";
+        assert_eq!(
+            split_statements(script, Dialect::MySql),
+            vec!["CREATE PROCEDURE p() BEGIN SELECT 1; END"]
+        );
+        let script = "# one\n/* two */\n  \nDELIMITER //\nSELECT 1; SELECT 2//";
+        assert_eq!(
+            split_statements(script, Dialect::MySql),
+            vec!["SELECT 1; SELECT 2"]
+        );
+        // A comment at the end of the script is kept as a statement.
+        assert_eq!(
+            split_statements("SELECT 1; -- end", Dialect::MySql),
+            vec!["SELECT 1", "-- end"]
+        );
+        // MySQL runs the text of an executable comment, so the word after it
+        // belongs to that statement.
+        assert_eq!(
+            split_statements(
+                "/*!40101 SET x = 1 */\nDELIMITER //\nSELECT 1;",
+                Dialect::MySql
+            ),
+            vec!["/*!40101 SET x = 1 */\nDELIMITER //\nSELECT 1"]
         );
     }
 

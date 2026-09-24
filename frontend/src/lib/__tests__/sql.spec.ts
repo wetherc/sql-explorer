@@ -210,6 +210,26 @@ describe('statementBounds', () => {
     expect(statementBounds('DELIMITER $$\nSELECT 1;', Dialect.Sqlite)).toEqual([[0, 21]])
   })
 
+  it('reads a DELIMITER command that follows a comment', () => {
+    const script =
+      '-- make p\nDELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; END$$\nDELIMITER ;'
+    const bounds = statementBounds(script, Dialect.MySql)
+    expect(bounds.map(([from, to]) => script.slice(from, to))).toEqual([
+      'CREATE PROCEDURE p() BEGIN SELECT 1; END',
+    ])
+    const block = '/* two */\nDELIMITER //\nSELECT 1; SELECT 2//'
+    expect(
+      statementBounds(block, Dialect.MySql).map(([from, to]) => block.slice(from, to)),
+    ).toEqual(['SELECT 1; SELECT 2'])
+    // MySQL runs the text of an executable comment, so the word after it
+    // belongs to that statement.
+    const executable = '/*!40101 SET x = 1 */\nDELIMITER //\nSELECT 1;'
+    expect(statementBounds(executable, Dialect.MySql)).toEqual([[0, executable.length - 1]])
+    // Text in front of the word keeps it as text.
+    const text = 'SELECT 1\nDELIMITER //\nSELECT 2;'
+    expect(statementBounds(text, Dialect.MySql)).toEqual([[0, text.length - 1]])
+  })
+
   it('holds a line that carries no terminator for the DELIMITER command', () => {
     // The word alone, the word with a longer word behind it, and the word
     // without a terminator all stay text.

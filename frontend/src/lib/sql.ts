@@ -348,6 +348,10 @@ export function statementBounds(script: string, dialect?: Dialect): Array<[numbe
   let delimiter = ';'
   let start = 0
   let index = 0
+  // True when the statement from `start` holds more than blank space and
+  // comments. A comment above a DELIMITER line, as in a dump file, does not
+  // hide the command.
+  let codeSeen = false
 
   while (index < script.length) {
     const character = script[index]
@@ -355,8 +359,8 @@ export function statementBounds(script: string, dialect?: Dialect): Array<[numbe
     const atLineStart = index === 0 || script[index - 1] === '\n'
 
     // The DELIMITER command holds a whole line, and it can stand only where
-    // a statement starts.
-    if (rules.delimiterCommand && atLineStart && script.slice(start, index).trim() === '') {
+    // a statement starts. A comment in front of it is dropped with it.
+    if (rules.delimiterCommand && atLineStart && !codeSeen) {
       const command = delimiterCommandAt(script, index)
       if (command) {
         delimiter = command.delimiter
@@ -371,6 +375,7 @@ export function statementBounds(script: string, dialect?: Dialect): Array<[numbe
         bounds.push([start, index])
         start = after
         index = after
+        codeSeen = false
         continue
       }
     }
@@ -383,8 +388,13 @@ export function statementBounds(script: string, dialect?: Dialect): Array<[numbe
       continue
     }
     if (character === '/' && next === '*') {
+      // MySQL runs the text of `/*!` and `/*M!` comments as code.
+      codeSeen ||= rules.delimiterCommand && /^\/\*M?!/.test(script.slice(index, index + 4))
       index = endOfBlockComment(script, index, rules.nestedBlockComments)
       continue
+    }
+    if (script.charAt(index).trim() !== '') {
+      codeSeen = true
     }
     if (character === "'" || character === '"' || (character === '`' && rules.backtickQuotes)) {
       index = endOfQuoted(script, index, character, rules.backslashEscapes)
@@ -405,6 +415,7 @@ export function statementBounds(script: string, dialect?: Dialect): Array<[numbe
       bounds.push([start, index])
       index += delimiter.length
       start = index
+      codeSeen = false
       continue
     }
     index += 1
