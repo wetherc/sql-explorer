@@ -19,7 +19,7 @@ import type {
   SaveStatementRequest,
   HistoryEntry,
   IndexRef,
-  PartitionRef,
+  PartitionList,
   PlanKind,
   QueryResponse,
   RoutineRef,
@@ -211,7 +211,7 @@ export const api = {
     database: string,
     schemaName: string | null,
     tableName: string,
-  ): Promise<PartitionRef[]> {
+  ): Promise<PartitionList> {
     return call('list_partitions', { connectionId, database, schemaName, tableName })
   },
 

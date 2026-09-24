@@ -209,6 +209,10 @@ counts of the records and of the files and a group of the values of the keys.
 The tree shows those columns as they come, so the text of a partition of an
 Iceberg table is longer than the text of a partition of a table of Hive.
 
+The read stops at 100000 partitions. The folder of a longer list shows
+"first 100000" beside its name. To see the rest, query the `$partitions`
+relation with a `WHERE` clause in the editor.
+
 ## A plan covers one statement
 
 The keyword that asks for a plan stands in front of one statement, so the

@@ -317,6 +317,13 @@ export interface PartitionRef {
   values: string
 }
 
+/** The partitions of one relation, up to the limit of the catalog read. */
+export interface PartitionList {
+  partitions: PartitionRef[]
+  /** True when the relation holds more partitions than the list. */
+  truncated: boolean
+}
+
 /** One fact about a relation, such as the number of rows it holds. */
 export interface TableFact {
   name: string

@@ -1429,6 +1429,7 @@ mod tests {
             .list_partitions("keys.db", None, "orders")
             .await
             .unwrap()
+            .partitions
             .is_empty());
     }
 

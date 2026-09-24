@@ -710,8 +710,9 @@ export const useExplorerStore = defineStore('explorer', () => {
         )
       }
       case 'partitions': {
-        const partitions = await api.listPartitions(connectionId, database, schema, table)
-        return partitions.map((partition) => leafNode(partition.values, 'partition', node))
+        const list = await api.listPartitions(connectionId, database, schema, table)
+        node.hint = list.truncated ? `first ${list.partitions.length}` : undefined
+        return list.partitions.map((partition) => leafNode(partition.values, 'partition', node))
       }
       default: {
         const columns = await api.listColumns(connectionId, database, schema, table)

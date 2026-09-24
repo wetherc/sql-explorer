@@ -425,7 +425,10 @@ describe('explorer store', () => {
     apiStub.listConstraints.mockResolvedValue([
       { name: 'pk_orders', kind: 'primaryKey', columns: ['id'], detail: null },
     ])
-    apiStub.listPartitions.mockResolvedValue([{ values: 'day=2026-08-10' }])
+    apiStub.listPartitions.mockResolvedValue({
+      partitions: [{ values: 'day=2026-08-10' }],
+      truncated: false,
+    })
 
     const explorer = await readyStore()
     const table = node({ kind: 'table', database: 'Sales', schema: 'dbo', table: 'orders' })
@@ -448,6 +451,19 @@ describe('explorer store', () => {
     await explorer.expand(partitions)
     expect(apiStub.listPartitions).toHaveBeenCalledWith('c1', 'Sales', 'dbo', 'orders')
     expect(partitions.children?.[0]?.label).toBe('day=2026-08-10')
+    expect(partitions.hint).toBeUndefined()
+  })
+
+  it('marks a list of partitions that stopped at the limit of the read', async () => {
+    apiStub.listPartitions.mockResolvedValue({
+      partitions: [{ values: 'day=1' }, { values: 'day=2' }],
+      truncated: true,
+    })
+    const explorer = await readyStore()
+    const table = node({ kind: 'table', database: 'Sales', schema: 'dbo', table: 'orders' })
+    const partitions = folderNode('Partitions', 'partitions', table)
+    await explorer.expand(partitions)
+    expect(partitions.hint).toBe('first 2')
   })
 
   it('takes the name of a database from its label when it reads the schemas', async () => {

@@ -7,7 +7,7 @@ use crate::db::drivers::{
 };
 use crate::db::{
     self, drivers::DatabaseDriver, AppColumn, Constraint, Database, ExecOptions, IndexInfo,
-    Partition, PlanKind, QueryParams, QueryResponse, Routine, Schema, SchemaSnapshot, Table,
+    PartitionList, PlanKind, QueryParams, QueryResponse, Routine, Schema, SchemaSnapshot, Table,
     TableDetails, TableKind,
 };
 use crate::error::{Error, Result};
@@ -1102,7 +1102,7 @@ pub async fn list_partitions<R: Runtime>(
     app: AppHandle<R>,
     request: TableScope,
     state: tauri::State<'_, AppState>,
-) -> Result<Vec<Partition>> {
+) -> Result<PartitionList> {
     let read = metadata_read(&app, &state, &request.connection_id).await?;
     let mut guard = read.lock().await?;
     read.run(guard.list_partitions(

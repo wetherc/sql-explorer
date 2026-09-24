@@ -11,8 +11,8 @@ use crate::db::drivers::{
 use crate::db::sink::{BufferSink, RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, CreateQuery, Database, DriverCapabilities, ExecOptions, Partition,
-    PlanKind, QueryParams, QueryResponse, QueryStats, ResultSet, Schema, SchemaSnapshot,
-    SnapshotColumn, Table, TableKind,
+    PartitionList, PlanKind, QueryParams, QueryResponse, QueryStats, ResultSet, Schema,
+    SchemaSnapshot, SnapshotColumn, Table, TableKind,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
@@ -93,6 +93,20 @@ fn partition_of_row(columns: &[ColumnInfo], row: &[JsonValue]) -> Partition {
         .collect::<Vec<String>>()
         .join("/");
     Partition { values }
+}
+
+/// Turns the answer of the partitions relation into the list of the tree.
+/// The catalog read stops at its row limit, and the list then says that more
+/// partitions exist.
+fn partition_list(set: &ResultSet) -> PartitionList {
+    PartitionList {
+        partitions: set
+            .rows
+            .iter()
+            .map(|row| partition_of_row(&set.columns, row))
+            .collect(),
+        truncated: set.truncated,
+    }
 }
 
 /// True when the service refused the statement because the relation holds no
@@ -878,18 +892,14 @@ impl DatabaseDriver for AthenaDriver {
         database: &str,
         _schema: Option<&str>,
         table: &str,
-    ) -> Result<Vec<Partition>> {
+    ) -> Result<PartitionList> {
         match self
             .catalog_set(&partitions_statement(database, table))
             .await
         {
-            Ok(None) => Ok(Vec::new()),
-            Ok(Some(set)) => Ok(set
-                .rows
-                .iter()
-                .map(|row| partition_of_row(&set.columns, row))
-                .collect()),
-            Err(error) if names_an_unpartitioned_table(&error) => Ok(Vec::new()),
+            Ok(None) => Ok(PartitionList::default()),
+            Ok(Some(set)) => Ok(partition_list(&set)),
+            Err(error) if names_an_unpartitioned_table(&error) => Ok(PartitionList::default()),
             Err(error) => Err(error),
         }
     }
@@ -1128,6 +1138,18 @@ mod tests {
         ];
         let row = vec![JsonValue::String("2026".to_string()), JsonValue::Null];
         assert_eq!(partition_of_row(&columns, &row).values, "year=2026/month=");
+    }
+
+    #[test]
+    fn a_list_of_partitions_says_when_the_read_stopped_at_the_limit() {
+        let mut set = ResultSet::new(vec![ColumnInfo::new("day", "varchar")]);
+        set.rows
+            .push(vec![JsonValue::String("2026-08-10".to_string())]);
+        let list = partition_list(&set);
+        assert_eq!(list.partitions[0].values, "day=2026-08-10");
+        assert!(!list.truncated);
+        set.truncated = true;
+        assert!(partition_list(&set).truncated);
     }
 
     #[test]

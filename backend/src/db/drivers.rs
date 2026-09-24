@@ -10,7 +10,7 @@ pub mod sqlite;
 use crate::db::sink::{BufferSink, RowSink, RunSummary};
 use crate::db::{
     AppColumn, Constraint, ConstraintKind, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, Message, Partition, PlanKind, QueryParams, QueryResponse, Routine, RoutineKind,
+    IndexInfo, Message, PartitionList, PlanKind, QueryParams, QueryResponse, Routine, RoutineKind,
     Schema, SchemaSnapshot, SnapshotColumn, SnapshotRelation, Table, TableFact, TableKind,
 };
 use crate::error::{Error, Result};
@@ -145,8 +145,8 @@ pub trait DatabaseDriver: Send + Sync {
         _database: &str,
         _schema: Option<&str>,
         _table: &str,
-    ) -> Result<Vec<Partition>> {
-        Ok(Vec::new())
+    ) -> Result<PartitionList> {
+        Ok(PartitionList::default())
     }
 
     /// Reads the facts of one relation, such as the number of rows it holds

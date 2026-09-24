@@ -332,6 +332,15 @@ pub struct Partition {
     pub values: String,
 }
 
+/// The partitions of one relation, up to the limit of the catalog read.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PartitionList {
+    pub partitions: Vec<Partition>,
+    /// True when the relation holds more partitions than the list.
+    pub truncated: bool,
+}
+
 /// One fact about a relation, such as the number of rows it holds. The
 /// engines report different facts, so each is a name and a value.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
