@@ -2284,6 +2284,14 @@ pub fn supported_engines() -> Vec<db::EngineInfo> {
     db::supported_engines()
 }
 
+/// Reports whether a saved password stays after the application closes. It
+/// does not when the keychain of the system was not reachable at the start,
+/// and the connection form then says so.
+#[tauri::command]
+pub fn passwords_persist(state: tauri::State<'_, AppState>) -> bool {
+    state.secrets.persists()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

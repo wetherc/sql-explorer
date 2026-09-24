@@ -315,8 +315,19 @@
       </v-expansion-panels>
     </v-card-text>
 
-    <!-- The warning stands outside the part that scrolls, so a form of many
-         fields cannot push it past the edge of the card. -->
+    <!-- The warnings stand outside the part that scrolls, so a form of many
+         fields cannot push them past the edge of the card. -->
+    <v-alert
+      v-if="!connections.passwordsPersist"
+      type="info"
+      variant="tonal"
+      density="compact"
+      class="form-problems mx-4 mb-2"
+      data-test="keychain-note"
+    >
+      The keychain of the system is not reachable. A password or a key that you save here stays
+      until the application closes, and the next start asks for it again.
+    </v-alert>
     <v-alert
       v-if="problems.length > 0"
       type="warning"

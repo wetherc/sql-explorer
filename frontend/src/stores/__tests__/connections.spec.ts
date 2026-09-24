@@ -176,6 +176,15 @@ describe('connections store', () => {
     const connections = useConnectionsStore()
     await connections.loadEngines()
     expect(connections.engines).toHaveLength(1)
+    expect(connections.passwordsPersist).toBe(true)
+  })
+
+  it('reads that the passwords stay in memory alone', async () => {
+    apiStub.supportedEngines.mockResolvedValue([])
+    apiStub.passwordsPersist.mockResolvedValue(false)
+    const connections = useConnectionsStore()
+    await connections.loadEngines()
+    expect(connections.passwordsPersist).toBe(false)
   })
 
   it('reports a failure to read the engines', async () => {

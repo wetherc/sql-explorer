@@ -51,6 +51,7 @@ export function makeApiStub() {
     saveBinaryFile: vi.fn(),
     exportQuery: vi.fn(),
     supportedEngines: vi.fn(),
+    passwordsPersist: vi.fn(),
     onConnectionStatus: vi.fn(),
     onMenuCommand: vi.fn(),
     setMenuCommands: vi.fn(),

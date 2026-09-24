@@ -90,6 +90,14 @@ describe('ConnectionForm', () => {
     expect(wrapper.find('[data-test="aws-region-field"]').exists()).toBe(false)
   })
 
+  it('says when a saved password stays for this session alone', async () => {
+    const wrapper = await mountForm()
+    expect(wrapper.find('[data-test="keychain-note"]').exists()).toBe(false)
+    useConnectionsStore().passwordsPersist = false
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-test="keychain-note"]').text()).toContain('not reachable')
+  })
+
   it('shows the file field for SQLite and hides the rest', async () => {
     const wrapper = await mountForm(connectionFixture({ dbType: DbType.Sqlite }))
     expect(wrapper.find('[data-test="file-field"]').exists()).toBe(true)

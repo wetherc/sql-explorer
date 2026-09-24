@@ -382,6 +382,12 @@ export const api = {
     return invoke('supported_engines')
   },
 
+  /** False when the keychain of the system was not reachable, so a saved
+   *  password stays for this session only. */
+  passwordsPersist(): Promise<boolean> {
+    return invoke('passwords_persist')
+  },
+
   onConnectionStatus(handler: (event: ConnectionStatusEvent) => void): Promise<UnlistenFn> {
     return listen<ConnectionStatusEvent>(CONNECTION_STATUS_EVENT, (event) => handler(event.payload))
   },

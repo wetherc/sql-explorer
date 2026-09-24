@@ -124,6 +124,8 @@ export const useConnectionsStore = defineStore('connections', () => {
 
   const saved = ref<SavedConnection[]>([])
   const engines = ref<EngineInfo[]>([])
+  /** False when a saved password goes away when the application closes. */
+  const passwordsPersist = ref(true)
   const active = ref<Record<string, ConnectionInfo>>({})
   const health = ref<Record<string, ConnectionHealth>>({})
   const loading = ref(false)
@@ -176,9 +178,14 @@ export const useConnectionsStore = defineStore('connections', () => {
     return byId(id)?.name ?? 'Connection that is gone'
   }
 
+  /** Reads what the connection form needs from the backend: the engines of
+   *  the build, and whether a saved password stays after a restart. */
   async function loadEngines(): Promise<void> {
     try {
-      engines.value = await api.supportedEngines()
+      const [list, persist] = await Promise.all([api.supportedEngines(), api.passwordsPersist()])
+      engines.value = list
+      // A backend that gives no answer keeps the keychain.
+      passwordsPersist.value = persist !== false
     } catch (error) {
       ui.reportError(error)
     }
@@ -358,6 +365,7 @@ export const useConnectionsStore = defineStore('connections', () => {
   return {
     saved,
     engines,
+    passwordsPersist,
     active,
     health,
     loading,

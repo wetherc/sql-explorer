@@ -14,7 +14,9 @@ it again. Use it before you save a record that you are not sure of.
 
 A password goes into the keychain of the operating system. The settings file
 holds no password. Leave the password box empty when you edit a record, and
-the stored password stays as it is.
+the stored password stays as it is. When the keychain is not reachable, for
+example on Linux with no secret service, the form says so. A password then
+stays in memory until the application closes.
 
 The advanced part of the form accepts a connection string, for an option that
 the form does not show. The string replaces the host, the port and the

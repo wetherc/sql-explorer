@@ -84,6 +84,7 @@ fn main() {
             commands::delete_connection,
             commands::get_history,
             commands::add_history_entry,
+            commands::passwords_persist,
             commands::clear_history,
             commands::get_saved_queries,
             commands::save_query,

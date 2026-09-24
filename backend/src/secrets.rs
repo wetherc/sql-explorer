@@ -27,6 +27,10 @@ pub trait SecretStore: Send + Sync {
     fn set(&self, id: &str, password: &str) -> Result<()>;
     fn get(&self, id: &str) -> Result<Option<String>>;
     fn delete(&self, id: &str) -> Result<()>;
+    /// True when a password stays after the application closes.
+    fn persists(&self) -> bool {
+        true
+    }
 }
 
 /// The store that the operating system provides.
@@ -90,6 +94,10 @@ impl SecretStore for MemoryStore {
         }
         Ok(())
     }
+
+    fn persists(&self) -> bool {
+        false
+    }
 }
 
 /// Selects the store to use. The keychain is tried first, and the store in
@@ -138,6 +146,7 @@ mod tests {
 
         store.delete("a").unwrap();
         assert_eq!(store.get("a").unwrap(), None);
+        assert!(!store.persists());
         // A second removal is accepted.
         store.delete("a").unwrap();
     }
@@ -152,6 +161,11 @@ mod tests {
         );
         store.delete("sql-explorer-test").unwrap();
         assert_eq!(store.get("sql-explorer-test").unwrap(), None);
+    }
+
+    #[test]
+    fn the_keychain_keeps_its_passwords() {
+        assert!(KeychainStore.persists());
     }
 
     #[test]

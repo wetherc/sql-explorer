@@ -184,6 +184,9 @@ describe('api', () => {
     await api.supportedEngines()
     expect(invoke).toHaveBeenCalledWith('supported_engines')
 
+    await api.passwordsPersist()
+    expect(invoke).toHaveBeenCalledWith('passwords_persist')
+
     const entry = {
       id: 'h1',
       connectionId: 'c1',
