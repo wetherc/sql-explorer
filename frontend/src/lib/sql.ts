@@ -241,6 +241,8 @@ interface SplitRules {
   batchSeparator: boolean
   /** The word DELIMITER alone on a line changes the terminator. */
   delimiterCommand: boolean
+  /** The `BEGIN ... END` body of a trigger holds semicolons. */
+  triggerBodies: boolean
 }
 
 /**
@@ -258,6 +260,7 @@ function splitRules(dialect?: Dialect): SplitRules {
     nestedBlockComments: dialect === Dialect.MsSql || dialect === Dialect.Postgres,
     batchSeparator: dialect === Dialect.MsSql,
     delimiterCommand: dialect === Dialect.MySql,
+    triggerBodies: dialect === Dialect.Sqlite,
   }
 }
 
@@ -374,9 +377,19 @@ interface StatementSpan {
 }
 
 /**
+ * True when the text starts a SQLite trigger whose body has no `END` yet.
+ * A semicolon inside that body ends nothing, and the backend joins the same
+ * fragments before it sends the trigger.
+ */
+function insideTriggerBody(text: string): boolean {
+  return /^\s*CREATE\s+(TEMP\s+|TEMPORARY\s+)?TRIGGER\b/i.test(text) && !/\bEND\s*$/i.test(text)
+}
+
+/**
  * The walk behind `statementBounds`, which also keeps the terminator. With
  * `whole` set, a batch of MS SQL Server is one span, because the backend
- * sends a batch whole and a cut at a semicolon would run part of it.
+ * sends a batch whole and a cut at a semicolon would run part of it. A
+ * SQLite trigger is one span for the same reason.
  */
 function statementSpans(script: string, dialect?: Dialect, whole = false): StatementSpan[] {
   const rules = splitRules(dialect)
@@ -447,7 +460,11 @@ function statementSpans(script: string, dialect?: Dialect, whole = false): State
         continue
       }
     }
-    if (!(whole && rules.batchSeparator) && script.startsWith(delimiter, index)) {
+    if (
+      !(whole && rules.batchSeparator) &&
+      script.startsWith(delimiter, index) &&
+      !(whole && rules.triggerBodies && insideTriggerBody(script.slice(start, index)))
+    ) {
       bounds.push({ start, end: index, delimiter })
       index += delimiter.length
       start = index

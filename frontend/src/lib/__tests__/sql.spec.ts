@@ -137,6 +137,17 @@ describe('statementBounds', () => {
     expect(statementBounds(script)).toEqual([[0, 20]])
   })
 
+  it('runs a whole trigger of SQLite', () => {
+    const trigger = 'CREATE TEMP TRIGGER t AFTER INSERT ON a BEGIN INSERT INTO b VALUES(1); END'
+    const script = `${trigger};\nSELECT 1;`
+    expect(statementAt(script, 10, Dialect.Sqlite)).toBe(trigger)
+    expect(statementAt(script, script.length, Dialect.Sqlite)).toBe('SELECT 1')
+    // Another dialect cuts at the semicolon.
+    expect(statementAt(script, 10, Dialect.Postgres)).toBe(
+      'CREATE TEMP TRIGGER t AFTER INSERT ON a BEGIN INSERT INTO b VALUES(1)',
+    )
+  })
+
   it('runs a whole batch of MS SQL Server', () => {
     const script = 'CREATE PROCEDURE p AS SELECT 1; SELECT 2\nGO\nDECLARE @x int; SELECT @x;'
     expect(statementAt(script, 0, Dialect.MsSql)).toBe('CREATE PROCEDURE p AS SELECT 1; SELECT 2')

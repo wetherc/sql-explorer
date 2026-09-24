@@ -25,6 +25,43 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+/// True when SQLite reads the text as one or more whole statements. The
+/// engine knows the `BEGIN ... END` body of a trigger, which the splitter of
+/// the application does not know.
+fn is_complete(text: &str) -> bool {
+    match std::ffi::CString::new(text) {
+        // SAFETY: the pointer names a string that ends with a NUL and that
+        // lives until the call returns. `sqlite3_complete` only reads it.
+        Ok(text) => unsafe { rusqlite::ffi::sqlite3_complete(text.as_ptr()) != 0 },
+        // A NUL inside the text ends it for SQLite, so no join can help.
+        Err(_) => true,
+    }
+}
+
+/// Joins the fragments that the splitter cut out of one trigger. The
+/// splitter ends a statement at each semicolon, so `CREATE TRIGGER t AFTER
+/// INSERT ON a BEGIN INSERT INTO b VALUES(1); END` gives two fragments, and
+/// SQLite refuses the first with "incomplete input". A fragment that SQLite
+/// reads as incomplete takes the next fragment, until the text is whole or
+/// the script ends.
+fn join_trigger_bodies(fragments: Vec<String>) -> Vec<String> {
+    let mut statements: Vec<String> = Vec::new();
+    let mut open: Option<String> = None;
+    for fragment in fragments {
+        let text = match open.take() {
+            Some(head) => format!("{head}; {fragment}"),
+            None => fragment,
+        };
+        if is_complete(&format!("{text};")) {
+            statements.push(text);
+        } else {
+            open = Some(text);
+        }
+    }
+    statements.extend(open);
+    statements
+}
+
 pub struct SqliteDriver {
     connection: Arc<Mutex<Connection>>,
     path: String,
@@ -166,7 +203,7 @@ impl DatabaseDriver for SqliteDriver {
         let statements: Vec<String> = if params.is_some() {
             vec![query.to_string()]
         } else {
-            split_statements(query, Dialect::Sqlite)
+            join_trigger_bodies(split_statements(query, Dialect::Sqlite))
         };
         let options = *options;
         let stop = Arc::new(AtomicBool::new(false));
@@ -781,6 +818,35 @@ mod tests {
     use crate::db::Message;
 
     #[test]
+    fn the_fragments_of_a_trigger_body_are_joined() {
+        let script = "CREATE TABLE a(x); CREATE TRIGGER t AFTER INSERT ON a BEGIN \
+                      INSERT INTO b VALUES(1); DELETE FROM c; END; SELECT 1";
+        assert_eq!(
+            join_trigger_bodies(split_statements(script, Dialect::Sqlite)),
+            vec![
+                "CREATE TABLE a(x)".to_string(),
+                "CREATE TRIGGER t AFTER INSERT ON a BEGIN INSERT INTO b VALUES(1); \
+                 DELETE FROM c; END"
+                    .to_string(),
+                "SELECT 1".to_string(),
+            ]
+        );
+        // A body that never ends stays one statement, and SQLite reports it.
+        assert_eq!(
+            join_trigger_bodies(vec![
+                "CREATE TRIGGER t BEGIN SELECT 1".into(),
+                "SELECT 2".into()
+            ]),
+            vec!["CREATE TRIGGER t BEGIN SELECT 1; SELECT 2".to_string()]
+        );
+        // A NUL in the text ends the join.
+        assert_eq!(
+            join_trigger_bodies(vec!["SELECT '\0".into(), "SELECT 2".into()]),
+            vec!["SELECT '\0".to_string(), "SELECT 2".to_string()]
+        );
+    }
+
+    #[test]
     fn the_create_statement_reads_the_master_table() {
         let query = create_query_text("it's");
         assert_eq!(
@@ -1082,6 +1148,22 @@ mod tests {
             response.results[0].rows[0],
             vec![serde_json::json!(4), serde_json::json!("four")]
         );
+    }
+
+    #[tokio::test]
+    async fn a_script_creates_a_trigger_with_a_body() {
+        let mut driver = open_memory().await;
+        let response = driver
+            .execute_query(
+                "CREATE TABLE a(x); CREATE TABLE b(y); \
+                 CREATE TRIGGER t AFTER INSERT ON a BEGIN INSERT INTO b VALUES(1); END; \
+                 INSERT INTO a VALUES(5); SELECT count(*) FROM b;",
+                None,
+                &ExecOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.results[0].rows, vec![vec![serde_json::json!(1)]]);
     }
 
     #[tokio::test]
