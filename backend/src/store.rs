@@ -22,6 +22,31 @@ pub const WORKSPACE_FILE: &str = "workspace.json";
 /// The file that holds the folders and the single files the user accepted.
 pub const FOLDERS_FILE: &str = "folders.json";
 
+/// One change of the history or of the saved queries at a time.
+///
+/// Each change reads a list, changes it and writes it back. Two runs that end
+/// together call the command on two threads, and without the lock the second
+/// write drops the entry of the first.
+static QUERIES_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Reads one list of the file of the queries, changes it and writes it back,
+/// under the lock of that file.
+fn edit_queries<R: Runtime, T, F>(app: &AppHandle<R>, key: &str, change: F) -> Result<()>
+where
+    T: DeserializeOwned + serde::Serialize,
+    F: FnOnce(&mut Vec<T>),
+{
+    let _edit = QUERIES_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let store = app.store(settings_path(QUERIES_FILE))?;
+    let mut list: Vec<T> = parse_list(store.get(key));
+    change(&mut list);
+    store.set(key, serde_json::to_value(&list)?);
+    store.save()?;
+    Ok(())
+}
+
 const HISTORY_KEY: &str = "history";
 const SAVED_KEY: &str = "saved";
 const WORKSPACE_KEY: &str = "workspace";
@@ -117,19 +142,15 @@ pub fn read_history<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<HistoryEntry>>
 /// list, so the function gives no list back. A large history then stays out of
 /// the answer of each execution.
 pub fn add_history<R: Runtime>(app: &AppHandle<R>, entry: HistoryEntry) -> Result<()> {
-    let store = app.store(settings_path(QUERIES_FILE))?;
-    let mut history: Vec<HistoryEntry> = parse_list(store.get(HISTORY_KEY));
-    push_entry(&mut history, entry);
-    store.set(HISTORY_KEY, serde_json::to_value(&history)?);
-    store.save()?;
-    Ok(())
+    edit_queries(app, HISTORY_KEY, |history: &mut Vec<HistoryEntry>| {
+        push_entry(history, entry)
+    })
 }
 
 pub fn clear_history<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
-    let store = app.store(settings_path(QUERIES_FILE))?;
-    store.set(HISTORY_KEY, JsonValue::Array(Vec::new()));
-    store.save()?;
-    Ok(())
+    edit_queries(app, HISTORY_KEY, |history: &mut Vec<HistoryEntry>| {
+        history.clear()
+    })
 }
 
 pub fn read_saved_queries<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<SavedQuery>> {
@@ -145,24 +166,20 @@ pub fn write_saved_query<R: Runtime>(app: &AppHandle<R>, query: &SavedQuery) -> 
             "A saved statement needs an identifier.".to_string(),
         ));
     }
-    let store = app.store(settings_path(QUERIES_FILE))?;
-    let mut queries: Vec<SavedQuery> = parse_list(store.get(SAVED_KEY));
-    match queries.iter_mut().find(|item| item.id == query.id) {
-        Some(existing) => *existing = query.clone(),
-        None => queries.push(query.clone()),
-    }
-    store.set(SAVED_KEY, serde_json::to_value(&queries)?);
-    store.save()?;
-    Ok(())
+    edit_queries(
+        app,
+        SAVED_KEY,
+        |queries: &mut Vec<SavedQuery>| match queries.iter_mut().find(|item| item.id == query.id) {
+            Some(existing) => *existing = query.clone(),
+            None => queries.push(query.clone()),
+        },
+    )
 }
 
 pub fn delete_saved_query<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<()> {
-    let store = app.store(settings_path(QUERIES_FILE))?;
-    let mut queries: Vec<SavedQuery> = parse_list(store.get(SAVED_KEY));
-    queries.retain(|item| item.id != id);
-    store.set(SAVED_KEY, serde_json::to_value(&queries)?);
-    store.save()?;
-    Ok(())
+    edit_queries(app, SAVED_KEY, |queries: &mut Vec<SavedQuery>| {
+        queries.retain(|item| item.id != id)
+    })
 }
 
 /// Reads the folders that the user accepted in an earlier session.
@@ -286,6 +303,72 @@ mod tests {
         assert!(entries.is_empty());
         let entries: Vec<HistoryEntry> = parse_list(Some(serde_json::json!("text")));
         assert!(entries.is_empty());
+    }
+
+    fn app_with_store() -> tauri::App<tauri::test::MockRuntime> {
+        tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(tauri::generate_context!())
+            .unwrap()
+    }
+
+    fn entry(id: &str, query: &str) -> HistoryEntry {
+        HistoryEntry {
+            id: id.to_string(),
+            connection_id: "c1".to_string(),
+            connection_name: "Server".to_string(),
+            query: query.to_string(),
+            ran_at: "2026-01-01T00:00:00Z".to_string(),
+            elapsed_ms: 1,
+            row_count: 1,
+            succeeded: true,
+            error: None,
+        }
+    }
+
+    fn saved(id: &str, name: &str) -> SavedQuery {
+        SavedQuery {
+            id: id.to_string(),
+            name: name.to_string(),
+            query: "SELECT 1".to_string(),
+            connection_id: None,
+            folder: None,
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn the_history_takes_each_entry_and_clears() {
+        let app = app_with_store();
+        add_history(app.handle(), entry("1", "SELECT 1")).unwrap();
+        add_history(app.handle(), entry("2", "SELECT 2")).unwrap();
+        let ids: Vec<String> = read_history(app.handle())
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect();
+        assert_eq!(ids, ["2", "1"]);
+
+        clear_history(app.handle()).unwrap();
+        assert!(read_history(app.handle()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_saved_query_is_added_replaced_and_deleted() {
+        let app = app_with_store();
+        write_saved_query(app.handle(), &saved("a", "Beta")).unwrap();
+        write_saved_query(app.handle(), &saved("b", "Alpha")).unwrap();
+        write_saved_query(app.handle(), &saved("a", "Gamma")).unwrap();
+        let names: Vec<String> = read_saved_queries(app.handle())
+            .unwrap()
+            .into_iter()
+            .map(|query| query.name)
+            .collect();
+        assert_eq!(names, ["Alpha", "Gamma"]);
+
+        delete_saved_query(app.handle(), "b").unwrap();
+        assert_eq!(read_saved_queries(app.handle()).unwrap().len(), 1);
+        assert!(write_saved_query(app.handle(), &saved(" ", "Blank")).is_err());
     }
 
     #[test]
