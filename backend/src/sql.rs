@@ -133,62 +133,107 @@ impl Dialect {
 /// over the comments and the opening brackets that can stand in front of the
 /// word, so `/* note */ (SELECT 1)` gives `select`. The dialect decides
 /// whether a number sign also starts a comment, because MySQL accepts that
-/// form and a script that opens with such a line still names a keyword.
+/// form and a script that opens with such a line still names a keyword. The
+/// dialect also decides whether a block comment can hold another one, so the
+/// reader ends the comment where the server ends it. MySQL runs the text of
+/// a `/*!` comment, so the reader reads that text as a statement.
 pub fn leading_keyword(statement: &str, dialect: Dialect) -> String {
-    let bytes: Vec<char> = statement.chars().collect();
+    let chars: Vec<char> = statement.chars().collect();
+    let mut skipped = String::new();
     let mut index = 0;
-    while index < bytes.len() {
-        let current = bytes[index];
+    while index < chars.len() {
+        let current = chars[index];
         if current.is_whitespace() || current == '(' {
             index += 1;
             continue;
         }
-        if dialect.hash_comments() && current == '#' {
-            while index < bytes.len() && bytes[index] != '\n' {
-                index += 1;
-            }
+        if (dialect.hash_comments() && current == '#')
+            || (current == '-' && chars.get(index + 1) == Some(&'-'))
+        {
+            index = copy_to_end_of_line(&chars, index, &mut skipped);
             continue;
         }
-        if current == '-' && bytes.get(index + 1) == Some(&'-') {
-            while index < bytes.len() && bytes[index] != '\n' {
-                index += 1;
-            }
+        if let Some(next) = executable_comment_body(&chars, index, dialect) {
+            index = next;
             continue;
         }
-        if current == '/' && bytes.get(index + 1) == Some(&'*') {
-            index += 2;
-            while index < bytes.len()
-                && !(bytes[index] == '*' && bytes.get(index + 1) == Some(&'/'))
-            {
-                index += 1;
-            }
-            index += 2;
+        if current == '/' && chars.get(index + 1) == Some(&'*') {
+            index =
+                copy_block_comment(&chars, index, &mut skipped, dialect.nested_block_comments());
             continue;
         }
         break;
     }
     let mut word = String::new();
-    while index < bytes.len() && (bytes[index].is_alphanumeric() || bytes[index] == '_') {
-        word.push(bytes[index].to_ascii_lowercase());
+    while index < chars.len() && (chars[index].is_alphanumeric() || chars[index] == '_') {
+        word.push(chars[index].to_ascii_lowercase());
         index += 1;
     }
     word
 }
 
-/// The words that change data. A statement that carries one of these words
+/// Finds a MySQL comment whose text the server runs, which is `/*!` or the
+/// MariaDB form `/*M!`, each with an optional version number. Returns the
+/// position of the first character of the text, or `None` when no such
+/// comment starts at the given position. The closing `*/` is punctuation to
+/// the readers, so they need no position for it.
+fn executable_comment_body(chars: &[char], index: usize, dialect: Dialect) -> Option<usize> {
+    if dialect != Dialect::MySql
+        || chars.get(index) != Some(&'/')
+        || chars.get(index + 1) != Some(&'*')
+    {
+        return None;
+    }
+    let mut cursor = index + 2;
+    if chars.get(cursor) == Some(&'M') {
+        cursor += 1;
+    }
+    if chars.get(cursor) != Some(&'!') {
+        return None;
+    }
+    cursor += 1;
+    while chars.get(cursor).is_some_and(|c| c.is_ascii_digit()) {
+        cursor += 1;
+    }
+    Some(cursor)
+}
+
+/// The words that change data. A statement that has one of these words
 /// outside a quoted region or a comment is refused for an export, because a
-/// common table expression can hold an INSERT, an UPDATE or a DELETE behind
-/// a leading WITH, and a SELECT can write through an INTO clause.
+/// common table expression can contain an INSERT, an UPDATE or a DELETE
+/// behind a leading WITH, and a SELECT can write through an INTO clause.
 const WRITE_WORDS: [&str; 15] = [
     "insert", "update", "delete", "merge", "create", "drop", "alter", "truncate", "grant",
     "revoke", "deny", "exec", "execute", "call", "into",
+];
+
+/// The words that start a statement of MS SQL Server that changes data, the
+/// server or the transaction. MS SQL Server needs no semicolon between two
+/// statements, so `SELECT 1 KILL 57` is two statements, and the second one
+/// has no reading keyword in front of it. Each word is reserved, so a bare
+/// column name cannot use it.
+const MSSQL_WRITE_WORDS: [&str; 14] = [
+    "kill",
+    "shutdown",
+    "dbcc",
+    "backup",
+    "restore",
+    "reconfigure",
+    "begin",
+    "commit",
+    "rollback",
+    "save",
+    "bulk",
+    "checkpoint",
+    "writetext",
+    "updatetext",
 ];
 
 /// True when a script only reads. The export to a file runs the script a
 /// second time, so it must refuse a script that changes data.
 ///
 /// Each statement must start with a reading keyword, and no statement may
-/// hold a writing word outside a quoted region or a comment. The check reads
+/// have a writing word outside a quoted region or a comment. The check reads
 /// the text alone, so a function of the server that writes can still pass.
 pub fn only_reads(script: &str, dialect: Dialect) -> bool {
     let statements: Vec<String> = split_batches(script, dialect)
@@ -206,14 +251,24 @@ pub fn only_reads(script: &str, dialect: Dialect) -> bool {
     })
 }
 
-/// True when the statement holds a writing word outside a quoted region or
-/// a comment.
+/// True when the statement has a writing word outside a quoted region or a
+/// comment. PostgreSQL and MySQL lock the rows of a `SELECT` with
+/// `FOR UPDATE`, and PostgreSQL also with `FOR NO KEY UPDATE`. That clause
+/// changes no data, so the word `update` after `for` or `key` does not count
+/// on these two engines.
 fn holds_a_write_word(statement: &str, dialect: Dialect) -> bool {
+    let row_locks = matches!(dialect, Dialect::Postgres | Dialect::MySql);
     let mut found = false;
+    let mut previous = String::new();
     scan_words(statement, dialect, |word| {
-        if WRITE_WORDS.contains(&word) {
+        let locks_rows =
+            row_locks && word == "update" && matches!(previous.as_str(), "for" | "key");
+        if (WRITE_WORDS.contains(&word) && !locks_rows)
+            || (dialect == Dialect::MsSql && MSSQL_WRITE_WORDS.contains(&word))
+        {
             found = true;
         }
+        previous = word.to_string();
     });
     found
 }
@@ -237,6 +292,11 @@ fn scan_words(sql: &str, dialect: Dialect, mut visit: impl FnMut(&str)) {
         }
         if dialect.hash_comments() && c == '#' {
             index = copy_to_end_of_line(&chars, index, &mut skipped);
+            continue;
+        }
+        // MySQL runs the text of this comment, so its words count.
+        if let Some(next) = executable_comment_body(&chars, index, dialect) {
+            index = next;
             continue;
         }
         if c == '/' && chars.get(index + 1) == Some(&'*') {
@@ -1439,6 +1499,101 @@ mod tests {
         assert!(!only_reads("SELECT * INTO t2 FROM t", Dialect::MsSql));
         // A script refuses when one of its statements writes.
         assert!(!only_reads("SELECT 1; DELETE FROM t", Dialect::Postgres));
+    }
+
+    #[test]
+    fn a_second_statement_of_ms_sql_server_without_a_semicolon_is_refused() {
+        for script in [
+            "SELECT 1\nKILL 57",
+            "SELECT 1 SHUTDOWN",
+            "SELECT 1 DBCC SHRINKFILE(1)",
+            "SELECT 1 BACKUP DATABASE d TO DISK = 'x'",
+            "SELECT 1 RESTORE DATABASE d FROM DISK = 'x'",
+            "SELECT 1 RECONFIGURE",
+            "SELECT 1 BEGIN TRAN",
+            "SELECT 1 COMMIT",
+            "SELECT 1 ROLLBACK",
+            "SELECT 1 SAVE TRAN s",
+            "SELECT 1 BULK INSERT t FROM 'x'",
+            "SELECT 1 CHECKPOINT",
+            "SELECT 1 WRITETEXT t.c @p 'x'",
+            "SELECT 1 UPDATETEXT t.c @p 0 0 'x'",
+        ] {
+            assert!(!only_reads(script, Dialect::MsSql), "{script}");
+        }
+        // The same words are names on the other engines.
+        assert!(only_reads("SELECT backup, save FROM t", Dialect::Postgres));
+        assert!(only_reads("SELECT [kill] FROM t", Dialect::MsSql));
+    }
+
+    #[test]
+    fn a_nested_comment_hides_no_keyword() {
+        assert_eq!(
+            leading_keyword("/* /* */ SELECT */ COPY t TO STDOUT", Dialect::Postgres),
+            "copy"
+        );
+        assert!(!only_reads(
+            "/* /* */ SELECT */ COPY t TO PROGRAM 'x'",
+            Dialect::Postgres
+        ));
+        assert_eq!(
+            leading_keyword("/* /* */ SELECT */ KILL 57", Dialect::MsSql),
+            "kill"
+        );
+        // MySQL ends a comment at the first close, so the rest is a statement.
+        assert_eq!(
+            leading_keyword("/* /* */ SELECT 1", Dialect::MySql),
+            "select"
+        );
+    }
+
+    #[test]
+    fn mysql_reads_the_text_of_an_executable_comment() {
+        assert!(!only_reads(
+            "SELECT * FROM t /*! INTO OUTFILE '/tmp/x' */",
+            Dialect::MySql
+        ));
+        assert!(!only_reads(
+            "SELECT * FROM t /*!50100 INTO OUTFILE '/tmp/x' */",
+            Dialect::MySql
+        ));
+        assert!(!only_reads(
+            "SELECT * FROM t /*M!100100 INTO OUTFILE '/tmp/x' */",
+            Dialect::MySql
+        ));
+        assert_eq!(
+            leading_keyword("/*!40101 SET x = 1 */", Dialect::MySql),
+            "set"
+        );
+        assert_eq!(
+            leading_keyword("/*M! DELETE FROM t */", Dialect::MySql),
+            "delete"
+        );
+        assert!(only_reads("/*! SELECT 1 */", Dialect::MySql));
+        // A plain comment and an optimizer hint stay comments.
+        assert!(only_reads("SELECT /*+ delete */ 1", Dialect::MySql));
+        assert!(only_reads("SELECT /*M delete */ 1", Dialect::MySql));
+        // The other engines read the form as a plain comment.
+        assert!(only_reads(
+            "SELECT * FROM t /*! INTO OUTFILE 'x' */",
+            Dialect::Postgres
+        ));
+    }
+
+    #[test]
+    fn a_row_lock_of_a_select_only_reads() {
+        assert!(only_reads("SELECT * FROM t FOR UPDATE", Dialect::Postgres));
+        assert!(only_reads(
+            "SELECT * FROM t FOR NO KEY UPDATE OF t",
+            Dialect::Postgres
+        ));
+        assert!(only_reads("SELECT * FROM t FOR UPDATE", Dialect::MySql));
+        // MS SQL Server has no such clause, so the word still counts there.
+        assert!(!only_reads("SELECT * FROM t FOR UPDATE", Dialect::MsSql));
+        assert!(!only_reads(
+            "WITH d AS (UPDATE t SET a = 1 RETURNING *) SELECT * FROM d FOR UPDATE",
+            Dialect::Postgres
+        ));
     }
 
     #[test]

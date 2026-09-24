@@ -12,6 +12,11 @@ The menu of the grid holds two kinds of export:
   entries stand in the menu only when the row limit stopped the read, and they
   offer a CSV file, a JSON file and an Excel file.
 
+**Write every row** accepts a statement that only reads, because it runs the
+statement again. The backend refuses a statement that has a word such as
+`INSERT`, `UPDATE`, `DELETE`, `INTO` or `EXEC` outside a string or a comment.
+A `FOR UPDATE` clause on PostgreSQL and MySQL is accepted.
+
 An Excel sheet holds 1048576 rows, the row of the column names among them, so
 an export of more rows than that stops there and reports the stop.
 

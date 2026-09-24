@@ -322,6 +322,16 @@ An Excel sheet holds 1048576 rows, the row of the column names among them.
 An export of more rows than that stops at the bound and reports the result
 as truncated. The CSV and the JSON forms have no such bound.
 
+## The export of every row reads the text of the statement
+
+**Write every row** runs the statement a second time. The backend accepts a
+statement that starts with `SELECT`, `WITH` or `SHOW` and has no word that
+changes data outside a quoted region or a comment. The check reads the text
+alone, so it cannot see a function or a procedure of the server that writes.
+`SELECT nextval('s')` on PostgreSQL and a `SELECT` that calls a function
+with side effects both pass. The check also refuses some statements that
+only read, such as a `SELECT` whose bare column name is a writing word.
+
 ## The filter of the grid reads the rows before it answers
 
 The filter matches against a copy of the text of each row. The grid builds
