@@ -25,7 +25,6 @@ use bytes::BytesMut;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use futures_util::{pin_mut, stream, StreamExt, TryStreamExt};
 use postgres_types::{to_sql_checked, Field, Format, FromSql, IsNull, Kind, ToSql, Type};
-use rust_decimal::Decimal;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
@@ -1171,9 +1170,7 @@ fn decode_scalar(column_type: &Type, bytes: &[u8]) -> JsonValue {
         Type::OID => scalar(column_type, bytes, |value: u32| value.into()),
         Type::FLOAT4 => scalar(column_type, bytes, |value: f32| f64_to_json(value as f64)),
         Type::FLOAT8 => scalar(column_type, bytes, f64_to_json),
-        Type::NUMERIC => scalar(column_type, bytes, |value: Decimal| {
-            JsonValue::String(value.to_string())
-        }),
+        Type::NUMERIC => numeric_text(bytes),
         Type::TEXT
         | Type::VARCHAR
         | Type::NAME
@@ -1186,18 +1183,33 @@ fn decode_scalar(column_type: &Type, bytes: &[u8]) -> JsonValue {
         }),
         Type::JSON | Type::JSONB => scalar(column_type, bytes, |value: JsonValue| value),
         Type::BYTEA => JsonValue::String(base64_text(bytes)),
-        Type::DATE => scalar(column_type, bytes, |value: NaiveDate| {
-            JsonValue::String(value.to_string())
+        Type::DATE => endless(
+            Reader::new(bytes).i32().map(i64::from),
+            i32::MAX as i64,
+            i32::MIN as i64,
+        )
+        .unwrap_or_else(|| {
+            scalar(column_type, bytes, |value: NaiveDate| {
+                JsonValue::String(value.to_string())
+            })
         }),
         Type::TIME => scalar(column_type, bytes, |value: NaiveTime| {
             JsonValue::String(value.to_string())
         }),
-        Type::TIMESTAMP => scalar(column_type, bytes, |value: NaiveDateTime| {
-            JsonValue::String(value.to_string())
-        }),
-        Type::TIMESTAMPTZ => scalar(column_type, bytes, |value: DateTime<Utc>| {
-            JsonValue::String(value.to_rfc3339())
-        }),
+        Type::TIMESTAMP => {
+            endless(Reader::new(bytes).i64(), i64::MAX, i64::MIN).unwrap_or_else(|| {
+                scalar(column_type, bytes, |value: NaiveDateTime| {
+                    JsonValue::String(value.to_string())
+                })
+            })
+        }
+        Type::TIMESTAMPTZ => {
+            endless(Reader::new(bytes).i64(), i64::MAX, i64::MIN).unwrap_or_else(|| {
+                scalar(column_type, bytes, |value: DateTime<Utc>| {
+                    JsonValue::String(value.to_rfc3339())
+                })
+            })
+        }
         Type::MONEY => money_text(bytes),
         Type::INTERVAL => interval_text(bytes),
         Type::INET | Type::CIDR => inet_text(bytes),
@@ -1400,6 +1412,83 @@ fn money_text(bytes: &[u8]) -> JsonValue {
     JsonValue::String(format!("{sign}{}.{:02}", units / 100, units % 100))
 }
 
+/// Gives `infinity` or `-infinity` for a date or a timestamp that holds one
+/// of these values. PostgreSQL sends them as the largest and the smallest
+/// value of the binary form, which no calendar type can read.
+fn endless(value: Option<i64>, largest: i64, smallest: i64) -> Option<JsonValue> {
+    match value? {
+        value if value == largest => Some(JsonValue::String("infinity".into())),
+        value if value == smallest => Some(JsonValue::String("-infinity".into())),
+        _ => None,
+    }
+}
+
+/// The sign words of the binary form of a NUMERIC value.
+const NUMERIC_NEGATIVE: u16 = 0x4000;
+const NUMERIC_NAN: u16 = 0xC000;
+const NUMERIC_INFINITY: u16 = 0xD000;
+const NUMERIC_NEGATIVE_INFINITY: u16 = 0xF000;
+
+/// Writes a NUMERIC value in the form that PostgreSQL itself writes, with
+/// every digit. The binary form holds digits of base ten thousand, the
+/// weight of the first digit, the sign, and the count of the decimal digits
+/// of the fraction. A reader of a fixed width, such as `rust_decimal`,
+/// rounds a value of more than 28 digits and refuses NaN and Infinity.
+fn numeric_text(bytes: &[u8]) -> JsonValue {
+    let mut reader = Reader::new(bytes);
+    let (Some(count), Some(weight), Some(sign), Some(scale)) =
+        (reader.i16(), reader.i16(), reader.i16(), reader.i16())
+    else {
+        return text_or_bytes(bytes);
+    };
+    let digits: Option<Vec<i16>> = (0..count.max(0)).map(|_| reader.i16()).collect();
+    let Some(digits) = digits else {
+        return text_or_bytes(bytes);
+    };
+    let text = match sign as u16 {
+        NUMERIC_NAN => "NaN".to_string(),
+        NUMERIC_INFINITY => "Infinity".to_string(),
+        NUMERIC_NEGATIVE_INFINITY => "-Infinity".to_string(),
+        sign => {
+            let weight = i32::from(weight);
+            // The digit of base ten thousand at the given power.
+            let digit = |power: i32| {
+                usize::try_from(weight - power)
+                    .ok()
+                    .and_then(|index| digits.get(index))
+                    .copied()
+                    .unwrap_or(0)
+            };
+            let mut out = String::new();
+            if sign == NUMERIC_NEGATIVE {
+                out.push('-');
+            }
+            if weight < 0 {
+                out.push('0');
+            } else {
+                out.push_str(&digit(weight).to_string());
+                for power in (0..weight).rev() {
+                    out.push_str(&format!("{:04}", digit(power)));
+                }
+            }
+            let scale = usize::from(scale as u16);
+            if scale > 0 {
+                let mut fraction = String::new();
+                let mut power = -1;
+                while fraction.len() < scale {
+                    fraction.push_str(&format!("{:04}", digit(power)));
+                    power -= 1;
+                }
+                fraction.truncate(scale);
+                out.push('.');
+                out.push_str(&fraction);
+            }
+            out
+        }
+    };
+    JsonValue::String(text)
+}
+
 /// Writes an interval in the form that PostgreSQL itself writes, such as
 /// `1 year 2 mons 3 days 04:05:06`.
 fn interval_text(bytes: &[u8]) -> JsonValue {
@@ -1527,6 +1616,11 @@ impl<'a> Reader<'a> {
 
     fn u8(&mut self) -> Option<u8> {
         self.take(1).map(|bytes| bytes[0])
+    }
+
+    fn i16(&mut self) -> Option<i16> {
+        self.take(2)
+            .map(|bytes| i16::from_be_bytes(bytes.try_into().unwrap()))
     }
 
     fn i32(&mut self) -> Option<i32> {
@@ -2698,6 +2792,71 @@ mod tests {
             decoded(&Type::NUMERIC, &body),
             JsonValue::String("1".into())
         );
+    }
+
+    /// Builds the binary form of a NUMERIC value.
+    fn numeric(weight: i16, sign: u16, scale: u16, digits: &[i16]) -> Vec<u8> {
+        let mut body = (digits.len() as i16).to_be_bytes().to_vec();
+        body.extend_from_slice(&weight.to_be_bytes());
+        body.extend_from_slice(&sign.to_be_bytes());
+        body.extend_from_slice(&scale.to_be_bytes());
+        for digit in digits {
+            body.extend_from_slice(&digit.to_be_bytes());
+        }
+        body
+    }
+
+    #[test]
+    fn a_numeric_keeps_every_digit_and_its_special_values() {
+        let text = |body: Vec<u8>| decoded(&Type::NUMERIC, &body);
+        let string = |value: &str| JsonValue::String(value.into());
+        // 123456789012345678901234567890.12, more digits than 28.
+        assert_eq!(
+            text(numeric(
+                7,
+                0,
+                2,
+                &[12, 3456, 7890, 1234, 5678, 9012, 3456, 7890, 1200]
+            )),
+            string("123456789012345678901234567890.12")
+        );
+        assert_eq!(text(numeric(0, 0x4000, 3, &[5, 1000])), string("-5.100"));
+        assert_eq!(text(numeric(-2, 0, 8, &[1])), string("0.00000001"));
+        assert_eq!(text(numeric(0, 0, 2, &[])), string("0.00"));
+        assert_eq!(text(numeric(1, 0, 0, &[1])), string("10000"));
+        assert_eq!(text(numeric(0, 0xC000, 0, &[])), string("NaN"));
+        assert_eq!(text(numeric(0, 0xD000, 0, &[])), string("Infinity"));
+        assert_eq!(text(numeric(0, 0xF000, 0, &[])), string("-Infinity"));
+        // A body that ends early falls back on the text rule.
+        assert_eq!(text(vec![0, 1]), text_or_bytes(&[0, 1]));
+        let mut short = numeric(0, 0, 0, &[1, 2]);
+        short.truncate(10);
+        assert_eq!(text(short.clone()), text_or_bytes(&short));
+    }
+
+    #[test]
+    fn an_endless_date_or_timestamp_shows_its_word() {
+        let string = |value: &str| JsonValue::String(value.into());
+        assert_eq!(
+            decoded(&Type::DATE, &i32::MAX.to_be_bytes()),
+            string("infinity")
+        );
+        assert_eq!(
+            decoded(&Type::DATE, &i32::MIN.to_be_bytes()),
+            string("-infinity")
+        );
+        for column_type in [Type::TIMESTAMP, Type::TIMESTAMPTZ] {
+            assert_eq!(
+                decoded(&column_type, &i64::MAX.to_be_bytes()),
+                string("infinity")
+            );
+            assert_eq!(
+                decoded(&column_type, &i64::MIN.to_be_bytes()),
+                string("-infinity")
+            );
+        }
+        // A body of the wrong length falls back on the text rule.
+        assert_eq!(decoded(&Type::DATE, &[1]), text_or_bytes(&[1]));
     }
 
     #[test]
