@@ -395,6 +395,16 @@ from a tab writes the whole file, so the last write wins and a change that
 came from outside is lost. A refresh of the folder, or a second open of the
 file, brings the text of the disk back.
 
+## A save writes UTF-8
+
+The editor reads a file in UTF-8, in UTF-16 with a byte order mark, or in
+Windows-1252 when the bytes are not UTF-8. A file in another code page, such
+as Windows-1251, opens with the characters of Windows-1252 in place of its
+own. A save always writes UTF-8 with no byte order mark. The first save of a
+file in UTF-16 or in Windows-1252 thus changes the encoding of the file, and
+a tool that reads the file in its old encoding shows the accented
+characters wrong.
+
 ## MySQL walks the rest of a result that passes the row limit
 
 The MS SQL Server driver sends an attention packet when a reading

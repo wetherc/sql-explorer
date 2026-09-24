@@ -163,7 +163,60 @@ pub fn read_text(path: &Path) -> Result<String> {
             MAX_FILE_BYTES / (1024 * 1024)
         )));
     }
-    Ok(std::fs::read_to_string(path)?)
+    Ok(decode_text(std::fs::read(path)?))
+}
+
+/// The characters of the bytes 0x80 to 0x9F in Windows-1252. The five bytes
+/// that the code page leaves out keep the control character of the same
+/// value, as the WHATWG decoder does.
+const CP1252_HIGH: [char; 32] = [
+    '\u{20AC}', '\u{81}', '\u{201A}', '\u{192}', '\u{201E}', '\u{2026}', '\u{2020}', '\u{2021}',
+    '\u{2C6}', '\u{2030}', '\u{160}', '\u{2039}', '\u{152}', '\u{8D}', '\u{17D}', '\u{8F}',
+    '\u{90}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}', '\u{2014}',
+    '\u{2DC}', '\u{2122}', '\u{161}', '\u{203A}', '\u{153}', '\u{9D}', '\u{17E}', '\u{178}',
+];
+
+/// Reads the text of the bytes of a file.
+///
+/// A byte order mark names UTF-8, UTF-16 LE or UTF-16 BE, and the mark does
+/// not go into the text. A leading mark in the text makes the first word of
+/// the statement unreadable to the checks of the backend. Bytes without a
+/// mark that are not UTF-8 are read as Windows-1252, the code page in which
+/// older Windows tools save a script. Every byte has a character in that
+/// code page, so such a file always opens.
+pub fn decode_text(bytes: Vec<u8>) -> String {
+    if let Some(rest) = bytes.strip_prefix(b"\xEF\xBB\xBF") {
+        return String::from_utf8_lossy(rest).into_owned();
+    }
+    if let Some(rest) = bytes.strip_prefix(b"\xFF\xFE") {
+        return utf16(rest, u16::from_le_bytes);
+    }
+    if let Some(rest) = bytes.strip_prefix(b"\xFE\xFF") {
+        return utf16(rest, u16::from_be_bytes);
+    }
+    match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) => error
+            .as_bytes()
+            .iter()
+            .map(|&byte| match byte {
+                0x80..=0x9F => CP1252_HIGH[usize::from(byte - 0x80)],
+                _ => char::from(byte),
+            })
+            .collect(),
+    }
+}
+
+/// Reads UTF-16 units in the byte order that `unit` gives. A last odd byte
+/// and a lone surrogate become U+FFFD.
+fn utf16(bytes: &[u8], unit: fn([u8; 2]) -> u16) -> String {
+    let units = bytes.chunks(2).map(|pair| match pair {
+        [high, low] => unit([*high, *low]),
+        _ => 0xFFFD,
+    });
+    char::decode_utf16(units)
+        .map(|decoded| decoded.unwrap_or(char::REPLACEMENT_CHARACTER))
+        .collect()
 }
 
 /// Writes the text of a file through a temporary file and a rename, so a
@@ -390,6 +443,26 @@ mod tests {
         assert!(error.to_string().contains("larger than the editor accepts"));
 
         assert!(read_text(&root.join("gone.sql")).is_err());
+    }
+
+    #[test]
+    fn a_byte_order_mark_names_the_encoding_and_leaves_the_text() {
+        assert_eq!(decode_text(b"\xEF\xBB\xBFSELECT 1".to_vec()), "SELECT 1");
+        assert_eq!(decode_text(b"\xFF\xFES\x001\x00".to_vec()), "S1");
+        assert_eq!(decode_text(b"\xFE\xFF\x00S\x001".to_vec()), "S1");
+        // A last odd byte and a lone surrogate become U+FFFD.
+        assert_eq!(decode_text(b"\xFF\xFES\x00\x31".to_vec()), "S\u{FFFD}");
+        assert_eq!(decode_text(b"\xFF\xFE\x00\xD8".to_vec()), "\u{FFFD}");
+    }
+
+    #[test]
+    fn text_that_is_not_utf8_is_read_as_windows_1252() {
+        assert_eq!(decode_text("SELECT 'é'".as_bytes().to_vec()), "SELECT 'é'");
+        assert_eq!(decode_text(b"SELECT '\xE9'".to_vec()), "SELECT 'é'");
+        assert_eq!(
+            decode_text(b"\x80\x81\x9F".to_vec()),
+            "\u{20AC}\u{81}\u{178}"
+        );
     }
 
     /// The names of the temporary files that a write left in a folder.
