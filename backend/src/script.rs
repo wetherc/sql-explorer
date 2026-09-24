@@ -61,6 +61,9 @@ pub fn insert_statement(dialect: Dialect, name: &str, columns: &[AppColumn]) -> 
 ///
 /// A relation with no primary key gets a WHERE clause that matches no row,
 /// so a statement that ran by mistake changes nothing.
+///
+/// The semicolon stands in front of the comment on the last line, because a
+/// `--` comment hides all text after it on the same line.
 pub fn update_statement(dialect: Dialect, name: &str, columns: &[AppColumn]) -> String {
     let keys: Vec<&AppColumn> = columns
         .iter()
@@ -83,15 +86,17 @@ pub fn update_statement(dialect: Dialect, name: &str, columns: &[AppColumn]) -> 
     });
 
     let where_clause = if keys.is_empty() {
-        "    1 = 0 -- No primary key was found. Name the rows to change.".to_string()
+        "    1 = 0; -- No primary key was found. Name the rows to change.".to_string()
     } else {
+        let last = keys.len() - 1;
         keys.iter()
             .enumerate()
             .map(|(index, column)| {
                 let lead = if index == 0 { "   " } else { "    AND" };
                 format!(
-                    "{lead} {} = {VALUE_MARK} -- {}",
+                    "{lead} {} = {VALUE_MARK}{} -- {}",
                     dialect.quote_identifier(&column.name),
+                    if index == last { ";" } else { "" },
                     comment_text(&column.data_type)
                 )
             })
@@ -99,7 +104,7 @@ pub fn update_statement(dialect: Dialect, name: &str, columns: &[AppColumn]) -> 
             .join("\n")
     };
 
-    format!("UPDATE {name}\nSET\n{sets}\nWHERE\n{where_clause};")
+    format!("UPDATE {name}\nSET\n{sets}\nWHERE\n{where_clause}")
 }
 
 /// Builds a draft of `CREATE TABLE` from the column list. This is the
@@ -230,7 +235,7 @@ mod tests {
         let mut keyed = columns.clone();
         keyed[0].data_type = "i\nnt".to_string();
         let update = update_statement(Dialect::Postgres, "\"t\"", &keyed);
-        assert!(update.ends_with(" = NULL -- i nt;"));
+        assert!(update.ends_with(" = NULL; -- i nt"));
     }
 
     #[test]
@@ -241,7 +246,7 @@ mod tests {
         assert_eq!(
             text,
             "UPDATE \"t\"\nSET\n    \"name\" = NULL -- nvarchar(50)\nWHERE\n    \
-             \"id\" = NULL -- int\n    AND \"code\" = NULL -- int;"
+             \"id\" = NULL -- int\n    AND \"code\" = NULL; -- int"
         );
     }
 
@@ -249,7 +254,8 @@ mod tests {
     fn an_update_without_a_key_matches_no_row() {
         let columns = vec![column("name", "text", true, false)];
         let text = update_statement(Dialect::Sqlite, "\"t\"", &columns);
-        assert!(text.contains("WHERE\n    1 = 0 -- No primary key was found."));
+        assert!(text
+            .ends_with("WHERE\n    1 = 0; -- No primary key was found. Name the rows to change."));
     }
 
     #[test]
@@ -257,7 +263,7 @@ mod tests {
         let columns = vec![column("id", "int", false, true)];
         let text = update_statement(Dialect::Sqlite, "\"t\"", &columns);
         assert!(text.contains("SET\n    \"id\" = NULL -- int"));
-        assert!(text.contains("WHERE\n    \"id\" = NULL -- int"));
+        assert!(text.ends_with("WHERE\n    \"id\" = NULL; -- int"));
     }
 
     #[test]
