@@ -737,7 +737,11 @@ function rowsPerPage(): number {
 }
 
 function onGridKeyDown(event: KeyboardEvent): void {
-  if (sortedOrder.value.length === 0) {
+  // A key of a sort button or of a grip belongs to that control. Without
+  // this check, Enter on a sort button would also open the value of a cell,
+  // and an arrow on a grip would also move the focus into the rows.
+  const target = event.target as Element | null
+  if (sortedOrder.value.length === 0 || target?.closest('thead')) {
     return
   }
   const row = focusedRow.value

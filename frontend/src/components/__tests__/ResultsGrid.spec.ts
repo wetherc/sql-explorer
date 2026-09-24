@@ -706,6 +706,22 @@ describe('ResultsGrid as a grid a reader can follow', () => {
     expect(document.body.textContent).toContain('Grace')
   })
 
+  it('leaves the keys of the header to the controls of the header', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    const sort = wrapper.findAll('[data-test="grid-header"]')[1]!
+    const grip = wrapper.findAll('[data-test="grid-column-grip"]')[0]!
+
+    await sort.trigger('keydown', { key: 'Enter' })
+    await sort.trigger('keydown', { key: ' ' })
+    expect(document.querySelector('.app-code-block')).toBeNull()
+    expect(wrapper.findAll('[data-test="grid-row"]')[0]!.classes()).not.toContain('selected')
+
+    ;(grip.element as HTMLElement).focus()
+    await grip.trigger('keydown', { key: 'ArrowRight' })
+    await grip.trigger('keydown', { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(grip.element)
+  })
+
   it('takes a row with the space bar', async () => {
     const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
 
