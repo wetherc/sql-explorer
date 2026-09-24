@@ -178,6 +178,21 @@ export function leafNode(
   }
 }
 
+/**
+ * Gives each node of one list a key of its own. A key holds the name of the
+ * node, and two routines of PostgreSQL can share a name when their
+ * arguments differ. A repeated key gets the number of its repeat, so the
+ * view gets no two rows with one key.
+ */
+export function withUniqueKeys(nodes: ExplorerNode[]): ExplorerNode[] {
+  const counts = new Map<string, number>()
+  return nodes.map((node) => {
+    const count = (counts.get(node.key) ?? 0) + 1
+    counts.set(node.key, count)
+    return count === 1 ? node : { ...node, key: `${node.key}#${count}` }
+  })
+}
+
 /** Names one constraint for the tree: its kind, and its columns. */
 export function constraintHint(constraint: ConstraintRef): string {
   const words: Record<ConstraintRef['kind'], string> = {
@@ -705,7 +720,7 @@ export const useExplorerStore = defineStore('explorer', () => {
       return relationFolders(node, info?.capabilities)
     }
 
-    return folderChildren(node)
+    return withUniqueKeys(await folderChildren(node))
   }
 
   /** The folders below a schema, or below a database without schemas. */

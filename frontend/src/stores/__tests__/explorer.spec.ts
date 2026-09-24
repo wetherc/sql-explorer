@@ -18,6 +18,7 @@ const {
   tableNode,
   useExplorerStore,
   walk,
+  withUniqueKeys,
 } = await import('@/stores/explorer')
 type ExplorerNode = import('@/stores/explorer').ExplorerNode
 const { useConnectionsStore } = await import('@/stores/connections')
@@ -204,6 +205,14 @@ describe('filterNodes', () => {
   })
 })
 
+describe('withUniqueKeys', () => {
+  it('numbers each repeat of a key and keeps the first one', () => {
+    const list = [node({ key: 'f/sum' }), node({ key: 'f/avg' }), node({ key: 'f/sum' })]
+    expect(withUniqueKeys(list).map((each) => each.key)).toEqual(['f/sum', 'f/avg', 'f/sum#2'])
+    expect(withUniqueKeys(list)[0]).toBe(list[0])
+  })
+})
+
 describe('walk', () => {
   it('visits every node in the tree', () => {
     const seen: string[] = []
@@ -360,6 +369,7 @@ describe('explorer store', () => {
     apiStub.listRoutines.mockResolvedValue([
       { name: 'add_order', kind: 'procedure' },
       { name: 'order_total', kind: 'function' },
+      { name: 'order_total', kind: 'function' },
     ])
     const explorer = await readyStore()
     const schema = node({ kind: 'schema', database: 'Sales', schema: 'dbo' })
@@ -372,7 +382,9 @@ describe('explorer store', () => {
 
     const functions = folderNode('Functions', 'functions', schema)
     await explorer.expand(functions)
-    expect(functions.children?.map((child) => child.label)).toEqual(['order_total'])
+    expect(functions.children?.map((child) => child.label)).toEqual(['order_total', 'order_total'])
+    // Two overloads of one function get two keys.
+    expect(new Set(functions.children?.map((child) => child.key)).size).toBe(2)
   })
 
   it('puts folders below a table and columns alone below a view', async () => {
