@@ -136,6 +136,15 @@ add the older block form. A server that offers `ECDHE_RSA_WITH_AES_256_CBC`
 and nothing newer cannot speak to `rustls`, and such servers are common.
 PostgreSQL keeps `rustls`, because no such server has appeared for it.
 
+## The roots of the system are read once
+
+PostgreSQL and MySQL check a certificate against the roots of the operating
+system. A read of these roots takes about 100 ms and blocks the thread, so the
+application reads them at the first check and keeps them until it closes. A
+root that the system gets later is used after a restart. When the system
+gives no root that `rustls` can read, the drivers use the Mozilla roots of
+`webpki-roots`.
+
 ## Windows Authentication needs a ticket and the full host name
 
 On Windows the account of the user reaches the server through SSPI. On macOS

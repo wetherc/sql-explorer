@@ -8,8 +8,8 @@
 use crate::db::drivers::{
     add_constraint_column, add_index_column, add_snapshot_column, bytes_to_json, constraint_kind,
     f32_to_json, f64_to_json, number_out_of_range, number_value, prefixed_plan, routine_kind,
-    rows_affected_message, rows_returned_message, size_text, table_kind, CancelHandle,
-    DatabaseDriver, NumberValue,
+    rows_affected_message, rows_returned_message, size_text, system_roots, table_kind,
+    CancelHandle, DatabaseDriver, NumberValue,
 };
 use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{
@@ -218,8 +218,7 @@ pub fn build_tls_config(connection: &SavedConnection) -> Result<ClientConfig> {
         return Ok(config);
     }
 
-    let mut roots = RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let mut roots = roots_from(system_roots());
     if let Some(path) = connection
         .options
         .ca_cert_path
@@ -240,6 +239,19 @@ pub fn build_tls_config(connection: &SavedConnection) -> Result<ClientConfig> {
         .with_root_certificates(roots)
         .with_no_client_auth()
         .pipe(Ok)
+}
+
+/// Builds the store of trusted roots from the roots of the operating system.
+/// When the system gives no usable root, the store takes the Mozilla roots
+/// of `webpki-roots`.
+fn roots_from(system: &[CertificateDer<'static>]) -> RootCertStore {
+    let mut roots = RootCertStore::empty();
+    if system.is_empty() {
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    } else {
+        roots.add_parsable_certificates(system.iter().cloned());
+    }
+    roots
 }
 
 /// A small helper that lets a value flow into a function at the end of a
@@ -3830,6 +3842,16 @@ mod tests {
 
         input.options.tls_mode = TlsMode::VerifyFull;
         assert!(build_tls_config(&input).is_ok());
+    }
+
+    #[test]
+    fn the_mozilla_roots_stand_in_when_the_system_gives_no_usable_root() {
+        let bundled = webpki_roots::TLS_SERVER_ROOTS.len();
+        assert_eq!(roots_from(&[]).len(), bundled);
+        let system = system_roots();
+        if !system.is_empty() {
+            assert_eq!(roots_from(system).len(), system.len());
+        }
     }
 
     #[test]

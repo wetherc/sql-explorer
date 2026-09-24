@@ -17,8 +17,10 @@ use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
 use async_trait::async_trait;
 use base64::Engine as _;
+use rustls::RootCertStore;
+use rustls_pki_types::CertificateDer;
 use serde_json::Value as JsonValue;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// The operations the application asks of one open connection.
 #[async_trait]
@@ -564,6 +566,26 @@ pub fn rows_returned_message(count: usize, truncated: bool) -> Message {
     }
 }
 
+/// The roots that the operating system trusts and that `rustls` can read.
+/// These come from the keychain on macOS, from the certificate store on
+/// Windows, and from the certificate files of OpenSSL on Linux, so a company
+/// authority that the system trusts is trusted by the drivers too. A read of
+/// the system roots takes about 100 ms, so the list is read once in each run
+/// of the application. A root that the system gets after the start is used
+/// after a restart. The list is empty when the system gives no usable root.
+pub fn system_roots() -> &'static [CertificateDer<'static>] {
+    static ROOTS: OnceLock<Vec<CertificateDer<'static>>> = OnceLock::new();
+    ROOTS.get_or_init(|| usable_roots(rustls_native_certs::load_native_certs().certs))
+}
+
+/// Keeps the certificates that a store of trusted roots accepts.
+fn usable_roots(certificates: Vec<CertificateDer<'static>>) -> Vec<CertificateDer<'static>> {
+    certificates
+        .into_iter()
+        .filter(|certificate| RootCertStore::empty().add(certificate.clone()).is_ok())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -706,6 +728,13 @@ mod tests {
         assert_eq!(indexes[0].columns, vec!["a".to_string(), "b".to_string()]);
         assert!(indexes[0].unique);
         assert!(indexes[1].columns.is_empty());
+    }
+
+    #[test]
+    fn a_certificate_that_is_not_a_root_is_left_out() {
+        assert!(usable_roots(vec![CertificateDer::from(vec![0, 1, 2])]).is_empty());
+        let system = system_roots();
+        assert_eq!(usable_roots(system.to_vec()).len(), system.len());
     }
 
     #[test]

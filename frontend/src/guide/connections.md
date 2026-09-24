@@ -37,6 +37,11 @@ A connection encrypts its traffic in one of four ways:
 - No encryption. The credentials and the results then cross the network in
   clear text.
 
+A check of the certificate trusts the authorities that the operating system
+trusts, such as the roots in the macOS keychain. The Certificate authority
+file adds one more authority. The application reads the roots of the system
+when it starts, so a root that you add later is used after a restart.
+
 ## Read-only sessions
 
 The read-only switch in the advanced part of the form does a different thing

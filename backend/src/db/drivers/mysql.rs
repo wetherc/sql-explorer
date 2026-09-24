@@ -4,7 +4,7 @@ use crate::db::drivers::{
     add_constraint_column, add_index_column, add_snapshot_column, bytes_to_json, constraint_kind,
     f32_to_json, f64_to_json, number_out_of_range, number_value, parameter_type_refused,
     prefixed_plan, routine_kind, rows_affected_message, rows_returned_message, size_text,
-    table_kind, CancelHandle, DatabaseDriver, NumberValue,
+    system_roots, table_kind, CancelHandle, DatabaseDriver, NumberValue,
 };
 use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{
@@ -105,13 +105,21 @@ fn read_only_setup(builder: OptsBuilder, connection: &SavedConnection) -> OptsBu
 /// Selects the transport settings. A preference asks for TLS and accepts
 /// any certificate, as a demand without verification does. `mysql_async`
 /// has no setting that tries TLS and then continues without it, so
-/// `clear_text_opts` gives the options of the second login.
+/// `clear_text_opts` gives the options of the second login. A demand with
+/// verification trusts the roots of the operating system in place of the
+/// Mozilla roots that `mysql_async` holds, and it keeps the Mozilla roots
+/// when the system gives no usable root.
 pub fn ssl_opts(connection: &SavedConnection) -> Option<SslOpts> {
     if connection.options.tls_mode == TlsMode::Disable {
         return None;
     }
     let mut opts = SslOpts::default();
-    if !connection.options.tls_mode.verifies_certificate() {
+    let mut roots = Vec::new();
+    if connection.options.tls_mode.verifies_certificate() {
+        let system = system_roots();
+        roots.extend(system.iter().map(|root| root.to_vec().into()));
+        opts = opts.with_disable_built_in_roots(!system.is_empty());
+    } else {
         opts = opts
             .with_danger_accept_invalid_certs(true)
             .with_danger_skip_domain_validation(true);
@@ -122,9 +130,9 @@ pub fn ssl_opts(connection: &SavedConnection) -> Option<SslOpts> {
         .as_deref()
         .filter(|value| !value.trim().is_empty())
     {
-        opts = opts.with_root_certs(vec![std::path::PathBuf::from(path).into()]);
+        roots.push(std::path::PathBuf::from(path).into());
     }
-    Some(opts)
+    Some(opts.with_root_certs(roots))
 }
 
 /// Gives the options of a login in clear text when the record prefers TLS
@@ -1067,15 +1075,22 @@ mod tests {
         let opts = ssl_opts(&input).unwrap();
         assert!(opts.accept_invalid_certs());
 
-        input.options.tls_mode = TlsMode::VerifyFull;
-        let opts = ssl_opts(&input).unwrap();
-        assert!(!opts.accept_invalid_certs());
-
         input.options.ca_cert_path = Some("/etc/ca.pem".into());
         assert_eq!(ssl_opts(&input).unwrap().root_certs().len(), 1);
 
+        input.options.tls_mode = TlsMode::VerifyFull;
+        input.options.ca_cert_path = None;
+        let opts = ssl_opts(&input).unwrap();
+        let system = system_roots().len();
+        assert!(!opts.accept_invalid_certs());
+        assert_eq!(opts.root_certs().len(), system);
+        assert_eq!(opts.disable_built_in_roots(), system > 0);
+
+        input.options.ca_cert_path = Some("/etc/ca.pem".into());
+        assert_eq!(ssl_opts(&input).unwrap().root_certs().len(), system + 1);
+
         input.options.ca_cert_path = Some("  ".into());
-        assert!(ssl_opts(&input).unwrap().root_certs().is_empty());
+        assert_eq!(ssl_opts(&input).unwrap().root_certs().len(), system);
     }
 
     #[test]
