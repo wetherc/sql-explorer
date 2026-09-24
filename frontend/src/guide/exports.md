@@ -29,6 +29,16 @@ digits, because Excel keeps no more. A longer number goes in as text. A text
 of more than 32767 characters is cut at that bound, which is the largest
 cell that Excel accepts.
 
+An INSERT file writes a boolean as `TRUE` or `FALSE` on PostgreSQL and
+Athena, and as `1` or `0` on the other engines. An array becomes the text
+form of an array on PostgreSQL, as `'{1,2}'`, and an `ARRAY[...]`
+constructor on Athena. On the other engines an array or an object becomes
+its JSON text.
+
+A copy to the clipboard separates the cells with tabs. A cell that holds a
+tab or a line break, or that begins with a quote, goes in quotes, as Excel
+writes it, so a spreadsheet keeps the value in one cell.
+
 ## The two limits
 
 The settings hold two separate limits, and they are separate by design:

@@ -1,4 +1,4 @@
-import type { CellValue, Dialect, ResultSet } from '@/types/api'
+import { Dialect, type CellValue, type ResultSet } from '@/types/api'
 import { formatCell, isNullCell, isPlainNumber } from './format'
 import { quoteIdentifier } from './sql'
 
@@ -97,22 +97,67 @@ export function toMarkdown(result: ResultSet): string {
   return lines.join('\n')
 }
 
+/** Writes a text as a literal of SQL, with its quotes doubled. */
+function textLiteral(text: string): string {
+  return `'${text.replace(/'/g, "''")}'`
+}
+
 /**
- * Writes a value as a literal of SQL. A number and a boolean go in as they
- * are, and everything else becomes a text with its quotes doubled. A value
- * that holds no data becomes NULL.
+ * Writes one element of an array in the text form of a PostgreSQL array. An
+ * element that holds a brace, a comma, a quote, a backslash or a blank, or
+ * that reads as the word NULL, goes in double quotes.
  */
-export function toSqlLiteral(value: CellValue): string {
+function postgresArrayElement(value: CellValue): string {
+  if (isNullCell(value)) {
+    return 'NULL'
+  }
+  if (Array.isArray(value)) {
+    return postgresArrayText(value)
+  }
+  if (typeof value === 'number' && !Number.isFinite(value)) {
+    return 'NULL'
+  }
+  const text = formatCell(value)
+  const needsQuotes = text === '' || /[{}",\\\s]/.test(text) || text.toUpperCase() === 'NULL'
+  return needsQuotes ? `"${text.replace(/[\\"]/g, '\\$&')}"` : text
+}
+
+/** Writes an array in the text form that PostgreSQL reads, as `{1,2}`. */
+function postgresArrayText(values: CellValue[]): string {
+  return `{${values.map(postgresArrayElement).join(',')}}`
+}
+
+/**
+ * Writes a value as a literal of SQL for one dialect. A number goes in as
+ * it is, and a value that holds no data becomes NULL.
+ *
+ * A boolean becomes TRUE or FALSE on PostgreSQL and Athena, which refuse
+ * the numbers 1 and 0 in a boolean column, and 1 or 0 on the other
+ * engines. An array becomes the text form of an array on PostgreSQL and an
+ * ARRAY constructor on Athena. Every other value becomes a text, and an
+ * array or an object then holds its JSON text.
+ */
+export function toSqlLiteral(value: CellValue, dialect: Dialect): string {
   if (isNullCell(value)) {
     return 'NULL'
   }
   if (typeof value === 'number') {
     return Number.isFinite(value) ? String(value) : 'NULL'
   }
+  const wordBooleans = dialect === Dialect.Postgres || dialect === Dialect.Athena
   if (typeof value === 'boolean') {
+    if (wordBooleans) {
+      return value ? 'TRUE' : 'FALSE'
+    }
     return value ? '1' : '0'
   }
-  return `'${formatCell(value).replace(/'/g, "''")}'`
+  if (Array.isArray(value) && dialect === Dialect.Postgres) {
+    return textLiteral(postgresArrayText(value))
+  }
+  if (Array.isArray(value) && dialect === Dialect.Athena) {
+    return `ARRAY[${value.map((each) => toSqlLiteral(each, dialect)).join(', ')}]`
+  }
+  return textLiteral(formatCell(value))
 }
 
 /**
@@ -128,10 +173,23 @@ export function toInsertStatements(result: ResultSet, table: string, dialect: Di
     .join('.')
   return result.rows
     .map((row) => {
-      const values = result.columns.map((_, index) => toSqlLiteral(row[index] ?? null)).join(', ')
+      const values = result.columns
+        .map((_, index) => toSqlLiteral(row[index] ?? null, dialect))
+        .join(', ')
       return `INSERT INTO ${target} (${columns}) VALUES (${values});`
     })
     .join('\n')
+}
+
+/**
+ * Writes one field of tab separated text. A field that holds a tab or a
+ * line break, or that begins with a quote, goes in quotes with each quote
+ * doubled, as Excel writes it. A spreadsheet that reads the text then
+ * keeps the field in one cell.
+ */
+function toTabField(value: CellValue): string {
+  const text = formatCell(value)
+  return /[\t\r\n]/.test(text) || text.startsWith('"') ? `"${text.replace(/"/g, '""')}"` : text
 }
 
 /**
@@ -140,7 +198,7 @@ export function toInsertStatements(result: ResultSet, table: string, dialect: Di
  * different from an empty text.
  */
 export function toTabSeparated(rows: CellValue[][]): string {
-  return rows.map((row) => row.map((value) => formatCell(value)).join('\t')).join('\n')
+  return rows.map((row) => row.map(toTabField).join('\t')).join('\n')
 }
 
 /**

@@ -119,6 +119,12 @@ describe('toTabSeparated', () => {
   it('keeps a cell without a value apart from an empty text', () => {
     expect(toTabSeparated([[null, '']])).toBe('NULL\t')
   })
+
+  it('quotes a cell that holds a tab or a break, or that begins with a quote', () => {
+    expect(toTabSeparated([['a\tb', 'one\ntwo', '"x" y', 'a "b"']])).toBe(
+      '"a\tb"\t"one\ntwo"\t"""x"" y"\ta "b"',
+    )
+  })
 })
 
 describe('uniqueColumnNames', () => {
@@ -183,12 +189,39 @@ describe('toMarkdown', () => {
 
 describe('toSqlLiteral', () => {
   it('writes each kind of value', () => {
-    expect(toSqlLiteral(null)).toBe('NULL')
-    expect(toSqlLiteral(7)).toBe('7')
-    expect(toSqlLiteral(Number.POSITIVE_INFINITY)).toBe('NULL')
-    expect(toSqlLiteral(true)).toBe('1')
-    expect(toSqlLiteral(false)).toBe('0')
-    expect(toSqlLiteral("it's")).toBe("'it''s'")
+    expect(toSqlLiteral(null, Dialect.MsSql)).toBe('NULL')
+    expect(toSqlLiteral(7, Dialect.MsSql)).toBe('7')
+    expect(toSqlLiteral(Number.POSITIVE_INFINITY, Dialect.MsSql)).toBe('NULL')
+    expect(toSqlLiteral(true, Dialect.MsSql)).toBe('1')
+    expect(toSqlLiteral(false, Dialect.MySql)).toBe('0')
+    expect(toSqlLiteral("it's", Dialect.Sqlite)).toBe("'it''s'")
+    expect(toSqlLiteral({ a: 1 }, Dialect.Postgres)).toBe(`'{"a":1}'`)
+  })
+
+  it('writes a boolean as a word where the engine refuses a number', () => {
+    expect(toSqlLiteral(true, Dialect.Postgres)).toBe('TRUE')
+    expect(toSqlLiteral(false, Dialect.Postgres)).toBe('FALSE')
+    expect(toSqlLiteral(true, Dialect.Athena)).toBe('TRUE')
+  })
+
+  it('writes an array in the form of each engine', () => {
+    expect(toSqlLiteral([1, 2], Dialect.Postgres)).toBe("'{1,2}'")
+    expect(toSqlLiteral([1, 2], Dialect.Athena)).toBe('ARRAY[1, 2]')
+    expect(toSqlLiteral(['a', true], Dialect.Athena)).toBe("ARRAY['a', TRUE]")
+    expect(toSqlLiteral([1, 2], Dialect.MySql)).toBe("'[1,2]'")
+  })
+
+  it('quotes each element of a PostgreSQL array that needs it', () => {
+    const value = [
+      ['a b', 'c,d'],
+      ['', 'null'],
+      ['say "hi"', 'back\\slash'],
+      [null, Number.NaN],
+      ["it's", false],
+    ]
+    expect(toSqlLiteral(value, Dialect.Postgres)).toBe(
+      `'{{"a b","c,d"},{"","null"},{"say \\"hi\\"","back\\\\slash"},{NULL,NULL},{it''s,false}}'`,
+    )
   })
 })
 
@@ -216,5 +249,19 @@ describe('toInsertStatements', () => {
       truncated: false,
     }
     expect(toInsertStatements(result, 't', Dialect.Sqlite)).toContain('VALUES (1, NULL)')
+  })
+
+  it('writes the values in the form of the dialect', () => {
+    const result = {
+      columns: [
+        { name: 'ok', typeName: 'bool' },
+        { name: 'tags', typeName: '_int4' },
+      ],
+      rows: [[true, [1, 2]]],
+      truncated: false,
+    }
+    expect(toInsertStatements(result, 't', Dialect.Postgres)).toBe(
+      `INSERT INTO "t" ("ok", "tags") VALUES (TRUE, '{1,2}');`,
+    )
   })
 })
