@@ -49,6 +49,7 @@ export const SQL_KEYWORDS: readonly string[] = [
   'OR',
   'ORDER',
   'OUTER',
+  'OUTPUT',
   'RIGHT',
   'ROLLBACK',
   'SELECT',
@@ -554,6 +555,7 @@ export function emptySchemaIndex(): SchemaIndex {
 const CLAUSE_WORDS = new Set([
   'AND',
   'CROSS',
+  'DEFAULT',
   'EXCEPT',
   'FETCH',
   'FOR',
@@ -576,6 +578,7 @@ const CLAUSE_WORDS = new Set([
   'SET',
   'UNION',
   'USING',
+  'VALUES',
   'WHERE',
   'WINDOW',
 ])
@@ -698,9 +701,13 @@ export function qualifierBefore(text: string, offset: number): string {
   return wordBefore(head, head.length)
 }
 
+/** The words that a name of a relation follows. */
+const RELATION_WORDS = new Set(['FROM', 'JOIN', 'UPDATE', 'INTO'])
+
 /**
- * Reads the FROM clause and the JOIN clauses of a statement and returns the
- * relation that each alias stands for. The name of a relation without an
+ * Reads the FROM clause and the JOIN clauses of a statement, and the target
+ * of an UPDATE and of an INSERT INTO, and returns the relation that each
+ * alias stands for. The name of a relation without an
  * alias is a key of its own, so `FROM Sales.dbo.Orders` answers for `Orders`
  * as well.
  */
@@ -714,11 +721,17 @@ export function tableAliases(statement: string, dialect: Dialect): Map<string, s
       continue
     }
     const upper = word.text.toUpperCase()
-    if (upper !== 'FROM' && upper !== 'JOIN') {
+    if (!RELATION_WORDS.has(upper)) {
       continue
     }
 
     let cursor = index + 1
+    // PostgreSQL writes ONLY in front of a relation to leave out its
+    // children, and the word is no part of the name.
+    const only = tokens[cursor]
+    if (only && !only.quoted && only.text.toUpperCase() === 'ONLY') {
+      cursor += 1
+    }
     // One FROM clause can name more than one relation, with a comma between
     // two names, so the reader takes each name of the list.
     for (;;) {
@@ -748,7 +761,9 @@ export function tableAliases(statement: string, dialect: Dialect): Map<string, s
         cursor += 1
         alias = tokens[cursor] as Token | undefined
       }
-      if (alias && !endsTheName(alias)) {
+      // An alias is a name. A sign such as the = of `UPDATE a = 1` in the
+      // ON DUPLICATE KEY clause of MySQL is not one.
+      if (alias && !endsTheName(alias) && (alias.quoted || /^[A-Za-z_#@]/.test(alias.text))) {
         aliases.set(alias.text.toLowerCase(), relation)
         cursor += 1
       }

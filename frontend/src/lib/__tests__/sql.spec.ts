@@ -530,6 +530,26 @@ describe('tableAliases', () => {
     expect(tableAliases('SELECT * FROM (SELECT 1) AS x', Dialect.Postgres).size).toBe(0)
   })
 
+  it('reads the target of an UPDATE and of an INSERT INTO', () => {
+    const updated = tableAliases('UPDATE ONLY public.orders AS o SET total = 0', Dialect.Postgres)
+    expect(updated.get('o')).toBe('orders')
+    const inserted = tableAliases('INSERT INTO dbo.Orders (id) VALUES (1)', Dialect.MsSql)
+    expect([...inserted.keys()]).toEqual(['orders'])
+    const plain = tableAliases('INSERT INTO t VALUES (1)', Dialect.Sqlite)
+    expect([...plain.keys()]).toEqual(['t'])
+    const aliased = tableAliases('INSERT INTO t AS x DEFAULT VALUES', Dialect.Postgres)
+    expect(aliased.get('x')).toBe('t')
+  })
+
+  it('takes no sign as an alias', () => {
+    const aliases = tableAliases(
+      'INSERT INTO t (a) VALUES (1) ON DUPLICATE KEY UPDATE a = 2',
+      Dialect.MySql,
+    )
+    expect([...aliases.keys()]).toEqual(['t', 'a'])
+    expect(tableAliases('SELECT * FROM "a" "#x"', Dialect.Postgres).get('#x')).toBe('a')
+  })
+
   it('stops the name of a relation at the next word of the clause', () => {
     const aliases = tableAliases('SELECT * FROM orders WHERE id = 1', Dialect.Postgres)
     expect([...aliases.keys()]).toEqual(['orders'])

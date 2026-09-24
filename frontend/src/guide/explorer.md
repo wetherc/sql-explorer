@@ -31,7 +31,9 @@ indexes and its constraints, and it reads them in one call.
 
 The editor completes the names that the tree has opened on the connection
 of the tab. The names of the other open connections stay out. A full stop after an
-alias offers the columns of the table that the alias names.
+alias offers the columns of the table that the alias names. The editor
+reads an alias in a `FROM`, a `JOIN`, an `UPDATE` and an `INSERT INTO`
+clause.
 
 One command reads every relation of a database at once. The completion then
 knows a name that the tree has never opened.
