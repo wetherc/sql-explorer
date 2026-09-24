@@ -394,16 +394,115 @@ async fn ensure_healthy<R: Runtime>(
     Ok(open)
 }
 
-/// Returns the driver that a metadata read runs on. The read goes to a
-/// second connection when one can open, so that the tree of the explorer
-/// does not wait behind a statement of the user.
-async fn metadata_driver<R: Runtime>(
+/// Starts a metadata read. The read goes to a second connection when one can
+/// open, so that the tree of the explorer does not wait behind a statement of
+/// the user.
+async fn metadata_read<'a, R: Runtime>(
     app: &AppHandle<R>,
-    state: &AppState,
-    connection_id: &str,
-) -> Result<crate::state::BackgroundDriver> {
+    state: &'a AppState,
+    connection_id: &'a str,
+) -> Result<CatalogRead<'a>> {
     let open = ensure_healthy(app, state, connection_id).await?;
-    background_driver(state, connection_id, &open).await
+    let session = background_session(state, connection_id, &open).await?;
+    Ok(CatalogRead::new(
+        state,
+        connection_id,
+        session,
+        CATALOG_LIMIT,
+    ))
+}
+
+/// The longest time that one read of the catalog takes, the wait for the
+/// driver included.
+///
+/// A read of the catalog can wait behind a lock of the server, for example
+/// the lock of a change of a table that another session did not commit.
+/// Without a limit, such a read keeps the driver of the metadata reads, and
+/// every later read of the explorer, of the completions and of the scripts of
+/// that connection waits behind it.
+pub const CATALOG_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// One read of the catalog on one session, under the limit of its time.
+struct CatalogRead<'a> {
+    state: &'a AppState,
+    connection_id: &'a str,
+    session: Arc<Session>,
+    limit: std::time::Duration,
+    deadline: tokio::time::Instant,
+}
+
+impl<'a> CatalogRead<'a> {
+    fn new(
+        state: &'a AppState,
+        connection_id: &'a str,
+        session: Arc<Session>,
+        limit: std::time::Duration,
+    ) -> Self {
+        Self {
+            state,
+            connection_id,
+            session,
+            limit,
+            deadline: tokio::time::Instant::now() + limit,
+        }
+    }
+
+    fn timeout(&self) -> Error {
+        Error::Timeout(self.limit.as_secs())
+    }
+
+    /// Takes the driver of the session. When another exchange keeps the
+    /// driver until the deadline, the read fails and the session stays,
+    /// because that exchange has a limit of its own.
+    async fn lock(&self) -> Result<tokio::sync::MutexGuard<'_, Box<dyn DatabaseDriver>>> {
+        tokio::time::timeout_at(self.deadline, self.session.driver.lock())
+            .await
+            .map_err(|_| self.timeout())
+    }
+
+    /// Runs the read until the deadline. A read that passes the deadline is
+    /// dropped in the middle of an exchange, so the server is asked to stop
+    /// the statement and the session goes. The next read then opens a new
+    /// session.
+    async fn run<T>(&self, read: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+        match tokio::time::timeout_at(self.deadline, read).await {
+            Ok(result) => result,
+            Err(_) => {
+                self.discard().await;
+                Err(self.timeout())
+            }
+        }
+    }
+
+    async fn discard(&self) {
+        if let Some(handle) = self.session.cancel_handle.clone() {
+            if let Err(error) = handle.cancel().await {
+                log::warn!("The server did not stop the read of the catalog: {error}");
+            }
+        }
+        if self.session.keeps_connection_after_stop {
+            return;
+        }
+        log::warn!(
+            "A read of the catalog of '{}' passed its limit, so its session closes.",
+            self.connection_id
+        );
+        if let Some(background) = self.state.background_session(self.connection_id).await {
+            if Arc::ptr_eq(&background, &self.session) {
+                self.state.clear_background(self.connection_id).await;
+                return;
+            }
+        }
+        // The read ran on the default session, because no second connection
+        // could open. The next command opens a new default session.
+        if let Ok(open) = self.state.connection(self.connection_id).await {
+            if let Some(current) = open.sessions.get(DEFAULT_SESSION).await {
+                if Arc::ptr_eq(&current, &self.session) {
+                    open.sessions.release(DEFAULT_SESSION).await;
+                }
+            }
+        }
+    }
 }
 
 /// Waits for the number of seconds, or forever when the number is zero.
@@ -811,9 +910,9 @@ pub async fn list_databases<R: Runtime>(
     connection_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<Database>> {
-    let driver = metadata_driver(&app, &state, &connection_id).await?;
-    let mut guard = driver.lock().await;
-    guard.list_databases().await
+    let read = metadata_read(&app, &state, &connection_id).await?;
+    let mut guard = read.lock().await?;
+    read.run(guard.list_databases()).await
 }
 
 #[tauri::command]
@@ -823,9 +922,9 @@ pub async fn list_schemas<R: Runtime>(
     database: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<Schema>> {
-    let driver = metadata_driver(&app, &state, &connection_id).await?;
-    let mut guard = driver.lock().await;
-    guard.list_schemas(&database).await
+    let read = metadata_read(&app, &state, &connection_id).await?;
+    let mut guard = read.lock().await?;
+    read.run(guard.list_schemas(&database)).await
 }
 
 /// Names one schema of one connection. The commands that list the relations
@@ -857,10 +956,9 @@ pub async fn list_tables<R: Runtime>(
     request: SchemaScope,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<Table>> {
-    let driver = metadata_driver(&app, &state, &request.connection_id).await?;
-    let mut guard = driver.lock().await;
-    guard
-        .list_tables(&request.database, request.schema_name.as_deref())
+    let read = metadata_read(&app, &state, &request.connection_id).await?;
+    let mut guard = read.lock().await?;
+    read.run(guard.list_tables(&request.database, request.schema_name.as_deref()))
         .await
 }
 
@@ -870,15 +968,14 @@ pub async fn list_columns<R: Runtime>(
     request: TableScope,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<AppColumn>> {
-    let driver = metadata_driver(&app, &state, &request.connection_id).await?;
-    let mut guard = driver.lock().await;
-    guard
-        .list_columns(
-            &request.database,
-            request.schema_name.as_deref(),
-            &request.table_name,
-        )
-        .await
+    let read = metadata_read(&app, &state, &request.connection_id).await?;
+    let mut guard = read.lock().await?;
+    read.run(guard.list_columns(
+        &request.database,
+        request.schema_name.as_deref(),
+        &request.table_name,
+    ))
+    .await
 }
 
 #[tauri::command]
@@ -887,10 +984,9 @@ pub async fn list_routines<R: Runtime>(
     request: SchemaScope,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<Routine>> {
-    let driver = metadata_driver(&app, &state, &request.connection_id).await?;
-    let mut guard = driver.lock().await;
-    guard
-        .list_routines(&request.database, request.schema_name.as_deref())
+    let read = metadata_read(&app, &state, &request.connection_id).await?;
+    let mut guard = read.lock().await?;
+    read.run(guard.list_routines(&request.database, request.schema_name.as_deref()))
         .await
 }
 
@@ -900,15 +996,14 @@ pub async fn list_indexes<R: Runtime>(
     request: TableScope,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<IndexInfo>> {
-    let driver = metadata_driver(&app, &state, &request.connection_id).await?;
-    let mut guard = driver.lock().await;
-    guard
-        .list_indexes(
-            &request.database,
-            request.schema_name.as_deref(),
-            &request.table_name,
-        )
-        .await
+    let read = metadata_read(&app, &state, &request.connection_id).await?;
+    let mut guard = read.lock().await?;
+    read.run(guard.list_indexes(
+        &request.database,
+        request.schema_name.as_deref(),
+        &request.table_name,
+    ))
+    .await
 }
 
 #[tauri::command]
@@ -917,15 +1012,14 @@ pub async fn list_constraints<R: Runtime>(
     request: TableScope,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<Constraint>> {
-    let driver = metadata_driver(&app, &state, &request.connection_id).await?;
-    let mut guard = driver.lock().await;
-    guard
-        .list_constraints(
-            &request.database,
-            request.schema_name.as_deref(),
-            &request.table_name,
-        )
-        .await
+    let read = metadata_read(&app, &state, &request.connection_id).await?;
+    let mut guard = read.lock().await?;
+    read.run(guard.list_constraints(
+        &request.database,
+        request.schema_name.as_deref(),
+        &request.table_name,
+    ))
+    .await
 }
 
 #[tauri::command]
@@ -934,15 +1028,14 @@ pub async fn list_partitions<R: Runtime>(
     request: TableScope,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<Partition>> {
-    let driver = metadata_driver(&app, &state, &request.connection_id).await?;
-    let mut guard = driver.lock().await;
-    guard
-        .list_partitions(
-            &request.database,
-            request.schema_name.as_deref(),
-            &request.table_name,
-        )
-        .await
+    let read = metadata_read(&app, &state, &request.connection_id).await?;
+    let mut guard = read.lock().await?;
+    read.run(guard.list_partitions(
+        &request.database,
+        request.schema_name.as_deref(),
+        &request.table_name,
+    ))
+    .await
 }
 
 /// Collects everything the properties dialog shows about one relation: the
@@ -956,20 +1049,23 @@ pub async fn table_details<R: Runtime>(
     request: TableScope,
     state: tauri::State<'_, AppState>,
 ) -> Result<TableDetails> {
-    let driver = metadata_driver(&app, &state, &request.connection_id).await?;
+    let read = metadata_read(&app, &state, &request.connection_id).await?;
     let database = &request.database;
     let schema = request.schema_name.as_deref();
     let table = &request.table_name;
-    let mut guard = driver.lock().await;
+    let mut guard = read.lock().await?;
 
-    let details = TableDetails {
-        facts: guard.table_facts(database, schema, table).await?,
-        columns: guard.list_columns(database, schema, table).await?,
-        indexes: guard.list_indexes(database, schema, table).await?,
-        constraints: guard.list_constraints(database, schema, table).await?,
-    };
-
-    Ok(details)
+    // The limit applies to the four reads together, because the dialog
+    // waits for all four.
+    read.run(async {
+        Ok(TableDetails {
+            facts: guard.table_facts(database, schema, table).await?,
+            columns: guard.list_columns(database, schema, table).await?,
+            indexes: guard.list_indexes(database, schema, table).await?,
+            constraints: guard.list_constraints(database, schema, table).await?,
+        })
+    })
+    .await
 }
 
 /// The number of columns a snapshot keeps when the caller names no bound.
@@ -1006,13 +1102,15 @@ pub async fn schema_snapshot<R: Runtime>(
         .unwrap_or(DEFAULT_SNAPSHOT_COLUMNS)
         .max(1);
 
-    let driver = match request.own_connection.unwrap_or(true) {
-        true => background_driver(&state, &request.connection_id, &open).await?,
-        false => open.default_session().await?.driver.clone(),
+    let session = match request.own_connection.unwrap_or(true) {
+        true => background_session(&state, &request.connection_id, &open).await?,
+        false => open.default_session().await?,
     };
 
-    let mut guard = driver.lock().await;
-    guard.schema_snapshot(&request.database, limit).await
+    let read = CatalogRead::new(&state, &request.connection_id, session, CATALOG_LIMIT);
+    let mut guard = read.lock().await?;
+    read.run(guard.schema_snapshot(&request.database, limit))
+        .await
 }
 
 /// Confirms that a background driver that stood idle still answers. A driver
@@ -1036,18 +1134,18 @@ async fn background_answers(session: &Arc<Session>) -> bool {
     healthy
 }
 
-/// Returns the background driver of a connection, and opens one when the
+/// Returns the background session of a connection, and opens one when the
 /// connection has none or when the one it has stopped answering. A driver
-/// that cannot open gives the driver of the default session, because a
-/// snapshot that waits is better than no completions.
-async fn background_driver(
+/// that cannot open gives the default session, because a snapshot that waits
+/// is better than no completions.
+async fn background_session(
     state: &AppState,
     connection_id: &str,
     open: &OpenConnection,
-) -> Result<Arc<tokio::sync::Mutex<Box<dyn DatabaseDriver>>>> {
+) -> Result<Arc<Session>> {
     if let Some(session) = state.background_session(connection_id).await {
         if background_answers(&session).await {
-            return Ok(session.driver.clone());
+            return Ok(session);
         }
         log::warn!(
             "The second connection of '{connection_id}' stopped answering. Opening it again."
@@ -1058,21 +1156,17 @@ async fn background_driver(
         Ok(full) => full,
         Err(error) => {
             log::warn!("The password of '{connection_id}' could not be read: {error}");
-            return Ok(open.default_session().await?.driver.clone());
+            return open.default_session().await;
         }
     };
     match open_driver(&full).await {
-        Ok(driver) => Ok(state
-            .set_background_driver(connection_id, driver)
-            .await
-            .driver
-            .clone()),
+        Ok(driver) => Ok(state.set_background_driver(connection_id, driver).await),
         Err(error) => {
             log::warn!(
                 "A second connection for '{connection_id}' could not open, so the schema is \
                  read on the session of the user: {error}"
             );
-            Ok(open.default_session().await?.driver.clone())
+            open.default_session().await
         }
     }
 }
@@ -1104,33 +1198,38 @@ pub async fn script_object<R: Runtime>(
 
     // The work only reads the catalog, so it runs on the driver of the
     // metadata reads and leaves the sessions of the tabs free.
-    let driver = background_driver(&state, &connection_id, &open).await?;
-    let mut guard = driver.lock().await;
-    let columns = guard
-        .list_columns(
-            database.as_deref().unwrap_or_default(),
-            schema_name.as_deref(),
-            &table_name,
-        )
+    let session = background_session(&state, &connection_id, &open).await?;
+    let read = CatalogRead::new(&state, &connection_id, session, CATALOG_LIMIT);
+    let mut guard = read.lock().await?;
+    let (columns, from_engine) = read
+        .run(async {
+            let columns = guard
+                .list_columns(
+                    database.as_deref().unwrap_or_default(),
+                    schema_name.as_deref(),
+                    &table_name,
+                )
+                .await?;
+            let from_engine = match script_kind {
+                ScriptKind::Create => match guard.create_query(
+                    database.as_deref(),
+                    schema_name.as_deref(),
+                    &table_name,
+                    kind,
+                ) {
+                    Some(query) => {
+                        let response = guard
+                            .execute_query(&query.sql, None, &ExecOptions::default())
+                            .await?;
+                        text_of_column(&response, query.column)
+                    }
+                    None => None,
+                },
+                _ => None,
+            };
+            Ok((columns, from_engine))
+        })
         .await?;
-
-    let from_engine = match script_kind {
-        ScriptKind::Create => match guard.create_query(
-            database.as_deref(),
-            schema_name.as_deref(),
-            &table_name,
-            kind,
-        ) {
-            Some(query) => {
-                let response = guard
-                    .execute_query(&query.sql, None, &ExecOptions::default())
-                    .await?;
-                text_of_column(&response, query.column)
-            }
-            None => None,
-        },
-        _ => None,
-    };
 
     drop(guard);
     script_text(dialect, &name, script_kind, &columns, from_engine)
@@ -3450,18 +3549,18 @@ mod tests {
         let (session, pings) = background_stub(&state, true).await;
 
         // A driver that answered a moment ago goes out without a ping.
-        let fresh = background_driver(&state, "s1", &open).await.unwrap();
-        assert!(Arc::ptr_eq(&fresh, &session.driver));
+        let fresh = background_session(&state, "s1", &open).await.unwrap();
+        assert!(Arc::ptr_eq(&fresh, &session));
         assert_eq!(pings.load(std::sync::atomic::Ordering::SeqCst), 0);
 
         session.age(crate::state::HEALTH_CHECK_AFTER).await;
-        let checked = background_driver(&state, "s1", &open).await.unwrap();
-        assert!(Arc::ptr_eq(&checked, &session.driver));
+        let checked = background_session(&state, "s1", &open).await.unwrap();
+        assert!(Arc::ptr_eq(&checked, &session));
         assert_eq!(pings.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         // The ping moved the moment of the last answer, so the next read
         // sends no second ping.
-        background_driver(&state, "s1", &open).await.unwrap();
+        background_session(&state, "s1", &open).await.unwrap();
         assert_eq!(pings.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
@@ -3473,12 +3572,12 @@ mod tests {
         let (session, pings) = background_stub(&state, false).await;
         session.age(crate::state::HEALTH_CHECK_AFTER).await;
 
-        let opened = background_driver(&state, "s1", &open).await.unwrap();
+        let opened = background_session(&state, "s1", &open).await.unwrap();
 
         assert_eq!(pings.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert!(!Arc::ptr_eq(&opened, &session.driver));
+        assert!(!Arc::ptr_eq(&opened, &session));
         // The new driver reaches the database.
-        opened.lock().await.ping().await.unwrap();
+        opened.driver.lock().await.ping().await.unwrap();
     }
 
     #[tokio::test]
@@ -3495,5 +3594,195 @@ mod tests {
         assert!(result.is_err());
         let kept = open.sessions.get("t1").await.unwrap();
         assert!(Arc::ptr_eq(&session, &kept));
+    }
+
+    /// A handle of a stop that counts its calls, and fails each one when it
+    /// is told to.
+    struct CountingCancel {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        fails: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::db::drivers::CancelHandle for CountingCancel {
+        async fn cancel(&self) -> Result<()> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match self.fails {
+                true => Err(Error::Connection("the stop failed".into())),
+                false => Ok(()),
+            }
+        }
+    }
+
+    /// A driver for the tests of the limit of the catalog reads. It gives
+    /// the handle of a stop when it has one.
+    struct CatalogDriver {
+        cancel: Option<Arc<dyn crate::db::drivers::CancelHandle>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DatabaseDriver for CatalogDriver {
+        fn capabilities(&self) -> crate::db::DriverCapabilities {
+            crate::db::DriverCapabilities::default()
+        }
+        fn dialect(&self) -> Dialect {
+            Dialect::Sqlite
+        }
+        fn cancel_handle(&self) -> Option<Arc<dyn crate::db::drivers::CancelHandle>> {
+            self.cancel.clone()
+        }
+        async fn ping(&mut self) -> Result<()> {
+            Ok(())
+        }
+        async fn list_databases(&mut self) -> Result<Vec<Database>> {
+            Ok(Vec::new())
+        }
+        async fn list_schemas(&mut self, _database: &str) -> Result<Vec<Schema>> {
+            Ok(Vec::new())
+        }
+        async fn list_tables(
+            &mut self,
+            _database: &str,
+            _schema: Option<&str>,
+        ) -> Result<Vec<Table>> {
+            Ok(Vec::new())
+        }
+        async fn list_columns(
+            &mut self,
+            _database: &str,
+            _schema: Option<&str>,
+            _table: &str,
+        ) -> Result<Vec<AppColumn>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn catalog_driver(
+        fails: Option<bool>,
+    ) -> (Box<dyn DatabaseDriver>, Arc<std::sync::atomic::AtomicUsize>) {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cancel = fails.map(|fails| {
+            Arc::new(CountingCancel {
+                calls: calls.clone(),
+                fails,
+            }) as Arc<dyn crate::db::drivers::CancelHandle>
+        });
+        (Box::new(CatalogDriver { cancel }), calls)
+    }
+
+    fn stops(calls: &std::sync::atomic::AtomicUsize) -> usize {
+        calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    const SHORT: std::time::Duration = std::time::Duration::from_millis(20);
+
+    #[tokio::test]
+    async fn a_catalog_read_that_answers_in_time_gives_its_answer() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (_app, state) = state_with_sqlite(descriptor).await;
+        let (driver, _calls) = catalog_driver(None);
+        let read = CatalogRead::new(&state, "s1", Arc::new(Session::new(driver)), SHORT);
+        let mut guard = read.lock().await.unwrap();
+        assert!(read.run(guard.list_databases()).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_catalog_read_past_its_limit_stops_and_closes_the_background_session() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (_app, state) = state_with_sqlite(descriptor).await;
+        let (driver, calls) = catalog_driver(Some(false));
+        let background = state.set_background_driver("s1", driver).await;
+
+        let read = CatalogRead::new(&state, "s1", background, SHORT);
+        let _guard = read.lock().await.unwrap();
+        let outcome: Result<()> = read.run(std::future::pending()).await;
+
+        assert!(matches!(outcome, Err(Error::Timeout(0))));
+        assert_eq!(stops(&calls), 1);
+        assert!(state.background_session("s1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_catalog_read_past_its_limit_closes_the_default_session_it_ran_on() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (_app, state) = state_with_sqlite(descriptor).await;
+        let open = state.connection("s1").await.unwrap();
+        // A stop that fails still lets the session go.
+        let (driver, calls) = catalog_driver(Some(true));
+        let default = open
+            .sessions
+            .insert(DEFAULT_SESSION, Session::new(driver))
+            .await;
+
+        let read = CatalogRead::new(&state, "s1", default, SHORT);
+        let outcome: Result<()> = read.run(std::future::pending()).await;
+
+        assert!(outcome.is_err());
+        assert_eq!(stops(&calls), 1);
+        assert!(open.default_session().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_catalog_read_past_its_limit_leaves_the_sessions_it_did_not_run_on() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (_app, state) = state_with_sqlite(descriptor).await;
+        let open = state.connection("s1").await.unwrap();
+        let (background, _pings) = background_stub(&state, true).await;
+        let default = open.default_session().await.unwrap();
+
+        // The session of the read stands in neither slot, for example because
+        // a health check put a new session in its place.
+        let (driver, _calls) = catalog_driver(None);
+        let read = CatalogRead::new(&state, "s1", Arc::new(Session::new(driver)), SHORT);
+        let outcome: Result<()> = read.run(std::future::pending()).await;
+
+        assert!(outcome.is_err());
+        let kept = state.background_session("s1").await.unwrap();
+        assert!(Arc::ptr_eq(&kept, &background));
+        assert!(Arc::ptr_eq(
+            &open.default_session().await.unwrap(),
+            &default
+        ));
+
+        // A connection that closed during the read leaves nothing to drop.
+        state.remove("s1").await;
+        let (driver, _calls) = catalog_driver(None);
+        let read = CatalogRead::new(&state, "s1", Arc::new(Session::new(driver)), SHORT);
+        assert!(read
+            .run(std::future::pending::<Result<()>>())
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn a_catalog_read_past_its_limit_keeps_a_session_that_survives_a_stop() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (_app, state) = state_with_sqlite(descriptor).await;
+        let open = state.connection("s1").await.unwrap();
+        // SQLite aborts a statement cleanly, so the session stays.
+        let default = open.default_session().await.unwrap();
+        let read = CatalogRead::new(&state, "s1", default.clone(), SHORT);
+        let outcome: Result<()> = read.run(std::future::pending()).await;
+
+        assert!(outcome.is_err());
+        assert!(Arc::ptr_eq(
+            &open.default_session().await.unwrap(),
+            &default
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_catalog_read_that_waits_for_the_driver_past_its_limit_keeps_the_session() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (_app, state) = state_with_sqlite(descriptor).await;
+        let (driver, calls) = catalog_driver(Some(false));
+        let background = state.set_background_driver("s1", driver).await;
+        let _other = background.driver.lock().await;
+
+        let read = CatalogRead::new(&state, "s1", background.clone(), SHORT);
+        assert!(matches!(read.lock().await, Err(Error::Timeout(0))));
+
+        assert_eq!(stops(&calls), 0);
+        assert!(state.background_session("s1").await.is_some());
     }
 }

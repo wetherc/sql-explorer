@@ -222,6 +222,24 @@ passes the limit is dropped in the middle of the exchange whatever the engine.
 A replacement touches one session alone: the tab that lost its session takes
 a new one at once, and the sessions of the other tabs run on.
 
+## Catalog reads have a fixed time limit and no Stop
+
+A read of the catalog for the explorer, the completions, the properties
+dialog or a script of an object has a limit of 60 seconds. The wait for the
+driver counts against that limit. The time limit of the connection does not
+apply to these reads, and no Stop button ends one. A catalog read that waits
+behind a lock of the server, for example an MS SQL Server Sch-M lock of a
+change that another tab did not commit, thus fails after 60 seconds.
+
+A read that passes the limit is dropped in the middle of the exchange. The
+application asks the server to stop the statement and closes the session of
+the read, except on SQLite and Athena. The next catalog read opens a new
+session. A read that ran on the default session, because no second
+connection could open, closes the default session, and the next command
+opens a new one. A read that waited for the driver during the whole limit
+fails and closes no session, because the exchange that keeps the driver has
+a limit of its own.
+
 ## MS SQL Server and Athena have no read-only session
 
 MS SQL Server has no setting that makes one session refuse writes. The

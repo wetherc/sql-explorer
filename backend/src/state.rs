@@ -125,9 +125,6 @@ pub struct ConnectionInfo {
     pub dialect: Dialect,
 }
 
-/// A driver that only background work uses.
-pub type BackgroundDriver = Arc<Mutex<Box<dyn DatabaseDriver>>>;
-
 /// One statement that runs, with the means to stop it.
 pub struct RunningRequest {
     /// Ends the wait for the statement.
