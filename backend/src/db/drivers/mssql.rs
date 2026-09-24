@@ -885,17 +885,7 @@ impl DatabaseDriver for MssqlDriver {
     }
 
     async fn list_schemas(&mut self, database: &str) -> Result<Vec<Schema>> {
-        // The catalog view is scoped to the database that the connection is
-        // attached to, so the name of the database goes in front of it.
-        let query = format!(
-            "SELECT s.name FROM {}.sys.schemas AS s \
-             JOIN {}.sys.database_principals AS p ON s.principal_id = p.principal_id \
-             WHERE s.name NOT IN ('sys', 'INFORMATION_SCHEMA') \
-               AND s.name NOT LIKE 'db\\_%' ESCAPE '\\' \
-             ORDER BY s.name",
-            Dialect::MsSql.quote_identifier(database),
-            Dialect::MsSql.quote_identifier(database)
-        );
+        let query = schema_query(&Dialect::MsSql.quote_identifier(database));
         let mut stream = self.client.simple_query(query).await?;
         let mut schemas = Vec::new();
         while let Some(item) = stream.try_next().await? {
@@ -1176,6 +1166,21 @@ fn routine_query(catalog: &str) -> String {
          FROM {catalog}.INFORMATION_SCHEMA.ROUTINES \
          WHERE ROUTINE_SCHEMA = @P1 \
          ORDER BY ROUTINE_TYPE, ROUTINE_NAME"
+    )
+}
+
+/// Reads the schemas of one database. The catalog view shows the database
+/// that the connection is attached to, so the name of the database goes in
+/// front of it. The statement hides `INFORMATION_SCHEMA` (id 3), `sys` (id 4)
+/// and the schemas of the fixed database roles, such as `db_owner`, which
+/// have the ids 16384 to 16399. It hides no schema by its name, so a user
+/// schema such as `db_sales` stays in the list. It does not join the owner,
+/// because a user can see a schema whose owner is hidden from that user.
+fn schema_query(catalog: &str) -> String {
+    format!(
+        "SELECT s.name FROM {catalog}.sys.schemas AS s \
+         WHERE s.schema_id NOT IN (3, 4) AND s.schema_id NOT BETWEEN 16384 AND 16399 \
+         ORDER BY s.name"
     )
 }
 
@@ -2646,6 +2651,12 @@ mod tests {
 
     #[test]
     fn the_catalog_statements_name_the_database_of_the_connection() {
+        let schemas = schema_query("[Sales]");
+        assert!(schemas.contains("FROM [Sales].sys.schemas AS s"));
+        assert!(schemas.contains("NOT BETWEEN 16384 AND 16399"));
+        assert!(!schemas.contains("database_principals"));
+        assert!(!schemas.contains("LIKE"));
+
         let routines = routine_query("[Sales]");
         assert!(routines.contains("FROM [Sales].INFORMATION_SCHEMA.ROUTINES"));
         assert!(routines.contains("WHERE ROUTINE_SCHEMA = @P1"));
