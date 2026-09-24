@@ -194,6 +194,25 @@ describe('ResultTable from plain rows', () => {
     expect(one.cell(0, 7)).toBeNull()
   })
 
+  it('finds the row of any chunk of a table of many chunks', () => {
+    const table = new ResultTable([{ name: 'n', typeName: 'int' }])
+    // The chunks have lengths of 1 to 4 rows, and some chunks hold no row.
+    let next = 0
+    for (let chunk = 0; chunk < 50; chunk += 1) {
+      const length = chunk % 5
+      const values = Int32Array.from({ length }, () => next++)
+      table.addSegment([{ kind: 'int32', nulls: new Uint8Array(1), values }], length)
+    }
+    expect(table.rowCount).toBe(next)
+    // Reads that jump back and forth find each row, and a read at a place
+    // outside the table finds none.
+    for (const row of [next - 1, 0, 57, 3, next - 2, 1, 50]) {
+      expect(table.cell(row, 0)).toBe(row)
+    }
+    expect(table.cell(-1, 0)).toBeNull()
+    expect(table.cell(next, 0)).toBeNull()
+  })
+
   it('keeps the mark of a read that a limit stopped', () => {
     expect(ResultTable.fromRows(columns, [[1, 'a']], true).truncated).toBe(true)
   })

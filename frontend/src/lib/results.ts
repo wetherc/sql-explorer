@@ -107,20 +107,33 @@ export class ResultTable {
     this.rows_ += length
   }
 
-  /** The segment that holds one row, or nothing when the row is past the end. */
+  /**
+   * The segment that holds one row, or nothing when the row is past the end.
+   * The segments stand in the order of their first rows, so a search that
+   * halves the list finds the segment of a table of many chunks in few steps.
+   */
   private segmentOf(row: number): Segment | null {
     const held = this.segments[this.lastSegment]
     if (held && row >= held.start && row < held.start + held.length) {
       return held
     }
-    for (let index = 0; index < this.segments.length; index += 1) {
-      const segment = this.segments[index]!
-      if (row >= segment.start && row < segment.start + segment.length) {
-        this.lastSegment = index
-        return segment
+    if (row < 0 || row >= this.rows_) {
+      return null
+    }
+    let low = 0
+    let high = this.segments.length - 1
+    // The row is inside the table, so some segment holds it, and the search
+    // ends with `low` at the last segment that starts at or before the row.
+    while (low < high) {
+      const middle = (low + high + 1) >> 1
+      if (this.segments[middle]!.start <= row) {
+        low = middle
+      } else {
+        high = middle - 1
       }
     }
-    return null
+    this.lastSegment = low
+    return this.segments[low]!
   }
 
   /** The value of one cell. A place that holds no value gives null. */
