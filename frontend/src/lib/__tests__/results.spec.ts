@@ -483,6 +483,40 @@ describe('the reader of the chunks', () => {
   })
 })
 
+describe('the wait for the end of a run', () => {
+  it('ends at once when the end frame came already', async () => {
+    const { stream, ends } = collect()
+    stream.feed(new Writer().u8(FRAME_END).text('{"messages":[],"elapsedMs":1}').buffer())
+    await stream.settle(100)
+    expect(ends).toHaveLength(1)
+  })
+
+  it('starts the idle time again for each message that does not end the run', async () => {
+    vi.useFakeTimers()
+    try {
+      const { stream, sets } = collect()
+      const settled = stream.settle(100)
+      await vi.advanceTimersByTimeAsync(60)
+      stream.feed(intSetMessage([1]))
+      await vi.advanceTimersByTimeAsync(60)
+      expect(stream.failure).toBeNull()
+      await vi.advanceTimersByTimeAsync(40)
+      await settled
+      expect(sets).toHaveLength(1)
+      expect(stream.failure?.message).toBe('The last rows of the run did not arrive.')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('takes no message once the caller closes it', () => {
+    const { stream, sets } = collect()
+    stream.close()
+    stream.feed(intSetMessage([1]))
+    expect(sets).toHaveLength(0)
+  })
+})
+
 describe('the cost of a large result', () => {
   it('reads a chunk of ten thousand rows without a row of objects', () => {
     const rows = 10_000

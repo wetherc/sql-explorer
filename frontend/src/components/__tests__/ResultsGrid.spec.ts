@@ -80,6 +80,15 @@ describe('ResultsGrid', () => {
     expect(wrapper.find('[data-test="grid-truncated"]').text()).toContain('row limit')
   })
 
+  it('takes the mark of the row limit from the pane over the table', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, {
+      props: { result: result(), truncated: false },
+    })
+    expect(wrapper.find('[data-test="grid-truncated"]').exists()).toBe(false)
+    await wrapper.setProps({ truncated: true })
+    expect(wrapper.find('[data-test="grid-truncated"]').exists()).toBe(true)
+  })
+
   it('says so when a statement returned no rows', () => {
     const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result({ rows: [] }) } })
     expect(wrapper.find('[data-test="grid-empty"]').text()).toBe('This statement returned no rows.')

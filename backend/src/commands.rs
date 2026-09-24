@@ -555,15 +555,29 @@ pub async fn execute_query<R: Runtime>(
         query_params,
         options,
     } = request;
-    let (open, session, key) = session_for(&app, &state, &connection_id, tab_id.as_deref()).await?;
-    let options = options.unwrap_or_else(|| open.descriptor.exec_options());
-    let (query, bound) = prepare_parameters(&query, open.dialect, query_params.as_ref())?;
+    let started = std::time::Instant::now();
+    let prepared = async {
+        let (open, session, key) =
+            session_for(&app, &state, &connection_id, tab_id.as_deref()).await?;
+        let options = options.unwrap_or_else(|| open.descriptor.exec_options());
+        let (query, bound) = prepare_parameters(&query, open.dialect, query_params.as_ref())?;
+        Ok::<_, Error>((open, session, key, options, query, bound))
+    }
+    .await;
+    let (open, session, key, options, query, bound) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            // The window waits for the end frame of every run, so a run that
+            // fails before it starts sends one too.
+            let _ = ChunkSink::new(on_chunk, 0).fail(started.elapsed().as_millis() as u64);
+            return Err(error);
+        }
+    };
     let token = state
         .start_request(&request_id, session.cancel_handle.clone())
         .await;
 
     let mut sink = ChunkSink::new(on_chunk, options.max_rows);
-    let started = std::time::Instant::now();
     let outcome = {
         let mut guard = session.driver.lock().await;
         run_bounded(
@@ -2934,6 +2948,69 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tabs.db");
         (dir, sqlite_connection(path.to_str().unwrap()))
+    }
+
+    /// A channel that keeps the first byte of every message, which names
+    /// the kind of the first frame of that message.
+    fn kind_channel() -> (
+        Channel<InvokeResponseBody>,
+        std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    ) {
+        let kinds = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = kinds.clone();
+        let channel = Channel::new(move |body| {
+            if let InvokeResponseBody::Raw(bytes) = body {
+                kept.lock().unwrap().push(bytes[0]);
+            }
+            Ok(())
+        });
+        (channel, kinds)
+    }
+
+    fn run_request(connection_id: &str, query: &str) -> ExecuteRequest {
+        ExecuteRequest {
+            connection_id: connection_id.into(),
+            request_id: "r1".into(),
+            query: query.into(),
+            tab_id: Some("t1".into()),
+            query_params: None,
+            options: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_run_ends_its_channel_with_the_end_frame() {
+        use crate::db::columnar::FRAME_END;
+        use tauri::Manager;
+        let (_dir, descriptor) = temp_sqlite();
+        let (app, state) = state_with_sqlite(descriptor).await;
+        app.manage(state);
+
+        let (channel, kinds) = kind_channel();
+        execute_query(
+            app.handle().clone(),
+            run_request("s1", "SELECT 1"),
+            app.state::<AppState>(),
+            channel,
+        )
+        .await
+        .unwrap();
+        assert_eq!(kinds.lock().unwrap().last(), Some(&FRAME_END));
+
+        // A run that fails before it reaches the server sends the end frame
+        // too, because the window waits for it.
+        let (channel, kinds) = kind_channel();
+        let error = execute_query(
+            app.handle().clone(),
+            run_request("missing", "SELECT 1"),
+            app.state::<AppState>(),
+            channel,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(!error.to_string().is_empty());
+        assert_eq!(*kinds.lock().unwrap(), vec![FRAME_END]);
     }
 
     #[tokio::test]

@@ -62,7 +62,7 @@
               data-test="grid-export-item"
               @click="askExport(entry.format)"
             />
-            <template v-if="result.truncated">
+            <template v-if="truncated">
               <v-divider />
               <v-list-item
                 title="Write every row to a CSV file"
@@ -95,9 +95,9 @@
       </template>
     </PanelHeader>
 
-    <div v-if="result.truncated" class="px-3 py-1">
+    <div v-if="truncated" class="px-3 py-1">
       <v-alert type="warning" density="compact" variant="tonal" data-test="grid-truncated">
-        The row limit stopped the read at {{ result.rowCount.toLocaleString() }} rows.
+        The row limit stopped the read at {{ rowTotal.toLocaleString() }} rows.
       </v-alert>
     </div>
 
@@ -296,13 +296,19 @@ const props = withDefaults(
      *  Vue, so this count tells the grid that rows arrived while the set
      *  streams. A grid without it reads the count of the table once. */
     rows?: number
+    /** True when the row limit stopped the read. The table sets its mark
+     *  when the set ends, and Vue does not see that change, so the pane
+     *  gives it here. A grid without it reads the mark of the table once. */
+    truncated?: boolean
     busy?: boolean
   }>(),
-  { busy: false, rows: undefined },
+  { busy: false, rows: undefined, truncated: undefined },
 )
 
 /** The number of rows of the result, which grows while the set streams. */
 const rowTotal = computed(() => props.rows ?? props.result.rowCount)
+/** True when the row limit stopped the read of the result. */
+const truncated = computed(() => props.truncated ?? props.result.truncated)
 const emit = defineEmits<{
   (event: 'export', format: ExportFormat, rows: ResultSet): void
   (event: 'export-all', format: ExportAllFormat): void
@@ -883,7 +889,7 @@ function rowsToExport(): ResultSet {
   return {
     columns: props.result.columns,
     rows: order.map((row) => props.result.row(row)),
-    truncated: props.result.truncated,
+    truncated: truncated.value,
   }
 }
 

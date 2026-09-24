@@ -27,6 +27,10 @@ export interface ResultPane {
    *  reactivity of Vue, so this count tells the grid that rows arrived
    *  while the set streams. */
   rows: number
+  /** True when the row limit stopped the read. The table sets its own mark
+   *  when the set ends, outside the reactivity of Vue, so this copy tells
+   *  the grid. */
+  truncated: boolean
   /** The place of the set inside the execution that made it, from one. */
   number: number
   /** The moment of the run, which the title of a kept result holds. */
@@ -219,6 +223,7 @@ export const useQueryStore = defineStore('query', () => {
             // carries the growth to the grid.
             result: markRaw(table),
             rows: table.rowCount,
+            truncated: table.truncated,
             number: fresh.length,
             ranAt,
             pinned: false,
@@ -249,6 +254,7 @@ export const useQueryStore = defineStore('query', () => {
             const pane = state.panes.find((pane) => pane.result === table)
             if (pane) {
               pane.rows = table.rowCount
+              pane.truncated = table.truncated
             } else {
               openPane(table)
             }

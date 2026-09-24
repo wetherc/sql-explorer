@@ -165,6 +165,23 @@ describe('query store', () => {
     expect(state.panes[0]?.rows).toBe(3)
   })
 
+  it('copies the mark of the row limit to the pane when the set ends', async () => {
+    const marks: boolean[] = []
+    apiStub.executeQuery.mockImplementation(async (_request, handlers) => {
+      const table = new ResultTable([{ name: 'n', typeName: 'int' }])
+      const state = useQueryStore().stateFor('t1')
+      handlers.onBegin?.(table)
+      marks.push(state.panes[0]!.truncated)
+      table.truncated = true
+      handlers.onSet(table)
+      marks.push(state.panes[0]!.truncated)
+      handlers.onEnd({ messages: [], rowsAffected: null, elapsedMs: 1, stats: null })
+    })
+    const queries = useQueryStore()
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    expect(marks).toEqual([false, true])
+  })
+
   it('uses the default time limit for a connection it does not know', async () => {
     apiStub.executeQuery.mockImplementation(streamed(response()))
     const queries = useQueryStore()

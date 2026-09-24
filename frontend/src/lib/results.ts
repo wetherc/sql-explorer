@@ -264,6 +264,15 @@ export class ResultStream {
   private readonly open = new Map<number, ResultTable>()
   /** The first fault of the frames, when one came. */
   private fault: Error | null = null
+  /** True once the frame that ends the run has arrived. */
+  private ended = false
+  /** True once the caller takes no more messages for this run. */
+  private closed = false
+  /** The caller that waits for the end of the run, when one waits. */
+  private waiter: (() => void) | null = null
+  /** The timer that ends a wait in which no message arrives. */
+  private idleTimer: ReturnType<typeof setTimeout> | null = null
+  private idleMs = 0
 
   constructor(handlers: ResultStreamHandlers) {
     this.handlers = handlers
@@ -286,13 +295,78 @@ export class ResultStream {
    * place in the frames unknown.
    */
   feed(buffer: ArrayBuffer): void {
-    if (this.fault !== null) {
+    if (this.fault !== null || this.closed) {
       return
     }
     try {
       this.readFrames(buffer)
     } catch (error) {
       this.fault = error instanceof Error ? error : new Error(String(error))
+    }
+    this.wake()
+  }
+
+  /**
+   * Waits for the frame that ends the run, or for a fault of the frames.
+   *
+   * The bridge sends a message of 1024 bytes or more through a fetch of its
+   * own, so the last frames can arrive after the command answers. The bridge
+   * keeps the order of the messages, so a message that it loses stops every
+   * later one. A wait in which no message arrives for `idleMs` therefore ends
+   * with a fault, and the run does not wait without end.
+   */
+  settle(idleMs: number): Promise<void> {
+    if (this.settled) {
+      return Promise.resolve()
+    }
+    this.idleMs = idleMs
+    return new Promise((resolve) => {
+      this.waiter = resolve
+      this.armIdle()
+    })
+  }
+
+  /**
+   * Takes no more messages. A frame that arrives later belongs to a run that
+   * has ended, so the reader drops it and it does not reach the panes of the
+   * next run.
+   */
+  close(): void {
+    this.closed = true
+    this.stopIdle()
+    this.waiter = null
+  }
+
+  private get settled(): boolean {
+    return this.ended || this.fault !== null
+  }
+
+  /** Ends the wait when the run has ended, or starts the idle time again. */
+  private wake(): void {
+    if (this.waiter === null) {
+      return
+    }
+    if (this.settled) {
+      const waiter = this.waiter
+      this.close()
+      waiter()
+    } else {
+      this.armIdle()
+    }
+  }
+
+  private armIdle(): void {
+    this.stopIdle()
+    this.idleTimer = setTimeout(() => {
+      this.fault = new Error('The last rows of the run did not arrive.')
+      this.wake()
+    }, this.idleMs)
+  }
+
+  private stopIdle(): void {
+    if (this.idleTimer !== null) {
+      clearTimeout(this.idleTimer)
+      this.idleTimer = null
     }
   }
 
@@ -374,6 +448,7 @@ export class ResultStream {
 
   private readEnd(view: DataView, buffer: ArrayBuffer, at: number): number {
     const json = readText(view, buffer, at)
+    this.ended = true
     this.handlers.onEnd(JSON.parse(json.text) as RunEnd)
     return json.at
   }

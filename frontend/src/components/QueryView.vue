@@ -297,6 +297,7 @@
                 v-show="state.activePaneId === pane.id"
                 :result="pane.result"
                 :rows="pane.rows"
+                :truncated="pane.truncated"
                 :busy="state.running && pane.pinned"
                 @export="onExport"
                 @export-all="onExportAll"

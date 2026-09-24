@@ -38,6 +38,9 @@ export const CONNECTION_STATUS_EVENT = 'connection-status'
 /** The name of the event that carries a command of the menu of the system. */
 export const MENU_COMMAND_EVENT = 'menu-command'
 
+/** The time a run waits for its next frame after the backend answers. */
+export const LAST_FRAME_WAIT_MS = 10_000
+
 /**
  * The convention for the shape of a command: a command with more than two
  * fields takes one `request` record, and a command with one or two plain
@@ -102,7 +105,21 @@ export const api = {
     const stream = new ResultStream(handlers)
     const onChunk = new Channel<ArrayBuffer>()
     onChunk.onmessage = (message) => stream.feed(message)
-    await invoke('execute_query', { request: withNulls(request), onChunk })
+    let failed = false
+    let error: unknown = null
+    try {
+      await invoke('execute_query', { request: withNulls(request), onChunk })
+    } catch (caught) {
+      failed = true
+      error = caught
+    }
+    // The backend sends the end frame for a failed run too, with the
+    // messages of the server, so the wait is the same on both paths.
+    await stream.settle(LAST_FRAME_WAIT_MS)
+    stream.close()
+    if (failed) {
+      throw error
+    }
     // A fault of the frames cannot travel out of the channel, so the reader
     // keeps it and the run fails here.
     const failure = stream.failure

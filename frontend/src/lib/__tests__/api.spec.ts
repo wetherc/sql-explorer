@@ -13,18 +13,34 @@ vi.mock('@tauri-apps/api/core', () => ({
 }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: (...args: unknown[]) => listen(...args) }))
 
-const { api, CONNECTION_STATUS_EVENT } = await import('@/lib/api')
+const { api, CONNECTION_STATUS_EVENT, LAST_FRAME_WAIT_MS } = await import('@/lib/api')
 
 /** The handlers of a run, which these tests do not need to answer. */
 function handlers() {
-  return { onSet: () => {}, onEnd: () => {} }
+  return { onSet: () => {}, onEnd: vi.fn() }
+}
+
+/** The frame that ends a run, as the backend writes it. */
+function endFrame(messages: unknown[] = []): ArrayBuffer {
+  const json = new TextEncoder().encode(JSON.stringify({ messages, elapsedMs: 1 }))
+  const bytes = new Uint8Array(5 + json.length)
+  bytes[0] = 4
+  new DataView(bytes.buffer).setUint32(1, json.length, true)
+  bytes.set(json, 5)
+  return bytes.buffer
+}
+
+/** Answers every command, and ends the channel of a run before it answers. */
+function answer(_command: string, args?: { onChunk?: ChannelStub }): Promise<unknown> {
+  args?.onChunk?.onmessage?.(endFrame())
+  return Promise.resolve(undefined)
 }
 const { newConnection } = await import('@/stores/connections')
 const { Dialect } = await import('@/types/api')
 
 describe('api', () => {
   beforeEach(() => {
-    invoke.mockReset().mockResolvedValue(undefined)
+    invoke.mockReset().mockImplementation(answer)
     listen.mockReset().mockResolvedValue(() => {})
   })
 
@@ -245,6 +261,54 @@ describe('api', () => {
     await expect(
       api.executeQuery({ connectionId: 'c1', requestId: 'r1', query: 'SELECT 1' }, handlers()),
     ).rejects.toThrow(/frame of the unknown kind 99/)
+  })
+
+  it('waits for the frames that arrive after the backend answers', async () => {
+    let channel: ChannelStub | null = null
+    invoke.mockImplementation((_command: string, args: { onChunk: ChannelStub }) => {
+      channel = args.onChunk
+      // The bridge fetches a large message on its own, so the end frame
+      // comes after the answer of the command.
+      setTimeout(() => channel?.onmessage?.(endFrame()), 0)
+      return Promise.resolve(undefined)
+    })
+    const run = handlers()
+    await api.executeQuery({ connectionId: 'c1', requestId: 'r1', query: 'SELECT 1' }, run)
+    expect(run.onEnd).toHaveBeenCalledTimes(1)
+
+    // A frame that comes after the end of the run reaches no handler.
+    channel!.onmessage?.(endFrame())
+    expect(run.onEnd).toHaveBeenCalledTimes(1)
+  })
+
+  it('gives the error of a failed run after its end frame', async () => {
+    invoke.mockImplementation((_command: string, args: { onChunk: ChannelStub }) => {
+      setTimeout(() => args.onChunk.onmessage?.(endFrame([{ level: 'error', text: 'x' }])), 0)
+      return Promise.reject(new Error('The statement failed.'))
+    })
+    const run = handlers()
+    await expect(
+      api.executeQuery({ connectionId: 'c1', requestId: 'r1', query: 'SELECT 1' }, run),
+    ).rejects.toThrow('The statement failed.')
+    expect(run.onEnd).toHaveBeenCalledWith(
+      expect.objectContaining({ messages: [{ level: 'error', text: 'x' }] }),
+    )
+  })
+
+  it('fails a run whose end frame does not arrive', async () => {
+    vi.useFakeTimers()
+    try {
+      invoke.mockResolvedValue(undefined)
+      const run = api.executeQuery(
+        { connectionId: 'c1', requestId: 'r1', query: 'SELECT 1' },
+        handlers(),
+      )
+      const outcome = expect(run).rejects.toThrow('The last rows of the run did not arrive.')
+      await vi.advanceTimersByTimeAsync(LAST_FRAME_WAIT_MS)
+      await outcome
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('leaves the limits out when none are given', async () => {
