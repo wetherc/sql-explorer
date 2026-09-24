@@ -94,9 +94,26 @@ impl Dialect {
         }
     }
 
-    /// True when a backslash starts an escape inside a string literal.
-    fn backslash_escapes(&self) -> bool {
-        matches!(self, Dialect::MySql)
+    /// True when a backslash starts an escape inside the quoted region that
+    /// opens at `index`. MySQL reads every string so. PostgreSQL reads so a
+    /// string with the prefix `E` alone, as in `E'it\'s'`.
+    fn backslash_escapes(&self, chars: &[char], index: usize) -> bool {
+        match self {
+            Dialect::MySql => true,
+            Dialect::Postgres => {
+                chars[index] == '\''
+                    && index > 0
+                    && matches!(chars[index - 1], 'e' | 'E')
+                    && (index < 2 || !in_a_word(chars[index - 2]))
+            }
+            _ => false,
+        }
+    }
+
+    /// True when a dollar sign at `index` opens a tagged string literal. A
+    /// dollar sign inside a name, as in `a$x$`, is part of the name.
+    fn opens_dollar_quote(&self, chars: &[char], index: usize) -> bool {
+        matches!(self, Dialect::Postgres) && (index == 0 || !in_a_word(chars[index - 1]))
     }
 
     /// True when a number sign starts a comment that runs to the end of
@@ -108,11 +125,6 @@ impl Dialect {
     /// True when brackets quote an identifier.
     fn bracket_quotes(&self) -> bool {
         matches!(self, Dialect::MsSql)
-    }
-
-    /// True when a dollar sign starts a tagged string literal.
-    fn dollar_quotes(&self) -> bool {
-        matches!(self, Dialect::Postgres)
     }
 
     /// True when a block comment can hold another block comment.
@@ -305,7 +317,13 @@ fn scan_words(sql: &str, dialect: Dialect, mut visit: impl FnMut(&str)) {
             continue;
         }
         if c == '\'' || c == '"' {
-            index = copy_quoted(&chars, index, c, dialect.backslash_escapes(), &mut skipped);
+            index = copy_quoted(
+                &chars,
+                index,
+                c,
+                dialect.backslash_escapes(&chars, index),
+                &mut skipped,
+            );
             continue;
         }
         if c == '`' && dialect == Dialect::MySql {
@@ -316,7 +334,7 @@ fn scan_words(sql: &str, dialect: Dialect, mut visit: impl FnMut(&str)) {
             index = copy_bracket(&chars, index, &mut skipped);
             continue;
         }
-        if c == '$' && dialect.dollar_quotes() {
+        if c == '$' && dialect.opens_dollar_quote(&chars, index) {
             if let Some(next) = copy_dollar_quoted(&chars, index, &mut skipped) {
                 index = next;
                 continue;
@@ -535,7 +553,7 @@ pub fn split_statements(script: &str, dialect: Dialect) -> Vec<String> {
                 &chars,
                 index,
                 '\'',
-                dialect.backslash_escapes(),
+                dialect.backslash_escapes(&chars, index),
                 &mut current,
             );
             continue;
@@ -545,7 +563,7 @@ pub fn split_statements(script: &str, dialect: Dialect) -> Vec<String> {
                 &chars,
                 index,
                 '"',
-                dialect.backslash_escapes(),
+                dialect.backslash_escapes(&chars, index),
                 &mut current,
             );
             continue;
@@ -558,7 +576,7 @@ pub fn split_statements(script: &str, dialect: Dialect) -> Vec<String> {
             index = copy_bracket(&chars, index, &mut current);
             continue;
         }
-        if c == '$' && dialect.dollar_quotes() {
+        if c == '$' && dialect.opens_dollar_quote(&chars, index) {
             if let Some(next) = copy_dollar_quoted(&chars, index, &mut current) {
                 index = next;
                 continue;
@@ -635,7 +653,13 @@ fn scan_parameters(sql: &str, dialect: Dialect, mut emit: impl FnMut(&str) -> St
             continue;
         }
         if c == '\'' || c == '"' {
-            index = copy_quoted(&chars, index, c, dialect.backslash_escapes(), &mut out);
+            index = copy_quoted(
+                &chars,
+                index,
+                c,
+                dialect.backslash_escapes(&chars, index),
+                &mut out,
+            );
             continue;
         }
         if c == '`' && dialect == Dialect::MySql {
@@ -646,7 +670,7 @@ fn scan_parameters(sql: &str, dialect: Dialect, mut emit: impl FnMut(&str) -> St
             index = copy_bracket(&chars, index, &mut out);
             continue;
         }
-        if c == '$' && dialect.dollar_quotes() {
+        if c == '$' && dialect.opens_dollar_quote(&chars, index) {
             if let Some(next) = copy_dollar_quoted(&chars, index, &mut out) {
                 index = next;
                 continue;
@@ -820,6 +844,12 @@ fn copy_to_end_of_line(chars: &[char], mut index: usize, out: &mut String) -> us
         }
     }
     index
+}
+
+/// True when a character can stand inside a bare name. PostgreSQL and MySQL
+/// accept a dollar sign after the first character.
+fn in_a_word(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '$'
 }
 
 /// Copies a block comment. Counts the depth when the dialect allows a
@@ -1167,6 +1197,43 @@ mod tests {
     }
 
     #[test]
+    fn a_postgres_string_with_the_prefix_e_reads_a_backslash_escape() {
+        assert_eq!(
+            split_statements("SELECT E'it\\'s; ok'; SELECT 2", Dialect::Postgres),
+            vec!["SELECT E'it\\'s; ok'", "SELECT 2"]
+        );
+        assert_eq!(
+            split_statements("SELECT e'a\\'; b'", Dialect::Postgres),
+            vec!["SELECT e'a\\'; b'"]
+        );
+        // The letter ends a longer name, so the string has no prefix.
+        assert_eq!(
+            split_statements("SELECT name'a\\'; b'", Dialect::Postgres),
+            vec!["SELECT name'a\\'", "b'"]
+        );
+        assert_eq!(
+            find_parameters("SELECT E'\\' :a' , :b", Dialect::Postgres),
+            vec!["b"]
+        );
+        assert!(!only_reads(
+            "SELECT E'\\''; DELETE FROM t",
+            Dialect::Postgres
+        ));
+    }
+
+    #[test]
+    fn a_dollar_sign_inside_a_postgres_name_opens_no_string() {
+        assert_eq!(
+            split_statements("SELECT a$x$ FROM t; SELECT $x$;$x$", Dialect::Postgres),
+            vec!["SELECT a$x$ FROM t", "SELECT $x$;$x$"]
+        );
+        assert_eq!(
+            split_statements("$a$;$a$; SELECT 2", Dialect::Postgres),
+            vec!["$a$;$a$", "SELECT 2"]
+        );
+    }
+
+    #[test]
     fn a_semicolon_inside_an_identifier_does_not_split() {
         assert_eq!(
             split_statements("SELECT \"a;b\" FROM t", Dialect::Postgres),
@@ -1458,14 +1525,16 @@ mod tests {
 
     #[test]
     fn the_dialect_flags_match_the_engine() {
-        assert!(Dialect::MySql.backslash_escapes());
-        assert!(!Dialect::Postgres.backslash_escapes());
+        let plain: Vec<char> = "'a'".chars().collect();
+        assert!(Dialect::MySql.backslash_escapes(&plain, 0));
+        assert!(!Dialect::Postgres.backslash_escapes(&plain, 0));
+        assert!(!Dialect::Sqlite.backslash_escapes(&plain, 0));
         assert!(Dialect::MySql.hash_comments());
         assert!(!Dialect::MsSql.hash_comments());
         assert!(Dialect::MsSql.bracket_quotes());
         assert!(!Dialect::MySql.bracket_quotes());
-        assert!(Dialect::Postgres.dollar_quotes());
-        assert!(!Dialect::Sqlite.dollar_quotes());
+        assert!(Dialect::Postgres.opens_dollar_quote(&['$'], 0));
+        assert!(!Dialect::Sqlite.opens_dollar_quote(&['$'], 0));
         assert!(Dialect::MsSql.nested_block_comments());
         assert!(!Dialect::Sqlite.nested_block_comments());
     }

@@ -214,6 +214,36 @@ describe('statementBounds', () => {
     ])
   })
 
+  it('reads a backslash escape in a PostgreSQL string with the prefix E alone', () => {
+    const prefixed = "SELECT E'it\\'s; ok'; SELECT 2"
+    expect(statementBounds(prefixed, Dialect.Postgres)).toEqual([
+      [0, 19],
+      [20, prefixed.length],
+    ])
+    const lower = "e'a\\'; b'"
+    expect(statementBounds(lower, Dialect.Postgres)).toEqual([[0, lower.length]])
+    // The letter ends a longer name, so the string has no prefix.
+    const named = "SELECT name'a\\'; b'"
+    expect(statementBounds(named, Dialect.Postgres)).toEqual([
+      [0, 15],
+      [16, named.length],
+    ])
+    // A backtick of MySQL reads no escape.
+    const tick = 'SELECT `a\\`; SELECT 2'
+    expect(statementBounds(tick, Dialect.MySql)).toEqual([
+      [0, 11],
+      [12, tick.length],
+    ])
+  })
+
+  it('reads a dollar sign inside a PostgreSQL name as part of the name', () => {
+    const script = 'SELECT a$x$ FROM t; SELECT $x$;$x$'
+    expect(statementBounds(script, Dialect.Postgres)).toEqual([
+      [0, 18],
+      [19, script.length],
+    ])
+  })
+
   it('follows the DELIMITER command of MySQL', () => {
     const script =
       'DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; END$$\nDELIMITER ;\nSELECT 2;\n'

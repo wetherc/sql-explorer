@@ -225,8 +225,10 @@ function delimiterCommandAt(
 
 /** The rules of one dialect that the split of a script follows. */
 interface SplitRules {
-  /** A backslash starts an escape inside a string literal. */
+  /** A backslash starts an escape inside every string literal. */
   backslashEscapes: boolean
+  /** A backslash starts an escape inside a string with the prefix `E`. */
+  prefixedEscapes: boolean
   /** A number sign starts a comment that runs to the end of the line. */
   hashComments: boolean
   /** Brackets quote a name. */
@@ -253,6 +255,7 @@ interface SplitRules {
 function splitRules(dialect?: Dialect): SplitRules {
   return {
     backslashEscapes: dialect === Dialect.MySql,
+    prefixedEscapes: dialect === Dialect.Postgres,
     hashComments: dialect === Dialect.MySql,
     bracketQuotes: dialect === Dialect.MsSql,
     backtickQuotes: dialect === Dialect.MySql || dialect === undefined,
@@ -262,6 +265,31 @@ function splitRules(dialect?: Dialect): SplitRules {
     delimiterCommand: dialect === Dialect.MySql,
     triggerBodies: dialect === Dialect.Sqlite,
   }
+}
+
+/** True when the character can stand inside a bare name. */
+function inAWord(character: string | undefined): boolean {
+  return character !== undefined && /[\p{L}\p{N}_$]/u.test(character)
+}
+
+/**
+ * True when a backslash starts an escape inside the quoted region that opens
+ * at the given position. PostgreSQL reads so a string with the prefix `E`
+ * alone, as in `E'it\'s'`.
+ */
+function escapesAt(script: string, index: number, rules: SplitRules): boolean {
+  if (script[index] === '`') {
+    return false
+  }
+  if (rules.backslashEscapes) {
+    return true
+  }
+  return (
+    rules.prefixedEscapes &&
+    script[index] === "'" &&
+    /[eE]/.test(script.charAt(index - 1)) &&
+    !inAWord(script[index - 2])
+  )
 }
 
 /** The position after the end of the line that holds the given position. */
@@ -446,14 +474,15 @@ function statementSpans(script: string, dialect?: Dialect, whole = false): State
       codeSeen = true
     }
     if (character === "'" || character === '"' || (character === '`' && rules.backtickQuotes)) {
-      index = endOfQuoted(script, index, character, rules.backslashEscapes)
+      index = endOfQuoted(script, index, character, escapesAt(script, index, rules))
       continue
     }
     if (character === '[' && rules.bracketQuotes) {
       index = endOfBracket(script, index)
       continue
     }
-    if (character === '$' && rules.dollarQuotes) {
+    // A dollar sign inside a name, as in `a$x$`, is part of the name.
+    if (character === '$' && rules.dollarQuotes && !inAWord(script[index - 1])) {
       const after = endOfDollarQuoted(script, index)
       if (after >= 0) {
         index = after
