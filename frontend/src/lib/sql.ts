@@ -96,8 +96,9 @@ export function quoteIfNeeded(name: string, dialect: Dialect): string {
  * it to run the statement under the cursor when nothing is selected. A
  * position that no statement holds gives the statement in front of it, and a
  * script that holds no statement gives an empty text. On MS SQL Server the
- * word GO bounds a statement and never travels with it. On MySQL a routine
- * body under a `DELIMITER` command keeps that command.
+ * GO batch is the unit, because the backend sends a batch whole, and the
+ * word GO never travels with it. On MySQL a routine body under a `DELIMITER`
+ * command keeps that command.
  *
  * The split follows the rules of the dialect: the quotes, the comments and
  * the terminator that the backend splitter knows. The backend splits again
@@ -106,7 +107,7 @@ export function quoteIfNeeded(name: string, dialect: Dialect): string {
  */
 export function statementAt(script: string, offset: number, dialect?: Dialect): string {
   const position = Math.max(0, Math.min(offset, script.length))
-  const parts = statementSpans(script, dialect)
+  const parts = statementSpans(script, dialect, true)
     .map(({ start, end, delimiter }) => ({
       start,
       end,
@@ -372,8 +373,12 @@ interface StatementSpan {
   delimiter: string
 }
 
-/** The walk behind `statementBounds`, which also keeps the terminator. */
-function statementSpans(script: string, dialect?: Dialect): StatementSpan[] {
+/**
+ * The walk behind `statementBounds`, which also keeps the terminator. With
+ * `whole` set, a batch of MS SQL Server is one span, because the backend
+ * sends a batch whole and a cut at a semicolon would run part of it.
+ */
+function statementSpans(script: string, dialect?: Dialect, whole = false): StatementSpan[] {
   const rules = splitRules(dialect)
   const bounds: StatementSpan[] = []
   let delimiter = ';'
@@ -442,7 +447,7 @@ function statementSpans(script: string, dialect?: Dialect): StatementSpan[] {
         continue
       }
     }
-    if (script.startsWith(delimiter, index)) {
+    if (!(whole && rules.batchSeparator) && script.startsWith(delimiter, index)) {
       bounds.push({ start, end: index, delimiter })
       index += delimiter.length
       start = index

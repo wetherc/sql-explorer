@@ -9,6 +9,10 @@ Choose a connection at the top of the tab, then write a statement.
 A script runs statement by statement. The splitter respects quotes, comments,
 dollar tags and the `DELIMITER` command of MySQL.
 
+On MS SQL Server the unit is the batch. A line that holds only `GO` ends a
+batch, and the server gets each batch whole. The statement under the cursor
+is the whole batch that holds the cursor, with its semicolons.
+
 The **Format** button lays the statement out with the rules of its dialect.
 
 ## While a statement runs

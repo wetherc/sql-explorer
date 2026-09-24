@@ -133,8 +133,13 @@ describe('SqlEditor', () => {
   it('gives the statement under the cursor', () => {
     const stub = stubEditor('SELECT 1;\nSELECT 2')
     vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
-    const wrapper = mount(SqlEditor, { props: { modelValue: 'SELECT 1;\nSELECT 2' } })
+    const wrapper = mount(SqlEditor, {
+      props: { modelValue: 'SELECT 1;\nSELECT 2', dialect: Dialect.Postgres },
+    })
     expect(statementOf(wrapper)).toBe('SELECT 1')
+    // MS SQL Server runs the whole batch.
+    const mssql = mount(SqlEditor, { props: { modelValue: 'SELECT 1;\nSELECT 2' } })
+    expect(statementOf(mssql)).toBe('SELECT 1;\nSELECT 2')
   })
 
   it('gives the selection when there is one', () => {
@@ -281,7 +286,9 @@ describe('SqlEditor', () => {
   it('offers the actions a parent can call', () => {
     const stub = stubEditor()
     vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
-    const wrapper = mount(SqlEditor, { props: { modelValue: 'SELECT 1;\nSELECT 2' } })
+    const wrapper = mount(SqlEditor, {
+      props: { modelValue: 'SELECT 1;\nSELECT 2', dialect: Dialect.Postgres },
+    })
     const exposed = wrapper.vm as unknown as {
       focus: () => void
       currentStatement: () => string

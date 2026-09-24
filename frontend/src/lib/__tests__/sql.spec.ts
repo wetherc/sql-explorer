@@ -137,6 +137,12 @@ describe('statementBounds', () => {
     expect(statementBounds(script)).toEqual([[0, 20]])
   })
 
+  it('runs a whole batch of MS SQL Server', () => {
+    const script = 'CREATE PROCEDURE p AS SELECT 1; SELECT 2\nGO\nDECLARE @x int; SELECT @x;'
+    expect(statementAt(script, 0, Dialect.MsSql)).toBe('CREATE PROCEDURE p AS SELECT 1; SELECT 2')
+    expect(statementAt(script, script.length, Dialect.MsSql)).toBe('DECLARE @x int; SELECT @x;')
+  })
+
   it('keeps a line that holds more than the batch separator', () => {
     for (const script of ['SELECT 1\nGOTO done', 'SELECT 1\nGO SELECT 2', 'SELECT 1 GO']) {
       expect(statementBounds(script, Dialect.MsSql)).toEqual([[0, script.length]])
