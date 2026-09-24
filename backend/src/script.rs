@@ -47,8 +47,8 @@ pub fn insert_statement(dialect: Dialect, name: &str, columns: &[AppColumn]) -> 
         format!(
             "    {VALUE_MARK}{} -- {}: {}",
             if last { "" } else { "," },
-            column.name,
-            column.data_type
+            comment_text(&column.name),
+            comment_text(&column.data_type)
         )
     });
     format!("INSERT INTO {name} (\n{names}\n)\nVALUES (\n{values}\n);")
@@ -78,7 +78,7 @@ pub fn update_statement(dialect: Dialect, name: &str, columns: &[AppColumn]) -> 
             "    {} = {VALUE_MARK}{} -- {}",
             dialect.quote_identifier(&column.name),
             if last { "" } else { "," },
-            column.data_type
+            comment_text(&column.data_type)
         )
     });
 
@@ -92,7 +92,7 @@ pub fn update_statement(dialect: Dialect, name: &str, columns: &[AppColumn]) -> 
                 format!(
                     "{lead} {} = {VALUE_MARK} -- {}",
                     dialect.quote_identifier(&column.name),
-                    column.data_type
+                    comment_text(&column.data_type)
                 )
             })
             .collect::<Vec<_>>()
@@ -136,6 +136,15 @@ pub fn create_draft(dialect: Dialect, name: &str, columns: &[AppColumn]) -> Stri
          CREATE TABLE {name} (\n{}\n);",
         lines.join(",\n")
     )
+}
+
+/// Changes each control character to a space, so that text from the catalog
+/// stays inside a `--` comment. A column named `"a\n); DELETE FROM t; --"`
+/// would otherwise put a DELETE on its own line of the statement.
+fn comment_text(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 /// Writes one line for each column and marks the last line, so that the
@@ -205,6 +214,23 @@ mod tests {
             "INSERT INTO `db`.`t` (\n    `id`,\n    `name`\n)\nVALUES (\n    \
              NULL, -- id: int\n    NULL -- name: nvarchar(50)\n);"
         );
+    }
+
+    #[test]
+    fn a_line_break_in_a_name_stays_inside_the_comment() {
+        let columns = vec![
+            column("a\n); DELETE FROM t; SELECT (1", "int", false, true),
+            column("b", "x\r\ny", true, false),
+        ];
+        let insert = insert_statement(Dialect::Postgres, "\"t\"", &columns);
+        assert!(insert.contains("    NULL, -- a ); DELETE FROM t; SELECT (1: int\n"));
+        assert!(insert.contains("    NULL -- b: x  y\n"));
+        let update = update_statement(Dialect::Postgres, "\"t\"", &columns);
+        assert!(update.contains("\"b\" = NULL -- x  y\n"));
+        let mut keyed = columns.clone();
+        keyed[0].data_type = "i\nnt".to_string();
+        let update = update_statement(Dialect::Postgres, "\"t\"", &keyed);
+        assert!(update.ends_with(" = NULL -- i nt;"));
     }
 
     #[test]
