@@ -85,18 +85,24 @@ a record still opens, and its password stays in the file until the user
 edits the record. The next save then refuses the string until the user moves
 the password to the Password box.
 
-## MS SQL Server shows the text of PRINT for a batch that can hold rows
+## PRINT text and statement counts of MS SQL Server
 
-`tiberius` decoded the info tokens that carry `PRINT` and a `RAISERROR` of low
-severity and then dropped them. The vendored copy gives the text of such a
-token to the caller as a `QueryItem::Message`, and the driver puts it in the
-Messages tab. The change is in `src/tds/stream/query.rs`.
+Release 0.12.3 of `tiberius` decodes the info tokens that carry `PRINT` and a
+`RAISERROR` of low severity, and then drops them. It also drops the `DONE` and
+`DONEINPROC` tokens that end each statement. The vendored copy gives the text
+of an info token to the caller as a `QueryItem::Message`. It gives each `DONE`
+and `DONEINPROC` token as a `QueryItem::Done`, with the count of rows when the
+server sets the count flag. The first read of a request stops at the first of
+these items, so a message or a count before the first result set also reaches
+the caller. The changes are in `src/tds/stream/query.rs` and
+`src/tds/codec/token/token_done.rs`.
 
-A batch whose statements all change data goes through the path that counts
-the changed rows, and that path holds no such item. The text of a `PRINT`
-that stands in a batch of writes alone therefore does not reach the user. A
-batch that can answer with rows, which is every batch that holds a `PRINT`
-of its own or a statement that reads, does show the text.
+The driver sends every batch through the path that keeps rows, so the rows of
+an `INSERT ... OUTPUT` and of a `BEGIN ... END` block reach the grid. The
+`DONE` token of a statement ends its result set. A count outside a result set,
+such as the count of an `UPDATE`, goes to the Messages tab as "N rows
+affected.". A statement under `SET NOCOUNT ON`, and a statement such as
+`CREATE TABLE`, sends no count and adds no message.
 
 An error of the server carries its number, its severity, its state, its line
 and its procedure, and those reach the user beside the text of the error.
@@ -397,15 +403,6 @@ back. Every other batch, such as a call of a procedure, an
 the walk drops the rows past the limit. The time of that walk counts
 against the time budget of the run. The probe costs one extra round trip
 for each run of a batch of one reading statement.
-
-## A batch that both changes rows and reads rows reports no count
-
-The driver counts the changed rows through the path that gives no rows back,
-so a batch whose statements all change data reports a count for each of
-them. A batch that also holds a statement which answers with rows goes
-through the path that keeps the rows, and that path gives no count. Such a
-batch shows its result sets alone. A `GO` separator in front of the reading
-statement puts it in a batch of its own and brings the count back.
 
 ## A run with parameters takes one batch on MS SQL Server
 

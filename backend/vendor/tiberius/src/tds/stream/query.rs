@@ -114,8 +114,12 @@ impl<'a> QueryStream<'a> {
         }
     }
 
-    /// Moves the stream forward until having result metadata, stream end or an
-    /// error.
+    /// Moves the stream forward until the first token that the stream gives
+    /// back as an item, the stream end or an error.
+    ///
+    /// A message or the count of a statement can come before the first result
+    /// set, as with `PRINT 'a'; SELECT 1` or `UPDATE t SET a = 1; SELECT 1`,
+    /// so the walk stops at those tokens too.
     pub(crate) async fn forward_to_metadata(&mut self) -> crate::Result<()> {
         loop {
             let item = Pin::new(&mut self.token_stream)
@@ -125,7 +129,12 @@ impl<'a> QueryStream<'a> {
                 .transpose()?;
 
             match item {
-                Some(ReceivedToken::NewResultset(_)) => break,
+                Some(
+                    ReceivedToken::NewResultset(_)
+                    | ReceivedToken::Info(_)
+                    | ReceivedToken::Done(_)
+                    | ReceivedToken::DoneInProc(_),
+                ) => break,
                 Some(_) => {
                     self.token_stream.try_next().await?;
                 }
@@ -240,6 +249,7 @@ impl<'a> QueryStream<'a> {
                 // A message of the server carries no row, so it holds no
                 // place among the results.
                 (QueryItem::Message(_), _) => {}
+                (QueryItem::Done(_), _) => {}
             }
         }
 
@@ -350,6 +360,11 @@ pub enum QueryItem {
     Metadata(ResultMetadata),
     /// A message that the server sent beside the rows.
     Message(ServerMessage),
+    /// The end of one statement, from a `DONE` or a `DONEINPROC` token. The
+    /// value is the count of rows that the statement returned or changed.
+    /// It is `None` when the server sent no count, as with `SET NOCOUNT ON`
+    /// or a statement that changes no rows, such as `CREATE TABLE`.
+    Done(Option<u64>),
 }
 
 impl QueryItem {
@@ -444,15 +459,15 @@ impl<'a> Stream for QueryStream<'a> {
                 }
                 // The text of PRINT and of a RAISERROR of a low severity
                 // reaches the caller, which shows it beside the rows.
-                ReceivedToken::Info(info) => Poll::Ready(Some(Ok(QueryItem::Message(
-                    ServerMessage {
+                ReceivedToken::Info(info) => {
+                    Poll::Ready(Some(Ok(QueryItem::Message(ServerMessage {
                         text: info.message,
                         number: info.number,
                         class: info.class,
                         line: info.line,
                         procedure: info.procedure,
-                    },
-                )))),
+                    }))))
+                }
                 ReceivedToken::Row(data) => {
                     let columns = this.columns.as_ref().unwrap().clone();
                     let result_index = this.result_set_index.unwrap();
@@ -464,6 +479,12 @@ impl<'a> Stream for QueryStream<'a> {
                     };
 
                     Poll::Ready(Some(Ok(QueryItem::Row(row))))
+                }
+                // The end of a routine that an RPC request ran comes as a
+                // `DONEPROC` token. The statements inside the routine send
+                // their own `DONEINPROC` tokens, so that token adds no count.
+                ReceivedToken::Done(done) | ReceivedToken::DoneInProc(done) => {
+                    Poll::Ready(Some(Ok(QueryItem::Done(done.count()))))
                 }
                 _ => continue,
             };

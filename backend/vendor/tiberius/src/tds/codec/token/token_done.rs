@@ -64,6 +64,13 @@ impl TokenDone {
     pub(crate) fn rows(&self) -> u64 {
         self.done_rows
     }
+
+    /// The count of rows, when the `Count` flag says that the count is valid.
+    pub(crate) fn count(&self) -> Option<u64> {
+        self.status
+            .contains(DoneStatus::Count)
+            .then_some(self.done_rows)
+    }
 }
 
 impl Encode<BytesMut> for TokenDone {
@@ -91,5 +98,29 @@ impl fmt::Display for TokenDone {
                 self.status, self.done_rows
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn done(status: BitFlags<DoneStatus>, done_rows: u64) -> TokenDone {
+        TokenDone {
+            status,
+            cur_cmd: 0,
+            done_rows,
+        }
+    }
+
+    #[test]
+    fn the_count_holds_only_when_the_count_flag_is_set() {
+        assert_eq!(
+            done(DoneStatus::Count | DoneStatus::More, 3).count(),
+            Some(3)
+        );
+        assert_eq!(done(DoneStatus::Count.into(), 0).count(), Some(0));
+        assert_eq!(done(DoneStatus::More.into(), 3).count(), None);
+        assert_eq!(done(BitFlags::empty(), 0).count(), None);
     }
 }

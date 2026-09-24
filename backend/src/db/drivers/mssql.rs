@@ -41,6 +41,15 @@ pub struct MssqlDriver {
     client: MssqlClient,
 }
 
+/// What one walk of a batch found.
+struct Walk {
+    /// True when the sink stopped the run.
+    stopped: bool,
+    /// The sum of the counts of changed rows, or `None` when the server sent
+    /// no count outside a result set.
+    rows_affected: Option<u64>,
+}
+
 /// Builds the `tiberius` configuration from a saved connection.
 pub async fn build_config(connection: &SavedConnection) -> Result<Config> {
     let mut config = if let Some(url) = connection.options.connection_url.as_deref() {
@@ -358,7 +367,10 @@ impl MssqlDriver {
     /// ends, so a batch that [`Self::may_end_early`] refuses arrives with
     /// `may_end_early` false and keeps the walk.
     ///
-    /// Returns true when the sink stopped the run.
+    /// The `DONE` token of each statement ends its result set. A statement
+    /// with no result set, such as an `UPDATE`, sends its count of changed
+    /// rows in that token, and the count goes to the sink as a message. A
+    /// statement that sends neither a set nor a count adds nothing.
     async fn stream_sets(
         &mut self,
         statement: &str,
@@ -366,7 +378,7 @@ impl MssqlDriver {
         options: &ExecOptions,
         sink: &mut dyn RowSink,
         may_end_early: bool,
-    ) -> Result<bool> {
+    ) -> Result<Walk> {
         // The handle is taken before the stream, because the stream holds
         // the client while it lives.
         let attention = self.client.attention_handle();
@@ -378,6 +390,7 @@ impl MssqlDriver {
         let mut asked_to_end = false;
         // True when the row limit brought the end, and not the sink.
         let mut ended_at_limit = false;
+        let mut rows_affected: Option<u64> = None;
 
         loop {
             let item = match stream.try_next().await {
@@ -391,8 +404,7 @@ impl MssqlDriver {
             match item {
                 QueryItem::Metadata(metadata) => {
                     if open {
-                        sink.message(rows_returned_message(count, truncated));
-                        sink.end_set(truncated)?;
+                        end_set(sink, count, truncated)?;
                         open = false;
                     }
                     // After a stop the sets that remain drain without a feed.
@@ -416,6 +428,15 @@ impl MssqlDriver {
                 // stands beside the rows, as the server sends it.
                 QueryItem::Message(message) => {
                     sink.message(Message::info(message.text().to_string()));
+                }
+                QueryItem::Done(done_rows) => {
+                    if open {
+                        end_set(sink, count, truncated)?;
+                        open = false;
+                    } else if let (Some(changed), false) = (done_rows, stopped) {
+                        rows_affected = Some(rows_affected.unwrap_or(0) + changed);
+                        sink.message(rows_affected_message(changed));
+                    }
                 }
                 QueryItem::Row(row) => {
                     if !open || stopped {
@@ -444,13 +465,15 @@ impl MssqlDriver {
             }
         }
         if open {
-            sink.message(rows_returned_message(count, truncated));
-            sink.end_set(truncated)?;
+            end_set(sink, count, truncated)?;
         }
         if ended_at_limit {
             sink.message(Message::info(ENDED_AT_THE_LIMIT_MESSAGE.to_string()));
         }
-        Ok(stopped)
+        Ok(Walk {
+            stopped,
+            rows_affected,
+        })
     }
 
     /// True when an attention packet at the row limit loses no work. The
@@ -602,32 +625,10 @@ pub fn select_plan_sets(sets: Vec<ResultSet>) -> (Vec<ResultSet>, bool) {
     }
 }
 
-/// True when the first keyword of the statement introduces a statement that
-/// gives rows back. A statement that does not is sent through `execute`, so
-/// that the number of changed rows reaches the user.
-pub fn returns_rows(statement: &str) -> bool {
-    let keyword = crate::sql::leading_keyword(statement, crate::sql::Dialect::MsSql);
-    !matches!(
-        keyword.as_str(),
-        "insert"
-            | "update"
-            | "delete"
-            | "merge"
-            | "create"
-            | "alter"
-            | "drop"
-            | "truncate"
-            | "grant"
-            | "revoke"
-            | "deny"
-            | "use"
-            | "set"
-            | "begin"
-            | "commit"
-            | "rollback"
-            | "backup"
-            | "restore"
-    )
+/// Reports the count of rows of the open result set and ends the set.
+fn end_set(sink: &mut dyn RowSink, count: usize, truncated: bool) -> Result<()> {
+    sink.message(rows_returned_message(count, truncated));
+    sink.end_set(truncated)
 }
 
 /// Turns the JSON parameters into values that `tiberius` can bind.
@@ -725,40 +726,32 @@ impl DatabaseDriver for MssqlDriver {
 
         'batches: for batch in batches {
             let statements = split_statements(&batch.text, Dialect::MsSql);
-            // A batch whose statements all change data goes through the path
-            // that counts the changed rows. Every other batch can answer with
-            // rows, so it goes through the path that keeps them.
-            let keeps_rows = statements.iter().any(|statement| returns_rows(statement));
             // A statement that only reads leaves the state of the session as
             // it found it, so one probe serves every run of the batch.
-            let may_end_early = keeps_rows && self.may_end_early(&statements).await;
+            let may_end_early = self.may_end_early(&statements).await;
 
             for _ in 0..batch.runs {
                 let bound = bind_params(params)?;
                 let borrowed: Vec<&dyn tiberius::ToSql> =
                     bound.iter().map(|value| value.as_ref()).collect();
 
-                if keeps_rows {
-                    let stopped = self
-                        .stream_sets(
-                            &batch.text,
-                            borrowed.as_slice(),
-                            options,
-                            sink,
-                            may_end_early,
-                        )
-                        .await?;
-                    if stopped {
-                        break 'batches;
-                    }
-                } else {
-                    let result = self
-                        .client
-                        .execute(&batch.text, borrowed.as_slice())
-                        .await?;
-                    let affected: u64 = result.rows_affected().iter().sum();
-                    rows_affected = Some(rows_affected.unwrap_or(0) + affected);
-                    sink.message(rows_affected_message(affected));
+                // Every batch goes through the path that keeps rows, because
+                // an `INSERT ... OUTPUT` or a `BEGIN ... END` block can answer
+                // with rows as well as with a count of changed rows.
+                let walk = self
+                    .stream_sets(
+                        &batch.text,
+                        borrowed.as_slice(),
+                        options,
+                        sink,
+                        may_end_early,
+                    )
+                    .await?;
+                if let Some(changed) = walk.rows_affected {
+                    rows_affected = Some(rows_affected.unwrap_or(0) + changed);
+                }
+                if walk.stopped {
+                    break 'batches;
                 }
             }
         }
@@ -1432,6 +1425,9 @@ mod tests {
     const DONE_ATTENTION: u16 = 1 << 5;
     /// The flag of a packet that ends its message.
     const END_OF_MESSAGE: u8 = 1;
+    /// The `More` and `Count` flags of a `DONE` token.
+    const DONE_MORE: u16 = 1;
+    const DONE_COUNT: u16 = 1 << 4;
 
     /// Reads one message of the client and gives back the kind of its first
     /// packet. A message can arrive in several packets, and the last of them
@@ -1639,7 +1635,8 @@ mod tests {
         let stopped = driver
             .stream_sets("SELECT a FROM b", &[], &options, &mut sink, true)
             .await
-            .unwrap();
+            .unwrap()
+            .stopped;
         let response = sink.into_response(RunSummary::default());
 
         assert!(!stopped);
@@ -1821,9 +1818,8 @@ mod tests {
         assert_eq!(server.await.unwrap(), 4);
     }
 
-    /// An `ERROR` token with the given text and a `DONE` token with the
-    /// error flag after it.
-    fn error_answer(text: &str) -> Vec<u8> {
+    /// An `ERROR` or an `INFO` token with the given text and severity.
+    fn text_token(kind: u8, class: u8, text: &str) -> Vec<u8> {
         let utf16: Vec<u8> = text
             .encode_utf16()
             .flat_map(|unit| unit.to_le_bytes())
@@ -1831,15 +1827,22 @@ mod tests {
         let mut body = Vec::new();
         body.extend_from_slice(&50000u32.to_le_bytes());
         body.push(1);
-        body.push(16);
+        body.push(class);
         body.extend_from_slice(&((utf16.len() / 2) as u16).to_le_bytes());
         body.extend_from_slice(&utf16);
         body.push(0);
         body.push(0);
         body.extend_from_slice(&1u32.to_le_bytes());
-        let mut token = vec![0xAA];
+        let mut token = vec![kind];
         token.extend_from_slice(&(body.len() as u16).to_le_bytes());
         token.extend_from_slice(&body);
+        token
+    }
+
+    /// An `ERROR` token with the given text and a `DONE` token with the
+    /// error flag after it.
+    fn error_answer(text: &str) -> Vec<u8> {
+        let mut token = text_token(0xAA, 16, text);
         token.extend_from_slice(&done_token(2, 0));
         token
     }
@@ -1960,6 +1963,150 @@ mod tests {
 
         let response = run_with_probe("SELECT a INTO c FROM b", Probe::Absent, false).await;
         assert!(!ended_at_the_limit(&response));
+    }
+
+    /// A `DONEINPROC` token with the `Count` flag and the given count.
+    fn counted_done_in_proc(rows: u64) -> Vec<u8> {
+        let mut token = vec![0xFF];
+        token.extend_from_slice(&(DONE_MORE | DONE_COUNT).to_le_bytes());
+        token.extend_from_slice(&0u16.to_le_bytes());
+        token.extend_from_slice(&rows.to_le_bytes());
+        token
+    }
+
+    /// Runs the query against a fake server that sends the given answer to
+    /// the first request. The query must not be one that only reads, so that
+    /// no probe of the row limit goes before it.
+    async fn run_against_answer(query: &str, answer: Vec<u8>, sink_rows: usize) -> QueryResponse {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            accept_login(&mut socket).await;
+            let kind = read_message(&mut socket).await;
+            assert!(kind == PACKET_RPC || kind == PACKET_SQL_BATCH);
+            write_packet(&mut socket, END_OF_MESSAGE, &answer).await;
+        });
+        let tcp = TcpStream::connect(address).await.unwrap();
+        let client = Client::connect(test_config(), tcp.compat_write())
+            .await
+            .unwrap();
+        let mut driver = MssqlDriver { client };
+
+        let options = ExecOptions {
+            max_rows: 10,
+            timeout_secs: 30,
+        };
+        let mut sink = BufferSink::new(sink_rows);
+        let summary = driver
+            .execute_stream(query, None, &options, &mut sink)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        sink.into_response(summary)
+    }
+
+    fn message_texts(response: &QueryResponse) -> Vec<&str> {
+        response
+            .messages
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_insert_with_output_shows_its_rows() {
+        let mut answer = int_metadata();
+        answer.extend_from_slice(&int_row(7));
+        answer.extend_from_slice(&done_token(DONE_COUNT, 1));
+
+        let response =
+            run_against_answer("INSERT INTO t(a) OUTPUT inserted.a VALUES (7)", answer, 10).await;
+
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].rows, vec![vec![JsonValue::from(7)]]);
+        assert_eq!(message_texts(&response), ["1 row returned."]);
+        assert_eq!(response.rows_affected, None);
+    }
+
+    #[tokio::test]
+    async fn a_block_shows_its_counts_and_its_rows() {
+        // The server sends a `DONEINPROC` token for each statement of a
+        // request that runs through `sp_executesql`.
+        let mut answer = counted_done_in_proc(3);
+        answer.extend_from_slice(&int_metadata());
+        answer.extend_from_slice(&int_row(1));
+        answer.extend_from_slice(&counted_done_in_proc(1));
+        answer.extend_from_slice(&counted_done_in_proc(2));
+        answer.extend_from_slice(&done_token(0, 0));
+
+        let response = run_against_answer(
+            "BEGIN TRY UPDATE t SET a = 1; SELECT a FROM t; DELETE FROM u END TRY \
+             BEGIN CATCH SELECT 0 END CATCH",
+            answer,
+            10,
+        )
+        .await;
+
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].rows.len(), 1);
+        assert_eq!(
+            message_texts(&response),
+            ["3 rows affected.", "1 row returned.", "2 rows affected."]
+        );
+        assert_eq!(response.rows_affected, Some(5));
+    }
+
+    #[tokio::test]
+    async fn a_message_and_a_count_before_the_first_set_arrive() {
+        let mut answer = text_token(0xAB, 0, "hello");
+        answer.extend_from_slice(&counted_done_in_proc(0));
+        answer.extend_from_slice(&int_metadata());
+        answer.extend_from_slice(&int_row(1));
+        answer.extend_from_slice(&done_token(DONE_COUNT, 1));
+
+        let response = run_against_answer(
+            "PRINT 'hello'; DELETE FROM t WHERE 1 = 0; SELECT a FROM t",
+            answer,
+            10,
+        )
+        .await;
+
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(
+            message_texts(&response),
+            ["hello", "0 rows affected.", "1 row returned."]
+        );
+        assert_eq!(response.rows_affected, Some(0));
+    }
+
+    #[tokio::test]
+    async fn a_statement_without_a_count_adds_no_message() {
+        let response = run_against_answer("CREATE TABLE t (a int)", done_token(0, 0), 10).await;
+
+        assert!(response.results.is_empty());
+        assert!(response.messages.is_empty());
+        assert_eq!(response.rows_affected, None);
+    }
+
+    #[tokio::test]
+    async fn a_count_after_the_sink_stops_adds_no_message() {
+        let mut answer = int_metadata();
+        answer.extend_from_slice(&int_row(1));
+        answer.extend_from_slice(&int_row(2));
+        answer.extend_from_slice(&counted_done_in_proc(2));
+        answer.extend_from_slice(&counted_done_in_proc(4));
+        answer.extend_from_slice(&done_token(0, 0));
+
+        let response = run_against_answer("SELECT a FROM t; UPDATE t SET a = 1", answer, 1).await;
+
+        assert_eq!(response.results[0].rows.len(), 1);
+        assert!(response.results[0].truncated);
+        assert_eq!(
+            message_texts(&response),
+            ["1 row returned. The row limit stopped the read."]
+        );
+        assert_eq!(response.rows_affected, None);
     }
 
     #[tokio::test]
@@ -2259,7 +2406,8 @@ mod tests {
         let stopped = driver
             .stream_sets("SELECT a FROM b", &[], &options, &mut sink, true)
             .await
-            .unwrap();
+            .unwrap()
+            .stopped;
         let response = sink.into_response(RunSummary::default());
 
         assert!(stopped);
@@ -2568,49 +2716,6 @@ mod tests {
         assert_eq!(non_empty(Some(" a ")), Some("a"));
         assert_eq!(non_empty(Some("   ")), None);
         assert_eq!(non_empty(None), None);
-    }
-
-    #[test]
-    fn a_statement_that_changes_data_is_not_a_query() {
-        for statement in [
-            "INSERT INTO t VALUES (1)",
-            "update t set a = 1",
-            "DELETE FROM t",
-            "MERGE t USING s ON 1=1",
-            "CREATE TABLE t (a int)",
-            "ALTER TABLE t ADD b int",
-            "DROP TABLE t",
-            "TRUNCATE TABLE t",
-            "GRANT SELECT ON t TO r",
-            "REVOKE SELECT ON t FROM r",
-            "DENY SELECT ON t TO r",
-            "USE Sales",
-            "SET NOCOUNT ON",
-            "BEGIN TRANSACTION",
-            "COMMIT",
-            "ROLLBACK",
-            "BACKUP DATABASE a TO DISK = 'x'",
-            "RESTORE DATABASE a FROM DISK = 'x'",
-        ] {
-            assert!(!returns_rows(statement), "{statement}");
-        }
-    }
-
-    #[test]
-    fn a_statement_that_reads_data_is_a_query() {
-        for statement in [
-            "SELECT 1",
-            "  select 1",
-            "WITH x AS (SELECT 1) SELECT * FROM x",
-            "EXEC sp_who",
-            "DECLARE @a int",
-            "(SELECT 1)",
-            "-- a comment\nSELECT 1",
-            "/* a comment */ SELECT 1",
-            "",
-        ] {
-            assert!(returns_rows(statement), "{statement}");
-        }
     }
 
     #[test]
