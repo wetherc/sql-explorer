@@ -540,20 +540,30 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
 
         let mut stream = TokenStream::new(self).try_unfold();
 
-        loop {
+        let outcome = loop {
             match stream.try_next().await {
                 // A token of the stopped request. Read past it.
                 Ok(Some(_)) => (),
                 Ok(None) => {
-                    return Err(crate::Error::Protocol(
+                    break Err(crate::Error::Protocol(
                         "the acknowledgement of the attention packet never arrived".into(),
                     ))
                 }
                 // The token stream turns the acknowledgement into this error.
-                Err(crate::Error::Canceled) => return Ok(()),
-                Err(e) => return Err(e),
+                Err(crate::Error::Canceled) => break Ok(()),
+                Err(e) => break Err(e),
             }
+        };
+        drop(stream);
+
+        // The acknowledgement is the last token of its message. When it stood
+        // in the buffer already, no packet was read, so the flag of the end
+        // would stay false and `flush_stream` would wait for a packet that
+        // never comes.
+        if outcome.is_ok() {
+            self.flushed = true;
         }
+        outcome
     }
 
     /// Sends an attention packet when a signal asks for one, and drives the

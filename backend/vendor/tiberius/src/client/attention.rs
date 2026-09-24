@@ -318,6 +318,56 @@ mod tests {
         server_task.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn an_acknowledgement_that_stands_in_the_buffer_ends_the_response() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+
+        let server_task = tokio::spawn(async move {
+            accept_login(&mut server).await;
+            let (ty, _) = read_message(&mut server).await;
+            assert_eq!(ty, PacketType::SQLBatch as u8);
+            write_packet(&mut server, PacketStatus::NormalMessage, &one_int_row(1)).await;
+
+            let (ty, _) = read_message(&mut server).await;
+            assert_eq!(ty, PacketType::AttentionSignal as u8);
+
+            // One last packet carries a row and the acknowledgement.
+            let mut last = vec![0xD1];
+            last.extend_from_slice(&2i32.to_le_bytes());
+            last.extend(done_token(DONE_ATTENTION, 0));
+            write_packet(&mut server, PacketStatus::EndOfMessage, &last).await;
+
+            let (ty, _) = read_message(&mut server).await;
+            assert_eq!(ty, PacketType::Rpc as u8);
+            write_message(&mut server, &done_token(0, 0)).await;
+        });
+
+        let mut client = Client::connect(config(), client_end.compat())
+            .await
+            .unwrap();
+        let handle = client.attention_handle();
+        let mut stream = client.simple_query("SELECT a FROM b").await.unwrap();
+        stream.try_next().await.unwrap();
+        stream.try_next().await.unwrap();
+        handle.signal();
+
+        // The read of the second row takes the last packet, and the
+        // acknowledgement stays in the buffer when the stream goes.
+        let second = stream.try_next().await.unwrap().unwrap();
+        assert_eq!(Some(2), second.as_row().unwrap().get::<i32, _>(0));
+        drop(stream);
+
+        let answered = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.execute("SELECT 1", &[]),
+        )
+        .await
+        .expect("the next request does not wait for a packet");
+        assert!(answered.is_ok());
+
+        server_task.await.unwrap();
+    }
+
     /// An `ERROR` token with the given number and text.
     fn error_token(code: u32, text: &str) -> Vec<u8> {
         let mut body = code.to_le_bytes().to_vec();

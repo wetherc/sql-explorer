@@ -34,7 +34,9 @@ The release gives no way to stop a statement that runs. The copy adds
 hold while the driver reads the results. A call to `signal` on the handle
 makes the connection send an `Attention` packet. The server then ends the
 statement, the stream of the statement ends with `Error::Canceled`, and
-the connection stays open for the next statement. The change is in
+the connection stays open for the next statement. The next request reads
+past the tokens of the stopped request up to the acknowledgement, which is
+the last token of its message. The change is in
 `src/client.rs`, in `src/client/attention.rs` and in
 `src/client/connection.rs`.
 
