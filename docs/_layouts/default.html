@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="{{ site.lang | default: "en-US" }}">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark light">
+    <meta name="theme-color" content="#14171c" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#e7ebf0" media="(prefers-color-scheme: light)">
+    {% seo %}
+    <link rel="icon" type="image/png" href="{{ "/favicon.png" | relative_url }}">
+    <link rel="apple-touch-icon" href="{{ "/assets/icon.png" | relative_url }}">
+    <link rel="stylesheet" href="{{ "/assets/css/site.css" | relative_url }}">
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="wrap site-header__inner">
+        <a class="brand" href="{{ "/" | relative_url }}">
+          <img src="{{ "/assets/icon.png" | relative_url }}" alt="" width="28" height="28">
+          <span>{{ site.title }}</span>
+        </a>
+        <nav class="site-nav" aria-label="Project links">
+          <a href="https://github.com/wetherc/sql-explorer">GitHub</a>
+          <a href="https://github.com/wetherc/sql-explorer/releases">Releases</a>
+          <a href="https://github.com/wetherc/sql-explorer/issues">Issues</a>
+        </nav>
+      </div>
+    </header>
+
+    <section class="hero">
+      <div class="wrap">
+        <img class="hero__icon" src="{{ "/assets/icon.png" | relative_url }}" alt="" width="96" height="96">
+        <h1>{{ site.title }}</h1>
+        <p class="hero__tagline">An open source SQL client for macOS, Windows and Linux.</p>
+        <ul class="engines" aria-label="Supported engines">
+          <li>MS SQL Server</li>
+          <li>AWS Athena</li>
+          <li>PostgreSQL</li>
+          <li>MySQL</li>
+          <li>MariaDB</li>
+          <li>SQLite</li>
+        </ul>
+        <p class="hero__actions">
+          <a class="button button--primary" href="https://github.com/wetherc/sql-explorer/releases">Download</a>
+          <a class="button" href="https://github.com/wetherc/sql-explorer">View the source</a>
+        </p>
+      </div>
+    </section>
+
+    <main class="wrap content">
+      {{ content }}
+    </main>
+
+    <footer class="site-footer">
+      <div class="wrap">
+        <p>
+          {{ site.title }} is free and open source under the
+          <a href="https://github.com/wetherc/sql-explorer/blob/main/LICENSE">MIT license</a>.
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>

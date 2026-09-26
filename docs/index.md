@@ -17,10 +17,6 @@ It connects to these engines:
 - MySQL and MariaDB
 - SQLite
 
-[Get SQL Explorer on GitHub](https://github.com/wetherc/sql-explorer) ·
-[Releases](https://github.com/wetherc/sql-explorer/releases) ·
-[Report a defect](https://github.com/wetherc/sql-explorer/issues)
-
 ![The tree of objects, the editor and the rows of a result](screenshots/overview.png)
 
 ## Explore the objects of a server

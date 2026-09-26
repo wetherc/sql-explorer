@@ -1,0 +1,311 @@
+/* The colors come from the two themes of the application, in
+   frontend/src/plugins/vuetify.ts. The site uses the dark theme, and the
+   light theme when the system of the reader asks for it. */
+:root {
+  --bg: #14171c;
+  --surface: #1b1f26;
+  --surface-bright: #242932;
+  --border: #39404d;
+  --text: #e3e8ef;
+  --text-muted: #9aa5b5;
+  --primary: #6aa9ff;
+  --primary-strong: #3d7fd6;
+  --on-primary: #0b1a2e;
+  --code-bg: #242932;
+  --shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --radius: 10px;
+  --width: 1040px;
+  --measure: 44rem;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f6f8fa;
+    --surface: #e7ebf0;
+    --surface-bright: #fbfcfd;
+    --border: #ccd3de;
+    --text: #1f2630;
+    --text-muted: #4a5462;
+    --primary: #1558c4;
+    --primary-strong: #10469c;
+    --on-primary: #ffffff;
+    --code-bg: #e6eaf0;
+    --shadow: 0 12px 32px rgba(31, 38, 48, 0.18);
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 1.0625rem;
+  line-height: 1.65;
+}
+
+a {
+  color: var(--primary);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+a:focus-visible,
+.button:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+.wrap {
+  max-width: var(--width);
+  margin: 0 auto;
+  padding: 0 1.5rem;
+}
+
+/* The bar at the top of each page. */
+.site-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: color-mix(in srgb, var(--bg) 85%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border);
+}
+
+.site-header__inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  height: 3.5rem;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--text);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.brand:hover {
+  text-decoration: none;
+}
+
+.brand img {
+  border-radius: 6px;
+}
+
+.site-nav {
+  display: flex;
+  gap: 1.25rem;
+  font-size: 0.9375rem;
+}
+
+.site-nav a {
+  color: var(--text-muted);
+}
+
+.site-nav a:hover {
+  color: var(--text);
+  text-decoration: none;
+}
+
+/* The introduction at the top of the home page. */
+.hero {
+  padding: 4.5rem 0 3rem;
+  text-align: center;
+  background: radial-gradient(ellipse at top, color-mix(in srgb, var(--primary) 16%, transparent), transparent 70%);
+}
+
+.hero__icon {
+  border-radius: 22px;
+  box-shadow: 0 0 0 1px var(--border), var(--shadow);
+}
+
+.hero h1 {
+  margin: 1.25rem 0 0.5rem;
+  font-size: clamp(2.25rem, 5vw, 3.25rem);
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+.hero__tagline {
+  margin: 0 auto;
+  max-width: 36rem;
+  color: var(--text-muted);
+  font-size: 1.25rem;
+}
+
+.engines {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+  margin: 1.75rem auto 0;
+  padding: 0;
+  max-width: 40rem;
+  list-style: none;
+}
+
+.engines li {
+  padding: 0.25rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.875rem;
+}
+
+.hero__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.75rem;
+  margin: 2rem 0 0;
+}
+
+.button {
+  display: inline-block;
+  padding: 0.65rem 1.4rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-bright);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.button:hover {
+  border-color: var(--primary);
+  text-decoration: none;
+}
+
+.button--primary {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: var(--on-primary);
+}
+
+.button--primary:hover {
+  border-color: var(--primary-strong);
+  background: var(--primary-strong);
+  color: #ffffff;
+}
+
+/* The text of the page. The paragraphs and the lists keep a line length that
+   is easy to read, and the screenshots use the full width of the column. */
+.content {
+  padding-bottom: 4rem;
+}
+
+.content > p,
+.content > ul,
+.content > ol,
+.content > h2,
+.content > h3 {
+  max-width: var(--measure);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.content h2 {
+  margin-top: 4.5rem;
+  margin-bottom: 0.5rem;
+  font-size: 1.75rem;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+}
+
+.content h3 {
+  margin-top: 2.5rem;
+  font-size: 1.25rem;
+}
+
+.content li + li {
+  margin-top: 0.35rem;
+}
+
+.content code {
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  background: var(--code-bg);
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
+.content pre {
+  overflow-x: auto;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.content pre code {
+  padding: 0;
+  background: none;
+}
+
+/* A paragraph that holds only a screenshot. */
+.content p:has(> img:only-child) {
+  max-width: none;
+  margin: 2rem 0;
+}
+
+.content img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.site-footer {
+  padding: 2rem 0;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.9375rem;
+  text-align: center;
+}
+
+.site-footer p {
+  margin: 0;
+}
+
+@media (max-width: 600px) {
+  body {
+    font-size: 1rem;
+  }
+
+  .site-nav {
+    gap: 0.75rem;
+    font-size: 0.875rem;
+  }
+
+  .hero {
+    padding-top: 3rem;
+  }
+
+  .content h2 {
+    margin-top: 3rem;
+  }
+}
