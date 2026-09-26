@@ -116,11 +116,6 @@ function lastPane(panes: ResultPane[]): ResultPane | undefined {
   return panes.length > 0 ? panes[panes.length - 1] : undefined
 }
 
-/** Gives the result sets of a list of panes, in their order. */
-export function resultsOf(panes: ResultPane[]): ResultTable[] {
-  return panes.map((pane) => pane.result)
-}
-
 /**
  * Gives the results that the last run made. A result that the user kept
  * against the next run carries the moment of an older run, so it stays out

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { markRaw } from 'vue'
 import { makeApiStub, connectionFixture, infoFixture } from '../../stores/__tests__/helpers'
 
 const apiStub = makeApiStub()
@@ -192,6 +193,35 @@ describe('StatusBar', () => {
     await wrapper.vm.$nextTick()
 
     expect(wrapper.find('[data-test="status-rows"]').text()).toBe('2 rows')
+  })
+
+  it('counts the rows that arrive while the set streams', async () => {
+    const wrapper = mountWithPlugins(StatusBar)
+    const tab = useTabsStore().add({ connectionId: 'c1' })
+    const state = useQueryStore().stateFor(tab.id)
+    state.panes = [
+      {
+        id: 'streaming',
+        // The store keeps the table raw, so Vue sees no change inside it.
+        result: markRaw(ResultTable.fromRows([], [])),
+        rows: 0,
+        truncated: false,
+        number: 1,
+        ranAt: 200,
+        pinned: false,
+        run: null,
+      },
+    ]
+    state.lastRunAt = 200
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-test="status-rows"]').text()).toBe('0 rows')
+
+    for (const pane of state.panes) {
+      pane.rows = 8
+    }
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('[data-test="status-rows"]').text()).toBe('8 rows')
   })
 
   it('reports no rows for a run that gave no result', async () => {

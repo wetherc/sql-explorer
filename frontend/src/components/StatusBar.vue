@@ -56,7 +56,7 @@ import { useConnectionsStore } from '@/stores/connections'
 import { useQueryStore } from '@/stores/query'
 import { useSettingsStore } from '@/stores/settings'
 import { useTabsStore } from '@/stores/tabs'
-import { panesOfLastRun, resultsOf, totalRows } from '@/stores/query'
+import { panesOfLastRun } from '@/stores/query'
 import { ConnectionHealth, Dialect } from '@/types/api'
 
 const connections = useConnectionsStore()
@@ -76,7 +76,9 @@ const lastRunRows = computed(() => {
     return null
   }
   const panes = panesOfLastRun(state.value)
-  return panes.length > 0 ? totalRows(resultsOf(panes)) : null
+  // The table of a pane stands outside the reactivity of Vue, so the count
+  // beside it gives the rows that arrive while the set streams.
+  return panes.length > 0 ? panes.reduce((sum, pane) => sum + pane.rows, 0) : null
 })
 
 const connectionId = computed(() => tab.value?.connectionId ?? connections.selectedId)
