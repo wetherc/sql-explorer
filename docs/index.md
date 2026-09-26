@@ -63,6 +63,17 @@ to an age that you set, and that reuse scans no data.
 
 ![A statement on AWS Athena, with the data it scanned](screenshots/athena.png)
 
+## Run it on Linux
+
+The Linux build makes a `.deb` package, an `.rpm` package and an AppImage. The
+passwords go to the Secret Service of the desktop, for example GNOME Keyring or
+KWallet. In the picture below, five sample servers are open at the same time:
+PostgreSQL, MS SQL Server, MySQL, MariaDB and SQLite.
+
+![Five open connections on Linux, and the rows of a MySQL result](screenshots/linux/overview.png)
+
+![The rows of a SQLite result with a filter, in the light theme](screenshots/linux/sqlite.png)
+
 ## Keep your secrets safe
 
 Passwords and AWS secret keys go into the keychain of the operating system. The
@@ -75,6 +86,4 @@ Download a build from the
 [releases page](https://github.com/wetherc/sql-explorer/releases), or build it
 from the source with the steps in the
 [README](https://github.com/wetherc/sql-explorer#setup). SQL Explorer is free
-and open source under the MIT licence.
-
-See the [limitations](LIMITATIONS) before you report a defect.
+and open source under the MIT license.

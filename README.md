@@ -7,14 +7,14 @@ PostgreSQL, MySQL, MariaDB and SQLite. It shows the objects of each server in a
 tree, runs statements in tabs, and writes the results to a file.
 
 The application is built with Vue 3, Vuetify and [Tauri 2](https://tauri.app/).
-The website is at <https://wetherc.github.io/sql-explorer/>.
+The website is at <https://sql-explorer.tbmh.org/>.
 
 ![The tree of objects, the editor and the rows of a result](docs/screenshots/overview.png)
 
 ## Screenshots
 
-Every picture below comes from the interface with sample connections and
-sample rows. No server, no user and no row in them is real.
+Every picture below shows sample connections and sample rows. No user and no
+row in them is real.
 
 ### Connections
 
@@ -87,6 +87,30 @@ persist across a restart.
 
 One registry holds every key of the application. The palette lists the
 commands with the keys that reach them.
+
+### Linux
+
+These pictures come from the release build of the `.deb` package on Ubuntu
+24.04, in the Openbox window manager. Five sample servers are open at the same
+time: PostgreSQL 18, MS SQL Server 2022, MySQL 8.4, MariaDB 11.4 and SQLite.
+
+![Five open connections in the tree and the rows of a MySQL result, in the dark theme](docs/screenshots/linux/overview.png)
+
+The tree holds the objects of the five connections. Each editor tab runs on its
+own connection, and this tab runs on MySQL.
+
+![The list of connections and the form of a MS SQL Server connection, in the light theme](docs/screenshots/linux/connections.png)
+
+The list puts the connections into folders. On Linux the passwords go to the
+Secret Service of the desktop, for example GNOME Keyring or KWallet.
+
+![A statement on MS SQL Server and the columns of its table in the tree](docs/screenshots/linux/mssql.png)
+
+![The rows of a SQLite result with a filter, in the light theme](docs/screenshots/linux/sqlite.png)
+
+The filter keeps 6 of the 18 rows of the result.
+
+![The properties of a MariaDB table](docs/screenshots/linux/properties.png)
 
 ## What it does
 
@@ -197,10 +221,15 @@ sudo apt install -y \
     librsvg2-dev \
     libxdo-dev \
     libssl-dev \
+    libkrb5-dev \
+    clang \
     pkg-config \
     build-essential \
     curl wget file
 ```
+
+The Kerberos headers of `libkrb5-dev` and the `clang` compiler build the
+Integrated Security of MS SQL Server.
 
 An earlier version of this application used Tauri 1, which needs
 `libsoup-2.4` and `webkit2gtk-4.0`. Neither package ships on Ubuntu 24.04 or on
@@ -245,6 +274,15 @@ system. The macOS installers appear under `backend/target/release/bundle/`.
 The Windows installer appears under
 `backend/target/x86_64-pc-windows-msvc/release/bundle/nsis/`. To build only
 one operating system, run `pnpm build:macos` or `pnpm build:windows`.
+
+To build the Linux packages, run this command on Linux:
+
+```sh
+pnpm build:linux
+```
+
+The command makes a `.deb` package, an `.rpm` package and an AppImage under
+`backend/target/release/bundle/`.
 
 The Windows cross-compilation needs these tools on the macOS machine:
 

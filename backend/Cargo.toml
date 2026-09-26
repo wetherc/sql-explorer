@@ -5,7 +5,7 @@ description = "A cross-platform desktop client for MS SQL Server, AWS Athena, My
 authors = ["Christopher Wetherill"]
 license = "MIT"
 repository = "https://github.com/wetherc/sql-explorer"
-homepage = "https://wetherc.github.io/sql-explorer/"
+homepage = "https://sql-explorer.tbmh.org/"
 edition = "2021"
 rust-version = "1.82"
 
