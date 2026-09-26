@@ -1,10 +1,13 @@
 # SQL Explorer
 
-A desktop client for SQL databases. It connects to MS SQL Server, AWS Athena,
+An open source desktop client for SQL databases on macOS, Windows and Linux. It
+is an alternative to SQL Server Management Studio (SSMS) and Azure Data Studio
+for users who work on a Mac. It connects to MS SQL Server, AWS Athena,
 PostgreSQL, MySQL, MariaDB and SQLite. It shows the objects of each server in a
 tree, runs statements in tabs, and writes the results to a file.
 
 The application is built with Vue 3, Vuetify and [Tauri 2](https://tauri.app/).
+The website is at <https://wetherc.github.io/sql-explorer/>.
 
 ![The tree of objects, the editor and the rows of a result](docs/screenshots/overview.png)
 
@@ -345,4 +348,4 @@ same name, and an object would lose one of them.
 
 ## Licence
 
-MIT
+MIT. See [LICENSE](LICENSE).

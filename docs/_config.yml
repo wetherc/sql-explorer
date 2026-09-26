@@ -1,0 +1,10 @@
+theme: jekyll-theme-minimal
+title: SQL Explorer
+description: An open source SQL client for Mac, Windows and Linux. An SSMS alternative for MS SQL Server, AWS Athena, PostgreSQL, MySQL, MariaDB and SQLite.
+url: https://wetherc.github.io
+baseurl: /sql-explorer
+lang: en-US
+plugins:
+  - jekyll-seo-tag
+  - jekyll-sitemap
+author: Christopher Wetherill
