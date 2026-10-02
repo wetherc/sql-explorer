@@ -7,7 +7,7 @@ function node(overrides: Partial<ExplorerNode> = {}): ExplorerNode {
   return {
     key: 'db',
     label: 'Sales',
-    kind: 'database',
+    nodeType: 'database',
     icon: 'mdi-database',
     children: [],
     loading: false,
@@ -30,7 +30,7 @@ describe('ExplorerTree', () => {
   it('offers a chevron only on a node that can hold children', () => {
     const wrapper = mountTree([
       node(),
-      node({ key: 'col', kind: 'column', label: 'id', children: undefined }),
+      node({ key: 'col', nodeType: 'column', label: 'id', children: undefined }),
     ])
     expect(wrapper.findAll('[data-test="tree-chevron"]')).toHaveLength(1)
   })
@@ -42,7 +42,10 @@ describe('ExplorerTree', () => {
   })
 
   it('reports a closed branch and a leaf', () => {
-    const wrapper = mountTree([node(), node({ key: 'col', kind: 'column', children: undefined })])
+    const wrapper = mountTree([
+      node(),
+      node({ key: 'col', nodeType: 'column', children: undefined }),
+    ])
     const rows = wrapper.findAll('[role="treeitem"]')
     expect(rows[0]?.attributes('aria-expanded')).toBe('false')
     expect(rows[1]?.attributes('aria-expanded')).toBeUndefined()
@@ -84,7 +87,7 @@ describe('ExplorerTree', () => {
   })
 
   it('draws the children of an open branch and passes their events up', async () => {
-    const child = node({ key: 'schema', label: 'dbo', kind: 'schema' })
+    const child = node({ key: 'schema', label: 'dbo', nodeType: 'schema' })
     const wrapper = mountTree([node({ children: [child] })], new Set(['db']))
     const rows = wrapper.findAll('[data-test="tree-row"]')
     expect(rows).toHaveLength(2)
@@ -103,15 +106,21 @@ describe('ExplorerTree', () => {
 
   it('shows the type of a column beside its name', () => {
     const wrapper = mountTree([
-      node({ key: 'col', kind: 'column', label: 'id', hint: 'int not null', children: undefined }),
+      node({
+        key: 'col',
+        nodeType: 'column',
+        label: 'id',
+        hint: 'int not null',
+        children: undefined,
+      }),
     ])
     expect(wrapper.find('.node-hint').text()).toBe('int not null')
   })
 
   it('dims an object that the engine does not run', () => {
     const wrapper = mountTree([
-      node({ key: 'on', kind: 'trigger', label: 'audit', children: undefined }),
-      node({ key: 'off', kind: 'trigger', label: 'old', children: undefined, dimmed: true }),
+      node({ key: 'on', nodeType: 'trigger', label: 'audit', children: undefined }),
+      node({ key: 'off', nodeType: 'trigger', label: 'old', children: undefined, dimmed: true }),
     ])
     const rows = wrapper.findAll('[data-test="tree-row"]')
     expect(rows[0]?.classes()).not.toContain('dimmed')
@@ -136,8 +145,8 @@ describe('ExplorerTree as a tree a reader can follow', () => {
     expect(wrapper.find('[data-test="tree-row"]').attributes('role')).toBe('treeitem')
   })
 
-  it('gives each row its level and its place among its own kind', () => {
-    const child = node({ key: 'schema', label: 'dbo', kind: 'schema' })
+  it('gives each row its level and its place among its siblings', () => {
+    const child = node({ key: 'schema', label: 'dbo', nodeType: 'schema' })
     const wrapper = mountTree(
       [node({ children: [child] }), node({ key: 'db2', label: 'Other' })],
       new Set(['db']),
@@ -323,7 +332,7 @@ describe('ExplorerTree as a tree a reader can follow', () => {
   })
 
   it('moves into an open branch with the right key', async () => {
-    const child = node({ key: 'schema', kind: 'schema' })
+    const child = node({ key: 'schema', nodeType: 'schema' })
     const wrapper = mountTree([node({ children: [child] })], new Set(['db']))
 
     await wrapper.trigger('keydown', { key: 'ArrowRight' })
@@ -333,7 +342,7 @@ describe('ExplorerTree as a tree a reader can follow', () => {
   })
 
   it('leaves a leaf alone when the right key arrives', async () => {
-    const wrapper = mountTree([node({ key: 'col', kind: 'column', children: undefined })])
+    const wrapper = mountTree([node({ key: 'col', nodeType: 'column', children: undefined })])
 
     await wrapper.trigger('keydown', { key: 'ArrowRight' })
 
@@ -349,7 +358,7 @@ describe('ExplorerTree as a tree a reader can follow', () => {
   })
 
   it('moves out to the row that holds a child with the left key', async () => {
-    const child = node({ key: 'schema', kind: 'schema' })
+    const child = node({ key: 'schema', nodeType: 'schema' })
     const wrapper = mountTree([node({ children: [child] })], new Set(['db']))
 
     await wrapper.trigger('keydown', { key: 'End' })
@@ -362,7 +371,7 @@ describe('ExplorerTree as a tree a reader can follow', () => {
   })
 
   it('stays where it is when the left key arrives on a row of the first level', async () => {
-    const wrapper = mountTree([node({ key: 'col', kind: 'column', children: undefined })])
+    const wrapper = mountTree([node({ key: 'col', nodeType: 'column', children: undefined })])
 
     await wrapper.trigger('keydown', { key: 'ArrowLeft' })
 
@@ -504,7 +513,7 @@ describe('ExplorerTree width', () => {
     const nodes = Array.from({ length: 300 }, (_, index) =>
       node({ key: `n${index}`, label: index === 250 ? 'x'.repeat(100) : 'short' }),
     )
-    nodes[1]!.kind = 'column'
+    nodes[1]!.nodeType = 'column'
     nodes[1]!.hint = 'y'.repeat(20)
     const wrapper = mountTree(nodes)
     expect(wrapper.findAll('[data-test="tree-row"]').length).toBeLessThan(300)
@@ -515,7 +524,7 @@ describe('ExplorerTree width', () => {
   })
 
   it('counts the hint of a row', async () => {
-    const wrapper = mountTree([node({ kind: 'column', label: 'id', hint: 'y'.repeat(100) })])
+    const wrapper = mountTree([node({ nodeType: 'column', label: 'id', hint: 'y'.repeat(100) })])
     // Both fonts are known, so a new drawing reads them no more.
     await wrapper.setProps({ selectedKey: 'db' })
     const body = wrapper.find('[data-test="tree-body"]').element as HTMLElement

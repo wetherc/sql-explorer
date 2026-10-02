@@ -24,7 +24,7 @@ import {
 /** The pause between the last keystroke in the filter and the match. */
 export const FILTER_DELAY_MS = 200
 
-export type NodeKind =
+export type NodeType =
   | 'connection'
   | 'database'
   | 'schema'
@@ -38,7 +38,7 @@ export type NodeKind =
   | ObjectType
 
 /** What a folder node holds, which decides the call that fills it. */
-export type FolderKind =
+export type FolderContent =
   | 'tables'
   | 'views'
   | 'materializedViews'
@@ -53,8 +53,8 @@ export type FolderKind =
   | 'triggers'
   | 'events'
 
-/** The kinds that hold no children of their own. */
-const LEAF_KINDS: NodeKind[] = [
+/** The node types that have no children of their own. */
+const LEAF_TYPES: NodeType[] = [
   'column',
   'routine',
   'index',
@@ -85,11 +85,9 @@ const RELATION_FOLDERS: Record<RelationFolder, { label: string; relationTypes: R
 
 /**
  * The folders of relations below a schema, in their order. A folder of a
- * kind that the engine does not have stays out of the tree.
+ * type of relation that the engine does not have stays out of the tree.
  */
-export function relationFolderKinds(
-  capabilities: DriverCapabilities | undefined,
-): RelationFolder[] {
+export function relationFoldersFor(capabilities: DriverCapabilities | undefined): RelationFolder[] {
   const folders: RelationFolder[] = ['tables', 'views']
   if (capabilities?.supportsMaterializedViews) {
     folders.push('materializedViews')
@@ -106,7 +104,7 @@ export function relationFolderKinds(
 export interface ExplorerNode {
   key: string
   label: string
-  kind: NodeKind
+  nodeType: NodeType
   icon: string
   /** Extra text the tree shows after the label, such as a column type. */
   hint?: string
@@ -119,14 +117,14 @@ export interface ExplorerNode {
   schema?: string
   table?: string
   /** Set on a folder node, and it names the list the folder holds. */
-  folder?: FolderKind
+  folder?: FolderContent
   /** True for an object that the engine keeps but does not run, such as a disabled trigger. */
   dimmed?: boolean
 }
 
 /** Selects the icon of a node. */
-export function iconFor(kind: NodeKind, isKey = false): string {
-  switch (kind) {
+export function iconFor(nodeType: NodeType, isKey = false): string {
+  switch (nodeType) {
     case 'connection':
       return 'mdi-server'
     case 'database':
@@ -165,17 +163,19 @@ export function iconFor(kind: NodeKind, isKey = false): string {
 
 /** True when the node can hold children. */
 export function isExpandable(node: ExplorerNode): boolean {
-  return !LEAF_KINDS.includes(node.kind)
+  return !LEAF_TYPES.includes(node.nodeType)
 }
 
 /** True when the node is a relation, such as a table, a view or a synonym. */
-export function isRelation(node: ExplorerNode): node is ExplorerNode & { kind: RelationType } {
-  return RELATION_TYPES.includes(node.kind)
+export function isRelation(node: ExplorerNode): node is ExplorerNode & { nodeType: RelationType } {
+  return RELATION_TYPES.includes(node.nodeType)
 }
 
 /** True when the node is a trigger or an event, which gives a CREATE script alone. */
-export function isTriggerOrEvent(node: ExplorerNode): node is ExplorerNode & { kind: ObjectType } {
-  return node.kind === ObjectType.Trigger || node.kind === ObjectType.Event
+export function isTriggerOrEvent(
+  node: ExplorerNode,
+): node is ExplorerNode & { nodeType: ObjectType } {
+  return node.nodeType === ObjectType.Trigger || node.nodeType === ObjectType.Event
 }
 
 /** Builds the node of one relation. */
@@ -191,7 +191,7 @@ export function tableNode(
     // can carry the same name.
     key: `${connectionId}/${database}/${schema ?? ''}/${relationType}/${table.name}`,
     label: table.name,
-    kind: relationType,
+    nodeType: relationType,
     icon: iconFor(relationType),
     children: [],
     loading: false,
@@ -216,7 +216,7 @@ export function columnNode(column: ColumnRef, parent: ExplorerNode): ExplorerNod
   return {
     key: `${parent.key}/${column.name}`,
     label: column.name,
-    kind: 'column',
+    nodeType: 'column',
     icon: iconFor('column', column.isPrimaryKey),
     hint: `${column.dataType}${column.nullable ? '' : ' not null'}`,
     loading: false,
@@ -229,11 +229,15 @@ export function columnNode(column: ColumnRef, parent: ExplorerNode): ExplorerNod
 }
 
 /** Builds a folder node below a schema, a database or a relation. */
-export function folderNode(label: string, folder: FolderKind, parent: ExplorerNode): ExplorerNode {
+export function folderNode(
+  label: string,
+  folder: FolderContent,
+  parent: ExplorerNode,
+): ExplorerNode {
   return {
     key: `${parent.key}/${folder}`,
     label,
-    kind: 'folder',
+    nodeType: 'folder',
     icon: iconFor('folder'),
     children: [],
     loading: false,
@@ -249,15 +253,15 @@ export function folderNode(label: string, folder: FolderKind, parent: ExplorerNo
 /** Builds a node that holds no children, below a folder. */
 export function leafNode(
   label: string,
-  kind: NodeKind,
+  nodeType: NodeType,
   parent: ExplorerNode,
   hint?: string,
 ): ExplorerNode {
   return {
     key: `${parent.key}/${label}`,
     label,
-    kind,
-    icon: iconFor(kind),
+    nodeType,
+    icon: iconFor(nodeType),
     hint,
     loading: false,
     loaded: true,
@@ -649,10 +653,10 @@ export const useExplorerStore = defineStore('explorer', () => {
     walk(own, (node) => {
       const qualifier = [node.database, node.schema].filter(Boolean).join('.')
       const identity = `${qualifier}/${node.table ?? node.label}`
-      if (node.kind === 'database' && !seen.databases.has(node.label)) {
+      if (node.nodeType === 'database' && !seen.databases.has(node.label)) {
         seen.databases.add(node.label)
         index.databases.push(node.label)
-      } else if (node.kind === 'schema' && !seen.schemas.has(node.label)) {
+      } else if (node.nodeType === 'schema' && !seen.schemas.has(node.label)) {
         seen.schemas.add(node.label)
         index.schemas.push(node.label)
       } else if (isRelation(node)) {
@@ -660,7 +664,7 @@ export const useExplorerStore = defineStore('explorer', () => {
           seen.tables.add(identity)
           index.tables.push({ name: node.label, qualifier })
         }
-      } else if (node.kind === 'column' && !fromSnapshot.has(identity)) {
+      } else if (node.nodeType === 'column' && !fromSnapshot.has(identity)) {
         // A relation that a snapshot already holds keeps the columns of the
         // snapshot, so no name appears twice.
         index.columns.push({
@@ -701,7 +705,7 @@ export const useExplorerStore = defineStore('explorer', () => {
     return {
       key: connectionId,
       label: connection?.name ?? connectionId,
-      kind: 'connection',
+      nodeType: 'connection',
       icon: iconFor('connection'),
       children: [],
       loading: false,
@@ -820,7 +824,7 @@ export const useExplorerStore = defineStore('explorer', () => {
     // The user asks for the objects of the server again, so the schema that
     // the editor offers is read again too. A database that is shut gets its
     // schema when the user next opens it.
-    if (node.kind === 'connection') {
+    if (node.nodeType === 'connection') {
       forgetSnapshots(node.connectionId)
     }
     await reopen(await load(node, true), open)
@@ -860,7 +864,7 @@ export const useExplorerStore = defineStore('explorer', () => {
       }
       setChildren(node, children)
       node.loaded = true
-      if (node.kind === 'database') {
+      if (node.nodeType === 'database') {
         // The user has shown interest in this database, so the whole schema
         // is read for the completions of the editor. The read runs on its own
         // and the tree does not wait for it.
@@ -889,12 +893,12 @@ export const useExplorerStore = defineStore('explorer', () => {
     const info = connections.active[node.connectionId]
     const supportsSchemas = info?.capabilities.supportsSchemas ?? false
 
-    if (node.kind === 'connection') {
+    if (node.nodeType === 'connection') {
       const databases = await api.listDatabases(node.connectionId)
       return databases.map((database) => ({
         key: `${node.connectionId}/${database.name}`,
         label: database.name,
-        kind: 'database' as const,
+        nodeType: 'database' as const,
         icon: iconFor('database'),
         children: [],
         loading: false,
@@ -904,7 +908,7 @@ export const useExplorerStore = defineStore('explorer', () => {
       }))
     }
 
-    if (node.kind === 'database' && supportsSchemas) {
+    if (node.nodeType === 'database' && supportsSchemas) {
       const database = node.database ?? node.label
       const schemas = await api.listSchemas(node.connectionId, database)
       // A SQLite file with no temporary and no attached database has the
@@ -916,7 +920,7 @@ export const useExplorerStore = defineStore('explorer', () => {
       return schemas.map((schema) => ({
         key: `${node.connectionId}/${database}/${schema.name}`,
         label: schema.name,
-        kind: 'schema' as const,
+        nodeType: 'schema' as const,
         icon: iconFor('schema'),
         children: [],
         loading: false,
@@ -928,7 +932,7 @@ export const useExplorerStore = defineStore('explorer', () => {
     }
 
     // A schema, and a database of an engine without schemas, hold folders.
-    if (node.kind === 'database' || node.kind === 'schema') {
+    if (node.nodeType === 'database' || node.nodeType === 'schema') {
       return schemaFolders(node, info?.capabilities)
     }
 
@@ -944,7 +948,7 @@ export const useExplorerStore = defineStore('explorer', () => {
     node: ExplorerNode,
     capabilities: DriverCapabilities | undefined,
   ): ExplorerNode[] {
-    const folders = relationFolderKinds(capabilities).map((folder) =>
+    const folders = relationFoldersFor(capabilities).map((folder) =>
       folderNode(RELATION_FOLDERS[folder].label, folder, node),
     )
     if (capabilities?.supportsRoutines) {
@@ -970,17 +974,17 @@ export const useExplorerStore = defineStore('explorer', () => {
     capabilities: DriverCapabilities | undefined,
   ): ExplorerNode[] {
     const folders = [folderNode('Columns', 'columns', node)]
-    const isTable = node.kind === 'table' || node.kind === 'partitionedTable'
-    if (capabilities?.supportsIndexes && (isTable || node.kind === 'materializedView')) {
+    const isTable = node.nodeType === 'table' || node.nodeType === 'partitionedTable'
+    if (capabilities?.supportsIndexes && (isTable || node.nodeType === 'materializedView')) {
       folders.push(folderNode('Indexes', 'indexes', node))
     }
-    if (capabilities?.supportsConstraints && (isTable || node.kind === 'foreignTable')) {
+    if (capabilities?.supportsConstraints && (isTable || node.nodeType === 'foreignTable')) {
       folders.push(folderNode('Keys', 'constraints', node))
     }
-    const viewTriggers = node.kind === 'view' && capabilities?.supportsViewTriggers
+    const viewTriggers = node.nodeType === 'view' && capabilities?.supportsViewTriggers
     if (
       capabilities?.supportsTriggers &&
-      (isTable || node.kind === 'foreignTable' || viewTriggers)
+      (isTable || node.nodeType === 'foreignTable' || viewTriggers)
     ) {
       folders.push(folderNode('Triggers', 'triggers', node))
     }
@@ -1004,7 +1008,7 @@ export const useExplorerStore = defineStore('explorer', () => {
       database: string
       schema: string | null
       list: Promise<TableRef[]>
-      readers: Set<FolderKind>
+      readers: Set<FolderContent>
     }
   >()
 
@@ -1027,7 +1031,7 @@ export const useExplorerStore = defineStore('explorer', () => {
         database,
         schema,
         list,
-        readers: new Set<FolderKind>(),
+        readers: new Set<FolderContent>(),
       }
       list.catch(() => {
         if (relationReads.get(key) === entry) {
@@ -1074,7 +1078,7 @@ export const useExplorerStore = defineStore('explorer', () => {
       case 'foreignTables':
       case 'synonyms': {
         const wanted = RELATION_FOLDERS[node.folder].relationTypes
-        const folders = relationFolderKinds(capabilities).length
+        const folders = relationFoldersFor(capabilities).length
         const tables = await relationsOf(node, database, schema, folders)
         return tables
           .filter((entry) => wanted.includes(entry.relationType))

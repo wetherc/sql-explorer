@@ -22,7 +22,7 @@ function node(overrides: Record<string, unknown> = {}) {
   return {
     key: 'c1/Sales/dbo/table/orders',
     label: 'orders',
-    kind: 'table' as const,
+    nodeType: 'table' as const,
     icon: 'mdi-table',
     loading: false,
     loaded: false,

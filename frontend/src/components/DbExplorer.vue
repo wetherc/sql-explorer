@@ -77,7 +77,7 @@
           @click="scriptHere(menuNode, 'create')"
         />
         <v-list-item
-          v-if="isRelation(menuNode) && menuNode.kind !== RelationType.Synonym"
+          v-if="isRelation(menuNode) && menuNode.nodeType !== RelationType.Synonym"
           prepend-icon="mdi-information-outline"
           title="Properties"
           data-test="menu-properties"
@@ -105,7 +105,7 @@
           @click="explorer.refresh(menuNode, openKeys)"
         />
         <v-list-item
-          v-if="menuNode.kind === 'connection'"
+          v-if="menuNode.nodeType === 'connection'"
           prepend-icon="mdi-lan-disconnect"
           title="Close this connection"
           data-test="menu-disconnect"
@@ -303,10 +303,10 @@ const limitedForms: Partial<Record<RelationType, ScriptStatement[]>> = {
 
 /**
  * The statements that the menu offers for one node. The menu shows them for
- * a relation alone, so the kind of the node is a `RelationType`.
+ * a relation alone, so the type of the node is a `RelationType`.
  */
 function scriptFormsFor(node: ExplorerNode): { statement: ScriptStatement; title: string }[] {
-  const only = limitedForms[node.kind as RelationType]
+  const only = limitedForms[node.nodeType as RelationType]
   return only ? scriptForms.filter((form) => only.includes(form.statement)) : scriptForms
 }
 
@@ -327,7 +327,7 @@ async function scriptHere(node: ExplorerNode, statement: ScriptStatement): Promi
       schemaName: node.schema ?? null,
       tableName: own ? node.label : (node.table ?? node.label),
       parentName: own ? (node.table ?? null) : null,
-      target: own ? node.kind : (node.kind as RelationType),
+      target: own ? node.nodeType : (node.nodeType as RelationType),
       statement,
     })
     tabs.add({

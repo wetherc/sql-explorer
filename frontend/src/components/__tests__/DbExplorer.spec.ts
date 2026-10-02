@@ -181,7 +181,7 @@ describe('DbExplorer', () => {
       node: {
         key: 't',
         label: 'orders',
-        kind: 'table',
+        nodeType: 'table',
         icon: 'mdi-table',
         loading: false,
         loaded: false,
@@ -208,7 +208,7 @@ describe('DbExplorer', () => {
       node: {
         key: 'v',
         label: 'orders',
-        kind: 'view',
+        nodeType: 'view',
         icon: 'mdi-table-eye',
         loading: false,
         loaded: false,
@@ -249,7 +249,7 @@ describe('DbExplorer', () => {
       node: {
         key: 't',
         label: 'orders',
-        kind: 'table',
+        nodeType: 'table',
         icon: 'mdi-table',
         loading: false,
         loaded: false,
@@ -277,20 +277,20 @@ describe('DbExplorer', () => {
     })
   })
 
-  it('offers the statements that each kind of relation takes', async () => {
+  it('offers the statements that each type of relation takes', async () => {
     apiStub.scriptObject.mockResolvedValue('CREATE SYNONYM [dbo].[alias] FOR [x];')
     const wrapper = await mountExplorer()
     const explorer = useExplorerStore()
     explorer.addRoot('c1')
     await wrapper.vm.$nextTick()
 
-    const openFor = async (kind: string) => {
+    const openFor = async (nodeType: string) => {
       await wrapper.findComponent({ name: 'ExplorerTree' }).vm.$emit('context', {
         event: new MouseEvent('contextmenu'),
         node: {
-          key: kind,
+          key: nodeType,
           label: 'r',
-          kind,
+          nodeType,
           icon: 'mdi-table',
           loading: false,
           loaded: false,
@@ -333,7 +333,7 @@ describe('DbExplorer', () => {
         node: {
           key: objectType,
           label: 'audit',
-          kind: objectType,
+          nodeType: objectType,
           icon: 'mdi-lightning-bolt',
           loading: false,
           loaded: true,
@@ -391,7 +391,7 @@ describe('DbExplorer', () => {
       node: {
         key: 't',
         label: 'orders',
-        kind: 'table',
+        nodeType: 'table',
         icon: 'mdi-table',
         loading: false,
         loaded: false,
@@ -423,7 +423,7 @@ describe('DbExplorer', () => {
       node: {
         key: 't',
         label: 'orders',
-        kind: 'table',
+        nodeType: 'table',
         icon: 'mdi-table',
         loading: false,
         loaded: false,
@@ -462,7 +462,7 @@ describe('DbExplorer', () => {
       node: {
         key: 't',
         label: 'orders',
-        kind: 'table',
+        nodeType: 'table',
         icon: 'mdi-table',
         loading: false,
         loaded: false,
@@ -575,7 +575,7 @@ describe('DbExplorer', () => {
       node: {
         key: 't',
         label: 'orders',
-        kind: 'table',
+        nodeType: 'table',
         icon: 'mdi-table',
         loading: false,
         loaded: false,
@@ -608,7 +608,7 @@ describe('DbExplorer', () => {
       node: {
         key: 't',
         label: 'orders',
-        kind: 'view',
+        nodeType: 'view',
         icon: 'mdi-table-eye',
         loading: false,
         loaded: false,
@@ -636,7 +636,7 @@ describe('DbExplorer', () => {
       node: {
         key: 't',
         label: 'orders',
-        kind: 'table',
+        nodeType: 'table',
         icon: 'mdi-table',
         loading: false,
         loaded: false,
@@ -659,7 +659,7 @@ describe('DbExplorer', () => {
     await wrapper.findComponent({ name: 'ExplorerTree' }).vm.$emit('activate', {
       key: 'leaf',
       label: 'id',
-      kind: 'column',
+      nodeType: 'column',
       icon: 'mdi-table-column',
       loading: false,
       loaded: true,
@@ -716,7 +716,7 @@ describe('DbExplorer menu on a column', () => {
       node: {
         key: 'col',
         label: 'id',
-        kind: 'column',
+        nodeType: 'column',
         icon: 'mdi-table-column',
         loading: false,
         loaded: true,

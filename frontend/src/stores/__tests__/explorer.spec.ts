@@ -20,7 +20,7 @@ const {
   isRelation,
   isTriggerOrEvent,
   leafNode,
-  relationFolderKinds,
+  relationFoldersFor,
   tableNode,
   triggerHint,
   useExplorerStore,
@@ -42,7 +42,7 @@ function node(overrides: Partial<ExplorerNode> = {}): ExplorerNode {
   return {
     key: 'k',
     label: 'label',
-    kind: 'database',
+    nodeType: 'database',
     icon: 'mdi-database',
     children: [],
     loading: false,
@@ -53,7 +53,7 @@ function node(overrides: Partial<ExplorerNode> = {}): ExplorerNode {
 }
 
 describe('iconFor', () => {
-  it('gives an icon for every kind of node', () => {
+  it('gives an icon for every type of node', () => {
     expect(iconFor('connection')).toBe('mdi-server')
     expect(iconFor('database')).toBe('mdi-database')
     expect(iconFor('schema')).toBe('mdi-folder-outline')
@@ -77,25 +77,25 @@ describe('iconFor', () => {
 
 describe('isExpandable', () => {
   it('holds for a node that can hold children', () => {
-    expect(isExpandable(node({ kind: 'table' }))).toBe(true)
-    expect(isExpandable(node({ kind: 'folder' }))).toBe(true)
-    for (const kind of ['column', 'routine', 'index', 'constraint', 'partition'] as const) {
-      expect(isExpandable(node({ kind }))).toBe(false)
+    expect(isExpandable(node({ nodeType: 'table' }))).toBe(true)
+    expect(isExpandable(node({ nodeType: 'folder' }))).toBe(true)
+    for (const nodeType of ['column', 'routine', 'index', 'constraint', 'partition'] as const) {
+      expect(isExpandable(node({ nodeType }))).toBe(false)
     }
     // A synonym names another object, and the tree reads nothing below it.
-    expect(isExpandable(node({ kind: 'synonym' }))).toBe(false)
-    expect(isExpandable(node({ kind: 'materializedView' }))).toBe(true)
-    expect(isExpandable(node({ kind: 'trigger' }))).toBe(false)
-    expect(isExpandable(node({ kind: 'event' }))).toBe(false)
+    expect(isExpandable(node({ nodeType: 'synonym' }))).toBe(false)
+    expect(isExpandable(node({ nodeType: 'materializedView' }))).toBe(true)
+    expect(isExpandable(node({ nodeType: 'trigger' }))).toBe(false)
+    expect(isExpandable(node({ nodeType: 'event' }))).toBe(false)
   })
 })
 
 describe('isTriggerOrEvent', () => {
   it('holds for a trigger and an event alone', () => {
-    expect(isTriggerOrEvent(node({ kind: 'trigger' }))).toBe(true)
-    expect(isTriggerOrEvent(node({ kind: 'event' }))).toBe(true)
-    expect(isTriggerOrEvent(node({ kind: 'table' }))).toBe(false)
-    expect(isTriggerOrEvent(node({ kind: 'routine' }))).toBe(false)
+    expect(isTriggerOrEvent(node({ nodeType: 'trigger' }))).toBe(true)
+    expect(isTriggerOrEvent(node({ nodeType: 'event' }))).toBe(true)
+    expect(isTriggerOrEvent(node({ nodeType: 'table' }))).toBe(false)
+    expect(isTriggerOrEvent(node({ nodeType: 'routine' }))).toBe(false)
   })
 })
 
@@ -129,23 +129,23 @@ describe('triggerHint and eventHint', () => {
 })
 
 describe('isRelation', () => {
-  it('holds for every kind of relation and for no other node', () => {
-    for (const kind of Object.values(RelationType)) {
-      expect(isRelation(node({ kind }))).toBe(true)
+  it('holds for every type of relation and for no other node', () => {
+    for (const nodeType of Object.values(RelationType)) {
+      expect(isRelation(node({ nodeType }))).toBe(true)
     }
-    for (const kind of ['connection', 'database', 'schema', 'folder', 'column'] as const) {
-      expect(isRelation(node({ kind }))).toBe(false)
+    for (const nodeType of ['connection', 'database', 'schema', 'folder', 'column'] as const) {
+      expect(isRelation(node({ nodeType }))).toBe(false)
     }
   })
 })
 
-describe('relationFolderKinds', () => {
-  it('adds the folder of each kind that the engine has, in the order of the tree', () => {
+describe('relationFoldersFor', () => {
+  it('adds the folder of each type of relation that the engine has, in the order of the tree', () => {
     const base = infoFixture().capabilities
-    expect(relationFolderKinds(undefined)).toEqual(['tables', 'views'])
-    expect(relationFolderKinds(base)).toEqual(['tables', 'views'])
+    expect(relationFoldersFor(undefined)).toEqual(['tables', 'views'])
+    expect(relationFoldersFor(base)).toEqual(['tables', 'views'])
     expect(
-      relationFolderKinds({
+      relationFoldersFor({
         ...base,
         supportsMaterializedViews: true,
         supportsForeignTables: true,
@@ -158,7 +158,7 @@ describe('relationFolderKinds', () => {
 describe('folderNode and leafNode', () => {
   it('carries the place of the parent down to the child', () => {
     const table = node({
-      kind: 'table',
+      nodeType: 'table',
       key: 'c1/Sales/dbo/table/orders',
       database: 'Sales',
       schema: 'dbo',
@@ -186,7 +186,7 @@ describe('indexColumns', () => {
 })
 
 describe('constraintHint', () => {
-  it('names the kind, the columns and the detail', () => {
+  it('names the type, the columns and the detail', () => {
     expect(
       constraintHint({ name: 'pk', constraintType: 'primaryKey', columns: ['id'], detail: null }),
     ).toBe('primary key \u00b7 id')
@@ -232,7 +232,7 @@ describe('tableNode', () => {
       'Sales',
       'dbo',
     )
-    expect(table.kind).toBe('table')
+    expect(table.nodeType).toBe('table')
     expect(table.key).toBe('c1/Sales/dbo/table/orders')
     expect(table.children).toEqual([])
     expect(table.loaded).toBe(false)
@@ -243,7 +243,7 @@ describe('tableNode', () => {
       'Sales',
       undefined,
     )
-    expect(view.kind).toBe('view')
+    expect(view.nodeType).toBe('view')
     expect(view.key).toBe('c1/Sales//view/big')
 
     const parted = tableNode(
@@ -252,7 +252,7 @@ describe('tableNode', () => {
       'logs',
       'public',
     )
-    expect(parted.kind).toBe('partitionedTable')
+    expect(parted.nodeType).toBe('partitionedTable')
     expect(parted.icon).toBe('mdi-table-split-cell')
     expect(parted.children).toEqual([])
   })
@@ -268,7 +268,7 @@ describe('tableNode', () => {
       'Sales',
       'dbo',
     )
-    expect(synonym.kind).toBe('synonym')
+    expect(synonym.nodeType).toBe('synonym')
     expect(synonym.key).toBe('c1/Sales/dbo/synonym/remote_orders')
     expect(synonym.hint).toBe('[Other].[dbo].[orders]')
     expect(synonym.children).toBeUndefined()
@@ -287,7 +287,7 @@ describe('tableNode', () => {
 
 describe('columnNode', () => {
   it('marks a key column and reports whether a column may hold no value', () => {
-    const parent = node({ kind: 'table', key: 'c1/db/dbo/orders', table: 'orders' })
+    const parent = node({ nodeType: 'table', key: 'c1/db/dbo/orders', table: 'orders' })
     const key = columnNode(
       { name: 'id', dataType: 'int', nullable: false, isPrimaryKey: true },
       parent,
@@ -311,12 +311,12 @@ describe('filterNodes', () => {
     node({
       key: 'root',
       label: 'Server',
-      kind: 'connection',
+      nodeType: 'connection',
       children: [
         node({
           key: 'db',
           label: 'Sales',
-          children: [node({ key: 't', label: 'orders', kind: 'table' })],
+          children: [node({ key: 't', label: 'orders', nodeType: 'table' })],
         }),
         node({ key: 'db2', label: 'Other', children: [] }),
       ],
@@ -349,7 +349,7 @@ describe('filterNodes', () => {
   })
 
   it('keeps a leaf without children as a leaf', () => {
-    const leaves = [node({ key: 'c', label: 'id', kind: 'column', children: undefined })]
+    const leaves = [node({ key: 'c', label: 'id', nodeType: 'column', children: undefined })]
     expect(filterNodes(leaves, 'id')[0]?.children).toBeUndefined()
   })
 })
@@ -441,10 +441,10 @@ describe('explorer store', () => {
   it('reads the schemas below a database when the engine has them', async () => {
     apiStub.listSchemas.mockResolvedValue([{ name: 'dbo' }])
     const explorer = await readyStore(true)
-    const database = node({ kind: 'database', database: 'Sales', label: 'Sales' })
+    const database = node({ nodeType: 'database', database: 'Sales', label: 'Sales' })
     await explorer.expand(database)
     expect(apiStub.listSchemas).toHaveBeenCalledWith('c1', 'Sales')
-    expect(database.children?.[0]?.kind).toBe('schema')
+    expect(database.children?.[0]?.nodeType).toBe('schema')
   })
 
   it('puts folders below a SQLite database that has the schema main alone', async () => {
@@ -454,27 +454,27 @@ describe('explorer store', () => {
     await useConnectionsStore().load()
     const explorer = useExplorerStore()
     apiStub.listSchemas.mockResolvedValue([{ name: 'main' }])
-    const database = node({ kind: 'database', database: 'main', label: 'main' })
+    const database = node({ nodeType: 'database', database: 'main', label: 'main' })
     await explorer.expand(database)
     expect(database.children?.[0]?.label).toBe('Tables')
 
     apiStub.listSchemas.mockResolvedValue([{ name: 'main' }, { name: 'temp' }])
-    const attached = node({ kind: 'database', database: 'other', label: 'other' })
+    const attached = node({ nodeType: 'database', database: 'other', label: 'other' })
     await explorer.expand(attached)
-    expect(attached.children?.map((child) => child.kind)).toEqual(['schema', 'schema'])
+    expect(attached.children?.map((child) => child.nodeType)).toEqual(['schema', 'schema'])
   })
 
   it('keeps a schema main of an engine other than SQLite', async () => {
     apiStub.listSchemas.mockResolvedValue([{ name: 'main' }])
     const explorer = await readyStore(true)
-    const database = node({ kind: 'database', database: 'Sales', label: 'Sales' })
+    const database = node({ nodeType: 'database', database: 'Sales', label: 'Sales' })
     await explorer.expand(database)
-    expect(database.children?.[0]?.kind).toBe('schema')
+    expect(database.children?.[0]?.nodeType).toBe('schema')
   })
 
   it('puts folders below a database when the engine has no schemas', async () => {
     const explorer = await readyStore(false)
-    const database = node({ kind: 'database', database: 'shop', label: 'shop' })
+    const database = node({ nodeType: 'database', database: 'shop', label: 'shop' })
     await explorer.expand(database)
     expect(database.children?.map((child) => child.label)).toEqual([
       'Tables',
@@ -487,7 +487,7 @@ describe('explorer store', () => {
 
   it('puts folders below a schema', async () => {
     const explorer = await readyStore()
-    const schema = node({ kind: 'schema', database: 'Sales', schema: 'dbo', label: 'dbo' })
+    const schema = node({ nodeType: 'schema', database: 'Sales', schema: 'dbo', label: 'dbo' })
     await explorer.expand(schema)
     expect(schema.children?.map((child) => child.folder)).toEqual([
       'tables',
@@ -507,12 +507,12 @@ describe('explorer store', () => {
     const connections = useConnectionsStore()
     await connections.load()
     const explorer = useExplorerStore()
-    const schema = node({ kind: 'schema', database: 'Sales', schema: 'dbo' })
+    const schema = node({ nodeType: 'schema', database: 'Sales', schema: 'dbo' })
     await explorer.expand(schema)
     expect(schema.children?.map((child) => child.folder)).toEqual(['tables', 'views'])
   })
 
-  /** Loads a store whose engine has every kind of relation of its own. */
+  /** Loads a store whose engine has every type of relation of its own. */
   async function storeWithEveryKind() {
     apiStub.listActiveConnections.mockResolvedValue([
       {
@@ -531,9 +531,9 @@ describe('explorer store', () => {
     return useExplorerStore()
   }
 
-  it('puts the folders of the kinds the engine has between the views and the routines', async () => {
+  it('puts the folders of the types of relation that the engine has between the views and the routines', async () => {
     const explorer = await storeWithEveryKind()
-    const schema = node({ kind: 'schema', database: 'Sales', schema: 'dbo' })
+    const schema = node({ nodeType: 'schema', database: 'Sales', schema: 'dbo' })
     await explorer.expand(schema)
     expect(schema.children?.map((child) => [child.folder, child.label])).toEqual([
       ['tables', 'Tables'],
@@ -546,7 +546,7 @@ describe('explorer store', () => {
     ])
   })
 
-  it('sorts each kind of relation into its folder from one shared read', async () => {
+  it('sorts each type of relation into its folder from one shared read', async () => {
     apiStub.listTables.mockResolvedValue([
       { name: 'orders', relationType: RelationType.Table },
       { name: 'events', relationType: RelationType.PartitionedTable },
@@ -556,11 +556,11 @@ describe('explorer store', () => {
       { name: 'alias', relationType: RelationType.Synonym, target: 'other.dbo.orders' },
     ])
     const explorer = await storeWithEveryKind()
-    const schema = node({ kind: 'schema', database: 'Sales', schema: 'dbo' })
+    const schema = node({ nodeType: 'schema', database: 'Sales', schema: 'dbo' })
     const read = async (folder: Parameters<typeof folderNode>[1]) => {
       const holder = folderNode(folder, folder, schema)
       await explorer.expand(holder)
-      return holder.children?.map((child) => [child.label, child.kind])
+      return holder.children?.map((child) => [child.label, child.nodeType])
     }
 
     expect(await read('tables')).toEqual([
@@ -579,11 +579,11 @@ describe('explorer store', () => {
     expect(apiStub.listTables).toHaveBeenCalledTimes(2)
   })
 
-  it('puts the folders of its kind below each new kind of relation', async () => {
+  it('puts the folders of its type below each new type of relation', async () => {
     const explorer = await storeWithEveryKind()
     const place = { database: 'Sales', schema: 'public' }
-    const foldersOf = async (kind: ExplorerNode['kind']) => {
-      const relation = node({ kind, ...place, table: 'r', key: kind })
+    const foldersOf = async (nodeType: ExplorerNode['nodeType']) => {
+      const relation = node({ nodeType, ...place, table: 'r', key: nodeType })
       await explorer.expand(relation)
       return relation.children?.map((child) => child.folder)
     }
@@ -605,7 +605,7 @@ describe('explorer store', () => {
     const root = explorer.addRoot('c1')
     const schema = node({
       key: 'c1/Sales/dbo',
-      kind: 'schema',
+      nodeType: 'schema',
       database: 'Sales',
       schema: 'dbo',
       label: 'dbo',
@@ -626,7 +626,7 @@ describe('explorer store', () => {
       { name: 'big_orders', relationType: RelationType.View },
     ])
     const explorer = await readyStore()
-    const schema = node({ kind: 'schema', database: 'Sales', schema: 'dbo' })
+    const schema = node({ nodeType: 'schema', database: 'Sales', schema: 'dbo' })
 
     const tables = folderNode('Tables', 'tables', schema)
     await explorer.expand(tables)
@@ -636,7 +636,7 @@ describe('explorer store', () => {
     const views = folderNode('Views', 'views', schema)
     await explorer.expand(views)
     expect(views.children?.map((child) => child.label)).toEqual(['big_orders'])
-    expect(views.children?.[0]?.kind).toBe('view')
+    expect(views.children?.[0]?.nodeType).toBe('view')
   })
 
   it('shares one read of the relations between the two folders of a schema', async () => {
@@ -645,7 +645,7 @@ describe('explorer store', () => {
       { name: 'big_orders', relationType: RelationType.View },
     ])
     const explorer = await readyStore()
-    const schema = node({ kind: 'schema', database: 'Sales', schema: 'dbo' })
+    const schema = node({ nodeType: 'schema', database: 'Sales', schema: 'dbo' })
     await explorer.expand(folderNode('Tables', 'tables', schema))
     const views = folderNode('Views', 'views', schema)
     await explorer.expand(views)
@@ -662,7 +662,7 @@ describe('explorer store', () => {
     const explorer = await readyStore()
     const place = (connectionId: string, database: string, schema?: string) =>
       node({
-        kind: 'schema',
+        nodeType: 'schema',
         key: `${connectionId}/${database}/${schema}`,
         connectionId,
         database,
@@ -708,7 +708,11 @@ describe('explorer store', () => {
     expect(apiStub.listTables).toHaveBeenCalledTimes(13)
 
     // A read that fails is not shared, so the other folder asks again.
-    apiStub.listTables.mockRejectedValueOnce({ kind: 'query', message: 'gone', detail: null })
+    apiStub.listTables.mockRejectedValueOnce({
+      category: 'database',
+      message: 'gone',
+      detail: null,
+    })
     const fresh = place('c1', 'Fresh', 'dbo')
     await explorer.expand(folderNode('Tables', 'tables', fresh))
     await explorer.expand(folderNode('Views', 'views', fresh))
@@ -725,11 +729,11 @@ describe('explorer store', () => {
         }),
     )
     apiStub.listTables.mockResolvedValue([])
-    const schema = node({ kind: 'schema', database: 'Sales', schema: 'dbo' })
+    const schema = node({ nodeType: 'schema', database: 'Sales', schema: 'dbo' })
     const first = explorer.expand(folderNode('Tables', 'tables', schema))
     await explorer.refresh(schema)
     await explorer.expand(folderNode('Views', 'views', schema))
-    fail({ kind: 'query', message: 'gone', detail: null })
+    fail({ category: 'database', message: 'gone', detail: null })
     await first
     await explorer.expand(folderNode('Tables', 'tables', { ...schema, key: 'other' }))
     expect(apiStub.listTables).toHaveBeenCalledTimes(2)
@@ -739,7 +743,7 @@ describe('explorer store', () => {
     apiStub.listTables.mockResolvedValue([])
     apiStub.listDatabases.mockResolvedValue([])
     const explorer = await readyStore()
-    const schema = node({ kind: 'schema', database: 'Sales', schema: 'dbo' })
+    const schema = node({ nodeType: 'schema', database: 'Sales', schema: 'dbo' })
     await explorer.expand(folderNode('Tables', 'tables', schema))
     await explorer.refresh(explorer.addRoot('c1'))
     await explorer.expand(folderNode('Views', 'views', schema))
@@ -749,7 +753,7 @@ describe('explorer store', () => {
   it('uses an empty database name and no schema when the node carries none', async () => {
     apiStub.listTables.mockResolvedValue([])
     const explorer = await readyStore()
-    const bare = node({ kind: 'schema', database: undefined, schema: undefined })
+    const bare = node({ nodeType: 'schema', database: undefined, schema: undefined })
     await explorer.expand(folderNode('Tables', 'tables', bare))
     expect(apiStub.listTables).toHaveBeenCalledWith('c1', '', null)
   })
@@ -761,13 +765,13 @@ describe('explorer store', () => {
       { name: 'order_total', routineType: 'function' },
     ])
     const explorer = await readyStore()
-    const schema = node({ kind: 'schema', database: 'Sales', schema: 'dbo' })
+    const schema = node({ nodeType: 'schema', database: 'Sales', schema: 'dbo' })
 
     const procedures = folderNode('Procedures', 'procedures', schema)
     await explorer.expand(procedures)
     expect(apiStub.listRoutines).toHaveBeenCalledWith('c1', 'Sales', 'dbo')
     expect(procedures.children?.map((child) => child.label)).toEqual(['add_order'])
-    expect(procedures.children?.[0]?.kind).toBe('routine')
+    expect(procedures.children?.[0]?.nodeType).toBe('routine')
 
     const functions = folderNode('Functions', 'functions', schema)
     await explorer.expand(functions)
@@ -778,7 +782,7 @@ describe('explorer store', () => {
 
   it('puts folders below a table and columns alone below a view', async () => {
     const explorer = await readyStore()
-    const table = node({ kind: 'table', database: 'Sales', schema: 'dbo', table: 'orders' })
+    const table = node({ nodeType: 'table', database: 'Sales', schema: 'dbo', table: 'orders' })
     await explorer.expand(table)
     expect(table.children?.map((child) => child.folder)).toEqual([
       'columns',
@@ -786,7 +790,7 @@ describe('explorer store', () => {
       'constraints',
     ])
 
-    const view = node({ kind: 'view', database: 'Sales', schema: 'dbo', table: 'big_orders' })
+    const view = node({ nodeType: 'view', database: 'Sales', schema: 'dbo', table: 'big_orders' })
     await explorer.expand(view)
     expect(view.children?.map((child) => child.folder)).toEqual(['columns'])
   })
@@ -801,7 +805,7 @@ describe('explorer store', () => {
     const connections = useConnectionsStore()
     await connections.load()
     const explorer = useExplorerStore()
-    const table = node({ kind: 'table', database: 'logs', table: 'events' })
+    const table = node({ nodeType: 'table', database: 'logs', table: 'events' })
     await explorer.expand(table)
     expect(table.children?.map((child) => child.folder)).toEqual([
       'columns',
@@ -834,9 +838,9 @@ describe('explorer store', () => {
 
   it('puts a folder of triggers below each relation that can have them', async () => {
     const explorer = await storeWithTriggers(true)
-    const foldersOf = async (relationType: ExplorerNode['kind']) => {
+    const foldersOf = async (relationType: ExplorerNode['nodeType']) => {
       const relation = node({
-        kind: relationType,
+        nodeType: relationType,
         database: 'Sales',
         schema: 'dbo',
         table: 'r',
@@ -859,14 +863,14 @@ describe('explorer store', () => {
 
   it('leaves the folder of triggers out of a view on an engine without view triggers', async () => {
     const explorer = await storeWithTriggers(false)
-    const view = node({ kind: 'view', database: 'shop', table: 'v' })
+    const view = node({ nodeType: 'view', database: 'shop', table: 'v' })
     await explorer.expand(view)
     expect(view.children?.map((child) => child.folder)).toEqual(['columns'])
   })
 
   it('puts the folder of events after the routines', async () => {
     const explorer = await storeWithTriggers(false, true)
-    const database = node({ kind: 'schema', database: 'shop', schema: 'dbo' })
+    const database = node({ nodeType: 'schema', database: 'shop', schema: 'dbo' })
     await explorer.expand(database)
     expect(database.children?.map((child) => child.label).slice(-3)).toEqual([
       'Procedures',
@@ -885,24 +889,24 @@ describe('explorer store', () => {
       { name: 'paused', enabled: false },
     ])
     const explorer = await readyStore()
-    const table = node({ kind: 'table', database: 'Sales', schema: 'dbo', table: 'orders' })
+    const table = node({ nodeType: 'table', database: 'Sales', schema: 'dbo', table: 'orders' })
     const triggers = folderNode('Triggers', 'triggers', table)
     await explorer.expand(triggers)
     expect(apiStub.listTriggers).toHaveBeenCalledWith('c1', 'Sales', 'dbo', 'orders')
     expect(
-      triggers.children?.map((child) => [child.label, child.kind, child.hint, child.dimmed]),
+      triggers.children?.map((child) => [child.label, child.nodeType, child.hint, child.dimmed]),
     ).toEqual([
       ['audit', 'trigger', 'AFTER INSERT, UPDATE', false],
       ['old', 'trigger', 'INSTEAD OF DELETE \u00b7 disabled', true],
     ])
     expect(triggers.children?.[0]?.table).toBe('orders')
 
-    const schema = node({ kind: 'schema', database: 'Sales', schema: 'dbo' })
+    const schema = node({ nodeType: 'schema', database: 'Sales', schema: 'dbo' })
     const events = folderNode('Events', 'events', schema)
     await explorer.expand(events)
     expect(apiStub.listEvents).toHaveBeenCalledWith('c1', 'Sales', 'dbo')
     expect(
-      events.children?.map((child) => [child.label, child.kind, child.hint, child.dimmed]),
+      events.children?.map((child) => [child.label, child.nodeType, child.hint, child.dimmed]),
     ).toEqual([
       ['nightly', 'event', 'EVERY 1 DAY', false],
       ['paused', 'event', 'disabled', true],
@@ -914,11 +918,11 @@ describe('explorer store', () => {
       { name: 'id', dataType: 'int', nullable: false, isPrimaryKey: true },
     ])
     const explorer = await readyStore()
-    const table = node({ kind: 'table', database: 'Sales', schema: 'dbo', table: 'orders' })
+    const table = node({ nodeType: 'table', database: 'Sales', schema: 'dbo', table: 'orders' })
     const columns = folderNode('Columns', 'columns', table)
     await explorer.expand(columns)
     expect(apiStub.listColumns).toHaveBeenCalledWith('c1', 'Sales', 'dbo', 'orders')
-    expect(columns.children?.[0]?.kind).toBe('column')
+    expect(columns.children?.[0]?.nodeType).toBe('column')
   })
 
   it('names the columns and the rule of each index and each constraint', async () => {
@@ -936,7 +940,7 @@ describe('explorer store', () => {
     })
 
     const explorer = await readyStore()
-    const table = node({ kind: 'table', database: 'Sales', schema: 'dbo', table: 'orders' })
+    const table = node({ nodeType: 'table', database: 'Sales', schema: 'dbo', table: 'orders' })
 
     const indexes = folderNode('Indexes', 'indexes', table)
     await explorer.expand(indexes)
@@ -950,7 +954,7 @@ describe('explorer store', () => {
     const keys = folderNode('Keys', 'constraints', table)
     await explorer.expand(keys)
     expect(keys.children?.[0]?.hint).toBe('primary key \u00b7 id')
-    expect(keys.children?.[0]?.kind).toBe('constraint')
+    expect(keys.children?.[0]?.nodeType).toBe('constraint')
 
     const partitions = folderNode('Partitions', 'partitions', table)
     await explorer.expand(partitions)
@@ -965,7 +969,7 @@ describe('explorer store', () => {
       truncated: true,
     })
     const explorer = await readyStore()
-    const table = node({ kind: 'table', database: 'Sales', schema: 'dbo', table: 'orders' })
+    const table = node({ nodeType: 'table', database: 'Sales', schema: 'dbo', table: 'orders' })
     const partitions = folderNode('Partitions', 'partitions', table)
     await explorer.expand(partitions)
     expect(partitions.hint).toBe('first 2')
@@ -974,7 +978,7 @@ describe('explorer store', () => {
   it('takes the name of a database from its label when it reads the schemas', async () => {
     apiStub.listSchemas.mockResolvedValue([{ name: 'dbo' }])
     const explorer = await readyStore(true)
-    await explorer.expand(node({ kind: 'database', label: 'Sales', database: undefined }))
+    await explorer.expand(node({ nodeType: 'database', label: 'Sales', database: undefined }))
     expect(apiStub.listSchemas).toHaveBeenCalledWith('c1', 'Sales')
   })
 
@@ -992,7 +996,7 @@ describe('explorer store', () => {
     const connections = useConnectionsStore()
     await connections.load()
     const explorer = useExplorerStore()
-    const table = node({ kind: 'table', database: 'Sales', schema: 'dbo', table: 'orders' })
+    const table = node({ nodeType: 'table', database: 'Sales', schema: 'dbo', table: 'orders' })
     await explorer.expand(table)
     expect(table.children?.map((child) => child.folder)).toEqual(['columns'])
   })
@@ -1221,7 +1225,7 @@ describe('explorer store', () => {
     apiStub.schemaSnapshot.mockResolvedValue(snapshotFixture())
     const explorer = await readyStore()
     const root = explorer.addRoot('c1')
-    await explorer.expand(node({ kind: 'database', database: 'Sales', label: 'Sales' }))
+    await explorer.expand(node({ nodeType: 'database', database: 'Sales', label: 'Sales' }))
     expect(apiStub.schemaSnapshot).toHaveBeenCalledWith({
       connectionId: 'c1',
       database: 'Sales',
@@ -1252,8 +1256,8 @@ describe('explorer store', () => {
     apiStub.schemaSnapshot.mockResolvedValue(snapshotFixture('Other'))
     await explorer.readSnapshot('c2', 'Other', { maxColumns: 10, ownConnection: true })
     explorer.roots = [
-      node({ key: 'c1', kind: 'connection', label: 'One', connectionId: 'c1' }),
-      node({ key: 'c2', kind: 'connection', label: 'Two', connectionId: 'c2' }),
+      node({ key: 'c1', nodeType: 'connection', label: 'One', connectionId: 'c1' }),
+      node({ key: 'c2', nodeType: 'connection', label: 'Two', connectionId: 'c2' }),
     ]
     explorer.roots[1]!.children = [
       node({ key: 'c2/Archive', label: 'Archive', database: 'Archive', connectionId: 'c2' }),
@@ -1329,7 +1333,7 @@ describe('explorer store', () => {
 
   it('does not read a leaf, which holds nothing below it', async () => {
     const explorer = await readyStore()
-    await explorer.expand(node({ kind: 'column' }))
+    await explorer.expand(node({ nodeType: 'column' }))
     expect(apiStub.listColumns).not.toHaveBeenCalled()
   })
 
@@ -1423,13 +1427,13 @@ describe('explorer store', () => {
 
   it('reads nothing again for a leaf', async () => {
     const explorer = await readyStore()
-    await explorer.refresh(node({ kind: 'column' }))
+    await explorer.refresh(node({ nodeType: 'column' }))
     expect(apiStub.listColumns).not.toHaveBeenCalled()
   })
 
   it('treats a connection the store does not know as one without schemas', async () => {
     const explorer = useExplorerStore()
-    const database = node({ kind: 'database', database: 'shop', connectionId: 'other' })
+    const database = node({ nodeType: 'database', database: 'shop', connectionId: 'other' })
     await explorer.expand(database)
     // The record of the connection is missing, so no folder of a capability
     // is added and no schema is read.
@@ -1473,7 +1477,7 @@ describe('explorer store', () => {
 
   it('reports a column without a type as one without a hint', async () => {
     const explorer = useExplorerStore()
-    explorer.roots = [node({ kind: 'column', label: 'id', hint: undefined, table: undefined })]
+    explorer.roots = [node({ nodeType: 'column', label: 'id', hint: undefined, table: undefined })]
     expect(explorer.schemaIndexFor('c1').columns).toEqual([
       { name: 'id', table: '', qualifier: '', dataType: '' },
     ])
@@ -1561,7 +1565,7 @@ describe('explorer store', () => {
     const columns = folderNode(
       'Columns',
       'columns',
-      node({ key: 'c1/t', kind: 'table', table: 't' }),
+      node({ key: 'c1/t', nodeType: 'table', table: 't' }),
     )
     await explorer.expand(columns)
     const leaf = columns.children![0]!

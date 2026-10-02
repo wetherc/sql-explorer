@@ -23,7 +23,7 @@
       <div v-if="topPad > 0" :style="{ height: `${topPad}px` }" aria-hidden="true"></div>
       <template v-for="row in windowRows" :key="row.key">
         <div
-          v-if="row.kind === 'node'"
+          v-if="row.rowType === 'node'"
           :ref="(element) => keepRow(row.key, element)"
           class="tree-row"
           :class="{ selected: selectedKey === row.key, dimmed: row.node.dimmed }"
@@ -132,7 +132,7 @@ const emit = defineEmits<{
 /** One line of the tree: either a node, or the note of a branch with none. */
 type Row =
   | {
-      kind: 'node'
+      rowType: 'node'
       key: string
       node: ExplorerNode
       depth: number
@@ -141,7 +141,7 @@ type Row =
       expandable: boolean
       expanded: boolean
     }
-  | { kind: 'empty'; key: string; depth: number }
+  | { rowType: 'empty'; key: string; depth: number }
 
 /** The row that holds the focus, which is the one row the Tab key reaches. */
 const focusedKey = ref<string | null>(null)
@@ -190,7 +190,7 @@ const rows = computed<Row[]>(() => {
       const expandable = isExpandable(node)
       const expanded = props.openKeys.has(node.key)
       out.push({
-        kind: 'node',
+        rowType: 'node',
         key: node.key,
         node,
         depth,
@@ -206,7 +206,7 @@ const rows = computed<Row[]>(() => {
       if (children.length > 0) {
         walk(children, depth + 1)
       } else if (node.loaded) {
-        out.push({ kind: 'empty', key: `${node.key} empty`, depth: depth + 1 })
+        out.push({ rowType: 'empty', key: `${node.key} empty`, depth: depth + 1 })
       }
     })
   }
@@ -249,7 +249,7 @@ const treeWidth = computed(() => {
   meter ??= createTextMeter(canvasContext())
   let widest = 0
   for (const row of rows.value) {
-    if (row.kind !== 'node') {
+    if (row.rowType !== 'node') {
       continue
     }
     let width =
@@ -267,7 +267,7 @@ const treeWidth = computed(() => {
 })
 
 /** The rows a key can reach, which leaves out the note of an empty branch. */
-const nodeRows = computed(() => rows.value.filter((row) => row.kind === 'node'))
+const nodeRows = computed(() => rows.value.filter((row) => row.rowType === 'node'))
 
 /** The first row of the window, counted from the first row of the tree. */
 const firstDrawn = computed(() => Math.max(0, Math.floor(scrollTop.value / ROW_HEIGHT) - OVERSCAN))
@@ -400,7 +400,7 @@ function moveTo(index: number): void {
  * Answers the Right key. A branch that is shut opens, and a branch that is
  * already open passes the focus to the first of its children.
  */
-function onRight(row: Extract<Row, { kind: 'node' }>): void {
+function onRight(row: Extract<Row, { rowType: 'node' }>): void {
   if (!row.expandable) {
     return
   }
@@ -415,7 +415,7 @@ function onRight(row: Extract<Row, { kind: 'node' }>): void {
  * Answers the Left key. A branch that is open shuts, and any other row passes
  * the focus to the row that holds it.
  */
-function onLeft(row: Extract<Row, { kind: 'node' }>): void {
+function onLeft(row: Extract<Row, { rowType: 'node' }>): void {
   if (row.expandable && row.expanded) {
     emit('collapse', row.node)
     return
