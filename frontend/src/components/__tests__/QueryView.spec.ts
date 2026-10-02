@@ -427,6 +427,20 @@ describe('QueryView', () => {
     expect(value.props('modelValue')).toBe('true')
   })
 
+  it('drops the names of an older read that answers after a newer read', async () => {
+    let answerOld: (names: string[]) => void = () => undefined
+    apiStub.queryParameters
+      .mockImplementationOnce(() => new Promise((resolve) => (answerOld = resolve)))
+      .mockResolvedValue(['city'])
+    const wrapper = await mountView('SELECT :id')
+    await wrapper.setProps({ tab: { ...wrapper.props('tab'), id: 't2', query: 'SELECT :city' } })
+    await settle()
+    answerOld(['id'])
+    await settle()
+    expect(wrapper.find('[data-test="parameter-chip-city"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="parameter-chip-id"]').exists()).toBe(false)
+  })
+
   it('names the parameters of the statement in a bar above the editor', async () => {
     apiStub.queryParameters.mockResolvedValue(['id', 'city'])
     const wrapper = mountWithPlugins(QueryView, {

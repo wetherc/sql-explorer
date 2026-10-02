@@ -648,10 +648,6 @@ watch(
 )
 
 /**
- * Names a result. A result the user keeps also carries the time of its run,
- * so that two results of the same statement can be told apart.
- */
-/**
  * Brings the focus to the dialog that asks for the values of the parameters.
  * A second request for a run arrives while that dialog stands open, and the
  * dialog is what the user has to answer first.
@@ -669,6 +665,10 @@ function focusParamDialog(): void {
 /** What the bar of the results panel says while the panel is away. */
 const collapsedLabel = computed(() => (activePane.value ? paneLabel(activePane.value) : 'Messages'))
 
+/**
+ * Names a result. A result the user keeps also shows the time of its run,
+ * so that two results of the same statement can be told apart.
+ */
 function paneLabel(pane: ResultPane): string {
   const name = pane.label ?? `Result ${pane.number}`
   const head = `${name} (${formatRowCount(pane.rows)})`
@@ -696,6 +696,8 @@ const PARAMETER_DEBOUNCE_MS = 300
 /** The names that the statement of the tab holds, for the bar. */
 const paramNames = ref<string[]>([])
 let namesTimer: ReturnType<typeof setTimeout> | null = null
+/** Rises with each read of the names. An answer of an older read is dropped. */
+let namesRead = 0
 
 /** True while the value of one name is still missing. */
 function paramIsUnset(name: string): boolean {
@@ -705,12 +707,20 @@ function paramIsUnset(name: string): boolean {
 
 /** Reads the names that the statement holds, for the bar above the editor. */
 async function readParamNames(): Promise<void> {
+  namesRead += 1
+  const read = namesRead
+  let names: string[]
   try {
-    paramNames.value = await api.queryParameters(props.tab.query, dialect.value)
+    names = await api.queryParameters(props.tab.query, dialect.value)
   } catch {
     // The bar is a help and not the run itself, so a failure to read the
     // names stays quiet. The run reports a failure of its own.
-    paramNames.value = []
+    names = []
+  }
+  // The answers can arrive out of order. Without this check, the slow answer
+  // for the text of another tab can replace the names of this text.
+  if (read === namesRead) {
+    paramNames.value = names
   }
 }
 
