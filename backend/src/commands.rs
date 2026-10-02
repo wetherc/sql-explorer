@@ -2151,15 +2151,16 @@ impl crate::db::sink::RowSink for FileSink {
         self.saw_set = true;
         match self.format {
             ExportFormat::Csv => {
-                let names: Vec<String> = columns
-                    .iter()
-                    .map(|column| csv_field(&serde_json::Value::String(column.name.clone())))
+                let names: Vec<serde_json::Value> = columns
+                    .into_iter()
+                    .map(|column| serde_json::Value::String(column.name))
                     .collect();
-                let line = names.join(",");
                 // The mark of the byte order stands at the head of the file,
                 // because Excel reads a file without it in the code page of
                 // the system and damages every value outside ASCII.
-                write!(self.writer()?, "{CSV_BOM}{line}{CSV_LINE_END}")?;
+                let out = self.writer()?;
+                out.write_all(CSV_BOM.as_bytes())?;
+                write_csv_line(out, &names)?;
             }
             ExportFormat::Json => {
                 self.names = crate::db::unique_column_names(&columns);
@@ -2188,26 +2189,19 @@ impl crate::db::sink::RowSink for FileSink {
         }
         match self.format {
             ExportFormat::Csv => {
-                let fields: Vec<String> = row.iter().map(csv_field).collect();
-                let line = fields.join(",");
-                write!(self.writer()?, "{line}{CSV_LINE_END}")?;
+                write_csv_line(self.writer()?, &row)?;
             }
             ExportFormat::Json => {
-                let mut object = serde_json::Map::new();
-                for (position, name) in self.names.iter().enumerate() {
-                    let value = row
-                        .get(position)
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Null);
-                    object.insert(name.clone(), value);
-                }
-                let text = serde_json::Value::Object(object).to_string();
                 let rows = self.rows;
-                let out = self.writer()?;
+                let out = self
+                    .out
+                    .as_mut()
+                    .ok_or_else(|| Error::Anyhow(anyhow::anyhow!("The export file is closed.")))?;
                 if rows > 0 {
                     writeln!(out, ",")?;
                 }
-                write!(out, "  {text}")?;
+                write!(out, "  ")?;
+                write_json_object(out, &self.names, &row)?;
             }
             ExportFormat::Xlsx => {
                 let sheet = self
@@ -2245,6 +2239,42 @@ const CSV_BOM: &str = "\u{feff}";
 
 /// The line end of a comma separated file, which Excel expects.
 const CSV_LINE_END: &str = "\r\n";
+
+/// Writes one line of a comma separated file straight to the writer, so a
+/// row of the export makes no joined copy of its fields.
+fn write_csv_line(out: &mut impl std::io::Write, values: &[serde_json::Value]) -> Result<()> {
+    for (position, value) in values.iter().enumerate() {
+        if position > 0 {
+            out.write_all(b",")?;
+        }
+        out.write_all(csv_field(value).as_bytes())?;
+    }
+    out.write_all(CSV_LINE_END.as_bytes())?;
+    Ok(())
+}
+
+/// Writes one row as a JSON object straight to the writer. The keys keep
+/// the order of the columns. A `serde_json::Map` sorts its keys, so an
+/// object built through it puts the columns in the order of the alphabet.
+/// A column with no value in the row gets `null`.
+fn write_json_object(
+    out: &mut impl std::io::Write,
+    names: &[String],
+    row: &[serde_json::Value],
+) -> Result<()> {
+    out.write_all(b"{")?;
+    for (position, name) in names.iter().enumerate() {
+        if position > 0 {
+            out.write_all(b",")?;
+        }
+        serde_json::to_writer(&mut *out, name)?;
+        out.write_all(b":")?;
+        let value = row.get(position).unwrap_or(&serde_json::Value::Null);
+        serde_json::to_writer(&mut *out, value)?;
+    }
+    out.write_all(b"}")?;
+    Ok(())
+}
 
 /// Writes one field of a comma separated file.
 ///
@@ -3099,6 +3129,23 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&json).unwrap(),
             "[\n  {\"id\":1,\"name\":\"Ada\"},\n  {\"id\":2,\"name\":null}\n]\n"
+        );
+    }
+
+    #[test]
+    fn a_json_object_keeps_the_order_of_the_columns() {
+        let names = ["zeta".to_string(), "alpha".to_string(), "mid".to_string()];
+        let mut out = Vec::new();
+        write_json_object(
+            &mut out,
+            &names,
+            &[serde_json::json!(1), serde_json::json!("a\"b")],
+        )
+        .unwrap();
+        // The row has no value for the last column, so it gets null.
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "{\"zeta\":1,\"alpha\":\"a\\\"b\",\"mid\":null}"
         );
     }
 
