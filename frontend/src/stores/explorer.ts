@@ -610,14 +610,20 @@ export const useExplorerStore = defineStore('explorer', () => {
     }
     node.loaded = false
     node.children = []
-    await reopen(await load(node), open)
+    // The user asks for the objects of the server again, so the schema that
+    // the editor offers is read again too. A database that is shut gets its
+    // schema when the user next opens it.
+    if (node.kind === 'connection') {
+      forgetSnapshots(node.connectionId)
+    }
+    await reopen(await load(node, true), open)
   }
 
   /** Reads each open branch among the children that a read just gave. */
   async function reopen(children: ExplorerNode[], open: ReadonlySet<string>): Promise<void> {
     for (const child of children) {
       if (open.has(child.key) && isExpandable(child)) {
-        await reopen(await load(child), open)
+        await reopen(await load(child, true), open)
       }
     }
   }
@@ -630,9 +636,10 @@ export const useExplorerStore = defineStore('explorer', () => {
    * started a newer read of the same node.
    *
    * Returns the children that the read wrote, and an empty list for a read
-   * that failed or that a newer read passed.
+   * that failed or that a newer read passed. A read with `fresh` also reads
+   * the schema of a database again.
    */
-  async function load(node: ExplorerNode): Promise<ExplorerNode[]> {
+  async function load(node: ExplorerNode, fresh = false): Promise<ExplorerNode[]> {
     const generation = (loadGeneration.get(node.key) ?? 0) + 1
     loadGeneration.set(node.key, generation)
     const isLast = () => loadGeneration.get(node.key) === generation
@@ -649,7 +656,7 @@ export const useExplorerStore = defineStore('explorer', () => {
         // The user has shown interest in this database, so the whole schema
         // is read for the completions of the editor. The read runs on its own
         // and the tree does not wait for it.
-        void readSnapshot(node.connectionId, node.database ?? node.label, snapshotOptions())
+        void readSnapshot(node.connectionId, node.database ?? node.label, snapshotOptions(), fresh)
       }
       return children
     } catch (error) {

@@ -554,6 +554,31 @@ describe('explorer store', () => {
     expect(apiStub.schemaSnapshot).toHaveBeenCalledTimes(2)
   })
 
+  it('reads the schema again when the user refreshes the tree', async () => {
+    apiStub.schemaSnapshot.mockResolvedValue(snapshotFixture())
+    apiStub.listDatabases.mockResolvedValue([{ name: 'Sales' }, { name: 'Shut' }])
+    apiStub.listSchemas.mockResolvedValue([{ name: 'dbo' }])
+    const explorer = await readyStore()
+    const root = explorer.addRoot('c1')
+    await explorer.expand(root)
+    const sales = root.children![0]!
+    await explorer.expand(sales)
+    await explorer.readSnapshot('c1', 'Shut', { maxColumns: 100, ownConnection: true })
+    await Promise.resolve()
+    expect(apiStub.schemaSnapshot).toHaveBeenCalledTimes(2)
+
+    // A refresh of the database reads its schema again.
+    await explorer.refresh(sales)
+    await Promise.resolve()
+    expect(apiStub.schemaSnapshot).toHaveBeenCalledTimes(3)
+
+    // A refresh of the connection drops every schema and reads the open ones.
+    await explorer.refresh(root, new Set([root.key, sales.key]))
+    await Promise.resolve()
+    expect(apiStub.schemaSnapshot).toHaveBeenCalledTimes(4)
+    expect(Object.keys(explorer.snapshots)).toEqual(['c1/Sales'])
+  })
+
   it('offers the names of a snapshot, and tells two schemas apart', async () => {
     apiStub.schemaSnapshot.mockResolvedValue(snapshotFixture())
     const explorer = await readyStore()
