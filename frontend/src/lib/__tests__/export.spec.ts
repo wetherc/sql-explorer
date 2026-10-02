@@ -158,7 +158,7 @@ describe('toScript', () => {
 describe('exportFileName', () => {
   const at = new Date(2026, 7, 10, 9, 5, 3)
 
-  it('joins the name, the moment and the kind of file', () => {
+  it('joins the name, the moment and the type of file', () => {
     expect(exportFileName('Query 1', 'csv', at)).toBe('Query_1-20260810-090503.csv')
   })
 
@@ -188,7 +188,7 @@ describe('toMarkdown', () => {
 })
 
 describe('toSqlLiteral', () => {
-  it('writes each kind of value', () => {
+  it('writes each type of value', () => {
     expect(toSqlLiteral(null, Dialect.MsSql)).toBe('NULL')
     expect(toSqlLiteral(7, Dialect.MsSql)).toBe('7')
     expect(toSqlLiteral(Number.POSITIVE_INFINITY, Dialect.MsSql)).toBe('NULL')

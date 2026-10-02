@@ -6,7 +6,7 @@ import {
   disposeSqlCompletions,
   installSqlCompletions,
   MAX_SUGGESTIONS,
-  monacoKind,
+  completionIcon,
   setCompletionSource,
   suggestionsFor,
 } from '@/lib/completion'
@@ -115,12 +115,12 @@ describe('completion provider', () => {
     expect(answer.suggestions.map((item) => item.label)).not.toContain('total')
   })
 
-  it('marks each kind of name with its own icon', () => {
-    const kinds = monaco.languages.CompletionItemKind
-    expect(monacoKind('database')).toBe(kinds.Module)
-    expect(monacoKind('schema')).toBe(kinds.Folder)
-    expect(monacoKind('table')).toBe(kinds.Struct)
-    expect(monacoKind('column')).toBe(kinds.Field)
-    expect(monacoKind('keyword')).toBe(kinds.Keyword)
+  it('marks each type of name with its own icon', () => {
+    const icons = monaco.languages.CompletionItemKind
+    expect(completionIcon('database')).toBe(icons.Module)
+    expect(completionIcon('schema')).toBe(icons.Folder)
+    expect(completionIcon('table')).toBe(icons.Struct)
+    expect(completionIcon('column')).toBe(icons.Field)
+    expect(completionIcon('keyword')).toBe(icons.Keyword)
   })
 })

@@ -640,7 +640,7 @@ export interface CompletionItem {
   label: string
   detail: string
   insertText: string
-  kind: 'keyword' | 'database' | 'schema' | 'table' | 'column'
+  nameType: 'keyword' | 'database' | 'schema' | 'table' | 'column'
 }
 
 /** One relation the completion list knows about. */
@@ -957,7 +957,7 @@ export function completionsFor(
           label: column.name,
           detail: `${column.dataType} in ${column.table}`,
           insertText: quoteIfNeeded(column.name, dialect),
-          kind: 'column',
+          nameType: 'column',
         })
       }
     }
@@ -975,7 +975,7 @@ export function completionsFor(
           label: table.name,
           detail: table.qualifier,
           insertText: quoteIfNeeded(table.name, dialect),
-          kind: 'table',
+          nameType: 'table',
         })
       }
     }
@@ -996,7 +996,7 @@ export function completionsFor(
           label: column.name,
           detail: `${column.dataType} in ${column.table}`,
           insertText: quoteIfNeeded(column.name, dialect),
-          kind: 'column',
+          nameType: 'column',
         })
       }
     }
@@ -1010,7 +1010,7 @@ export function completionsFor(
         label: table.name,
         detail: table.qualifier,
         insertText: quoteIfNeeded(table.name, dialect),
-        kind: 'table',
+        nameType: 'table',
       })
     }
   }
@@ -1023,7 +1023,7 @@ export function completionsFor(
         label: schema,
         detail: 'schema',
         insertText: quoteIfNeeded(schema, dialect),
-        kind: 'schema',
+        nameType: 'schema',
       })
     }
   }
@@ -1036,7 +1036,7 @@ export function completionsFor(
         label: database,
         detail: 'database',
         insertText: quoteIfNeeded(database, dialect),
-        kind: 'database',
+        nameType: 'database',
       })
     }
   }
@@ -1049,7 +1049,7 @@ export function completionsFor(
         label: keyword,
         detail: 'keyword',
         insertText: keyword,
-        kind: 'keyword',
+        nameType: 'keyword',
       })
     }
   }

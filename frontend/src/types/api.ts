@@ -242,9 +242,9 @@ export interface ExportSummary {
 export interface SaveFileRequest {
   /** The file name that the save dialog suggests. */
   defaultName: string
-  /** The label of the file kind in the dialog. */
+  /** The label of the file type in the dialog. */
   filterLabel: string
-  /** The extension of the file kind, without the period. */
+  /** The extension of the file type, without the period. */
   extension: string
   /** The content: text, or base64 text for a binary file. */
   contents: string

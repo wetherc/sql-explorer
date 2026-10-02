@@ -384,7 +384,7 @@ of every MS SQL Server connection, because the parser of `tiberius` reads the
 port only from inside the `server` value. The same string lost any password that
 held a semicolon or a brace.
 
-**Errors carry their reason.** A failed command returns a kind, a message and
+**Errors carry their reason.** A failed command returns a category, a message and
 the chain of causes. An earlier version replaced every database error with one
 fixed sentence, which made a set of deterministic faults look like intermittent
 behaviour.

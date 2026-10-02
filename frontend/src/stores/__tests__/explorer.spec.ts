@@ -513,7 +513,7 @@ describe('explorer store', () => {
   })
 
   /** Loads a store whose engine has every type of relation of its own. */
-  async function storeWithEveryKind() {
+  async function storeWithEveryRelationType() {
     apiStub.listActiveConnections.mockResolvedValue([
       {
         ...infoFixture('c1'),
@@ -532,7 +532,7 @@ describe('explorer store', () => {
   }
 
   it('puts the folders of the types of relation that the engine has between the views and the routines', async () => {
-    const explorer = await storeWithEveryKind()
+    const explorer = await storeWithEveryRelationType()
     const schema = node({ nodeType: 'schema', database: 'Sales', schema: 'dbo' })
     await explorer.expand(schema)
     expect(schema.children?.map((child) => [child.folder, child.label])).toEqual([
@@ -555,7 +555,7 @@ describe('explorer store', () => {
       { name: 'remote', relationType: RelationType.ForeignTable },
       { name: 'alias', relationType: RelationType.Synonym, target: 'other.dbo.orders' },
     ])
-    const explorer = await storeWithEveryKind()
+    const explorer = await storeWithEveryRelationType()
     const schema = node({ nodeType: 'schema', database: 'Sales', schema: 'dbo' })
     const read = async (folder: Parameters<typeof folderNode>[1]) => {
       const holder = folderNode(folder, folder, schema)
@@ -580,7 +580,7 @@ describe('explorer store', () => {
   })
 
   it('puts the folders of its type below each new type of relation', async () => {
-    const explorer = await storeWithEveryKind()
+    const explorer = await storeWithEveryRelationType()
     const place = { database: 'Sales', schema: 'public' }
     const foldersOf = async (nodeType: ExplorerNode['nodeType']) => {
       const relation = node({ nodeType, ...place, table: 'r', key: nodeType })
@@ -601,7 +601,7 @@ describe('explorer store', () => {
     apiStub.listTables.mockResolvedValue([
       { name: 'alias', relationType: RelationType.Synonym, target: 'other.dbo.orders' },
     ])
-    const explorer = await storeWithEveryKind()
+    const explorer = await storeWithEveryRelationType()
     const root = explorer.addRoot('c1')
     const schema = node({
       key: 'c1/Sales/dbo',

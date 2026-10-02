@@ -204,7 +204,7 @@ export function toXlsx(result: ResultSet, name = 'Result'): Uint8Array {
       message: `An Excel sheet holds at most ${MAX_SHEET_COLUMNS} columns, and the result has ${count} columns. Export the result as CSV or JSON.`,
       detail: null,
     }
-    // The error is also a payload, so the notice shows the kind of fault.
+    // The error is also a payload, so the notice shows the category of the fault.
     throw Object.assign(new Error(payload.message), payload)
   }
   return zipSync({

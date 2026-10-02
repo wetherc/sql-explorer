@@ -353,7 +353,7 @@ describe('connections store', () => {
     expect(connections.expiredTokenId).toBeNull()
   })
 
-  it('asks for no token for another method or another kind of failure', async () => {
+  it('asks for no token for another method or another category of failure', async () => {
     const connections = useConnectionsStore()
     const withToken = connectionFixture({
       options: { ...connectionFixture().options, mssqlAuth: MssqlAuth.EntraAccessToken },

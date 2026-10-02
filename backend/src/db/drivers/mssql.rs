@@ -1603,7 +1603,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    /// The kinds of packet that the test reads from the client.
+    /// The types of packet that the test reads from the client.
     const PACKET_SQL_BATCH: u8 = 1;
     const PACKET_RPC: u8 = 3;
     const PACKET_ATTENTION: u8 = 6;
@@ -1615,25 +1615,25 @@ mod tests {
     const DONE_MORE: u16 = 1;
     const DONE_COUNT: u16 = 1 << 4;
 
-    /// Reads one message of the client and gives back the kind of its first
+    /// Reads one message of the client and gives back the type of its first
     /// packet. A message can arrive in several packets, and the last of them
     /// carries the end flag.
     async fn read_message(server: &mut tokio::net::TcpStream) -> u8 {
-        let mut kind = None;
+        let mut packet_type = None;
         loop {
             let mut header = [0u8; 8];
             server.read_exact(&mut header).await.unwrap();
             let length = u16::from_be_bytes([header[2], header[3]]) as usize;
             let mut body = vec![0u8; length - 8];
             server.read_exact(&mut body).await.unwrap();
-            kind.get_or_insert(header[0]);
+            packet_type.get_or_insert(header[0]);
             if header[1] & END_OF_MESSAGE == END_OF_MESSAGE {
-                return kind.unwrap();
+                return packet_type.unwrap();
             }
         }
     }
 
-    /// Writes one packet of the server, with the kind `TabularResult`.
+    /// Writes one packet of the server, with the type `TabularResult`.
     async fn write_packet(server: &mut tokio::net::TcpStream, status: u8, payload: &[u8]) {
         let length = (payload.len() + 8) as u16;
         let mut packet = vec![4, status];
@@ -1803,8 +1803,8 @@ mod tests {
         let (mut socket, _) = listener.accept().await.unwrap();
         accept_login(&mut socket).await;
 
-        let kind = read_message(&mut socket).await;
-        assert!(kind == PACKET_RPC || kind == PACKET_SQL_BATCH);
+        let packet_type = read_message(&mut socket).await;
+        assert!(packet_type == PACKET_RPC || packet_type == PACKET_SQL_BATCH);
         let mut answer = int_metadata();
         for value in 0..5 {
             answer.extend_from_slice(&int_row(value));
@@ -1815,8 +1815,8 @@ mod tests {
         write_packet(&mut socket, END_OF_MESSAGE, &done_token(DONE_ATTENTION, 0)).await;
 
         // The connection takes the next statement of the session.
-        let kind = read_message(&mut socket).await;
-        assert!(kind == PACKET_RPC || kind == PACKET_SQL_BATCH);
+        let packet_type = read_message(&mut socket).await;
+        assert!(packet_type == PACKET_RPC || packet_type == PACKET_SQL_BATCH);
         write_packet(&mut socket, END_OF_MESSAGE, &done_token(0, 0)).await;
     }
 
@@ -1884,8 +1884,8 @@ mod tests {
         read_message(&mut socket).await;
         write_packet(&mut socket, END_OF_MESSAGE, &done_token(0, 0)).await;
 
-        let kind = read_message(&mut socket).await;
-        assert!(kind == PACKET_RPC || kind == PACKET_SQL_BATCH);
+        let packet_type = read_message(&mut socket).await;
+        assert!(packet_type == PACKET_RPC || packet_type == PACKET_SQL_BATCH);
         let mut rows = int_metadata();
         for value in 0..5 {
             rows.extend_from_slice(&int_row(value));
@@ -1894,8 +1894,8 @@ mod tests {
 
         let pause = Duration::from_millis(300);
         let ended_early = match tokio::time::timeout(pause, read_message(&mut socket)).await {
-            Ok(kind) => {
-                assert_eq!(kind, PACKET_ATTENTION);
+            Ok(packet_type) => {
+                assert_eq!(packet_type, PACKET_ATTENTION);
                 write_packet(&mut socket, END_OF_MESSAGE, &done_token(DONE_ATTENTION, 0)).await;
                 true
             }
@@ -1958,8 +1958,8 @@ mod tests {
 
         let mut count = 0usize;
         let pause = Duration::from_millis(300);
-        while let Ok(kind) = tokio::time::timeout(pause, read_message(&mut socket)).await {
-            assert!(kind == PACKET_RPC || kind == PACKET_SQL_BATCH);
+        while let Ok(packet_type) = tokio::time::timeout(pause, read_message(&mut socket)).await {
+            assert!(packet_type == PACKET_RPC || packet_type == PACKET_SQL_BATCH);
             let mut answer = int_metadata();
             answer.extend_from_slice(&int_row(count as i32));
             answer.extend_from_slice(&done_token(0, 1));
@@ -2028,7 +2028,7 @@ mod tests {
     }
 
     /// An `ERROR` or an `INFO` token with the given text and severity.
-    fn text_token(kind: u8, class: u8, text: &str) -> Vec<u8> {
+    fn text_token(token_type: u8, class: u8, text: &str) -> Vec<u8> {
         let utf16: Vec<u8> = text
             .encode_utf16()
             .flat_map(|unit| unit.to_le_bytes())
@@ -2042,7 +2042,7 @@ mod tests {
         body.push(0);
         body.push(0);
         body.extend_from_slice(&1u32.to_le_bytes());
-        let mut token = vec![kind];
+        let mut token = vec![token_type];
         token.extend_from_slice(&(body.len() as u16).to_le_bytes());
         token.extend_from_slice(&body);
         token
@@ -2086,8 +2086,8 @@ mod tests {
             }
         }
 
-        let kind = read_message(&mut socket).await;
-        assert!(kind == PACKET_RPC || kind == PACKET_SQL_BATCH);
+        let packet_type = read_message(&mut socket).await;
+        assert!(packet_type == PACKET_RPC || packet_type == PACKET_SQL_BATCH);
         let mut answer = int_metadata();
         for value in 0..5 {
             answer.extend_from_slice(&int_row(value));
@@ -2193,8 +2193,8 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             accept_login(&mut socket).await;
-            let kind = read_message(&mut socket).await;
-            assert!(kind == PACKET_RPC || kind == PACKET_SQL_BATCH);
+            let packet_type = read_message(&mut socket).await;
+            assert!(packet_type == PACKET_RPC || packet_type == PACKET_SQL_BATCH);
             write_packet(&mut socket, END_OF_MESSAGE, &answer).await;
         });
         let tcp = TcpStream::connect(address).await.unwrap();
@@ -2452,8 +2452,8 @@ mod tests {
             let (mut socket, _) = listener.accept().await.unwrap();
             accept_login(&mut socket).await;
 
-            let kind = read_message(&mut socket).await;
-            assert!(kind == PACKET_RPC || kind == PACKET_SQL_BATCH);
+            let packet_type = read_message(&mut socket).await;
+            assert!(packet_type == PACKET_RPC || packet_type == PACKET_SQL_BATCH);
             let mut answer = xml_metadata();
             answer.extend_from_slice(&xml_row("<a>1</a>"));
             answer.extend_from_slice(&done_token(0, 1));
@@ -2495,8 +2495,8 @@ mod tests {
             let (mut socket, _) = listener.accept().await.unwrap();
             accept_login(&mut socket).await;
 
-            let kind = read_message(&mut socket).await;
-            assert!(kind == PACKET_RPC || kind == PACKET_SQL_BATCH);
+            let packet_type = read_message(&mut socket).await;
+            assert!(packet_type == PACKET_RPC || packet_type == PACKET_SQL_BATCH);
             let text: Vec<u8> = "hi".encode_utf16().flat_map(u16::to_le_bytes).collect();
             let mut answer = variant_metadata();
             answer.extend_from_slice(&variant_row(0x38, &[], &42i32.to_le_bytes()));
@@ -2758,8 +2758,8 @@ mod tests {
 
             // The whole answer arrives at once, and the server waits for no
             // attention packet.
-            let kind = read_message(&mut socket).await;
-            assert!(kind == PACKET_RPC || kind == PACKET_SQL_BATCH);
+            let packet_type = read_message(&mut socket).await;
+            assert!(packet_type == PACKET_RPC || packet_type == PACKET_SQL_BATCH);
             let mut answer = int_metadata();
             for value in 0..5 {
                 answer.extend_from_slice(&int_row(value));

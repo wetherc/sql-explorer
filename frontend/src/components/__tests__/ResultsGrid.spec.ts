@@ -1203,7 +1203,9 @@ describe('ResultsGrid copy and menu from the keyboard', () => {
     const data = new Map<string, string>()
     const event = new Event('copy', { bubbles: true, cancelable: true }) as ClipboardEvent
     Object.defineProperty(event, 'clipboardData', {
-      value: withData ? { setData: (kind: string, text: string) => data.set(kind, text) } : null,
+      value: withData
+        ? { setData: (format: string, text: string) => data.set(format, text) }
+        : null,
     })
     wrapper.find('[data-test="grid-cell"]').element.dispatchEvent(event)
     return { event, text: data.get('text/plain') }

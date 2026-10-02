@@ -482,7 +482,7 @@ describe('completionsFor', () => {
 
   it('offers the objects before the keywords', () => {
     const items = completionsFor('sal', index, Dialect.MsSql)
-    expect(items.map((item) => item.kind)).toEqual(['column', 'table', 'schema', 'database'])
+    expect(items.map((item) => item.nameType)).toEqual(['column', 'table', 'schema', 'database'])
   })
 
   it('offers everything for an empty prefix', () => {
@@ -493,7 +493,7 @@ describe('completionsFor', () => {
   it('offers the keywords that match', () => {
     const items = completionsFor('sel', index, Dialect.MsSql)
     expect(items).toEqual([
-      { label: 'SELECT', detail: 'keyword', insertText: 'SELECT', kind: 'keyword' },
+      { label: 'SELECT', detail: 'keyword', insertText: 'SELECT', nameType: 'keyword' },
     ])
   })
 
@@ -576,7 +576,7 @@ describe('completionsFor with a dialect that quotes differently', () => {
       tables: [{ name: 'user', qualifier: 'dbo' }],
     }
     const table = (dialect: Dialect) =>
-      completionsFor('use', index, dialect).find((item) => item.kind === 'table')?.insertText
+      completionsFor('use', index, dialect).find((item) => item.nameType === 'table')?.insertText
     expect(table(Dialect.MsSql)).toBe('[user]')
     expect(table(Dialect.Postgres)).toBe('"user"')
   })

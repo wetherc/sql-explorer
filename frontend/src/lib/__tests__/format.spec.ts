@@ -176,7 +176,7 @@ describe('sortKey', () => {
   it('compares a decimal text with other text and with an infinite number as text', () => {
     expect(compareSortKeys(sortKey('5'), sortKey('abc'))).toBeLessThan(0)
     expect(compareSortKeys(sortKey(Infinity), sortKey('5'))).toBeGreaterThan(0)
-    // A text of another cell kind stays text.
+    // A text of another cell type stays text.
     expect(sortKey([1])).toBe('[1]')
   })
 })

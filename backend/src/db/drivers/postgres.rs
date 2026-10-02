@@ -1686,7 +1686,7 @@ impl<'a> FromSql<'a> for Raw<'a> {
 type BoxError = Box<dyn std::error::Error + Sync + Send>;
 
 /// Turns the binary form of one value into JSON. The shape of a value that
-/// holds other values comes from the kind of its type, so an array, a
+/// holds other values comes from the `Kind` of its type, so an array, a
 /// range, and a composite of any element type read the same way.
 fn decode_value(column_type: &Type, bytes: &[u8], settings: &Settings) -> JsonValue {
     match column_type.kind() {
@@ -2041,7 +2041,7 @@ fn tsvector_text(bytes: &[u8]) -> JsonValue {
     })
 }
 
-/// The kinds and the operators of the items of a `tsquery` value.
+/// The types and the operators of the items of a `tsquery` value.
 const TSQUERY_VALUE: u8 = 1;
 const TSQUERY_OPERATOR: u8 = 2;
 const TSQUERY_NOT: u8 = 1;
@@ -2795,10 +2795,10 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
     use tokio::sync::Notify;
 
-    /// Wraps a body of a message with its kind and its length. The length
-    /// counts itself and the body, and never the byte of the kind.
-    fn message(kind: u8, body: &[u8]) -> Vec<u8> {
-        let mut out = vec![kind];
+    /// Wraps a body of a message with its type and its length. The length
+    /// counts itself and the body, and never the byte of the type.
+    fn message(message_type: u8, body: &[u8]) -> Vec<u8> {
+        let mut out = vec![message_type];
         out.extend_from_slice(&((body.len() + 4) as i32).to_be_bytes());
         out.extend_from_slice(body);
         out
@@ -2875,7 +2875,7 @@ mod tests {
 
     /// Answers the startup message of a client that connects.
     async fn accept_startup(server: &mut DuplexStream) {
-        // The startup message carries a length and no byte of a kind.
+        // The startup message carries a length and no byte of a type.
         let mut length = [0u8; 4];
         server.read_exact(&mut length).await.unwrap();
         let rest = i32::from_be_bytes(length) as usize - 4;
@@ -2887,9 +2887,9 @@ mod tests {
 
     /// Reads one simple query of the client and gives its text back.
     async fn read_query(server: &mut DuplexStream) -> String {
-        let mut kind = [0u8; 1];
-        server.read_exact(&mut kind).await.unwrap();
-        assert_eq!(kind[0], b'Q');
+        let mut message_type = [0u8; 1];
+        server.read_exact(&mut message_type).await.unwrap();
+        assert_eq!(message_type[0], b'Q');
         let mut length = [0u8; 4];
         server.read_exact(&mut length).await.unwrap();
         let mut body = vec![0u8; i32::from_be_bytes(length) as usize - 4];
@@ -2925,7 +2925,7 @@ mod tests {
         message(b'D', &body)
     }
 
-    /// The answer to a statement that the client prepares. The kinds of the
+    /// The answer to a statement that the client prepares. The types of the
     /// parameters go back as the client asked for them.
     fn prepared(columns: Option<&[(&str, u32)]>) -> Vec<u8> {
         let mut out = message(b'1', &[]);
@@ -2982,13 +2982,13 @@ mod tests {
     /// to answer.
     async fn read_until_sync(server: &mut DuplexStream) {
         loop {
-            let mut kind = [0u8; 1];
-            server.read_exact(&mut kind).await.unwrap();
+            let mut message_type = [0u8; 1];
+            server.read_exact(&mut message_type).await.unwrap();
             let mut length = [0u8; 4];
             server.read_exact(&mut length).await.unwrap();
             let mut body = vec![0u8; i32::from_be_bytes(length) as usize - 4];
             server.read_exact(&mut body).await.unwrap();
-            if kind[0] == b'S' {
+            if message_type[0] == b'S' {
                 return;
             }
         }
@@ -3954,14 +3954,14 @@ mod tests {
             // The drop of the prepared statement sends a close and a sync,
             // and the connection ends only after the server answers them.
             // No simple query comes, so no probe ran.
-            let mut kind = [0u8; 1];
-            while server.read_exact(&mut kind).await.is_ok() {
-                assert_ne!(kind[0], b'Q');
+            let mut message_type = [0u8; 1];
+            while server.read_exact(&mut message_type).await.is_ok() {
+                assert_ne!(message_type[0], b'Q');
                 let mut length = [0u8; 4];
                 server.read_exact(&mut length).await.unwrap();
                 let mut body = vec![0u8; i32::from_be_bytes(length) as usize - 4];
                 server.read_exact(&mut body).await.unwrap();
-                if kind[0] == b'S' {
+                if message_type[0] == b'S' {
                     let mut answer = message(b'3', &[]);
                     answer.extend_from_slice(&ready_for_query());
                     server.write_all(&answer).await.unwrap();
@@ -5187,7 +5187,7 @@ mod tests {
         );
         assert_eq!(text(&[query_value("a", 0b0101, 0)]), string("'a':BD"));
 
-        // An item of an unknown kind, an unknown operator, an operator
+        // An item of an unknown type, an unknown operator, an operator
         // without its operands, and a value with two roots fall back on the
         // text rule.
         let fallback = |items: &[Vec<u8>]| {
@@ -5568,43 +5568,43 @@ mod tests {
 
     #[test]
     fn a_range_shows_its_bounds_and_the_form_of_its_ends() {
-        let kind = range_type(Type::INT4);
+        let data_type = range_type(Type::INT4);
         let one = 1i32.to_be_bytes();
         let ten = 10i32.to_be_bytes();
         assert_eq!(
-            decoded(&kind, &range_body(RANGE_LOWER_CLOSED, &[&one, &ten])),
+            decoded(&data_type, &range_body(RANGE_LOWER_CLOSED, &[&one, &ten])),
             JsonValue::String("[1,10)".into())
         );
         assert_eq!(
             decoded(
-                &kind,
+                &data_type,
                 &range_body(RANGE_LOWER_CLOSED | RANGE_UPPER_CLOSED, &[&one, &ten])
             ),
             JsonValue::String("[1,10]".into())
         );
         assert_eq!(
-            decoded(&kind, &[RANGE_EMPTY]),
+            decoded(&data_type, &[RANGE_EMPTY]),
             JsonValue::String("empty".into())
         );
         assert_eq!(
             decoded(
-                &kind,
+                &data_type,
                 &range_body(RANGE_LOWER_OPEN_END | RANGE_UPPER_OPEN_END, &[])
             ),
             JsonValue::String("(,)".into())
         );
         // A range without its bounds falls back on the text rule.
         assert_eq!(
-            decoded(&kind, &[RANGE_LOWER_CLOSED]),
+            decoded(&data_type, &[RANGE_LOWER_CLOSED]),
             JsonValue::String("\u{2}".into())
         );
-        assert_eq!(decoded(&kind, &[]), JsonValue::String(String::new()));
+        assert_eq!(decoded(&data_type, &[]), JsonValue::String(String::new()));
     }
 
     #[test]
     fn a_multirange_holds_its_ranges_in_braces() {
         let element = range_type(Type::INT4);
-        let kind = Type::new(
+        let data_type = Type::new(
             "int4multirange".to_string(),
             4451,
             Kind::Multirange(Type::INT4),
@@ -5615,17 +5615,20 @@ mod tests {
         let first = range_body(RANGE_LOWER_CLOSED, &[&one, &ten]);
         let mut body = 1i32.to_be_bytes().to_vec();
         body.extend_from_slice(&element_body(Some(&first)));
-        assert_eq!(decoded(&kind, &body), JsonValue::String("{[1,10)}".into()));
         assert_eq!(
-            decoded(&kind, &0i32.to_be_bytes()),
+            decoded(&data_type, &body),
+            JsonValue::String("{[1,10)}".into())
+        );
+        assert_eq!(
+            decoded(&data_type, &0i32.to_be_bytes()),
             JsonValue::String("{}".into())
         );
         // A count that names a range the value does not hold.
         assert_eq!(
-            decoded(&kind, &1i32.to_be_bytes()),
+            decoded(&data_type, &1i32.to_be_bytes()),
             JsonValue::String("\u{0}\u{0}\u{0}\u{1}".into())
         );
-        assert_eq!(decoded(&kind, b"ab"), JsonValue::String("ab".into()));
+        assert_eq!(decoded(&data_type, b"ab"), JsonValue::String("ab".into()));
         // The element type of the multirange reads on its own as well.
         assert_eq!(
             decoded(&element, &[RANGE_EMPTY]),
@@ -5635,7 +5638,7 @@ mod tests {
 
     #[test]
     fn a_composite_shows_its_fields_in_order() {
-        let kind = Type::new(
+        let data_type = Type::new(
             "pair".to_string(),
             17000,
             Kind::Composite(vec![
@@ -5649,24 +5652,27 @@ mod tests {
         body.extend_from_slice(&element_body(Some(&1i32.to_be_bytes())));
         body.extend_from_slice(&Type::TEXT.oid().to_be_bytes());
         body.extend_from_slice(&element_body(Some(b"two")));
-        assert_eq!(decoded(&kind, &body), JsonValue::String("(1,two)".into()));
+        assert_eq!(
+            decoded(&data_type, &body),
+            JsonValue::String("(1,two)".into())
+        );
 
         // A count that does not match the fields of the type, and a value
         // that ends too early, both fall back on the text rule.
         assert_eq!(
-            decoded(&kind, &1i32.to_be_bytes()),
+            decoded(&data_type, &1i32.to_be_bytes()),
             JsonValue::String("\u{0}\u{0}\u{0}\u{1}".into())
         );
         assert_eq!(
-            decoded(&kind, &2i32.to_be_bytes()),
+            decoded(&data_type, &2i32.to_be_bytes()),
             JsonValue::String("\u{0}\u{0}\u{0}\u{2}".into())
         );
-        assert_eq!(decoded(&kind, b"ab"), JsonValue::String("ab".into()));
+        assert_eq!(decoded(&data_type, b"ab"), JsonValue::String("ab".into()));
     }
 
     #[test]
     fn a_field_of_a_composite_that_holds_no_value_shows_as_empty() {
-        let kind = Type::new(
+        let data_type = Type::new(
             "one".to_string(),
             17001,
             Kind::Composite(vec![Field::new("name".to_string(), Type::TEXT)]),
@@ -5675,7 +5681,7 @@ mod tests {
         let mut body = 1i32.to_be_bytes().to_vec();
         body.extend_from_slice(&Type::TEXT.oid().to_be_bytes());
         body.extend_from_slice(&element_body(None));
-        assert_eq!(decoded(&kind, &body), JsonValue::String("()".into()));
+        assert_eq!(decoded(&data_type, &body), JsonValue::String("()".into()));
     }
 
     #[test]

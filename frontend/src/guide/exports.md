@@ -3,7 +3,7 @@
 A result goes to a CSV, JSON, Markdown, INSERT or Excel file, or to the
 clipboard.
 
-The menu of the grid holds two kinds of export:
+The menu of the grid holds two types of export:
 
 - **Export the rows** writes what the grid holds. The rows pass through the
   interface. Mark rows first, and the entries then write those rows alone.

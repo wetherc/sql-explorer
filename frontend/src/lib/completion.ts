@@ -44,20 +44,20 @@ export function clearCompletionSource(uri: string): void {
   sources.delete(uri)
 }
 
-/** The Monaco kind that matches one kind of name. */
-export function monacoKind(kind: string): monaco.languages.CompletionItemKind {
-  const kinds = monaco.languages.CompletionItemKind
-  switch (kind) {
+/** The Monaco icon that matches one type of name. */
+export function completionIcon(nameType: string): monaco.languages.CompletionItemKind {
+  const icons = monaco.languages.CompletionItemKind
+  switch (nameType) {
     case 'database':
-      return kinds.Module
+      return icons.Module
     case 'schema':
-      return kinds.Folder
+      return icons.Folder
     case 'table':
-      return kinds.Struct
+      return icons.Struct
     case 'column':
-      return kinds.Field
+      return icons.Field
     default:
-      return kinds.Keyword
+      return icons.Keyword
   }
 }
 
@@ -101,7 +101,7 @@ export function suggestionsFor(
       label: item.label,
       detail: item.detail,
       insertText: item.insertText,
-      kind: monacoKind(item.kind),
+      kind: completionIcon(item.nameType),
       range,
     })),
   }

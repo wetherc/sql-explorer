@@ -2002,9 +2002,9 @@ pub async fn save_statement_file<R: Runtime>(
 pub struct SaveFileRequest {
     /// The file name that the save dialog suggests.
     pub default_name: String,
-    /// The label of the file kind in the dialog.
+    /// The label of the file type in the dialog.
     pub filter_label: String,
-    /// The extension of the file kind, without the period.
+    /// The extension of the file type, without the period.
     pub extension: String,
     pub contents: String,
 }

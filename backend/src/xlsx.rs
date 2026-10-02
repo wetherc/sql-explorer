@@ -443,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn each_kind_of_value_takes_its_own_form_of_cell() {
+    fn each_type_of_value_takes_its_own_form_of_cell() {
         assert_eq!(cell_xml("A1", &JsonValue::Null), "");
         assert_eq!(cell_xml("A1", &json!(12.5)), "<c r=\"A1\"><v>12.5</v></c>");
         assert_eq!(
@@ -458,7 +458,7 @@ mod tests {
             cell_xml("C1", &json!("a<b")),
             "<c r=\"C1\" t=\"inlineStr\"><is><t xml:space=\"preserve\">a&lt;b</t></is></c>"
         );
-        // A value of another kind goes in as its JSON text.
+        // A value of another type goes in as its JSON text.
         assert_eq!(
             cell_xml("D1", &json!({ "a": 1 })),
             "<c r=\"D1\" t=\"inlineStr\"><is><t xml:space=\"preserve\">{&quot;a&quot;:1}</t></is></c>"

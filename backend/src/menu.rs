@@ -186,8 +186,8 @@ pub fn set_command_enabled<R: Runtime>(
     };
     // The items of this application live one level down, in the File menu,
     // so the walk goes through the submenus.
-    for kind in menu.items()? {
-        let Some(submenu) = kind.as_submenu() else {
+    for entry in menu.items()? {
+        let Some(submenu) = entry.as_submenu() else {
             continue;
         };
         let Some(found) = submenu.get(id) else {
