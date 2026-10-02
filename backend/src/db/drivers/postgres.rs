@@ -1290,8 +1290,76 @@ fn decode_scalar(column_type: &Type, bytes: &[u8], zone: &TimeZone) -> JsonValue
         Type::INET | Type::CIDR => inet_text(bytes),
         Type::MACADDR => mac_text(bytes, 6),
         Type::MACADDR8 => mac_text(bytes, 8),
+        Type::TIMETZ => time_with_zone_text(bytes),
+        Type::BIT | Type::VARBIT => bits_text(bytes),
+        // The binary form of these types is an OID or a counter of four
+        // bytes without a sign. The name that the text form gives needs a
+        // read of the catalog, so the grid shows the number.
+        Type::REGCLASS
+        | Type::REGTYPE
+        | Type::REGPROC
+        | Type::REGPROCEDURE
+        | Type::REGOPER
+        | Type::REGOPERATOR
+        | Type::REGNAMESPACE
+        | Type::REGROLE
+        | Type::REGCONFIG
+        | Type::REGDICTIONARY
+        | Type::XID
+        | Type::CID => match Reader::new(bytes).u32() {
+            Some(value) if bytes.len() == 4 => value.into(),
+            _ => text_or_bytes(bytes),
+        },
         _ => text_or_bytes(bytes),
     }
+}
+
+/// Writes a `timetz` value in the form that PostgreSQL writes, such as
+/// `10:00:00+02`. The value holds the microseconds since midnight and the
+/// offset of the zone in seconds west of UTC.
+fn time_with_zone_text(bytes: &[u8]) -> JsonValue {
+    let mut reader = Reader::new(bytes);
+    let (Some(micros), Some(west)) = (reader.i64(), reader.i32()) else {
+        return text_or_bytes(bytes);
+    };
+    JsonValue::String(format!("{}{}", clock_text(micros), offset_text(-west)))
+}
+
+/// Writes an offset of a zone in seconds east of UTC, in the form that
+/// PostgreSQL writes, such as `+05`, `-03:30` or `+00:19:32`.
+fn offset_text(east: i32) -> String {
+    let sign = if east < 0 { '-' } else { '+' };
+    let whole = east.unsigned_abs();
+    let mut text = format!("{sign}{:02}", whole / 3600);
+    if whole % 3600 != 0 {
+        text.push_str(&format!(":{:02}", whole % 3600 / 60));
+    }
+    if whole % 60 != 0 {
+        text.push_str(&format!(":{:02}", whole % 60));
+    }
+    text
+}
+
+/// Writes a `bit` or a `varbit` value as its digits, such as `1010`. The
+/// value holds the count of the bits and then the bits, first bit high.
+fn bits_text(bytes: &[u8]) -> JsonValue {
+    let mut reader = Reader::new(bytes);
+    let Some(count) = reader.i32().and_then(|count| usize::try_from(count).ok()) else {
+        return text_or_bytes(bytes);
+    };
+    let Some(body) = reader.take(count.div_ceil(8)) else {
+        return text_or_bytes(bytes);
+    };
+    let digits = (0..count)
+        .map(|index| {
+            if body[index / 8] & (0x80 >> (index % 8)) != 0 {
+                '1'
+            } else {
+                '0'
+            }
+        })
+        .collect();
+    JsonValue::String(digits)
 }
 
 /// Reads one value through the conversion of `tokio_postgres`. Bytes that
@@ -1529,15 +1597,7 @@ fn zoned_text(value: DateTime<Utc>, zone: &TimeZone) -> String {
         text.push('.');
         text.push_str(fraction.trim_end_matches('0'));
     }
-    let sign = if offset < 0 { '-' } else { '+' };
-    let whole = offset.unsigned_abs();
-    text.push_str(&format!("{sign}{:02}", whole / 3600));
-    if whole % 3600 != 0 {
-        text.push_str(&format!(":{:02}", whole % 3600 / 60));
-    }
-    if whole % 60 != 0 {
-        text.push_str(&format!(":{:02}", whole % 60));
-    }
+    text.push_str(&offset_text(offset));
     text
 }
 
@@ -3434,6 +3494,65 @@ mod tests {
         assert_eq!(
             decoded(&Type::MACADDR, b"ab"),
             JsonValue::String("ab".into())
+        );
+    }
+
+    #[test]
+    fn a_time_with_a_zone_shows_its_offset() {
+        let mut body = 36_000_000_000i64.to_be_bytes().to_vec();
+        body.extend_from_slice(&(-7_200i32).to_be_bytes());
+        assert_eq!(
+            decoded(&Type::TIMETZ, &body),
+            JsonValue::String("10:00:00+02".into())
+        );
+        let mut body = 1_500_000i64.to_be_bytes().to_vec();
+        body.extend_from_slice(&12_600i32.to_be_bytes());
+        assert_eq!(
+            decoded(&Type::TIMETZ, &body),
+            JsonValue::String("00:00:01.5-03:30".into())
+        );
+        assert_eq!(
+            decoded(&Type::TIMETZ, b"short"),
+            JsonValue::String("short".into())
+        );
+    }
+
+    #[test]
+    fn a_bit_string_shows_its_digits() {
+        let mut body = 10i32.to_be_bytes().to_vec();
+        body.extend_from_slice(&[0b1010_0000, 0b0100_0000]);
+        assert_eq!(
+            decoded(&Type::VARBIT, &body),
+            JsonValue::String("1010000001".into())
+        );
+        assert_eq!(
+            decoded(&Type::BIT, &0i32.to_be_bytes()),
+            JsonValue::String(String::new())
+        );
+        assert_eq!(
+            decoded(&Type::BIT, &(-1i32).to_be_bytes()),
+            JsonValue::String(base64_text(&(-1i32).to_be_bytes()))
+        );
+        assert_eq!(
+            decoded(&Type::BIT, &9i32.to_be_bytes()),
+            text_or_bytes(&9i32.to_be_bytes())
+        );
+        assert_eq!(decoded(&Type::BIT, b"ab"), JsonValue::String("ab".into()));
+    }
+
+    #[test]
+    fn a_catalog_reference_shows_its_number() {
+        assert_eq!(
+            decoded(&Type::REGCLASS, &16_384u32.to_be_bytes()),
+            JsonValue::from(16_384u32)
+        );
+        assert_eq!(
+            decoded(&Type::XID, &u32::MAX.to_be_bytes()),
+            JsonValue::from(u32::MAX)
+        );
+        assert_eq!(
+            decoded(&Type::REGTYPE, b"abcde"),
+            JsonValue::String("abcde".into())
         );
     }
 
