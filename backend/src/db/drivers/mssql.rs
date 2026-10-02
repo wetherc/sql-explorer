@@ -21,7 +21,7 @@ use crate::error::{Error, Result};
 use crate::sql::{only_reads, split_batches, split_statements, Dialect};
 use crate::storage::{MssqlAuth, SavedConnection, TlsMode};
 use async_trait::async_trait;
-use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use futures_util::TryStreamExt;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
@@ -1371,12 +1371,14 @@ fn cell_to_json(
         ColumnType::Timen => read(row.try_get::<NaiveTime, _>(index))
             .map(|value| JsonValue::String(value.to_string()))
             .unwrap_or(JsonValue::Null),
-        ColumnType::Datetime
-        | ColumnType::Datetimen
-        | ColumnType::Datetime4
-        | ColumnType::Datetime2 => read(row.try_get::<NaiveDateTime, _>(index))
-            .map(|value| JsonValue::String(value.to_string()))
-            .unwrap_or(JsonValue::Null),
+        // A `datetime` value needs the rounding of `datetime_text`, and a
+        // nullable column of this type can also hold a `smalldatetime`.
+        ColumnType::Datetime | ColumnType::Datetimen => column_data_to_json(data),
+        ColumnType::Datetime4 | ColumnType::Datetime2 => {
+            read(row.try_get::<NaiveDateTime, _>(index))
+                .map(|value| JsonValue::String(value.to_string()))
+                .unwrap_or(JsonValue::Null)
+        }
         ColumnType::DatetimeOffsetn => column_data_to_json(data),
         ColumnType::BigVarBin | ColumnType::BigBinary | ColumnType::Image | ColumnType::Udt => {
             read(row.try_get::<&[u8], _>(index)).map_or(JsonValue::Null, bytes_to_json)
@@ -1422,7 +1424,11 @@ fn column_data_to_json(data: &ColumnData<'static>) -> JsonValue {
         ColumnData::Xml(value) => value.as_ref().map_or(JsonValue::Null, |value| {
             JsonValue::String(value.to_string())
         }),
-        ColumnData::DateTime(_) | ColumnData::SmallDateTime(_) | ColumnData::DateTime2(_) => {
+        ColumnData::DateTime(_) => read(NaiveDateTime::from_sql(data))
+            .map_or(JsonValue::Null, |value| {
+                JsonValue::String(datetime_text(value))
+            }),
+        ColumnData::SmallDateTime(_) | ColumnData::DateTime2(_) => {
             read(NaiveDateTime::from_sql(data)).map_or(JsonValue::Null, |value| {
                 JsonValue::String(value.to_string())
             })
@@ -1439,6 +1445,16 @@ fn column_data_to_json(data: &ColumnData<'static>) -> JsonValue {
                 JsonValue::String(value.to_rfc3339())
             }),
     }
+}
+
+/// Writes a `datetime` value with the milliseconds that the server shows.
+/// The server keeps the time in units of 1/300 of a second, so the value
+/// `.007` arrives as 6,666,666 nanoseconds. The function rounds the value to
+/// the nearest millisecond, as SQL Server Management Studio does.
+fn datetime_text(value: NaiveDateTime) -> String {
+    let millis = (i64::from(value.nanosecond()) + 500_000) / 1_000_000;
+    let whole = value.with_nanosecond(0).unwrap_or(value);
+    (whole + chrono::Duration::milliseconds(millis)).to_string()
 }
 
 /// Reads a value as text, and falls back on the binary form.
@@ -2409,6 +2425,16 @@ mod tests {
         assert_eq!(
             column_data_to_json(&ColumnData::DateTime(Some(DateTime::new(0, 0)))),
             JsonValue::String("1900-01-01 00:00:00".into())
+        );
+        // The server keeps 1/300 of a second, and the grid shows the
+        // milliseconds that the server shows.
+        assert_eq!(
+            column_data_to_json(&ColumnData::DateTime(Some(DateTime::new(0, 2)))),
+            JsonValue::String("1900-01-01 00:00:00.007".into())
+        );
+        assert_eq!(
+            column_data_to_json(&ColumnData::DateTime(Some(DateTime::new(0, 299)))),
+            JsonValue::String("1900-01-01 00:00:00.997".into())
         );
         assert_eq!(
             column_data_to_json(&ColumnData::SmallDateTime(Some(SmallDateTime::new(0, 0)))),
