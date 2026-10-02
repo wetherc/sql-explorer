@@ -891,6 +891,28 @@ impl PostgresDriver {
         }
     }
 
+    /// Reads the count of the digits of the fraction of a `money` value. The
+    /// binary form holds the amount in the smallest unit of the currency, and
+    /// the `lc_monetary` setting of the session gives the count. The cast to
+    /// numeric applies that count as the scale. An answer that is not a count
+    /// from 0 to 10, or a probe that fails, gives 2, as the server does.
+    async fn money_digits(&self) -> u32 {
+        match self.client.simple_query(MONEY_DIGITS).await {
+            Ok(messages) => messages
+                .iter()
+                .find_map(|message| match message {
+                    SimpleQueryMessage::Row(row) => row.get(0)?.parse::<u32>().ok(),
+                    _ => None,
+                })
+                .filter(|digits| *digits <= 10)
+                .unwrap_or(2),
+            Err(error) => {
+                log::warn!("The money format of the session could not be read: {error}");
+                2
+            }
+        }
+    }
+
     /// Runs the probe [`OUTSIDE_A_BLOCK`] and reads its answer.
     async fn outside_a_block(&self) -> std::result::Result<bool, tokio_postgres::Error> {
         let messages = self.client.simple_query(OUTSIDE_A_BLOCK).await?;
@@ -1093,15 +1115,19 @@ impl PostgresDriver {
             .map(|column| ColumnInfo::new(column.name(), column.type_().name()))
             .collect();
         let returns_rows = !columns.is_empty();
-        let zone = if statement
-            .columns()
-            .iter()
-            .any(|column| holds_timestamptz(column.type_()))
-        {
-            self.session_zone().await
-        } else {
-            TimeZone::UTC
+        let needs = |wanted: &Type| {
+            statement
+                .columns()
+                .iter()
+                .any(|column| holds(column.type_(), wanted))
         };
+        let mut settings = Settings::default();
+        if needs(&Type::TIMESTAMPTZ) {
+            settings.zone = self.session_zone().await;
+        }
+        if needs(&Type::MONEY) {
+            settings.money_digits = self.money_digits().await;
+        }
 
         let rows = self.client.query_raw(&statement, &bound).await?;
         pin_mut!(rows);
@@ -1116,7 +1142,8 @@ impl PostgresDriver {
             if truncated {
                 continue;
             }
-            if count >= options.max_rows || sink.row(row_to_json(&row, &zone))? == SinkControl::Stop
+            if count >= options.max_rows
+                || sink.row(row_to_json(&row, &settings))? == SinkControl::Stop
             {
                 truncated = true;
                 // The statement holds the rest of its result on the server.
@@ -1379,10 +1406,31 @@ pub fn bind_params(params: &QueryParams) -> Result<Vec<TextParam>> {
     Ok(bound)
 }
 
+/// The probe that reads the count of the digits of the fraction of `money`.
+const MONEY_DIGITS: &str = "SELECT scale(0::money::numeric)";
+
+/// The settings of the session that the text of some binary values needs.
+/// The text form of the simple protocol applies them on the server.
+pub struct Settings {
+    /// The zone that a `timestamptz` value shows in.
+    zone: TimeZone,
+    /// The count of the digits of the fraction of a `money` value.
+    money_digits: u32,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            zone: TimeZone::UTC,
+            money_digits: 2,
+        }
+    }
+}
+
 /// Converts one row into an array of JSON values.
-pub fn row_to_json(row: &Row, zone: &TimeZone) -> Vec<JsonValue> {
+pub fn row_to_json(row: &Row, settings: &Settings) -> Vec<JsonValue> {
     (0..row.columns().len())
-        .map(|index| cell_to_json(row, index, zone))
+        .map(|index| cell_to_json(row, index, settings))
         .collect()
 }
 
@@ -1391,13 +1439,13 @@ pub fn row_to_json(row: &Row, zone: &TimeZone) -> Vec<JsonValue> {
 /// type of the column turns them into JSON. A cell shows NULL only when the
 /// server sent no value: bytes that no reader understands show as text when
 /// they are text, and as base64 when they are not.
-fn cell_to_json(row: &Row, index: usize, zone: &TimeZone) -> JsonValue {
+fn cell_to_json(row: &Row, index: usize, settings: &Settings) -> JsonValue {
     // The type stays in the row, because a copy of it would cost a count on
     // a shared record for each cell of the answer.
     let column_type = row.columns()[index].type_();
     match row.try_get::<_, Option<Raw>>(index) {
         Ok(None) => JsonValue::Null,
-        Ok(Some(Raw(bytes))) => decode_value(column_type, bytes, zone),
+        Ok(Some(Raw(bytes))) => decode_value(column_type, bytes, settings),
         Err(error) => {
             log::debug!("A column gave no value: {error}");
             JsonValue::Null
@@ -1424,22 +1472,22 @@ type BoxError = Box<dyn std::error::Error + Sync + Send>;
 /// Turns the binary form of one value into JSON. The shape of a value that
 /// holds other values comes from the kind of its type, so an array, a
 /// range, and a composite of any element type read the same way.
-fn decode_value(column_type: &Type, bytes: &[u8], zone: &TimeZone) -> JsonValue {
+fn decode_value(column_type: &Type, bytes: &[u8], settings: &Settings) -> JsonValue {
     match column_type.kind() {
-        Kind::Array(element) => decode_array(element, bytes, zone),
-        Kind::Range(element) => decode_range(element, bytes, zone),
-        Kind::Multirange(element) => decode_multirange(element, bytes, zone),
+        Kind::Array(element) => decode_array(element, bytes, settings),
+        Kind::Range(element) => decode_range(element, bytes, settings),
+        Kind::Multirange(element) => decode_multirange(element, bytes, settings),
         // A domain carries the value of the type it is built on.
-        Kind::Domain(inner) => decode_value(inner, bytes, zone),
-        Kind::Composite(fields) => decode_composite(fields, bytes, zone),
+        Kind::Domain(inner) => decode_value(inner, bytes, settings),
+        Kind::Composite(fields) => decode_composite(fields, bytes, settings),
         // The value of an enumerated type is the label itself.
         Kind::Enum(_) => text_or_bytes(bytes),
-        _ => decode_scalar(column_type, bytes, zone),
+        _ => decode_scalar(column_type, bytes, settings),
     }
 }
 
 /// Reads one value that holds no other value.
-fn decode_scalar(column_type: &Type, bytes: &[u8], zone: &TimeZone) -> JsonValue {
+fn decode_scalar(column_type: &Type, bytes: &[u8], settings: &Settings) -> JsonValue {
     match *column_type {
         Type::BOOL => scalar(column_type, bytes, JsonValue::Bool),
         Type::INT2 => scalar(column_type, bytes, |value: i16| value.into()),
@@ -1470,27 +1518,31 @@ fn decode_scalar(column_type: &Type, bytes: &[u8], zone: &TimeZone) -> JsonValue
         )
         .unwrap_or_else(|| {
             scalar(column_type, bytes, |value: NaiveDate| {
-                JsonValue::String(value.to_string())
+                let (date, before) = date_text(value);
+                JsonValue::String(format!("{date}{}", era(before)))
             })
         }),
-        Type::TIME => scalar(column_type, bytes, |value: NaiveTime| {
-            JsonValue::String(value.to_string())
-        }),
+        // The clock of PostgreSQL reaches 24:00:00, which `chrono` refuses,
+        // so the count of microseconds since midnight gives the text.
+        Type::TIME => match Reader::new(bytes).i64() {
+            Some(micros) if bytes.len() == 8 => JsonValue::String(clock_text(micros)),
+            _ => text_or_bytes(bytes),
+        },
         Type::TIMESTAMP => {
             endless(Reader::new(bytes).i64(), i64::MAX, i64::MIN).unwrap_or_else(|| {
                 scalar(column_type, bytes, |value: NaiveDateTime| {
-                    JsonValue::String(value.to_string())
+                    JsonValue::String(date_time_text(value, ""))
                 })
             })
         }
         Type::TIMESTAMPTZ => {
             endless(Reader::new(bytes).i64(), i64::MAX, i64::MIN).unwrap_or_else(|| {
                 scalar(column_type, bytes, |value: DateTime<Utc>| {
-                    JsonValue::String(zoned_text(value, zone))
+                    JsonValue::String(zoned_text(value, &settings.zone))
                 })
             })
         }
-        Type::MONEY => money_text(bytes),
+        Type::MONEY => money_text(bytes, settings.money_digits),
         Type::INTERVAL => interval_text(bytes),
         Type::INET | Type::CIDR => inet_text(bytes),
         Type::MACADDR => mac_text(bytes, 6),
@@ -1515,6 +1567,35 @@ fn decode_scalar(column_type: &Type, bytes: &[u8], zone: &TimeZone) -> JsonValue
             Some(value) if bytes.len() == 4 => value.into(),
             _ => text_or_bytes(bytes),
         },
+        // tokio-postgres asks for every column of the extended protocol in
+        // the binary form, and it gives no way to ask for the text form of
+        // one column. So each type below has a reader of its binary form.
+        Type::POINT
+        | Type::LSEG
+        | Type::BOX
+        | Type::PATH
+        | Type::POLYGON
+        | Type::LINE
+        | Type::CIRCLE => geometry_text(column_type, bytes),
+        Type::PG_LSN => lsn_text(bytes),
+        Type::XID8 => match Reader::new(bytes).u64() {
+            Some(value) if bytes.len() == 8 => value.into(),
+            _ => text_or_bytes(bytes),
+        },
+        Type::TID => tid_text(bytes),
+        Type::PG_SNAPSHOT | Type::TXID_SNAPSHOT => snapshot_text(bytes),
+        // A jsonpath value is a version byte and then the text.
+        Type::JSONPATH => match bytes.split_first() {
+            Some((1, text)) => text_or_bytes(text),
+            _ => text_or_bytes(bytes),
+        },
+        Type::TS_VECTOR => tsvector_text(bytes),
+        Type::TSQUERY => tsquery_text(bytes),
+        // The extension gives hstore a new OID in each database, so the
+        // name finds the type.
+        _ if column_type.name() == "hstore" => hstore_text(bytes),
+        // The binary form of the type of another extension is unknown. It is
+        // often the text itself, as for citext.
         _ => text_or_bytes(bytes),
     }
 }
@@ -1567,6 +1648,370 @@ fn bits_text(bytes: &[u8]) -> JsonValue {
     JsonValue::String(digits)
 }
 
+/// Writes a value of a geometric type in the form that PostgreSQL writes,
+/// such as `(1,2)` for a point or `<(0,0),5>` for a circle. Each type sends
+/// its coordinates as float8 values. A path also sends a flag for a closed
+/// path and the count of its points, and a polygon sends the count of its
+/// points.
+fn geometry_text(column_type: &Type, bytes: &[u8]) -> JsonValue {
+    let mut reader = Reader::new(bytes);
+    let text = match *column_type {
+        Type::POINT => points(&mut reader, 1),
+        Type::LSEG => points(&mut reader, 2).map(|text| format!("[{text}]")),
+        Type::BOX => points(&mut reader, 2),
+        Type::PATH => reader.u8().and_then(|closed| {
+            let count = usize::try_from(reader.i32()?).ok()?;
+            let text = points(&mut reader, count)?;
+            Some(if closed != 0 {
+                format!("({text})")
+            } else {
+                format!("[{text}]")
+            })
+        }),
+        Type::POLYGON => reader
+            .i32()
+            .and_then(|count| points(&mut reader, usize::try_from(count).ok()?))
+            .map(|text| format!("({text})")),
+        Type::LINE => floats(&mut reader, 3).map(|values| format!("{{{}}}", values.join(","))),
+        // A circle, the only other geometric type.
+        _ => floats(&mut reader, 3)
+            .map(|values| format!("<({},{}),{}>", values[0], values[1], values[2])),
+    };
+    complete(text, &reader, bytes)
+}
+
+/// Gives the text when the reader used every byte of the value, and the
+/// text rule for the bytes when it did not.
+fn complete(text: Option<String>, reader: &Reader<'_>, bytes: &[u8]) -> JsonValue {
+    match text {
+        Some(text) if reader.is_empty() => JsonValue::String(text),
+        _ => text_or_bytes(bytes),
+    }
+}
+
+/// Runs the read of one value over its bytes. The text rule for the bytes
+/// applies when the read fails or leaves bytes unused.
+fn read_with<'a>(
+    bytes: &'a [u8],
+    read: impl FnOnce(&mut Reader<'a>) -> Option<String>,
+) -> JsonValue {
+    let mut reader = Reader::new(bytes);
+    let text = read(&mut reader);
+    complete(text, &reader, bytes)
+}
+
+/// Reads float8 values and writes each one as PostgreSQL writes it.
+fn floats(reader: &mut Reader<'_>, count: usize) -> Option<Vec<String>> {
+    (0..count).map(|_| reader.f64().map(float_text)).collect()
+}
+
+/// Reads points and writes them as `(x,y)`, separated by commas.
+fn points(reader: &mut Reader<'_>, count: usize) -> Option<String> {
+    let values = floats(reader, count * 2)?;
+    let points: Vec<String> = values
+        .chunks(2)
+        .map(|pair| format!("({},{})", pair[0], pair[1]))
+        .collect();
+    Some(points.join(","))
+}
+
+/// Writes a float8 value as PostgreSQL 12 and later write it. The text has
+/// the fewest digits that read back to the same value. A decimal exponent
+/// below -4 or above 14 gives the exponent form, such as `1e+21` or
+/// `1.5e-05`.
+fn float_text(value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".into();
+    }
+    if value.is_infinite() {
+        return if value > 0.0 { "Infinity" } else { "-Infinity" }.into();
+    }
+    let scientific = format!("{value:e}");
+    let (mantissa, exponent) = scientific
+        .split_once('e')
+        .unwrap_or((scientific.as_str(), "0"));
+    let exponent: i32 = exponent.parse().unwrap_or(0);
+    if (-4..15).contains(&exponent) {
+        return value.to_string();
+    }
+    let sign = if exponent < 0 { '-' } else { '+' };
+    format!("{mantissa}e{sign}{:02}", exponent.unsigned_abs())
+}
+
+/// Writes a `pg_lsn` value in the form that PostgreSQL writes, such as
+/// `16/B374D848`. The value is a count of eight bytes, and the text shows
+/// the high and the low four bytes in hexadecimal.
+fn lsn_text(bytes: &[u8]) -> JsonValue {
+    match Reader::new(bytes).u64() {
+        Some(value) if bytes.len() == 8 => {
+            JsonValue::String(format!("{:X}/{:X}", value >> 32, value & 0xFFFF_FFFF))
+        }
+        _ => text_or_bytes(bytes),
+    }
+}
+
+/// Writes a `tid` value, which holds the number of a block and the place of
+/// the row in the block, such as `(0,1)`.
+fn tid_text(bytes: &[u8]) -> JsonValue {
+    let mut reader = Reader::new(bytes);
+    let text = match (reader.u32(), reader.u16()) {
+        (Some(block), Some(offset)) => Some(format!("({block},{offset})")),
+        _ => None,
+    };
+    complete(text, &reader, bytes)
+}
+
+/// Writes a `pg_snapshot` or a `txid_snapshot` value in the form that
+/// PostgreSQL writes, such as `10:20:12,15`. The value holds the count of
+/// the transactions in progress, the lowest and the highest transaction,
+/// and then the transactions in progress.
+fn snapshot_text(bytes: &[u8]) -> JsonValue {
+    read_with(bytes, |reader| {
+        let count = usize::try_from(reader.i32()?).ok()?;
+        let (low, high) = (reader.u64()?, reader.u64()?);
+        let running: Option<Vec<String>> = (0..count)
+            .map(|_| reader.u64().map(|id| id.to_string()))
+            .collect();
+        Some(format!("{low}:{high}:{}", running?.join(",")))
+    })
+}
+
+/// Writes a lexeme of text search between single quotes. A quote and a
+/// backslash inside the lexeme are doubled, as in PostgreSQL.
+fn lexeme_text(word: &str) -> String {
+    let mut text = String::from('\'');
+    for character in word.chars() {
+        if character == '\'' || character == '\\' {
+            text.push(character);
+        }
+        text.push(character);
+    }
+    text.push('\'');
+    text
+}
+
+/// Writes a `tsvector` value in the form that PostgreSQL writes, such as
+/// `'cat':3 'fat':2A`. The value holds the count of the lexemes. Each
+/// lexeme is text that ends with a zero byte, then the count of its
+/// positions, then the positions. The top two bits of a position give its
+/// weight.
+fn tsvector_text(bytes: &[u8]) -> JsonValue {
+    read_with(bytes, |reader| {
+        let count = reader.i32()?;
+        let mut lexemes = Vec::new();
+        for _ in 0..count.max(0) {
+            let mut text = lexeme_text(reader.c_text()?);
+            let positions: Option<Vec<String>> = (0..reader.u16()?)
+                .map(|_| {
+                    reader.u16().map(|entry| {
+                        let weight = match entry >> 14 {
+                            3 => "A",
+                            2 => "B",
+                            1 => "C",
+                            _ => "",
+                        };
+                        format!("{}{weight}", entry & 0x3FFF)
+                    })
+                })
+                .collect();
+            let positions = positions?;
+            if !positions.is_empty() {
+                text.push(':');
+                text.push_str(&positions.join(","));
+            }
+            lexemes.push(text);
+        }
+        Some(lexemes.join(" "))
+    })
+}
+
+/// The kinds and the operators of the items of a `tsquery` value.
+const TSQUERY_VALUE: u8 = 1;
+const TSQUERY_OPERATOR: u8 = 2;
+const TSQUERY_NOT: u8 = 1;
+const TSQUERY_AND: u8 = 2;
+const TSQUERY_OR: u8 = 3;
+const TSQUERY_PHRASE: u8 = 4;
+
+/// One item of a `tsquery` value, as the binary form sends it.
+enum QueryItem<'a> {
+    Value {
+        word: &'a str,
+        weight: u8,
+        prefix: bool,
+    },
+    Operator {
+        operator: u8,
+        distance: i16,
+    },
+}
+
+/// One part of a `tsquery` value that is already text. The operator of the
+/// part, if it has one, decides whether its parent puts it in parentheses.
+struct QueryPart {
+    text: String,
+    operator: Option<u8>,
+}
+
+/// The priority of an operator of a `tsquery` value. An operator of a
+/// lower priority than its parent goes in parentheses.
+fn query_priority(operator: u8) -> u8 {
+    match operator {
+        TSQUERY_NOT => 4,
+        TSQUERY_PHRASE => 3,
+        TSQUERY_AND => 2,
+        _ => 1,
+    }
+}
+
+/// Writes a `tsquery` value in the form that PostgreSQL writes, such as
+/// `'fat' & ( 'rat' | !'cat' )`. The value holds the count of the items and
+/// then the items in prefix order. An operator comes before its right
+/// operand, and the right operand comes before the left operand.
+///
+/// The walk reads the items from the end, so each operand is text before
+/// its operator needs it. A stack of parts keeps the depth of the query off
+/// the call stack.
+fn tsquery_text(bytes: &[u8]) -> JsonValue {
+    read_with(bytes, |reader| {
+        let count = reader.i32()?;
+        let mut items = Vec::new();
+        for _ in 0..count.max(0) {
+            items.push(match reader.u8()? {
+                TSQUERY_VALUE => {
+                    let (weight, prefix) = (reader.u8()?, reader.u8()?);
+                    QueryItem::Value {
+                        word: reader.c_text()?,
+                        weight,
+                        prefix: prefix != 0,
+                    }
+                }
+                TSQUERY_OPERATOR => {
+                    let operator = reader.u8()?;
+                    let distance = if operator == TSQUERY_PHRASE {
+                        reader.i16()?
+                    } else {
+                        0
+                    };
+                    QueryItem::Operator { operator, distance }
+                }
+                _ => return None,
+            });
+        }
+        let mut stack: Vec<QueryPart> = Vec::new();
+        for item in items.iter().rev() {
+            let part = match *item {
+                QueryItem::Value {
+                    word,
+                    weight,
+                    prefix,
+                } => {
+                    let mut text = lexeme_text(word);
+                    if weight != 0 || prefix {
+                        text.push(':');
+                        if prefix {
+                            text.push('*');
+                        }
+                        for (bit, letter) in [(8, 'A'), (4, 'B'), (2, 'C'), (1, 'D')] {
+                            if weight & bit != 0 {
+                                text.push(letter);
+                            }
+                        }
+                    }
+                    QueryPart {
+                        text,
+                        operator: None,
+                    }
+                }
+                QueryItem::Operator {
+                    operator: TSQUERY_NOT,
+                    ..
+                } => {
+                    let operand = stack.pop()?;
+                    QueryPart {
+                        text: format!("!{}", query_operand(operand, TSQUERY_NOT, false)),
+                        operator: Some(TSQUERY_NOT),
+                    }
+                }
+                QueryItem::Operator { operator, distance } => {
+                    let right = stack.pop()?;
+                    let left = stack.pop()?;
+                    let symbol = match operator {
+                        TSQUERY_AND => "&".to_string(),
+                        TSQUERY_OR => "|".to_string(),
+                        TSQUERY_PHRASE if distance == 1 => "<->".to_string(),
+                        TSQUERY_PHRASE => format!("<{distance}>"),
+                        _ => return None,
+                    };
+                    QueryPart {
+                        text: format!(
+                            "{} {symbol} {}",
+                            query_operand(left, operator, false),
+                            query_operand(right, operator, true)
+                        ),
+                        operator: Some(operator),
+                    }
+                }
+            };
+            stack.push(part);
+        }
+        match (stack.pop(), stack.is_empty()) {
+            (None, true) => Some(String::new()),
+            (Some(part), true) => Some(part.text),
+            _ => None,
+        }
+    })
+}
+
+/// Gives the text of an operand of a `tsquery` operator. An operand with an
+/// operator of a lower priority goes in parentheses. A phrase as the right
+/// operand of a phrase goes in parentheses too, because the order of a
+/// phrase changes its meaning.
+fn query_operand(part: QueryPart, parent: u8, right: bool) -> String {
+    let wrap = part.operator.is_some_and(|operator| {
+        query_priority(operator) < query_priority(parent)
+            || (right && parent == TSQUERY_PHRASE && operator == TSQUERY_PHRASE)
+    });
+    if wrap {
+        format!("( {} )", part.text)
+    } else {
+        part.text
+    }
+}
+
+/// Writes an `hstore` value in the form that the extension writes, such as
+/// `"a"=>"1", "b"=>NULL`. The value holds the count of the pairs. Each key
+/// and each value has its length first, and a value of length minus one is
+/// NULL.
+fn hstore_text(bytes: &[u8]) -> JsonValue {
+    read_with(bytes, |reader| {
+        let count = reader.i32()?;
+        let mut pairs = Vec::new();
+        for _ in 0..count.max(0) {
+            let key = reader.sized_text()?.map(hstore_quoted)?;
+            let value = reader
+                .sized_text()?
+                .map_or_else(|| "NULL".to_string(), hstore_quoted);
+            pairs.push(format!("{key}=>{value}"));
+        }
+        Some(pairs.join(", "))
+    })
+}
+
+/// Writes a key or a value of an `hstore` between double quotes, with a
+/// backslash before each double quote and each backslash.
+fn hstore_quoted(text: &str) -> String {
+    let mut quoted = String::from('"');
+    for character in text.chars() {
+        if character == '"' || character == '\\' {
+            quoted.push('\\');
+        }
+        quoted.push(character);
+    }
+    quoted.push('"');
+    quoted
+}
+
 /// Reads one value through the conversion of `tokio_postgres`. Bytes that
 /// the target type refuses fall back on the text rule, so a value that the
 /// server sent never shows as NULL.
@@ -1604,7 +2049,7 @@ fn base64_text(bytes: &[u8]) -> String {
 /// Reads an array of any element type. The value holds the count of the
 /// dimensions, the type of the elements, the length of each dimension, and
 /// then the elements in row order.
-fn decode_array(element: &Type, bytes: &[u8], zone: &TimeZone) -> JsonValue {
+fn decode_array(element: &Type, bytes: &[u8], settings: &Settings) -> JsonValue {
     let mut reader = Reader::new(bytes);
     let Some(dimensions) = reader.i32() else {
         return text_or_bytes(bytes);
@@ -1626,7 +2071,7 @@ fn decode_array(element: &Type, bytes: &[u8], zone: &TimeZone) -> JsonValue {
             _ => return text_or_bytes(bytes),
         }
     }
-    match nested_elements(&mut reader, element, &lengths, zone) {
+    match nested_elements(&mut reader, element, &lengths, settings) {
         Some(value) => value,
         None => text_or_bytes(bytes),
     }
@@ -1638,15 +2083,15 @@ fn nested_elements(
     reader: &mut Reader<'_>,
     element: &Type,
     lengths: &[usize],
-    zone: &TimeZone,
+    settings: &Settings,
 ) -> Option<JsonValue> {
     let (length, rest) = lengths.split_first()?;
     let mut values = Vec::with_capacity(*length);
     for _ in 0..*length {
         if rest.is_empty() {
-            values.push(reader.value(element, zone)?);
+            values.push(reader.value(element, settings)?);
         } else {
-            values.push(nested_elements(reader, element, rest, zone)?);
+            values.push(nested_elements(reader, element, rest, settings)?);
         }
     }
     Some(JsonValue::Array(values))
@@ -1661,15 +2106,15 @@ const RANGE_UPPER_OPEN_END: u8 = 0x10;
 
 /// Reads a range of any element type and writes it in the form that
 /// PostgreSQL itself writes, such as `[1,10)`.
-fn decode_range(element: &Type, bytes: &[u8], zone: &TimeZone) -> JsonValue {
-    match range_text(element, &mut Reader::new(bytes), zone) {
+fn decode_range(element: &Type, bytes: &[u8], settings: &Settings) -> JsonValue {
+    match range_text(element, &mut Reader::new(bytes), settings) {
         Some(text) => JsonValue::String(text),
         None => text_or_bytes(bytes),
     }
 }
 
 /// Reads one range out of the reader and writes it as text.
-fn range_text(element: &Type, reader: &mut Reader<'_>, zone: &TimeZone) -> Option<String> {
+fn range_text(element: &Type, reader: &mut Reader<'_>, settings: &Settings) -> Option<String> {
     let flags = reader.u8()?;
     if flags & RANGE_EMPTY != 0 {
         return Some("empty".to_string());
@@ -1677,12 +2122,12 @@ fn range_text(element: &Type, reader: &mut Reader<'_>, zone: &TimeZone) -> Optio
     let lower = if flags & RANGE_LOWER_OPEN_END != 0 {
         String::new()
     } else {
-        render(&reader.value(element, zone)?)
+        render(&reader.value(element, settings)?)
     };
     let upper = if flags & RANGE_UPPER_OPEN_END != 0 {
         String::new()
     } else {
-        render(&reader.value(element, zone)?)
+        render(&reader.value(element, settings)?)
     };
     let open = if flags & RANGE_LOWER_CLOSED != 0 {
         '['
@@ -1698,7 +2143,7 @@ fn range_text(element: &Type, reader: &mut Reader<'_>, zone: &TimeZone) -> Optio
 }
 
 /// Reads a multirange, which holds a count and then the ranges.
-fn decode_multirange(element: &Type, bytes: &[u8], zone: &TimeZone) -> JsonValue {
+fn decode_multirange(element: &Type, bytes: &[u8], settings: &Settings) -> JsonValue {
     let mut reader = Reader::new(bytes);
     let Some(count) = reader.i32() else {
         return text_or_bytes(bytes);
@@ -1707,7 +2152,7 @@ fn decode_multirange(element: &Type, bytes: &[u8], zone: &TimeZone) -> JsonValue
     for _ in 0..count.max(0) {
         let Some(part) = reader.i32().and_then(|length| {
             let mut inner = Reader::new(reader.take(length.max(0) as usize)?);
-            range_text(element, &mut inner, zone)
+            range_text(element, &mut inner, settings)
         }) else {
             return text_or_bytes(bytes);
         };
@@ -1718,7 +2163,7 @@ fn decode_multirange(element: &Type, bytes: &[u8], zone: &TimeZone) -> JsonValue
 
 /// Reads a composite value and writes it in the form that PostgreSQL itself
 /// writes, such as `(1,two)`.
-fn decode_composite(fields: &[Field], bytes: &[u8], zone: &TimeZone) -> JsonValue {
+fn decode_composite(fields: &[Field], bytes: &[u8], settings: &Settings) -> JsonValue {
     let mut reader = Reader::new(bytes);
     let Some(count) = reader.i32() else {
         return text_or_bytes(bytes);
@@ -1730,7 +2175,10 @@ fn decode_composite(fields: &[Field], bytes: &[u8], zone: &TimeZone) -> JsonValu
     for field in fields {
         // The type of the field arrives with the value, and the type of the
         // column holds the same one.
-        let Some(value) = reader.u32().and_then(|_| reader.value(field.type_(), zone)) else {
+        let Some(value) = reader
+            .u32()
+            .and_then(|_| reader.value(field.type_(), settings))
+        else {
             return text_or_bytes(bytes);
         };
         parts.push(render(&value));
@@ -1748,28 +2196,34 @@ fn render(value: &JsonValue) -> String {
     }
 }
 
-/// Writes a money value. The server sends the amount in the smallest unit
-/// of the currency, and the count of the digits of the fraction comes from
-/// the `lc_monetary` setting of the server. Two digits hold for every
-/// currency that PostgreSQL ships a locale for.
-fn money_text(bytes: &[u8]) -> JsonValue {
+/// Writes a money value as a number. The server sends the amount in the
+/// smallest unit of the currency, and `digits` is the count of the digits
+/// of the fraction that the `lc_monetary` setting of the session gives.
+/// The symbol of the currency and the group separators of the text form
+/// are not written.
+fn money_text(bytes: &[u8], digits: u32) -> JsonValue {
     let Some(amount) = Reader::new(bytes).i64() else {
         return text_or_bytes(bytes);
     };
     let sign = if amount < 0 { "-" } else { "" };
     let units = amount.unsigned_abs();
-    JsonValue::String(format!("{sign}{}.{:02}", units / 100, units % 100))
+    if digits == 0 {
+        return JsonValue::String(format!("{sign}{units}"));
+    }
+    let scale = 10u64.pow(digits);
+    let width = digits as usize;
+    JsonValue::String(format!("{sign}{}.{:0width$}", units / scale, units % scale))
 }
 
-/// True when a value of the type holds a `timestamptz` value, alone or inside
-/// an array, a range, a domain or a composite.
-fn holds_timestamptz(column_type: &Type) -> bool {
+/// True when a value of the type holds a value of the `wanted` type, alone
+/// or inside an array, a range, a domain or a composite.
+fn holds(column_type: &Type, wanted: &Type) -> bool {
     match column_type.kind() {
         Kind::Array(inner) | Kind::Range(inner) | Kind::Multirange(inner) | Kind::Domain(inner) => {
-            holds_timestamptz(inner)
+            holds(inner, wanted)
         }
-        Kind::Composite(fields) => fields.iter().any(|field| holds_timestamptz(field.type_())),
-        _ => *column_type == Type::TIMESTAMPTZ,
+        Kind::Composite(fields) => fields.iter().any(|field| holds(field.type_(), wanted)),
+        _ => column_type == wanted,
     }
 }
 
@@ -1795,15 +2249,45 @@ fn zoned_text(value: DateTime<Utc>, zone: &TimeZone) -> String {
     };
     let offset = zone.to_offset(moment).seconds();
     let local = value.naive_utc() + chrono::TimeDelta::seconds(i64::from(offset));
-    let mut text = local.format("%Y-%m-%d %H:%M:%S").to_string();
-    let micros = local.and_utc().timestamp_subsec_micros();
-    if micros > 0 {
-        let fraction = format!("{micros:06}");
-        text.push('.');
-        text.push_str(fraction.trim_end_matches('0'));
+    date_time_text(local, &offset_text(offset))
+}
+
+/// Writes a date and a time in the form that PostgreSQL writes under the
+/// ISO date style, such as `2024-01-01 09:00:00.25`. The `zone` text, such
+/// as `-05`, follows the clock. The era of a date before the year 1 comes
+/// last, as in `0044-03-15 12:00:00+00 BC`.
+fn date_time_text(value: NaiveDateTime, zone: &str) -> String {
+    let (date, before) = date_text(value.date());
+    format!("{date} {}{zone}{}", time_of_day(value.time()), era(before))
+}
+
+/// Writes a date as `2024-01-31`, with four digits of the year at least.
+/// PostgreSQL counts no year zero, so the year 0 of `chrono` is 1 BC and the
+/// year -43 is 44 BC. Gives the text and true for a date before the year 1.
+fn date_text(date: NaiveDate) -> (String, bool) {
+    use chrono::Datelike;
+    let year = date.year();
+    let shown = if year > 0 { year } else { 1 - year };
+    let text = format!("{shown:04}-{:02}-{:02}", date.month(), date.day());
+    (text, year <= 0)
+}
+
+/// The text that PostgreSQL puts after a date before the year 1.
+fn era(before: bool) -> &'static str {
+    if before {
+        " BC"
+    } else {
+        ""
     }
-    text.push_str(&offset_text(offset));
-    text
+}
+
+/// Writes a time of day as a clock. The fraction of a second has no zeros
+/// at its end, as in PostgreSQL, so 250 milliseconds give `.25`.
+fn time_of_day(time: NaiveTime) -> String {
+    use chrono::Timelike;
+    let micros = i64::from(time.num_seconds_from_midnight()) * 1_000_000
+        + i64::from(time.nanosecond() / 1_000);
+    clock_text(micros)
 }
 
 /// Gives `infinity` or `-infinity` for a date or a timestamp that holds one
@@ -1883,43 +2367,50 @@ fn numeric_text(bytes: &[u8]) -> JsonValue {
     JsonValue::String(text)
 }
 
-/// Writes an interval in the form that PostgreSQL itself writes, such as
-/// `1 year 2 mons 3 days 04:05:06`.
+/// Writes an interval in the form that PostgreSQL writes under the default
+/// `postgres` interval style, such as `1 year 2 mons 3 days 04:05:06` or
+/// `-1 days +02:00:00`. Only a count of exactly 1 takes the singular word,
+/// so `-1` gives `-1 days`. A positive part that comes after a negative part
+/// takes a plus sign, as in PostgreSQL.
 fn interval_text(bytes: &[u8]) -> JsonValue {
     let mut reader = Reader::new(bytes);
     let (Some(micros), Some(days), Some(months)) = (reader.i64(), reader.i32(), reader.i32())
     else {
         return text_or_bytes(bytes);
     };
-    let mut parts = Vec::new();
-    let years = months / 12;
-    let rest_months = months % 12;
-    if years != 0 {
-        parts.push(format!("{years} {}", plural(years, "year", "years")));
+    // PostgreSQL 17 sends an infinite interval as the largest or the smallest
+    // value of each part.
+    if (micros, days, months) == (i64::MAX, i32::MAX, i32::MAX) {
+        return JsonValue::String("infinity".into());
     }
-    if rest_months != 0 {
-        parts.push(format!(
-            "{rest_months} {}",
-            plural(rest_months, "mon", "mons")
-        ));
+    if (micros, days, months) == (i64::MIN, i32::MIN, i32::MIN) {
+        return JsonValue::String("-infinity".into());
     }
-    if days != 0 {
-        parts.push(format!("{days} {}", plural(days, "day", "days")));
+    let mut text = String::new();
+    // True when the last part in the text is negative.
+    let mut after_negative = false;
+    for (count, unit) in [(months / 12, "year"), (months % 12, "mon"), (days, "day")] {
+        if count == 0 {
+            continue;
+        }
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        let plus = if after_negative && count > 0 { "+" } else { "" };
+        let plural = if count == 1 { "" } else { "s" };
+        text.push_str(&format!("{plus}{count} {unit}{plural}"));
+        after_negative = count < 0;
     }
-    if micros != 0 || parts.is_empty() {
-        parts.push(clock_text(micros));
+    if micros != 0 || text.is_empty() {
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        if after_negative && micros > 0 {
+            text.push('+');
+        }
+        text.push_str(&clock_text(micros));
     }
-    JsonValue::String(parts.join(" "))
-}
-
-/// Gives the singular word for a count of one, and the plural for every
-/// other count.
-fn plural<'a>(count: i32, one: &'a str, many: &'a str) -> &'a str {
-    if count.abs() == 1 {
-        one
-    } else {
-        many
-    }
+    JsonValue::String(text)
 }
 
 /// Writes a count of microseconds as a clock, with the fraction only when
@@ -2026,6 +2517,42 @@ impl<'a> Reader<'a> {
         self.i32().map(|value| value as u32)
     }
 
+    fn u16(&mut self) -> Option<u16> {
+        self.i16().map(|value| value as u16)
+    }
+
+    fn u64(&mut self) -> Option<u64> {
+        self.i64().map(|value| value as u64)
+    }
+
+    fn f64(&mut self) -> Option<f64> {
+        self.u64().map(f64::from_bits)
+    }
+
+    /// True when the reader used every byte.
+    fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    /// Reads text that ends with a zero byte, and the zero byte.
+    fn c_text(&mut self) -> Option<&'a str> {
+        let end = self.bytes.iter().position(|&byte| byte == 0)?;
+        let text = std::str::from_utf8(self.take(end)?).ok()?;
+        self.take(1)?;
+        Some(text)
+    }
+
+    /// Reads text that has its length first. A length of minus one gives
+    /// `Some(None)`, which is NULL.
+    fn sized_text(&mut self) -> Option<Option<&'a str>> {
+        let length = self.i32()?;
+        if length < 0 {
+            return Some(None);
+        }
+        let bytes = self.take(length as usize)?;
+        std::str::from_utf8(bytes).ok().map(Some)
+    }
+
     fn i64(&mut self) -> Option<i64> {
         self.take(8)
             .map(|bytes| i64::from_be_bytes(bytes.try_into().unwrap()))
@@ -2034,13 +2561,13 @@ impl<'a> Reader<'a> {
     /// Reads one value that carries its own length, as the elements of an
     /// array and the bounds of a range do. A length of minus one means a
     /// value that is null.
-    fn value(&mut self, column_type: &Type, zone: &TimeZone) -> Option<JsonValue> {
+    fn value(&mut self, column_type: &Type, settings: &Settings) -> Option<JsonValue> {
         let length = self.i32()?;
         if length < 0 {
             return Some(JsonValue::Null);
         }
         let bytes = self.take(length as usize)?;
-        Some(decode_value(column_type, bytes, zone))
+        Some(decode_value(column_type, bytes, settings))
     }
 }
 
@@ -2915,6 +3442,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_parameterised_select_of_money_reads_the_digits_of_the_session() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            answer_probe(&mut server, true).await;
+            read_until_sync(&mut server).await;
+            server
+                .write_all(&prepared(Some(&[("price", 790)])))
+                .await
+                .unwrap();
+
+            let mut digits = row_description(&["scale"]);
+            digits.extend_from_slice(&data_row(&[Some("3")]));
+            digits.extend_from_slice(&command_complete("SELECT 1"));
+            answer_query(&mut server, MONEY_DIGITS, &[digits]).await;
+
+            read_until_sync(&mut server).await;
+            let mut answer = message(b'2', &[]);
+            answer.extend_from_slice(&binary_data_row(&[Some(&123456i64.to_be_bytes())]));
+            answer.extend_from_slice(&command_complete("SELECT 1"));
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
+        });
+
+        let mut driver = driver_on(client_end).await;
+        let mut sink = BufferSink::new(100);
+        driver
+            .stream_with_params("SELECT $1::money", &one_param(), &no_limit(), &mut sink)
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        assert_eq!(
+            response.results[0].rows[0][0],
+            JsonValue::String("123.456".into())
+        );
+
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_money_probe_that_fails_or_gives_no_count_gives_two_digits() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            answer_query(
+                &mut server,
+                MONEY_DIGITS,
+                &[error_response("25P02", "transaction is aborted")],
+            )
+            .await;
+            answer_query(&mut server, MONEY_DIGITS, &[command_complete("SELECT 0")]).await;
+            let mut large = row_description(&["scale"]);
+            large.extend_from_slice(&data_row(&[Some("11")]));
+            large.extend_from_slice(&command_complete("SELECT 1"));
+            answer_query(&mut server, MONEY_DIGITS, &[large]).await;
+        });
+
+        let driver = driver_on(client_end).await;
+        assert_eq!(driver.money_digits().await, 2);
+        // An answer with no row, and a count past 10, give 2 as well.
+        assert_eq!(driver.money_digits().await, 2);
+        assert_eq!(driver.money_digits().await, 2);
+
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn a_zone_probe_that_fails_gives_utc() {
         let (client_end, mut server) = tokio::io::duplex(64 * 1024);
         let task = tokio::spawn(async move {
@@ -3563,7 +4158,7 @@ mod tests {
     }
 
     fn decoded(column_type: &Type, bytes: &[u8]) -> JsonValue {
-        decode_value(column_type, bytes, &TimeZone::UTC)
+        decode_value(column_type, bytes, &Settings::default())
     }
 
     #[test]
@@ -3716,6 +4311,60 @@ mod tests {
     }
 
     #[test]
+    fn a_date_and_a_time_show_as_postgresql_writes_them() {
+        let string = |value: &str| JsonValue::String(value.into());
+        let epoch = NaiveDate::from_ymd_opt(2000, 1, 1).unwrap();
+        // The days and the microseconds from the epoch of the server.
+        let days = |year: i32, month: u32, day: u32| {
+            let date = NaiveDate::from_ymd_opt(year, month, day).unwrap();
+            (date - epoch).num_days() as i32
+        };
+        let micros = |year: i32| i64::from(days(year, 1, 1)) * 86_400_000_000;
+
+        // The fraction of a second has no zeros at its end.
+        let quarter = 9 * 3_600_000_000i64 + 250_000;
+        assert_eq!(
+            decoded(&Type::TIME, &quarter.to_be_bytes()),
+            string("09:00:00.25")
+        );
+        assert_eq!(
+            decoded(&Type::TIME, &86_400_000_000i64.to_be_bytes()),
+            string("24:00:00")
+        );
+        assert_eq!(decoded(&Type::TIME, b"abc"), string("abc"));
+        assert_eq!(
+            decoded(&Type::TIMESTAMP, &250_000i64.to_be_bytes()),
+            string("2000-01-01 00:00:00.25")
+        );
+        // A date before the year 1 shows its era, and the year 0 is 1 BC.
+        assert_eq!(
+            decoded(&Type::DATE, &days(0, 1, 1).to_be_bytes()),
+            string("0001-01-01 BC")
+        );
+        assert_eq!(
+            decoded(&Type::DATE, &days(-43, 3, 15).to_be_bytes()),
+            string("0044-03-15 BC")
+        );
+        assert_eq!(
+            decoded(&Type::TIMESTAMP, &micros(0).to_be_bytes()),
+            string("0001-01-01 00:00:00 BC")
+        );
+        assert_eq!(
+            decoded(&Type::TIMESTAMPTZ, &micros(0).to_be_bytes()),
+            string("0001-01-01 00:00:00+00 BC")
+        );
+        // A year past 9999 has no sign.
+        assert_eq!(
+            decoded(&Type::DATE, &days(10_000, 1, 1).to_be_bytes()),
+            string("10000-01-01")
+        );
+        assert_eq!(
+            decoded(&Type::DATE, &days(5, 1, 1).to_be_bytes()),
+            string("0005-01-01")
+        );
+    }
+
+    #[test]
     fn a_timestamptz_value_shows_in_the_zone_of_the_session() {
         let moment = |micros: i64| DateTime::<Utc>::from_timestamp_micros(micros).unwrap();
         // 2024-01-01 14:00:00 UTC.
@@ -3759,18 +4408,20 @@ mod tests {
 
     #[test]
     fn a_type_that_holds_a_timestamptz_is_found() {
-        assert!(holds_timestamptz(&Type::TIMESTAMPTZ));
-        assert!(holds_timestamptz(&Type::TIMESTAMPTZ_ARRAY));
-        assert!(holds_timestamptz(&Type::TSTZ_RANGE));
-        assert!(!holds_timestamptz(&Type::TIMESTAMP));
-        assert!(!holds_timestamptz(&Type::INT4_ARRAY));
+        let tz = &Type::TIMESTAMPTZ;
+        assert!(holds(&Type::TIMESTAMPTZ, tz));
+        assert!(holds(&Type::TIMESTAMPTZ_ARRAY, tz));
+        assert!(holds(&Type::TSTZ_RANGE, tz));
+        assert!(!holds(&Type::TIMESTAMP, tz));
+        assert!(!holds(&Type::INT4_ARRAY, tz));
         let composite = Type::new(
             "pair".into(),
             0,
             Kind::Composite(vec![Field::new("at".into(), Type::TIMESTAMPTZ)]),
             "public".into(),
         );
-        assert!(holds_timestamptz(&composite));
+        assert!(holds(&composite, tz));
+        assert!(holds(&Type::MONEY_ARRAY, &Type::MONEY));
     }
 
     #[test]
@@ -3786,17 +4437,21 @@ mod tests {
     }
 
     #[test]
-    fn a_money_value_holds_two_digits_of_the_fraction() {
+    fn a_money_value_holds_the_digits_of_the_fraction_of_the_session() {
+        let string = |value: &str| JsonValue::String(value.into());
         assert_eq!(
             decoded(&Type::MONEY, &123456i64.to_be_bytes()),
-            JsonValue::String("1234.56".into())
+            string("1234.56")
         );
         assert_eq!(
             decoded(&Type::MONEY, &(-5i64).to_be_bytes()),
-            JsonValue::String("-0.05".into())
+            string("-0.05")
         );
+        // A currency of three digits, and one of none.
+        assert_eq!(money_text(&123456i64.to_be_bytes(), 3), string("123.456"));
+        assert_eq!(money_text(&(-1234i64).to_be_bytes(), 0), string("-1234"));
         // A value of the wrong length falls back on the text rule.
-        assert_eq!(decoded(&Type::MONEY, b"12"), JsonValue::String("12".into()));
+        assert_eq!(decoded(&Type::MONEY, b"12"), string("12"));
     }
 
     #[test]
@@ -3825,6 +4480,365 @@ mod tests {
             decoded(&Type::INTERVAL, b"short"),
             JsonValue::String("short".into())
         );
+    }
+
+    #[test]
+    fn an_interval_writes_its_signs_as_postgresql_does() {
+        fn interval(micros: i64, days: i32, months: i32) -> JsonValue {
+            let mut body = micros.to_be_bytes().to_vec();
+            body.extend_from_slice(&days.to_be_bytes());
+            body.extend_from_slice(&months.to_be_bytes());
+            decoded(&Type::INTERVAL, &body)
+        }
+        let string = |value: &str| JsonValue::String(value.into());
+
+        // Only a count of exactly 1 takes the singular word.
+        assert_eq!(interval(0, -1, 0), string("-1 days"));
+        assert_eq!(interval(0, 0, -13), string("-1 years -1 mons"));
+        // A positive part after a negative part takes a plus sign.
+        assert_eq!(interval(7_200_000_000, -1, 0), string("-1 days +02:00:00"));
+        assert_eq!(
+            interval(3_600_000_000, -1, 1),
+            string("1 mon -1 days +01:00:00")
+        );
+        assert_eq!(interval(0, 1, -1), string("-1 mons +1 day"));
+        // A negative part after a negative part keeps its own sign alone.
+        assert_eq!(interval(-60_000_000, -2, 0), string("-2 days -00:01:00"));
+        // A positive part after a positive part takes no sign.
+        assert_eq!(interval(1_000_000, 2, 0), string("2 days 00:00:01"));
+        assert_eq!(interval(i64::MAX, i32::MAX, i32::MAX), string("infinity"));
+        assert_eq!(interval(i64::MIN, i32::MIN, i32::MIN), string("-infinity"));
+    }
+
+    /// Joins the big-endian bytes of float8 values.
+    fn float_body(values: &[f64]) -> Vec<u8> {
+        values
+            .iter()
+            .flat_map(|value| value.to_be_bytes())
+            .collect()
+    }
+
+    #[test]
+    fn a_geometric_value_shows_in_the_form_of_postgresql() {
+        let string = |value: &str| JsonValue::String(value.into());
+        assert_eq!(
+            decoded(&Type::POINT, &float_body(&[1.0, -2.5])),
+            string("(1,-2.5)")
+        );
+        assert_eq!(
+            decoded(&Type::LSEG, &float_body(&[0.0, 0.0, 1.0, 1.0])),
+            string("[(0,0),(1,1)]")
+        );
+        assert_eq!(
+            decoded(&Type::BOX, &float_body(&[1.0, 1.0, 0.0, 0.0])),
+            string("(1,1),(0,0)")
+        );
+        let mut closed = vec![1u8];
+        closed.extend_from_slice(&2i32.to_be_bytes());
+        closed.extend_from_slice(&float_body(&[0.0, 0.0, 1.0, 1.0]));
+        assert_eq!(decoded(&Type::PATH, &closed), string("((0,0),(1,1))"));
+        closed[0] = 0;
+        assert_eq!(decoded(&Type::PATH, &closed), string("[(0,0),(1,1)]"));
+        let mut polygon = 3i32.to_be_bytes().to_vec();
+        polygon.extend_from_slice(&float_body(&[0.0, 0.0, 1.0, 0.0, 0.0, 1.0]));
+        assert_eq!(
+            decoded(&Type::POLYGON, &polygon),
+            string("((0,0),(1,0),(0,1))")
+        );
+        assert_eq!(
+            decoded(&Type::LINE, &float_body(&[1.0, -1.0, 0.0])),
+            string("{1,-1,0}")
+        );
+        assert_eq!(
+            decoded(&Type::CIRCLE, &float_body(&[0.0, 0.0, 5.0])),
+            string("<(0,0),5>")
+        );
+        // A value that ends early, or that has bytes past its end, falls
+        // back on the text rule.
+        let short = float_body(&[1.0]);
+        assert_eq!(decoded(&Type::POINT, &short), text_or_bytes(&short));
+        let long = float_body(&[1.0, 2.0, 3.0]);
+        assert_eq!(decoded(&Type::POINT, &long), text_or_bytes(&long));
+        let negative = (-1i32).to_be_bytes();
+        assert_eq!(decoded(&Type::POLYGON, &negative), text_or_bytes(&negative));
+        assert_eq!(
+            decoded(&Type::PATH, &[1, 0xFF, 0xFF, 0xFF, 0xFF]),
+            text_or_bytes(&[1, 0xFF, 0xFF, 0xFF, 0xFF])
+        );
+        assert_eq!(decoded(&Type::PATH, &[]), text_or_bytes(&[]));
+        // An array of points reads each element.
+        assert_eq!(
+            decoded(
+                &Type::POINT_ARRAY,
+                &array_body(&Type::POINT, &[1], &[Some(&float_body(&[1.0, 2.0]))])
+            ),
+            serde_json::json!(["(1,2)"])
+        );
+    }
+
+    #[test]
+    fn a_float_of_a_geometric_value_follows_the_rules_of_postgresql() {
+        assert_eq!(float_text(1.5), "1.5");
+        assert_eq!(float_text(0.1), "0.1");
+        assert_eq!(float_text(-0.0), "-0");
+        assert_eq!(float_text(0.0001), "0.0001");
+        assert_eq!(float_text(0.000015), "1.5e-05");
+        assert_eq!(float_text(1e14), "100000000000000");
+        assert_eq!(float_text(1e15), "1e+15");
+        assert_eq!(float_text(1.25e21), "1.25e+21");
+        assert_eq!(float_text(1e-300), "1e-300");
+        assert_eq!(float_text(f64::NAN), "NaN");
+        assert_eq!(float_text(f64::INFINITY), "Infinity");
+        assert_eq!(float_text(f64::NEG_INFINITY), "-Infinity");
+    }
+
+    #[test]
+    fn a_log_place_a_row_place_and_a_snapshot_are_read() {
+        let string = |value: &str| JsonValue::String(value.into());
+        assert_eq!(
+            decoded(&Type::PG_LSN, &0x16_B374_D848u64.to_be_bytes()),
+            string("16/B374D848")
+        );
+        assert_eq!(decoded(&Type::PG_LSN, b"abc"), string("abc"));
+        assert_eq!(
+            decoded(&Type::XID8, &u64::MAX.to_be_bytes()),
+            JsonValue::from(u64::MAX)
+        );
+        assert_eq!(decoded(&Type::XID8, b"abc"), string("abc"));
+        let mut tid = 7u32.to_be_bytes().to_vec();
+        tid.extend_from_slice(&3u16.to_be_bytes());
+        assert_eq!(decoded(&Type::TID, &tid), string("(7,3)"));
+        assert_eq!(decoded(&Type::TID, b"abc"), string("abc"));
+
+        let snapshot = |running: &[u64]| {
+            let mut body = (running.len() as i32).to_be_bytes().to_vec();
+            body.extend_from_slice(&10u64.to_be_bytes());
+            body.extend_from_slice(&20u64.to_be_bytes());
+            for id in running {
+                body.extend_from_slice(&id.to_be_bytes());
+            }
+            body
+        };
+        assert_eq!(
+            decoded(&Type::PG_SNAPSHOT, &snapshot(&[])),
+            string("10:20:")
+        );
+        assert_eq!(
+            decoded(&Type::TXID_SNAPSHOT, &snapshot(&[12, 15])),
+            string("10:20:12,15")
+        );
+        let negative = (-1i32).to_be_bytes();
+        assert_eq!(
+            decoded(&Type::PG_SNAPSHOT, &negative),
+            text_or_bytes(&negative)
+        );
+        let mut short = snapshot(&[12]);
+        short.truncate(20);
+        assert_eq!(decoded(&Type::PG_SNAPSHOT, &short), text_or_bytes(&short));
+
+        // A jsonpath value is a version byte and then the text.
+        assert_eq!(decoded(&Type::JSONPATH, b"\x01$.a"), string("$.a"));
+        assert_eq!(decoded(&Type::JSONPATH, b"$.a"), string("$.a"));
+    }
+
+    #[test]
+    fn a_tsvector_shows_its_lexemes_positions_and_weights() {
+        let mut body = 3i32.to_be_bytes().to_vec();
+        body.extend_from_slice(b"cat\0");
+        body.extend_from_slice(&0u16.to_be_bytes());
+        body.extend_from_slice(b"it's\0");
+        body.extend_from_slice(&1u16.to_be_bytes());
+        body.extend_from_slice(&3u16.to_be_bytes());
+        body.extend_from_slice(b"a\\b\0");
+        body.extend_from_slice(&4u16.to_be_bytes());
+        for entry in [0xC001u16, 0x8002, 0x4003, 0x0004] {
+            body.extend_from_slice(&entry.to_be_bytes());
+        }
+        assert_eq!(
+            decoded(&Type::TS_VECTOR, &body),
+            JsonValue::String("'cat' 'it''s':3 'a\\\\b':1A,2B,3C,4".into())
+        );
+        assert_eq!(
+            decoded(&Type::TS_VECTOR, &0i32.to_be_bytes()),
+            JsonValue::String(String::new())
+        );
+        // A lexeme without its zero byte, or a position that is missing,
+        // falls back on the text rule.
+        let mut open = 1i32.to_be_bytes().to_vec();
+        open.extend_from_slice(b"cat");
+        assert_eq!(decoded(&Type::TS_VECTOR, &open), text_or_bytes(&open));
+        let mut missing = 1i32.to_be_bytes().to_vec();
+        missing.extend_from_slice(b"cat\0");
+        missing.extend_from_slice(&1u16.to_be_bytes());
+        assert_eq!(decoded(&Type::TS_VECTOR, &missing), text_or_bytes(&missing));
+        let mut no_count = 1i32.to_be_bytes().to_vec();
+        no_count.extend_from_slice(b"cat\0");
+        assert_eq!(
+            decoded(&Type::TS_VECTOR, &no_count),
+            text_or_bytes(&no_count)
+        );
+        let mut not_text = 1i32.to_be_bytes().to_vec();
+        not_text.extend_from_slice(&[0xFF, 0]);
+        not_text.extend_from_slice(&0u16.to_be_bytes());
+        assert_eq!(
+            decoded(&Type::TS_VECTOR, &not_text),
+            text_or_bytes(&not_text)
+        );
+        assert_eq!(decoded(&Type::TS_VECTOR, &[1]), text_or_bytes(&[1]));
+    }
+
+    /// The binary form of an operand of a `tsquery` value.
+    fn query_value(word: &str, weight: u8, prefix: u8) -> Vec<u8> {
+        let mut body = vec![TSQUERY_VALUE, weight, prefix];
+        body.extend_from_slice(word.as_bytes());
+        body.push(0);
+        body
+    }
+
+    /// The binary form of a `tsquery` value of the given items.
+    fn query_body(items: &[Vec<u8>]) -> Vec<u8> {
+        let mut body = (items.len() as i32).to_be_bytes().to_vec();
+        for item in items {
+            body.extend_from_slice(item);
+        }
+        body
+    }
+
+    #[test]
+    fn a_tsquery_shows_its_operators_and_parentheses_as_postgresql_does() {
+        let text = |items: &[Vec<u8>]| decoded(&Type::TSQUERY, &query_body(items));
+        let string = |value: &str| JsonValue::String(value.into());
+        let and = vec![TSQUERY_OPERATOR, TSQUERY_AND];
+        let or = vec![TSQUERY_OPERATOR, TSQUERY_OR];
+        let not = vec![TSQUERY_OPERATOR, TSQUERY_NOT];
+        let phrase = |distance: i16| {
+            let mut item = vec![TSQUERY_OPERATOR, TSQUERY_PHRASE];
+            item.extend_from_slice(&distance.to_be_bytes());
+            item
+        };
+        let (fat, rat, cat) = (
+            query_value("fat", 0, 0),
+            query_value("rat", 0, 0),
+            query_value("cat", 0, 0),
+        );
+
+        assert_eq!(text(&[]), string(""));
+        assert_eq!(text(std::slice::from_ref(&fat)), string("'fat'"));
+        // An operator comes first, then its right operand, then its left.
+        assert_eq!(
+            text(&[and.clone(), rat.clone(), fat.clone()]),
+            string("'fat' & 'rat'")
+        );
+        // 'fat' & ( 'rat' | !'cat' )
+        assert_eq!(
+            text(&[
+                and.clone(),
+                or.clone(),
+                not.clone(),
+                cat.clone(),
+                rat.clone(),
+                fat.clone()
+            ]),
+            string("'fat' & ( 'rat' | !'cat' )")
+        );
+        // ( 'fat' | 'rat' ) & 'cat' and 'fat' | 'rat' & 'cat'.
+        assert_eq!(
+            text(&[
+                and.clone(),
+                cat.clone(),
+                or.clone(),
+                rat.clone(),
+                fat.clone()
+            ]),
+            string("( 'fat' | 'rat' ) & 'cat'")
+        );
+        assert_eq!(
+            text(&[
+                or.clone(),
+                and.clone(),
+                cat.clone(),
+                rat.clone(),
+                fat.clone()
+            ]),
+            string("'fat' | 'rat' & 'cat'")
+        );
+        // A NOT of an operator puts the operator in parentheses.
+        assert_eq!(
+            text(&[not.clone(), and.clone(), rat.clone(), fat.clone()]),
+            string("!( 'fat' & 'rat' )")
+        );
+        // A phrase on the right of a phrase goes in parentheses, and one on
+        // the left does not.
+        assert_eq!(
+            text(&[phrase(1), phrase(2), cat.clone(), rat.clone(), fat.clone()]),
+            string("'fat' <-> ( 'rat' <2> 'cat' )")
+        );
+        assert_eq!(
+            text(&[phrase(1), cat.clone(), phrase(1), rat.clone(), fat.clone()]),
+            string("'fat' <-> 'rat' <-> 'cat'")
+        );
+        // The weights and the prefix flag follow a colon, and a quote is
+        // doubled.
+        assert_eq!(
+            text(&[query_value("it's", 0b1010, 1)]),
+            string("'it''s':*AC")
+        );
+        assert_eq!(text(&[query_value("a", 0b0101, 0)]), string("'a':BD"));
+
+        // An item of an unknown kind, an unknown operator, an operator
+        // without its operands, and a value with two roots fall back on the
+        // text rule.
+        let fallback = |items: &[Vec<u8>]| {
+            let body = query_body(items);
+            assert_eq!(decoded(&Type::TSQUERY, &body), text_or_bytes(&body));
+        };
+        fallback(&[vec![9]]);
+        fallback(&[vec![TSQUERY_OPERATOR, 9], rat.clone(), fat.clone()]);
+        fallback(&[and.clone(), fat.clone()]);
+        fallback(std::slice::from_ref(&not));
+        fallback(&[fat.clone(), rat.clone()]);
+        fallback(&[vec![TSQUERY_VALUE, 0]]);
+        fallback(&[vec![TSQUERY_OPERATOR, TSQUERY_PHRASE, 0]]);
+        assert_eq!(decoded(&Type::TSQUERY, &[1]), text_or_bytes(&[1]));
+    }
+
+    #[test]
+    fn an_hstore_value_shows_its_pairs() {
+        let hstore = Type::new("hstore".into(), 16_400, Kind::Simple, "public".into());
+        let pair = |key: &[u8], value: Option<&[u8]>| {
+            let mut body = (key.len() as i32).to_be_bytes().to_vec();
+            body.extend_from_slice(key);
+            match value {
+                Some(value) => {
+                    body.extend_from_slice(&(value.len() as i32).to_be_bytes());
+                    body.extend_from_slice(value);
+                }
+                None => body.extend_from_slice(&(-1i32).to_be_bytes()),
+            }
+            body
+        };
+        let mut body = 2i32.to_be_bytes().to_vec();
+        body.extend_from_slice(&pair(b"a", Some(b"say \"hi\" \\")));
+        body.extend_from_slice(&pair(b"b", None));
+        assert_eq!(
+            decoded(&hstore, &body),
+            JsonValue::String("\"a\"=>\"say \\\"hi\\\" \\\\\", \"b\"=>NULL".into())
+        );
+        // A key that is NULL, and a key that is not text, fall back on the
+        // text rule.
+        let mut null_key = 1i32.to_be_bytes().to_vec();
+        null_key.extend_from_slice(&(-1i32).to_be_bytes());
+        assert_eq!(decoded(&hstore, &null_key), text_or_bytes(&null_key));
+        let mut not_text = 1i32.to_be_bytes().to_vec();
+        not_text.extend_from_slice(&pair(&[0xFF], None));
+        assert_eq!(decoded(&hstore, &not_text), text_or_bytes(&not_text));
+        let mut short = 1i32.to_be_bytes().to_vec();
+        short.extend_from_slice(&5i32.to_be_bytes());
+        assert_eq!(decoded(&hstore, &short), text_or_bytes(&short));
+        assert_eq!(decoded(&hstore, &[1]), text_or_bytes(&[1]));
+        // A type of another name keeps the text rule.
+        let other = Type::new("citext".into(), 16_401, Kind::Simple, "public".into());
+        assert_eq!(decoded(&other, b"Hi"), JsonValue::String("Hi".into()));
     }
 
     #[test]
