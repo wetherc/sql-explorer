@@ -203,6 +203,7 @@ export function constraintHint(constraint: ConstraintRef): string {
     exclusion: 'exclusion',
     trigger: 'trigger',
     notNull: 'not null',
+    default: 'default',
   }
   const parts = [words[constraint.kind]]
   if (constraint.columns.length > 0) {

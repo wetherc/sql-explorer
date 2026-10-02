@@ -129,6 +129,9 @@ describe('constraintHint', () => {
     expect(constraintHint({ name: 'n', kind: 'notNull', columns: ['id'], detail: null })).toBe(
       'not null \u00b7 id',
     )
+    expect(
+      constraintHint({ name: 'df', kind: 'default', columns: ['made'], detail: '(getdate())' }),
+    ).toBe('default \u00b7 made \u00b7 (getdate())')
   })
 })
 

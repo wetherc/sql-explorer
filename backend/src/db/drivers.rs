@@ -533,6 +533,7 @@ pub fn constraint_kind(word: &str) -> ConstraintKind {
         "X" => ConstraintKind::Exclusion,
         "T" => ConstraintKind::Trigger,
         "N" => ConstraintKind::NotNull,
+        "DEFAULT" => ConstraintKind::Default,
         _ => ConstraintKind::Check,
     }
 }
@@ -820,6 +821,7 @@ mod tests {
         assert_eq!(constraint_kind("x"), ConstraintKind::Exclusion);
         assert_eq!(constraint_kind("t"), ConstraintKind::Trigger);
         assert_eq!(constraint_kind("n"), ConstraintKind::NotNull);
+        assert_eq!(constraint_kind("DEFAULT"), ConstraintKind::Default);
         assert_eq!(routine_kind("PROCEDURE"), RoutineKind::Procedure);
         assert_eq!(routine_kind("FUNCTION"), RoutineKind::Function);
     }

@@ -306,6 +306,7 @@ export const ConstraintKind = {
   Exclusion: 'exclusion',
   Trigger: 'trigger',
   NotNull: 'notNull',
+  Default: 'default',
 } as const
 export type ConstraintKind = (typeof ConstraintKind)[keyof typeof ConstraintKind]
 

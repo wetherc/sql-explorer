@@ -30,6 +30,48 @@ pub enum TypeInfo {
         schema: Option<Arc<XmlSchema>>,
         size: usize,
     },
+    /// A user-defined type, such as `geography` or `hierarchyid`.
+    Udt(UdtInfo),
+}
+
+/// The metadata that the server sends for a user-defined type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UdtInfo {
+    max_size: u16,
+    db_name: String,
+    schema: String,
+    type_name: String,
+    assembly_name: String,
+}
+
+impl UdtInfo {
+    pub fn new(
+        max_size: u16,
+        db_name: impl Into<String>,
+        schema: impl Into<String>,
+        type_name: impl Into<String>,
+        assembly_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            max_size,
+            db_name: db_name.into(),
+            schema: schema.into(),
+            type_name: type_name.into(),
+            assembly_name: assembly_name.into(),
+        }
+    }
+
+    /// The name of the type without its schema, such as `geography`.
+    pub fn type_name(&self) -> &str {
+        &self.type_name
+    }
+}
+
+/// Writes a text with a length of one byte, in UTF-16.
+fn put_b_varchar(dst: &mut BytesMut, text: &str) {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    dst.put_u8(units.len() as u8);
+    units.into_iter().for_each(|unit| dst.put_u16_le(unit));
 }
 
 #[derive(Clone, Debug, Copy, PartialEq, Eq)]
@@ -99,7 +141,11 @@ impl Encode<BytesMut> for VarLenContext {
                 dst.put_u32_le(self.len() as u32);
             }
             VarLenType::Xml => (),
-            typ => todo!("encoding {:?} is not supported yet", typ),
+            typ => {
+                return Err(Error::Protocol(
+                    format!("encoding of column type {:?} is not supported", typ).into(),
+                ))
+            }
         }
 
         if let Some(collation) = self.collation() {
@@ -250,6 +296,16 @@ impl Encode<BytesMut> for TypeInfo {
                     dst.put_u8(0);
                 }
             }
+            TypeInfo::Udt(udt) => {
+                dst.put_u8(VarLenType::Udt as u8);
+                dst.put_u16_le(udt.max_size);
+                put_b_varchar(dst, &udt.db_name);
+                put_b_varchar(dst, &udt.schema);
+                put_b_varchar(dst, &udt.type_name);
+                let assembly: Vec<u16> = udt.assembly_name.encode_utf16().collect();
+                dst.put_u16_le(assembly.len() as u16);
+                assembly.into_iter().for_each(|unit| dst.put_u16_le(unit));
+            }
         }
 
         Ok(())
@@ -292,18 +348,20 @@ impl TypeInfo {
             // A user-defined type, such as `geography` or `hierarchyid`,
             // names its type in the metadata. Each value comes as a
             // partially length-prefixed run of bytes, whatever the maximum
-            // size is, so the context gets the size of an unknown length.
+            // size is.
             Ok(VarLenType::Udt) => {
-                let _max_size = src.read_u16_le().await?;
-                let _db_name = src.read_b_varchar().await?;
-                let _schema_name = src.read_b_varchar().await?;
-                let _type_name = src.read_b_varchar().await?;
-                let _assembly_name = src.read_us_varchar().await?;
+                let max_size = src.read_u16_le().await?;
+                let db_name = src.read_b_varchar().await?;
+                let schema = src.read_b_varchar().await?;
+                let type_name = src.read_b_varchar().await?;
+                let assembly_name = src.read_us_varchar().await?;
 
-                Ok(TypeInfo::VarLenSized(VarLenContext::new(
-                    VarLenType::Udt,
-                    usize::MAX,
-                    None,
+                Ok(TypeInfo::Udt(UdtInfo::new(
+                    max_size,
+                    db_name,
+                    schema,
+                    type_name,
+                    assembly_name,
                 )))
             }
             Ok(ty) => {
@@ -332,7 +390,11 @@ impl TypeInfo {
                     | VarLenType::Text
                     | VarLenType::NText
                     | VarLenType::SSVariant => src.read_u32_le().await? as usize,
-                    _ => todo!("not yet implemented for {:?}", ty),
+                    _ => {
+                        return Err(Error::Protocol(
+                            format!("no length to read for column type {:?}", ty).into(),
+                        ))
+                    }
                 };
 
                 let collation = match ty {
@@ -403,8 +465,12 @@ mod tests {
             .expect("decode must succeed");
         assert_eq!(
             ti,
-            TypeInfo::VarLenSized(VarLenContext::new(VarLenType::Udt, usize::MAX, None))
+            TypeInfo::Udt(UdtInfo::new(892, "db", "sys", "hierarchyid", "a"))
         );
+        let TypeInfo::Udt(udt) = &ti else {
+            unreachable!()
+        };
+        assert_eq!(udt.type_name(), "hierarchyid");
 
         let value = crate::ColumnData::decode(&mut src, &ti).await.unwrap();
         assert_eq!(
@@ -413,6 +479,14 @@ mod tests {
         );
         let null = crate::ColumnData::decode(&mut src, &ti).await.unwrap();
         assert_eq!(null, crate::ColumnData::Binary(None));
+    }
+
+    #[test]
+    fn a_context_without_an_encoding_gives_a_protocol_error() {
+        let ctx = VarLenContext::new(VarLenType::Udt, 0, None);
+        let result = ctx.encode(&mut BytesMut::new());
+
+        assert!(matches!(result, Err(Error::Protocol(_))));
     }
 
     #[tokio::test]
@@ -433,6 +507,13 @@ mod tests {
                 VarLenType::NChar,
                 40,
                 Some(Collation::new(13632521, 52)),
+            )),
+            TypeInfo::Udt(UdtInfo::new(
+                0xffff,
+                "db",
+                "dbo",
+                "point",
+                "Geometry, Version=1.0",
             )),
         ];
 

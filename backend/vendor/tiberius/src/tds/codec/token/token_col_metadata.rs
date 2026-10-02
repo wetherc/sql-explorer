@@ -107,6 +107,7 @@ impl<'a> Display for MetaDataColumn<'a> {
                 _ => unreachable!(),
             },
             TypeInfo::Xml { .. } => write!(f, "xml")?,
+            TypeInfo::Udt(udt) => write!(f, "{}", udt.type_name())?,
         }
 
         Ok(())
@@ -209,6 +210,7 @@ impl BaseMetaDataColumn {
                 VarLenType::SSVariant => ColumnData::String(None),
             },
             TypeInfo::Xml { .. } => ColumnData::Xml(None),
+            TypeInfo::Udt(_) => ColumnData::Binary(None),
         }
     }
 }
@@ -317,10 +319,22 @@ impl TokenColMetaData<'static> {
 
 impl<'a> TokenColMetaData<'a> {
     pub(crate) fn columns(&self) -> impl Iterator<Item = Column> + '_ {
-        self.columns.iter().map(|x| Column {
-            name: x.col_name.to_string(),
-            column_type: ColumnType::from(&x.base.ty),
-        })
+        self.columns.iter().map(MetaDataColumn::column)
+    }
+}
+
+impl<'a> MetaDataColumn<'a> {
+    /// The column that a row of the result gives to the caller.
+    pub(crate) fn column(&self) -> Column {
+        let udt_name = match &self.base.ty {
+            TypeInfo::Udt(udt) => Some(udt.type_name().to_string()),
+            _ => None,
+        };
+        Column {
+            name: self.col_name.to_string(),
+            column_type: ColumnType::from(&self.base.ty),
+            udt_name,
+        }
     }
 }
 
@@ -350,5 +364,46 @@ impl BaseMetaDataColumn {
         };
 
         Ok(BaseMetaDataColumn { flags, ty })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tds::codec::UdtInfo;
+
+    fn column(ty: TypeInfo) -> MetaDataColumn<'static> {
+        MetaDataColumn {
+            base: BaseMetaDataColumn {
+                flags: BitFlags::empty(),
+                ty,
+            },
+            col_name: Cow::from("g"),
+        }
+    }
+
+    #[test]
+    fn a_user_defined_type_keeps_its_name_in_the_column() {
+        let meta = column(TypeInfo::Udt(UdtInfo::new(
+            0xffff,
+            "db",
+            "sys",
+            "geography",
+            "a",
+        )));
+
+        let column = meta.column();
+        assert_eq!(column.column_type(), ColumnType::Udt);
+        assert_eq!(column.udt_name(), Some("geography"));
+        assert_eq!(meta.to_string(), "g geography");
+        assert_eq!(meta.base.null_value(), ColumnData::Binary(None));
+    }
+
+    #[test]
+    fn a_type_of_the_server_has_no_user_type_name() {
+        let column = column(TypeInfo::FixedLen(FixedLenType::Int4)).column();
+
+        assert_eq!(column.column_type(), ColumnType::Int4);
+        assert_eq!(column.udt_name(), None);
     }
 }

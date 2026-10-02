@@ -21,15 +21,14 @@ use crate::error::{Error, Result};
 use crate::sql::{only_reads, split_batches, split_statements, Dialect};
 use crate::storage::{MssqlAuth, SavedConnection, TlsMode};
 use async_trait::async_trait;
-use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
+use chrono::{NaiveDate, NaiveDateTime};
 use futures_util::TryStreamExt;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tiberius::numeric::Numeric;
-use tiberius::xml::XmlData;
 use tiberius::{
-    AttentionHandle, AuthMethod, Client, ColumnData, ColumnType, Config, EncryptionLevel, FromSql,
+    AttentionHandle, AuthMethod, Client, ColumnData, ColumnType, Config, EncryptionLevel,
     QueryItem, Row,
 };
 use tokio::net::TcpStream;
@@ -417,7 +416,11 @@ impl MssqlDriver {
                             .columns()
                             .iter()
                             .map(|column| {
-                                ColumnInfo::new(column.name(), type_name(column.column_type()))
+                                // A user-defined type, such as `geography`,
+                                // gives its own name.
+                                let type_name =
+                                    column.udt_name().unwrap_or(type_name(column.column_type()));
+                                ColumnInfo::new(column.name(), type_name)
                             })
                             .collect(),
                     )?;
@@ -1206,13 +1209,22 @@ fn index_query(catalog: &str) -> String {
 /// `SCHEMA_ID` look in the current database, so the statement joins the
 /// `sys` views of the named database instead. A foreign key matches on its
 /// schema and its name, because two schemas can each have a key of one name.
+/// The relation of a foreign key gets its schema, because a key can point at
+/// a table of a different schema.
+///
+/// `INFORMATION_SCHEMA` does not list a `DEFAULT` constraint, so the second
+/// part of the statement reads `sys.default_constraints`. A default gives
+/// its expression as the detail. The `ORDER BY` of a `UNION` can name only
+/// the columns that the statement returns, so the statement also returns the
+/// position of the column.
 fn constraint_query(catalog: &str) -> String {
     format!(
-        "SELECT tc.CONSTRAINT_NAME, \
+        "SELECT tc.CONSTRAINT_NAME AS constraint_name, \
                 tc.CONSTRAINT_TYPE, \
                 ku.COLUMN_NAME, \
-                ro.name, \
-                cc.CHECK_CLAUSE \
+                rs.name + N'.' + ro.name, \
+                cc.CHECK_CLAUSE, \
+                ku.ORDINAL_POSITION AS position \
          FROM {catalog}.INFORMATION_SCHEMA.TABLE_CONSTRAINTS AS tc \
          LEFT JOIN {catalog}.INFORMATION_SCHEMA.KEY_COLUMN_USAGE AS ku \
                 ON ku.CONSTRAINT_NAME = tc.CONSTRAINT_NAME \
@@ -1223,9 +1235,19 @@ fn constraint_query(catalog: &str) -> String {
          LEFT JOIN ({catalog}.sys.foreign_keys AS fk \
                     JOIN {catalog}.sys.schemas AS fs ON fs.schema_id = fk.schema_id) \
                 ON fk.name = tc.CONSTRAINT_NAME AND fs.name = tc.CONSTRAINT_SCHEMA \
-         LEFT JOIN {catalog}.sys.objects AS ro ON ro.object_id = fk.referenced_object_id \
+         LEFT JOIN ({catalog}.sys.objects AS ro \
+                    JOIN {catalog}.sys.schemas AS rs ON rs.schema_id = ro.schema_id) \
+                ON ro.object_id = fk.referenced_object_id \
          WHERE tc.TABLE_SCHEMA = @P1 AND tc.TABLE_NAME = @P2 \
-         ORDER BY tc.CONSTRAINT_NAME, ku.ORDINAL_POSITION"
+         UNION ALL \
+         SELECT dc.name, N'DEFAULT', c.name, NULL, dc.definition, 1 \
+         FROM {catalog}.sys.default_constraints AS dc \
+         JOIN {catalog}.sys.columns AS c \
+           ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id \
+         JOIN {catalog}.sys.tables AS t ON t.object_id = dc.parent_object_id \
+         JOIN {catalog}.sys.schemas AS s ON s.schema_id = t.schema_id \
+         WHERE s.name = @P1 AND t.name = @P2 \
+         ORDER BY constraint_name, position"
     )
 }
 
@@ -1311,95 +1333,24 @@ pub fn numeric_to_string(value: Numeric) -> String {
 }
 
 /// Converts one row into an array of JSON values.
-///
-/// Every read uses `try_get`. The `get` of `tiberius` panics when the type
-/// of the column does not match the target type, and the type of a column
-/// is not known before the server answers.
 pub fn row_to_json(row: &Row) -> Vec<JsonValue> {
     row.cells()
-        .enumerate()
-        .map(|(index, (column, data))| cell_to_json(row, index, column.column_type(), data))
+        .map(|(column, data)| cell_to_json(column.column_type(), data))
         .collect()
 }
 
-/// Reads one cell. A read that fails falls back on the next target type,
-/// and at the end on text, so that an unknown type shows a value and does
-/// not stop the whole result.
-///
-/// A type of the server that covers several widths of value carries no
-/// width in the type of the column. Such a cell gives the data it holds,
-/// and the form of that data gives the JSON value, so the read pays no
-/// conversion that fails.
-fn cell_to_json(
-    row: &Row,
-    index: usize,
-    column_type: ColumnType,
-    data: &ColumnData<'static>,
-) -> JsonValue {
+/// Reads one cell from the data that it holds. The data gives the JSON
+/// value, so a read needs no target type that can fail to match. The type
+/// of the column decides the result only for a user-defined type, whose
+/// data has the form of a binary value.
+fn cell_to_json(column_type: ColumnType, data: &ColumnData<'static>) -> JsonValue {
     match column_type {
-        ColumnType::Bit | ColumnType::Bitn => {
-            read(row.try_get::<bool, _>(index)).map_or(JsonValue::Null, JsonValue::Bool)
-        }
-        ColumnType::Int1 => read(row.try_get::<u8, _>(index)).map_or(JsonValue::Null, Into::into),
-        ColumnType::Int2 => read(row.try_get::<i16, _>(index)).map_or(JsonValue::Null, Into::into),
-        ColumnType::Int4 => read(row.try_get::<i32, _>(index)).map_or(JsonValue::Null, Into::into),
-        ColumnType::Int8 => read(row.try_get::<i64, _>(index)).map_or(JsonValue::Null, Into::into),
-        // A nullable integer covers every width from one to eight bytes,
-        // which the type of the column does not name.
-        ColumnType::Intn => column_data_to_json(data),
-        ColumnType::Float4 => {
-            read(row.try_get::<f32, _>(index)).map_or(JsonValue::Null, f32_to_json)
-        }
-        ColumnType::Float8 => {
-            read(row.try_get::<f64, _>(index)).map_or(JsonValue::Null, f64_to_json)
-        }
-        // The copy of `tiberius` reads a money value as a decimal, so each of
-        // its 19 digits stays.
-        ColumnType::Money | ColumnType::Money4 => column_data_to_json(data),
-        // A nullable float holds four bytes or eight, which the type of the
-        // column does not name either.
-        ColumnType::Floatn => column_data_to_json(data),
-        ColumnType::Decimaln | ColumnType::Numericn => read(row.try_get::<Numeric, _>(index))
-            .map(|value| JsonValue::String(numeric_to_string(value)))
-            .unwrap_or(JsonValue::Null),
-        ColumnType::Guid => read(row.try_get::<uuid::Uuid, _>(index))
-            .map(|value| JsonValue::String(value.to_string()))
-            .unwrap_or(JsonValue::Null),
-        ColumnType::Daten => read(row.try_get::<NaiveDate, _>(index))
-            .map(|value| JsonValue::String(value.to_string()))
-            .unwrap_or(JsonValue::Null),
-        ColumnType::Timen => read(row.try_get::<NaiveTime, _>(index))
-            .map(|value| JsonValue::String(value.to_string()))
-            .unwrap_or(JsonValue::Null),
-        // A `datetime` value needs the rounding of `datetime_text`, and a
-        // nullable column of this type can also hold a `smalldatetime`.
-        ColumnType::Datetime | ColumnType::Datetimen => column_data_to_json(data),
-        ColumnType::Datetime4 | ColumnType::Datetime2 => {
-            read(row.try_get::<NaiveDateTime, _>(index))
-                .map(|value| JsonValue::String(value.to_string()))
-                .unwrap_or(JsonValue::Null)
-        }
-        ColumnType::DatetimeOffsetn => column_data_to_json(data),
-        ColumnType::BigVarBin | ColumnType::BigBinary | ColumnType::Image | ColumnType::Udt => {
-            read(row.try_get::<&[u8], _>(index)).map_or(JsonValue::Null, bytes_to_json)
-        }
-        // The server sends an XML value in its own column type, which holds
-        // text. The reads for text refuse that type, so the value needs the
-        // type of the driver.
-        ColumnType::Xml => read(row.try_get::<&XmlData, _>(index))
-            .map(|value| JsonValue::String(value.as_ref().to_string()))
-            .unwrap_or(JsonValue::Null),
-        // Each value of a `sql_variant` column carries its own type, so the
-        // type of the column says nothing about the cell. The cell gives its
-        // own data, and the type of that data gives the JSON value.
-        ColumnType::SSVariant => column_data_to_json(data),
-        _ => text_or_bytes(row, index),
+        ColumnType::Udt => udt_to_json(data),
+        _ => column_data_to_json(data),
     }
 }
 
-/// Turns the data of one cell into JSON. The reads of `cell_to_json` ask for
-/// a target type, which a `sql_variant` cell does not have before the value
-/// arrives. This function reads the value that the cell already holds.
+/// Turns the data of one cell into JSON.
 fn column_data_to_json(data: &ColumnData<'static>) -> JsonValue {
     match data {
         ColumnData::U8(value) => value.map_or(JsonValue::Null, Into::into),
@@ -1418,63 +1369,131 @@ fn column_data_to_json(data: &ColumnData<'static>) -> JsonValue {
         ColumnData::Binary(value) => value
             .as_ref()
             .map_or(JsonValue::Null, |bytes| bytes_to_json(bytes)),
+        // The copy of `tiberius` reads a money value as a decimal, so each of
+        // its 19 digits stays.
         ColumnData::Numeric(value) => value.map_or(JsonValue::Null, |value| {
             JsonValue::String(numeric_to_string(value))
         }),
         ColumnData::Xml(value) => value.as_ref().map_or(JsonValue::Null, |value| {
             JsonValue::String(value.to_string())
         }),
-        ColumnData::DateTime(_) => read(NaiveDateTime::from_sql(data))
-            .map_or(JsonValue::Null, |value| {
-                JsonValue::String(datetime_text(value))
-            }),
-        ColumnData::SmallDateTime(_) | ColumnData::DateTime2(_) => {
-            read(NaiveDateTime::from_sql(data)).map_or(JsonValue::Null, |value| {
-                JsonValue::String(value.to_string())
-            })
+        // The server keeps a `datetime` value in units of 1/300 of a second.
+        // The text rounds the value to the nearest millisecond, as SQL
+        // Server Management Studio does, so the value `.007` stays `.007`.
+        ColumnData::DateTime(value) => text_or_null(value.and_then(|value| {
+            let millis = (u64::from(value.seconds_fragments()) * 10 + 1) / 3;
+            moment_text(DAYS_TO_1900 + i64::from(value.days()), millis as i64, 3)
+        })),
+        // A `smalldatetime` value counts the minutes after midnight.
+        ColumnData::SmallDateTime(value) => text_or_null(value.and_then(|value| {
+            moment_text(
+                DAYS_TO_1900 + i64::from(value.days()),
+                i64::from(value.seconds_fragments()) * 60,
+                0,
+            )
+        })),
+        ColumnData::DateTime2(value) => text_or_null(value.and_then(|value| {
+            let time = value.time();
+            moment_text(
+                i64::from(value.date().days()),
+                time.increments() as i64,
+                time.scale(),
+            )
+        })),
+        ColumnData::Date(value) => text_or_null(
+            value
+                .and_then(|value| date_after(i64::from(value.days())).map(|date| date.to_string())),
+        ),
+        ColumnData::Time(value) => {
+            text_or_null(value.map(|value| time_text(value.increments(), value.scale())))
         }
-        ColumnData::Date(_) => read(NaiveDate::from_sql(data)).map_or(JsonValue::Null, |value| {
-            JsonValue::String(value.to_string())
-        }),
-        ColumnData::Time(_) => read(NaiveTime::from_sql(data)).map_or(JsonValue::Null, |value| {
-            JsonValue::String(value.to_string())
-        }),
-        // The value keeps the offset that the server sent with it.
-        ColumnData::DateTimeOffset(_) => read(DateTime::<FixedOffset>::from_sql(data))
-            .map_or(JsonValue::Null, |value| {
-                JsonValue::String(value.to_rfc3339())
-            }),
+        // The server sends the moment in UTC with the offset in minutes. The
+        // text shows the local time and the offset, as SQL Server Management
+        // Studio does.
+        ColumnData::DateTimeOffset(value) => text_or_null(value.and_then(|value| {
+            let datetime = value.datetime2();
+            let time = datetime.time();
+            let offset = i64::from(value.offset());
+            let unit = 10i64.pow(u32::from(time.scale()));
+            let local = moment_text(
+                i64::from(datetime.date().days()),
+                time.increments() as i64 + offset * 60 * unit,
+                time.scale(),
+            )?;
+            let sign = if offset < 0 { '-' } else { '+' };
+            let minutes = offset.abs();
+            Some(format!(
+                "{local} {sign}{:02}:{:02}",
+                minutes / 60,
+                minutes % 60
+            ))
+        })),
     }
 }
 
-/// Writes a `datetime` value with the milliseconds that the server shows.
-/// The server keeps the time in units of 1/300 of a second, so the value
-/// `.007` arrives as 6,666,666 nanoseconds. The function rounds the value to
-/// the nearest millisecond, as SQL Server Management Studio does.
-fn datetime_text(value: NaiveDateTime) -> String {
-    let millis = (i64::from(value.nanosecond()) + 500_000) / 1_000_000;
-    let whole = value.with_nanosecond(0).unwrap_or(value);
-    (whole + chrono::Duration::milliseconds(millis)).to_string()
+/// The days from 0001-01-01 to 1900-01-01, the first day of `datetime` and
+/// `smalldatetime`.
+const DAYS_TO_1900: i64 = 693_595;
+
+/// Gives the date that lies the given number of days after 0001-01-01, or
+/// `None` when the date is outside the range of `chrono`.
+fn date_after(days: i64) -> Option<NaiveDate> {
+    let days = u64::try_from(days).ok()?;
+    NaiveDate::from_ymd_opt(1, 1, 1)?.checked_add_days(chrono::Days::new(days))
 }
 
-/// Reads a value as text, and falls back on the binary form.
-fn text_or_bytes(row: &Row, index: usize) -> JsonValue {
-    if let Some(text) = read(row.try_get::<&str, _>(index)) {
-        return JsonValue::String(text.to_string());
+/// Writes a time of day, given as increments of 10^-scale seconds after
+/// midnight, with as many digits of fraction as the scale of the column.
+/// A `time(7)` value shows as `12:00:00.1234567` and a `time(0)` value as
+/// `12:00:00`, as in SQL Server Management Studio.
+fn time_text(increments: u64, scale: u8) -> String {
+    let unit = 10u64.pow(u32::from(scale));
+    let seconds = increments / unit;
+    let clock = format!(
+        "{:02}:{:02}:{:02}",
+        seconds / 3600,
+        seconds / 60 % 60,
+        seconds % 60
+    );
+    if scale == 0 {
+        return clock;
     }
-    read(row.try_get::<&[u8], _>(index)).map_or(JsonValue::Null, bytes_to_json)
+    format!(
+        "{clock}.{:0width$}",
+        increments % unit,
+        width = usize::from(scale)
+    )
 }
 
-/// Turns the result of a read into an option. A read that fails is written
-/// to the log and counts as an absent value, so the next target type gets a
-/// turn.
-fn read<T>(result: tiberius::Result<Option<T>>) -> Option<T> {
-    match result {
-        Ok(value) => value,
-        Err(error) => {
-            log::debug!("A column did not match the target type: {error}");
-            None
+/// Writes a date and a time with a space between them. The increments of
+/// 10^-scale seconds count from midnight of the given day, and a count
+/// below zero or past one day moves the date.
+fn moment_text(days: i64, increments: i64, scale: u8) -> Option<String> {
+    let per_day = 86_400 * 10i64.pow(u32::from(scale));
+    let date = date_after(days + increments.div_euclid(per_day))?;
+    let time = time_text(increments.rem_euclid(per_day) as u64, scale);
+    Some(format!("{date} {time}"))
+}
+
+/// Gives a JSON text, or the null of JSON for no text.
+fn text_or_null(text: Option<String>) -> JsonValue {
+    text.map_or(JsonValue::Null, JsonValue::String)
+}
+
+/// Writes the value of a user-defined type, such as `geography`, as the
+/// hexadecimal text that SQL Server Management Studio shows, such as
+/// `0xE6100000`. The driver cannot decode the format of each type.
+fn udt_to_json(data: &ColumnData<'static>) -> JsonValue {
+    match data {
+        ColumnData::Binary(Some(bytes)) => {
+            let mut text = String::with_capacity(2 + bytes.len() * 2);
+            text.push_str("0x");
+            for byte in bytes.iter() {
+                text.push_str(&format!("{byte:02X}"));
+            }
+            JsonValue::String(text)
         }
+        _ => column_data_to_json(data),
     }
 }
 
@@ -2143,7 +2162,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_user_defined_type_shows_its_bytes() {
+    async fn a_user_defined_type_shows_its_name_and_its_bytes_in_hexadecimal() {
         let mut answer = udt_metadata();
         // A value of a user-defined type comes in chunks, as a `varbinary(max)`
         // value does, whatever the maximum size of the type is.
@@ -2163,10 +2182,10 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.results[0].columns[0].type_name, "udt");
+        assert_eq!(response.results[0].columns[0].type_name, "hierarchyid");
         assert_eq!(
             response.results[0].rows,
-            vec![vec![JsonValue::from("WEA=")], vec![JsonValue::Null]]
+            vec![vec![JsonValue::from("0x5840")], vec![JsonValue::Null]]
         );
     }
 
@@ -2373,6 +2392,7 @@ mod tests {
     fn the_data_of_a_cell_covers_every_form_of_value() {
         use std::borrow::Cow;
         use tiberius::time::{Date, DateTime, DateTime2, DateTimeOffset, SmallDateTime, Time};
+        use tiberius::xml::XmlData;
 
         assert_eq!(
             column_data_to_json(&ColumnData::U8(Some(1))),
@@ -2422,12 +2442,12 @@ mod tests {
             column_data_to_json(&ColumnData::Xml(Some(Cow::Owned(XmlData::new("<a/>"))))),
             JsonValue::String("<a/>".into())
         );
+        // The server keeps 1/300 of a second, and the grid shows the three
+        // digits of milliseconds that the server shows.
         assert_eq!(
             column_data_to_json(&ColumnData::DateTime(Some(DateTime::new(0, 0)))),
-            JsonValue::String("1900-01-01 00:00:00".into())
+            JsonValue::String("1900-01-01 00:00:00.000".into())
         );
-        // The server keeps 1/300 of a second, and the grid shows the
-        // milliseconds that the server shows.
         assert_eq!(
             column_data_to_json(&ColumnData::DateTime(Some(DateTime::new(0, 2)))),
             JsonValue::String("1900-01-01 00:00:00.007".into())
@@ -2436,9 +2456,15 @@ mod tests {
             column_data_to_json(&ColumnData::DateTime(Some(DateTime::new(0, 299)))),
             JsonValue::String("1900-01-01 00:00:00.997".into())
         );
+        // A `datetime` value before 1900 has a count of days below zero.
         assert_eq!(
-            column_data_to_json(&ColumnData::SmallDateTime(Some(SmallDateTime::new(0, 0)))),
-            JsonValue::String("1900-01-01 00:00:00".into())
+            column_data_to_json(&ColumnData::DateTime(Some(DateTime::new(-53690, 0)))),
+            JsonValue::String("1753-01-01 00:00:00.000".into())
+        );
+        // A `smalldatetime` value counts minutes and shows no fraction.
+        assert_eq!(
+            column_data_to_json(&ColumnData::SmallDateTime(Some(SmallDateTime::new(1, 61)))),
+            JsonValue::String("1900-01-02 01:01:00".into())
         );
         assert_eq!(
             column_data_to_json(&ColumnData::DateTime2(Some(DateTime2::new(
@@ -2446,6 +2472,22 @@ mod tests {
                 Time::new(0, 0)
             )))),
             JsonValue::String("0001-01-01 00:00:00".into())
+        );
+        // A value shows as many digits of fraction as the scale of the
+        // column, as in SQL Server Management Studio.
+        assert_eq!(
+            column_data_to_json(&ColumnData::DateTime2(Some(DateTime2::new(
+                Date::new(730119),
+                Time::new(432_001_234_567, 7)
+            )))),
+            JsonValue::String("2000-01-01 12:00:00.1234567".into())
+        );
+        assert_eq!(
+            column_data_to_json(&ColumnData::DateTime2(Some(DateTime2::new(
+                Date::new(730119),
+                Time::new(4_320_005, 2)
+            )))),
+            JsonValue::String("2000-01-01 12:00:00.05".into())
         );
         assert_eq!(
             column_data_to_json(&ColumnData::Date(Some(Date::new(0)))),
@@ -2456,20 +2498,56 @@ mod tests {
             JsonValue::String("00:00:00".into())
         );
         assert_eq!(
+            column_data_to_json(&ColumnData::Time(Some(Time::new(432_001_234_567, 7)))),
+            JsonValue::String("12:00:00.1234567".into())
+        );
+        assert_eq!(
+            column_data_to_json(&ColumnData::Time(Some(Time::new(45_296_120, 3)))),
+            JsonValue::String("12:34:56.120".into())
+        );
+        assert_eq!(
             column_data_to_json(&ColumnData::DateTimeOffset(Some(DateTimeOffset::new(
                 DateTime2::new(Date::new(730119), Time::new(0, 0)),
                 0
             )))),
-            JsonValue::String("2000-01-01T00:00:00+00:00".into())
+            JsonValue::String("2000-01-01 00:00:00 +00:00".into())
         );
-        // The server sends the moment in UTC with the offset beside it, and
-        // the text keeps the offset.
+        // The server sends the moment in UTC with the offset beside it. The
+        // text shows the local time and the offset.
         assert_eq!(
             column_data_to_json(&ColumnData::DateTimeOffset(Some(DateTimeOffset::new(
                 DateTime2::new(Date::new(730119), Time::new(14 * 3600 * 10_000_000, 7)),
                 -300
             )))),
-            JsonValue::String("2000-01-01T09:00:00-05:00".into())
+            JsonValue::String("2000-01-01 09:00:00.0000000 -05:00".into())
+        );
+        // The local time can fall on the day before or the day after the
+        // day in UTC.
+        assert_eq!(
+            column_data_to_json(&ColumnData::DateTimeOffset(Some(DateTimeOffset::new(
+                DateTime2::new(Date::new(730119), Time::new(3600, 0)),
+                -330
+            )))),
+            JsonValue::String("1999-12-31 19:30:00 -05:30".into())
+        );
+        assert_eq!(
+            column_data_to_json(&ColumnData::DateTimeOffset(Some(DateTimeOffset::new(
+                DateTime2::new(Date::new(730119), Time::new(23 * 36_000, 1)),
+                60
+            )))),
+            JsonValue::String("2000-01-02 00:00:00.0 +01:00".into())
+        );
+        // A date outside the range of `chrono` gives the null of JSON.
+        assert_eq!(
+            column_data_to_json(&ColumnData::DateTime(Some(DateTime::new(i32::MIN, 0)))),
+            JsonValue::Null
+        );
+        assert_eq!(
+            column_data_to_json(&ColumnData::DateTimeOffset(Some(DateTimeOffset::new(
+                DateTime2::new(Date::new(0), Time::new(0, 0)),
+                -60
+            )))),
+            JsonValue::Null
         );
         // A four-byte float gives the digits that it shows, and a money
         // value keeps each of its digits.
@@ -2750,10 +2828,20 @@ mod tests {
         assert!(!constraints.contains("OBJECT_NAME"));
         assert!(constraints.contains("JOIN [Sales].sys.schemas AS fs"));
         assert!(constraints.contains("fs.name = tc.CONSTRAINT_SCHEMA"));
+        // The relation of a foreign key gets its schema.
+        assert!(constraints.contains("rs.name + N'.' + ro.name"));
         assert!(constraints.contains(
-            "LEFT JOIN [Sales].sys.objects AS ro ON ro.object_id = fk.referenced_object_id"
+            "JOIN [Sales].sys.schemas AS rs ON rs.schema_id = ro.schema_id) \
+             ON ro.object_id = fk.referenced_object_id"
         ));
         assert!(constraints.contains("WHERE tc.TABLE_SCHEMA = @P1 AND tc.TABLE_NAME = @P2"));
+        // A `DEFAULT` constraint comes from the `sys` views, with its
+        // expression as the detail.
+        assert!(constraints
+            .contains("UNION ALL SELECT dc.name, N'DEFAULT', c.name, NULL, dc.definition, 1"));
+        assert!(constraints.contains("FROM [Sales].sys.default_constraints AS dc"));
+        assert!(constraints.contains("WHERE s.name = @P1 AND t.name = @P2"));
+        assert!(constraints.ends_with("ORDER BY constraint_name, position"));
     }
 
     #[test]
@@ -3140,16 +3228,6 @@ mod tests {
         assert_eq!(format_type("int", None, None, None), "int");
     }
 
-    #[test]
-    fn a_failed_read_counts_as_an_absent_value() {
-        let ok: tiberius::Result<Option<i32>> = Ok(Some(1));
-        assert_eq!(read(ok), Some(1));
-        let empty: tiberius::Result<Option<i32>> = Ok(None);
-        assert_eq!(read(empty), None);
-        let failed: tiberius::Result<Option<i32>> =
-            Err(tiberius::error::Error::Conversion("no".into()));
-        assert_eq!(read(failed), None);
-    }
     #[test]
     fn the_token_is_read_from_the_answer_of_the_cli() {
         let good = r#"{"accessToken":"abc","expiresOn":"2026-01-01"}"#;

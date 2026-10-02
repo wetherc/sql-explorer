@@ -10,12 +10,23 @@ use std::{fmt::Display, sync::Arc};
 pub struct Column {
     pub(crate) name: String,
     pub(crate) column_type: ColumnType,
+    pub(crate) udt_name: Option<String>,
 }
 
 impl Column {
     /// Construct a new Column.
     pub fn new(name: String, column_type: ColumnType) -> Self {
-        Self { name, column_type }
+        Self {
+            name,
+            column_type,
+            udt_name: None,
+        }
+    }
+
+    /// The name of the user-defined type of the column, such as
+    /// `geography`. A column of a type of the server gives `None`.
+    pub fn udt_name(&self) -> Option<&str> {
+        self.udt_name.as_deref()
     }
 
     /// The name of the column.
@@ -192,6 +203,7 @@ impl From<&TypeInfo> for ColumnType {
                 VarLenType::SSVariant => Self::SSVariant,
             },
             TypeInfo::Xml { .. } => Self::Xml,
+            TypeInfo::Udt(_) => Self::Udt,
         }
     }
 }

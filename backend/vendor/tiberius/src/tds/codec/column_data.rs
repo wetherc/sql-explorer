@@ -137,6 +137,9 @@ impl<'a> ColumnData<'a> {
                 _ => todo!(),
             },
             TypeInfo::Xml { schema, size } => xml::decode(src, *size, schema.clone()).await?,
+            // The server sends a value of a user-defined type in chunks, as
+            // it does for `varbinary(max)`, whatever the maximum size is.
+            TypeInfo::Udt(_) => binary::decode(src, usize::MAX).await?,
         };
 
         Ok(res)

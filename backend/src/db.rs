@@ -318,6 +318,9 @@ pub enum ConstraintKind {
     /// A PostgreSQL `NOT NULL` constraint, which the catalog of version 18
     /// keeps as a record of its own.
     NotNull,
+    /// The default value of a column, which MS SQL Server keeps as a
+    /// constraint with a name.
+    Default,
 }
 
 /// One constraint of a relation.
