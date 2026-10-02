@@ -29,6 +29,7 @@ import type {
   SchemaSnapshot,
   ScriptKind,
   TableDetails,
+  TableKind,
   TableRef,
 } from '@/types/api'
 
@@ -250,7 +251,7 @@ export const api = {
     database: string | null
     schemaName: string | null
     tableName: string
-    kind: 'table' | 'view'
+    kind: TableKind
     scriptKind: ScriptKind
   }): Promise<string> {
     return call('script_object', request)

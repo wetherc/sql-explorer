@@ -16,7 +16,9 @@ const {
   folderNode,
   iconFor,
   isExpandable,
+  isRelation,
   leafNode,
+  relationFolderKinds,
   tableNode,
   useExplorerStore,
   walk,
@@ -61,6 +63,10 @@ describe('iconFor', () => {
     expect(iconFor('index')).toBe('mdi-sort-alphabetical-variant')
     expect(iconFor('constraint')).toBe('mdi-key-chain')
     expect(iconFor('partition')).toBe('mdi-file-tree-outline')
+    expect(iconFor('materializedView')).toBe('mdi-table-refresh')
+    expect(iconFor('partitionedTable')).toBe('mdi-table-split-cell')
+    expect(iconFor('foreignTable')).toBe('mdi-table-network')
+    expect(iconFor('synonym')).toBe('mdi-link-variant')
   })
 })
 
@@ -71,6 +77,36 @@ describe('isExpandable', () => {
     for (const kind of ['column', 'routine', 'index', 'constraint', 'partition'] as const) {
       expect(isExpandable(node({ kind }))).toBe(false)
     }
+    // A synonym names another object, and the tree reads nothing below it.
+    expect(isExpandable(node({ kind: 'synonym' }))).toBe(false)
+    expect(isExpandable(node({ kind: 'materializedView' }))).toBe(true)
+  })
+})
+
+describe('isRelation', () => {
+  it('holds for every kind of relation and for no other node', () => {
+    for (const kind of Object.values(TableKind)) {
+      expect(isRelation(node({ kind }))).toBe(true)
+    }
+    for (const kind of ['connection', 'database', 'schema', 'folder', 'column'] as const) {
+      expect(isRelation(node({ kind }))).toBe(false)
+    }
+  })
+})
+
+describe('relationFolderKinds', () => {
+  it('adds the folder of each kind that the engine has, in the order of the tree', () => {
+    const base = infoFixture().capabilities
+    expect(relationFolderKinds(undefined)).toEqual(['tables', 'views'])
+    expect(relationFolderKinds(base)).toEqual(['tables', 'views'])
+    expect(
+      relationFolderKinds({
+        ...base,
+        supportsMaterializedViews: true,
+        supportsForeignTables: true,
+        supportsSynonyms: true,
+      }),
+    ).toEqual(['tables', 'views', 'materializedViews', 'foreignTables', 'synonyms'])
   })
 })
 
@@ -147,6 +183,34 @@ describe('tableNode', () => {
     const view = tableNode({ name: 'big', kind: TableKind.View }, 'c1', 'Sales', undefined)
     expect(view.kind).toBe('view')
     expect(view.key).toBe('c1/Sales//view/big')
+
+    const parted = tableNode(
+      { name: 'events', kind: TableKind.PartitionedTable },
+      'c1',
+      'logs',
+      'public',
+    )
+    expect(parted.kind).toBe('partitionedTable')
+    expect(parted.icon).toBe('mdi-table-split-cell')
+    expect(parted.children).toEqual([])
+  })
+
+  it('builds a synonym as a leaf that names its target', () => {
+    const synonym = tableNode(
+      { name: 'remote_orders', kind: TableKind.Synonym, target: '[Other].[dbo].[orders]' },
+      'c1',
+      'Sales',
+      'dbo',
+    )
+    expect(synonym.kind).toBe('synonym')
+    expect(synonym.key).toBe('c1/Sales/dbo/synonym/remote_orders')
+    expect(synonym.hint).toBe('[Other].[dbo].[orders]')
+    expect(synonym.children).toBeUndefined()
+    expect(synonym.loaded).toBe(true)
+    expect(synonym.table).toBe('remote_orders')
+
+    const bare = tableNode({ name: 's', kind: TableKind.Synonym, target: '' }, 'c1', 'Sales', 'dbo')
+    expect(bare.hint).toBeUndefined()
   })
 })
 
@@ -375,6 +439,114 @@ describe('explorer store', () => {
     const schema = node({ kind: 'schema', database: 'Sales', schema: 'dbo' })
     await explorer.expand(schema)
     expect(schema.children?.map((child) => child.folder)).toEqual(['tables', 'views'])
+  })
+
+  /** Loads a store whose engine has every kind of relation of its own. */
+  async function storeWithEveryKind() {
+    apiStub.listActiveConnections.mockResolvedValue([
+      {
+        ...infoFixture('c1'),
+        capabilities: {
+          ...infoFixture('c1').capabilities,
+          supportsPartitions: true,
+          supportsMaterializedViews: true,
+          supportsForeignTables: true,
+          supportsSynonyms: true,
+        },
+      },
+    ])
+    const connections = useConnectionsStore()
+    await connections.load()
+    return useExplorerStore()
+  }
+
+  it('puts the folders of the kinds the engine has between the views and the routines', async () => {
+    const explorer = await storeWithEveryKind()
+    const schema = node({ kind: 'schema', database: 'Sales', schema: 'dbo' })
+    await explorer.expand(schema)
+    expect(schema.children?.map((child) => [child.folder, child.label])).toEqual([
+      ['tables', 'Tables'],
+      ['views', 'Views'],
+      ['materializedViews', 'Materialized Views'],
+      ['foreignTables', 'Foreign Tables'],
+      ['synonyms', 'Synonyms'],
+      ['procedures', 'Procedures'],
+      ['functions', 'Functions'],
+    ])
+  })
+
+  it('sorts each kind of relation into its folder from one shared read', async () => {
+    apiStub.listTables.mockResolvedValue([
+      { name: 'orders', kind: TableKind.Table },
+      { name: 'events', kind: TableKind.PartitionedTable },
+      { name: 'big_orders', kind: TableKind.View },
+      { name: 'totals', kind: TableKind.MaterializedView },
+      { name: 'remote', kind: TableKind.ForeignTable },
+      { name: 'alias', kind: TableKind.Synonym, target: 'other.dbo.orders' },
+    ])
+    const explorer = await storeWithEveryKind()
+    const schema = node({ kind: 'schema', database: 'Sales', schema: 'dbo' })
+    const read = async (folder: Parameters<typeof folderNode>[1]) => {
+      const holder = folderNode(folder, folder, schema)
+      await explorer.expand(holder)
+      return holder.children?.map((child) => [child.label, child.kind])
+    }
+
+    expect(await read('tables')).toEqual([
+      ['orders', 'table'],
+      ['events', 'partitionedTable'],
+    ])
+    expect(await read('views')).toEqual([['big_orders', 'view']])
+    expect(await read('materializedViews')).toEqual([['totals', 'materializedView']])
+    expect(await read('foreignTables')).toEqual([['remote', 'foreignTable']])
+    // The read stays shared until the last of the five folders reads it.
+    expect(apiStub.listTables).toHaveBeenCalledTimes(1)
+    expect(await read('synonyms')).toEqual([['alias', 'synonym']])
+    expect(apiStub.listTables).toHaveBeenCalledTimes(1)
+
+    await read('tables')
+    expect(apiStub.listTables).toHaveBeenCalledTimes(2)
+  })
+
+  it('puts the folders of its kind below each new kind of relation', async () => {
+    const explorer = await storeWithEveryKind()
+    const place = { database: 'Sales', schema: 'public' }
+    const foldersOf = async (kind: ExplorerNode['kind']) => {
+      const relation = node({ kind, ...place, table: 'r', key: kind })
+      await explorer.expand(relation)
+      return relation.children?.map((child) => child.folder)
+    }
+    expect(await foldersOf('partitionedTable')).toEqual([
+      'columns',
+      'indexes',
+      'constraints',
+      'partitions',
+    ])
+    expect(await foldersOf('materializedView')).toEqual(['columns', 'indexes'])
+    expect(await foldersOf('foreignTable')).toEqual(['columns', 'constraints'])
+  })
+
+  it('offers the name of a synonym to the editor', async () => {
+    apiStub.listTables.mockResolvedValue([
+      { name: 'alias', kind: TableKind.Synonym, target: 'other.dbo.orders' },
+    ])
+    const explorer = await storeWithEveryKind()
+    const root = explorer.addRoot('c1')
+    const schema = node({
+      key: 'c1/Sales/dbo',
+      kind: 'schema',
+      database: 'Sales',
+      schema: 'dbo',
+      label: 'dbo',
+    })
+    root.children = [schema]
+    root.loaded = true
+    await explorer.expand(schema)
+    const synonyms = schema.children!.find((child) => child.folder === 'synonyms')!
+    await explorer.expand(synonyms)
+    expect(explorer.schemaIndexFor('c1').tables).toEqual([
+      { name: 'alias', qualifier: 'Sales.dbo' },
+    ])
   })
 
   it('reads the tables and the views of their own folders', async () => {

@@ -90,6 +90,9 @@ export function infoFixture(connectionId = 'c1', supportsSchemas = true) {
       supportsConstraints: true,
       supportsPartitions: false,
       supportsExplain: true,
+      supportsMaterializedViews: false,
+      supportsForeignTables: false,
+      supportsSynonyms: false,
     },
     dialect: Dialect.MsSql,
   }

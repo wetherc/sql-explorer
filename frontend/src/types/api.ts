@@ -107,6 +107,9 @@ export interface DriverCapabilities {
   supportsConstraints: boolean
   supportsPartitions: boolean
   supportsExplain: boolean
+  supportsMaterializedViews: boolean
+  supportsForeignTables: boolean
+  supportsSynonyms: boolean
 }
 
 export interface ConnectionInfo {
@@ -270,12 +273,18 @@ export interface SchemaRef {
 export const TableKind = {
   Table: 'table',
   View: 'view',
+  MaterializedView: 'materializedView',
+  PartitionedTable: 'partitionedTable',
+  ForeignTable: 'foreignTable',
+  Synonym: 'synonym',
 } as const
 export type TableKind = (typeof TableKind)[keyof typeof TableKind]
 
 export interface TableRef {
   name: string
   kind: TableKind
+  /** The name of the object that a synonym points at. */
+  target?: string
 }
 
 export const RoutineKind = {

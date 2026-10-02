@@ -24,8 +24,7 @@ export type NodeKind =
   | 'database'
   | 'schema'
   | 'folder'
-  | 'table'
-  | 'view'
+  | TableKind
   | 'column'
   | 'routine'
   | 'index'
@@ -36,6 +35,9 @@ export type NodeKind =
 export type FolderKind =
   | 'tables'
   | 'views'
+  | 'materializedViews'
+  | 'foreignTables'
+  | 'synonyms'
   | 'procedures'
   | 'functions'
   | 'columns'
@@ -44,7 +46,42 @@ export type FolderKind =
   | 'partitions'
 
 /** The kinds that hold no children of their own. */
-const LEAF_KINDS: NodeKind[] = ['column', 'routine', 'index', 'constraint', 'partition']
+const LEAF_KINDS: NodeKind[] = ['column', 'routine', 'index', 'constraint', 'partition', 'synonym']
+
+/** The kinds of the relations, which are the kinds of nodes that `TableKind` names. */
+const RELATION_KINDS: readonly string[] = Object.values(TableKind)
+
+/** The folders that list the relations of a schema. */
+type RelationFolder = 'tables' | 'views' | 'materializedViews' | 'foreignTables' | 'synonyms'
+
+/** The label of each folder of relations, and the kinds of relation it shows. */
+const RELATION_FOLDERS: Record<RelationFolder, { label: string; kinds: TableKind[] }> = {
+  tables: { label: 'Tables', kinds: [TableKind.Table, TableKind.PartitionedTable] },
+  views: { label: 'Views', kinds: [TableKind.View] },
+  materializedViews: { label: 'Materialized Views', kinds: [TableKind.MaterializedView] },
+  foreignTables: { label: 'Foreign Tables', kinds: [TableKind.ForeignTable] },
+  synonyms: { label: 'Synonyms', kinds: [TableKind.Synonym] },
+}
+
+/**
+ * The folders of relations below a schema, in their order. A folder of a
+ * kind that the engine does not have stays out of the tree.
+ */
+export function relationFolderKinds(
+  capabilities: DriverCapabilities | undefined,
+): RelationFolder[] {
+  const folders: RelationFolder[] = ['tables', 'views']
+  if (capabilities?.supportsMaterializedViews) {
+    folders.push('materializedViews')
+  }
+  if (capabilities?.supportsForeignTables) {
+    folders.push('foreignTables')
+  }
+  if (capabilities?.supportsSynonyms) {
+    folders.push('synonyms')
+  }
+  return folders
+}
 
 export interface ExplorerNode {
   key: string
@@ -79,6 +116,14 @@ export function iconFor(kind: NodeKind, isKey = false): string {
       return 'mdi-table'
     case 'view':
       return 'mdi-table-eye'
+    case 'materializedView':
+      return 'mdi-table-refresh'
+    case 'partitionedTable':
+      return 'mdi-table-split-cell'
+    case 'foreignTable':
+      return 'mdi-table-network'
+    case 'synonym':
+      return 'mdi-link-variant'
     case 'routine':
       return 'mdi-function-variant'
     case 'index':
@@ -97,6 +142,11 @@ export function isExpandable(node: ExplorerNode): boolean {
   return !LEAF_KINDS.includes(node.kind)
 }
 
+/** True when the node is a relation, such as a table, a view or a synonym. */
+export function isRelation(node: ExplorerNode): node is ExplorerNode & { kind: TableKind } {
+  return RELATION_KINDS.includes(node.kind)
+}
+
 /** Builds the node of one relation. */
 export function tableNode(
   table: TableRef,
@@ -104,8 +154,8 @@ export function tableNode(
   database: string,
   schema: string | undefined,
 ): ExplorerNode {
-  const kind: NodeKind = table.kind === TableKind.View ? 'view' : 'table'
-  return {
+  const kind = table.kind
+  const node: ExplorerNode = {
     // The kind is part of the key, because a table and a view of one schema
     // can carry the same name.
     key: `${connectionId}/${database}/${schema ?? ''}/${kind}/${table.name}`,
@@ -120,6 +170,14 @@ export function tableNode(
     schema,
     table: table.name,
   }
+  if (kind === TableKind.Synonym) {
+    // The object of a synonym can be in another database, where a read of
+    // its columns can fail. The node is a leaf that names that object.
+    node.hint = table.target || undefined
+    node.children = undefined
+    node.loaded = true
+  }
+  return node
 }
 
 /** Builds the node of one column. */
@@ -543,7 +601,7 @@ export const useExplorerStore = defineStore('explorer', () => {
       } else if (node.kind === 'schema' && !seen.schemas.has(node.label)) {
         seen.schemas.add(node.label)
         index.schemas.push(node.label)
-      } else if (node.kind === 'table' || node.kind === 'view') {
+      } else if (isRelation(node)) {
         if (!seen.tables.has(identity)) {
           seen.tables.add(identity)
           index.tables.push({ name: node.label, qualifier })
@@ -820,11 +878,11 @@ export const useExplorerStore = defineStore('explorer', () => {
       return schemaFolders(node, info?.capabilities)
     }
 
-    if (node.kind === 'table' || node.kind === 'view') {
+    if (isRelation(node)) {
       return relationFolders(node, info?.capabilities)
     }
 
-    return withUniqueKeys(await folderChildren(node))
+    return withUniqueKeys(await folderChildren(node, info?.capabilities))
   }
 
   /** The folders below a schema, or below a database without schemas. */
@@ -832,7 +890,9 @@ export const useExplorerStore = defineStore('explorer', () => {
     node: ExplorerNode,
     capabilities: DriverCapabilities | undefined,
   ): ExplorerNode[] {
-    const folders = [folderNode('Tables', 'tables', node), folderNode('Views', 'views', node)]
+    const folders = relationFolderKinds(capabilities).map((folder) =>
+      folderNode(RELATION_FOLDERS[folder].label, folder, node),
+    )
     if (capabilities?.supportsRoutines) {
       folders.push(folderNode('Procedures', 'procedures', node))
       folders.push(folderNode('Functions', 'functions', node))
@@ -842,34 +902,34 @@ export const useExplorerStore = defineStore('explorer', () => {
 
   /**
    * The folders below a relation. A view holds columns alone, because an
-   * index and a constraint belong to a table.
+   * index and a constraint belong to a table. A materialized view keeps its
+   * rows, so it can have indexes. A foreign table keeps its rows on another
+   * server, so it has constraints but no index and no partition.
    */
   function relationFolders(
     node: ExplorerNode,
     capabilities: DriverCapabilities | undefined,
   ): ExplorerNode[] {
     const folders = [folderNode('Columns', 'columns', node)]
-    if (node.kind === 'view') {
-      return folders
-    }
-    if (capabilities?.supportsIndexes) {
+    const isTable = node.kind === 'table' || node.kind === 'partitionedTable'
+    if (capabilities?.supportsIndexes && (isTable || node.kind === 'materializedView')) {
       folders.push(folderNode('Indexes', 'indexes', node))
     }
-    if (capabilities?.supportsConstraints) {
+    if (capabilities?.supportsConstraints && (isTable || node.kind === 'foreignTable')) {
       folders.push(folderNode('Keys', 'constraints', node))
     }
-    if (capabilities?.supportsPartitions) {
+    if (capabilities?.supportsPartitions && isTable) {
       folders.push(folderNode('Partitions', 'partitions', node))
     }
     return folders
   }
 
   /**
-   * The reads of the relations of one schema, by the place they read. The
-   * Tables folder and the Views folder show two parts of one list, so the
-   * two folders share one call to the backend. An entry goes away when both
-   * folders have read it, when its read fails, and when the user refreshes
-   * or closes its place.
+   * The reads of the relations of one schema, by the place they read. Each
+   * folder of relations, such as Tables and Views, shows one part of one
+   * list, so the folders share one call to the backend. An entry goes away
+   * when every folder of the schema has read it, when its read fails, and
+   * when the user refreshes or closes its place.
    */
   const relationReads = new Map<
     string,
@@ -882,8 +942,16 @@ export const useExplorerStore = defineStore('explorer', () => {
     }
   >()
 
-  /** Reads the relations of one schema for one of its two folders. */
-  function relationsOf(node: ExplorerNode, database: string, schema: string | null) {
+  /**
+   * Reads the relations of one schema for one of its folders. `folders` is
+   * the count of the folders of relations that the schema shows.
+   */
+  function relationsOf(
+    node: ExplorerNode,
+    database: string,
+    schema: string | null,
+    folders: number,
+  ) {
     const key = JSON.stringify([node.connectionId, database, schema])
     let read = relationReads.get(key)
     if (!read) {
@@ -904,7 +972,7 @@ export const useExplorerStore = defineStore('explorer', () => {
       read = entry
     }
     read.readers.add(node.folder!)
-    if (read.readers.size === 2) {
+    if (read.readers.size === folders) {
       relationReads.delete(key)
     }
     return read.list
@@ -924,7 +992,10 @@ export const useExplorerStore = defineStore('explorer', () => {
   }
 
   /** Reads the list that one folder holds. */
-  async function folderChildren(node: ExplorerNode): Promise<ExplorerNode[]> {
+  async function folderChildren(
+    node: ExplorerNode,
+    capabilities: DriverCapabilities | undefined,
+  ): Promise<ExplorerNode[]> {
     const connectionId = node.connectionId
     const database = node.database ?? ''
     const schema = node.schema ?? null
@@ -932,11 +1003,15 @@ export const useExplorerStore = defineStore('explorer', () => {
 
     switch (node.folder) {
       case 'tables':
-      case 'views': {
-        const wanted = node.folder === 'views' ? TableKind.View : TableKind.Table
-        const tables = await relationsOf(node, database, schema)
+      case 'views':
+      case 'materializedViews':
+      case 'foreignTables':
+      case 'synonyms': {
+        const wanted = RELATION_FOLDERS[node.folder].kinds
+        const folders = relationFolderKinds(capabilities).length
+        const tables = await relationsOf(node, database, schema, folders)
         return tables
-          .filter((entry) => entry.kind === wanted)
+          .filter((entry) => wanted.includes(entry.kind))
           .map((entry) => tableNode(entry, connectionId, database, node.schema))
       }
       case 'procedures':

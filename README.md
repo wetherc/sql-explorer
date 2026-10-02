@@ -194,7 +194,9 @@ The filter keeps 6 of the 18 rows of the result.
 - Databases, schemas, tables, views and columns. A key column carries its own
   icon, and each column shows its type.
 - Folders hold the tables, the views, the routines, the indexes, the constraints
-  and the partitions of a schema or a relation.
+  and the partitions of a schema or a relation. PostgreSQL also gets folders for
+  the materialized views and the foreign tables, and a partitioned table has its
+  own icon. MS SQL Server also gets a folder for the synonyms.
 - A filter box keeps the path down to each match.
 - The context menu builds a preview statement in the backend, so every name is
   quoted for the engine. It also builds the statements of an object: a CREATE

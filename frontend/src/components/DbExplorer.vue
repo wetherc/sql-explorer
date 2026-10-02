@@ -61,7 +61,7 @@
         />
         <template v-if="isRelation(menuNode)">
           <v-list-item
-            v-for="form of scriptForms"
+            v-for="form of scriptFormsFor(menuNode)"
             :key="form.kind"
             prepend-icon="mdi-script-text-outline"
             :title="form.title"
@@ -70,7 +70,7 @@
           />
         </template>
         <v-list-item
-          v-if="isRelation(menuNode)"
+          v-if="isRelation(menuNode) && menuNode.kind !== TableKind.Synonym"
           prepend-icon="mdi-information-outline"
           title="Properties"
           data-test="menu-properties"
@@ -135,8 +135,8 @@ import PanelHeader from './PanelHeader.vue'
 import TableProperties from './TableProperties.vue'
 import { api } from '@/lib/api'
 import { stoppedStatementsMessage } from '@/lib/format'
-import { isExpandable, type ExplorerNode } from '@/stores/explorer'
-import type { ScriptKind } from '@/types/api'
+import { isExpandable, isRelation, type ExplorerNode } from '@/stores/explorer'
+import { TableKind, type ScriptKind } from '@/types/api'
 import { useConnectionsStore } from '@/stores/connections'
 import { useExplorerStore } from '@/stores/explorer'
 import { useQueryStore } from '@/stores/query'
@@ -181,10 +181,6 @@ const emptyHint = computed(() =>
     ? 'Clear the filter to see the whole tree.'
     : 'Open a connection to see its databases, tables and columns.',
 )
-
-function isRelation(node: ExplorerNode): boolean {
-  return node.kind === 'table' || node.kind === 'view'
-}
 
 async function onActivate(node: ExplorerNode): Promise<void> {
   selectedKey.value = node.key
@@ -287,6 +283,27 @@ const scriptForms: { kind: ScriptKind; title: string }[] = [
 ]
 
 /**
+ * The statements that a kind offers when it does not offer all four. A
+ * materialized view and a synonym take no INSERT and no UPDATE. A foreign
+ * table gets no CREATE, because the draft of its columns makes a plain
+ * table.
+ */
+const limitedForms: Partial<Record<TableKind, ScriptKind[]>> = {
+  [TableKind.MaterializedView]: ['create', 'select'],
+  [TableKind.ForeignTable]: ['select', 'insert', 'update'],
+  [TableKind.Synonym]: ['create', 'select'],
+}
+
+/**
+ * The statements that the menu offers for one node. The menu shows them for
+ * a relation alone, so the kind of the node is a `TableKind`.
+ */
+function scriptFormsFor(node: ExplorerNode): { kind: ScriptKind; title: string }[] {
+  const only = limitedForms[node.kind as TableKind]
+  return only ? scriptForms.filter((form) => only.includes(form.kind)) : scriptForms
+}
+
+/**
  * Puts the statement of one object in a new tab. The tab is never run,
  * because an INSERT or an UPDATE would change data.
  */
@@ -297,7 +314,7 @@ async function scriptHere(node: ExplorerNode, scriptKind: ScriptKind): Promise<v
       database: node.database ?? null,
       schemaName: node.schema ?? null,
       tableName: node.table ?? node.label,
-      kind: node.kind === 'view' ? 'view' : 'table',
+      kind: node.kind as TableKind,
       scriptKind,
     })
     tabs.add({

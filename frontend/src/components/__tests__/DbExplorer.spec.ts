@@ -275,6 +275,49 @@ describe('DbExplorer', () => {
     })
   })
 
+  it('offers the statements that each kind of relation takes', async () => {
+    apiStub.scriptObject.mockResolvedValue('CREATE SYNONYM [dbo].[alias] FOR [x];')
+    const wrapper = await mountExplorer()
+    const explorer = useExplorerStore()
+    explorer.addRoot('c1')
+    await wrapper.vm.$nextTick()
+
+    const openFor = async (kind: string) => {
+      await wrapper.findComponent({ name: 'ExplorerTree' }).vm.$emit('context', {
+        event: new MouseEvent('contextmenu'),
+        node: {
+          key: kind,
+          label: 'r',
+          kind,
+          icon: 'mdi-table',
+          loading: false,
+          loaded: false,
+          connectionId: 'c1',
+          table: 'r',
+        },
+      })
+      await settle()
+      return ['create', 'select', 'insert', 'update'].filter((form) =>
+        menuItem(`menu-script-${form}`),
+      )
+    }
+
+    expect(await openFor('partitionedTable')).toEqual(['create', 'select', 'insert', 'update'])
+    expect(menuItem('menu-properties')).toBeTruthy()
+    expect(await openFor('materializedView')).toEqual(['create', 'select'])
+    expect(await openFor('foreignTable')).toEqual(['select', 'insert', 'update'])
+    expect(await openFor('synonym')).toEqual(['create', 'select'])
+    // A synonym reports no facts of its own, so the menu offers no properties.
+    expect(menuItem('menu-properties')).toBeNull()
+    expect(menuItem('menu-preview')).toBeTruthy()
+
+    menuItem('menu-script-create')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+    expect(apiStub.scriptObject).toHaveBeenCalledWith(
+      expect.objectContaining({ tableName: 'r', kind: 'synonym', scriptKind: 'create' }),
+    )
+  })
+
   it('reports a failure to build the statement of an object', async () => {
     apiStub.scriptObject.mockRejectedValue({
       kind: 'configuration',

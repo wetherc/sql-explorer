@@ -7,6 +7,21 @@ of its own, and each column shows its type.
 Folders hold the tables, the views, the routines, the indexes, the constraints
 and the partitions of a schema or a relation.
 
+## Folders of a schema
+
+A schema shows these folders, in this order:
+
+1. **Tables**. On PostgreSQL, a partitioned table has an icon of its own, and
+   its **Partitions** folder lists its partitions.
+2. **Views**.
+3. **Materialized Views**, on PostgreSQL only. A materialized view has a
+   **Columns** folder and an **Indexes** folder.
+4. **Foreign Tables**, on PostgreSQL only. A foreign table has a **Columns**
+   folder and a **Keys** folder.
+5. **Synonyms**, on MS SQL Server only. A synonym does not open. The tree
+   shows the name of the object that it points at beside the synonym.
+6. **Procedures** and **Functions**, on the engines that have routines.
+
 An index shows its key columns in key order. On MS SQL Server, the `INCLUDE`
 columns of an index follow the key, as in `a, b include (c)`.
 
@@ -37,6 +52,11 @@ carries the quotes of its engine:
 - A `SELECT`, an `INSERT` and an `UPDATE` draft.
 - A `CREATE` draft of a table. The draft holds no index, no default and no
   constraint.
+
+A materialized view and a synonym get their `CREATE` text and a `SELECT`
+alone, and a synonym has no **Properties** item. A foreign table gets a
+`SELECT`, an `INSERT` and an `UPDATE`, because a `CREATE` draft of its columns
+makes a plain table.
 
 The **Properties** dialog holds the facts of a relation, its columns, its
 indexes and its constraints, and it reads them in one call.
