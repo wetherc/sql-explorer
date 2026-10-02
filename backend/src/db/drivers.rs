@@ -9,10 +9,10 @@ pub mod sqlite;
 
 use crate::db::sink::{BufferSink, RowSink, RunSummary};
 use crate::db::{
-    AppColumn, Constraint, ConstraintKind, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, Message, ObjectType, PartitionList, PlanKind, QueryParams, QueryResponse, Routine,
-    RoutineKind, ScheduledEvent, Schema, SchemaSnapshot, SnapshotColumn, SnapshotRelation, Table,
-    TableFact, TableKind, Trigger, TriggerEvent, TriggerTiming,
+    AppColumn, Constraint, ConstraintType, CreateQuery, Database, DriverCapabilities, ExecOptions,
+    IndexInfo, Message, ObjectType, PartitionList, PlanKind, QueryParams, QueryResponse,
+    RelationType, Routine, RoutineType, ScheduledEvent, Schema, SchemaSnapshot, SnapshotColumn,
+    SnapshotRelation, Table, TableFact, Trigger, TriggerEvent, TriggerTiming,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
@@ -226,7 +226,7 @@ pub trait DatabaseDriver: Send + Sync {
                 snapshot.relations.push(SnapshotRelation {
                     name: table.name,
                     schema: place.clone(),
-                    kind: table.kind,
+                    relation_type: table.relation_type,
                     columns: columns
                         .into_iter()
                         .map(|column| SnapshotColumn {
@@ -268,7 +268,7 @@ pub trait DatabaseDriver: Send + Sync {
         _database: Option<&str>,
         _schema: Option<&str>,
         _table: &str,
-        _kind: TableKind,
+        _relation_type: RelationType,
     ) -> Option<CreateQuery> {
         None
     }
@@ -439,7 +439,7 @@ pub fn add_snapshot_column(
     max_columns: usize,
     schema: Option<String>,
     relation: String,
-    kind: TableKind,
+    relation_type: RelationType,
     column: SnapshotColumn,
 ) -> bool {
     if snapshot.column_count >= max_columns {
@@ -453,7 +453,7 @@ pub fn add_snapshot_column(
             snapshot.relations.push(SnapshotRelation {
                 name: relation,
                 schema,
-                kind,
+                relation_type,
                 columns: Vec::new(),
             });
             snapshot
@@ -467,12 +467,12 @@ pub fn add_snapshot_column(
     true
 }
 
-/// Reads the word of `INFORMATION_SCHEMA` that names the kind of a relation.
-pub fn table_kind(word: &str) -> TableKind {
+/// Reads the word of `INFORMATION_SCHEMA` that names the type of a relation.
+pub fn relation_type(word: &str) -> RelationType {
     if word.trim().eq_ignore_ascii_case("VIEW") {
-        TableKind::View
+        RelationType::View
     } else {
-        TableKind::Table
+        RelationType::Table
     }
 }
 
@@ -537,7 +537,7 @@ fn index_entry(
 pub fn add_constraint_column(
     constraints: &mut Vec<Constraint>,
     name: String,
-    kind: ConstraintKind,
+    constraint_type: ConstraintType,
     column: Option<String>,
     detail: Option<String>,
 ) {
@@ -549,7 +549,7 @@ pub fn add_constraint_column(
         None => {
             constraints.push(Constraint {
                 name,
-                kind,
+                constraint_type,
                 columns: Vec::new(),
                 detail,
             });
@@ -561,19 +561,19 @@ pub fn add_constraint_column(
     }
 }
 
-/// Reads the kind of a constraint from the word the engine reports. The
+/// Reads the type of a constraint from the word the engine reports. The
 /// engines answer with the words of `INFORMATION_SCHEMA` or with the one
 /// letter of PostgreSQL. A word that no rule names gives a check.
-pub fn constraint_kind(word: &str) -> ConstraintKind {
+pub fn constraint_type(word: &str) -> ConstraintType {
     match word.trim().to_uppercase().as_str() {
-        "PRIMARY KEY" | "P" => ConstraintKind::PrimaryKey,
-        "FOREIGN KEY" | "F" => ConstraintKind::ForeignKey,
-        "UNIQUE" | "U" => ConstraintKind::Unique,
-        "X" => ConstraintKind::Exclusion,
-        "T" => ConstraintKind::Trigger,
-        "N" => ConstraintKind::NotNull,
-        "DEFAULT" => ConstraintKind::Default,
-        _ => ConstraintKind::Check,
+        "PRIMARY KEY" | "P" => ConstraintType::PrimaryKey,
+        "FOREIGN KEY" | "F" => ConstraintType::ForeignKey,
+        "UNIQUE" | "U" => ConstraintType::Unique,
+        "X" => ConstraintType::Exclusion,
+        "T" => ConstraintType::Trigger,
+        "N" => ConstraintType::NotNull,
+        "DEFAULT" => ConstraintType::Default,
+        _ => ConstraintType::Check,
     }
 }
 
@@ -629,14 +629,14 @@ pub fn trigger_timing(word: &str) -> TriggerTiming {
     }
 }
 
-/// Reads the kind of a routine from the word the engine reports. A word that
-/// is not `PROCEDURE` names a function, because an engine has other kinds of
-/// function and no other kind of procedure.
-pub fn routine_kind(word: &str) -> RoutineKind {
+/// Reads the type of a routine from the word the engine reports. A word that
+/// is not `PROCEDURE` names a function, because an engine has other types of
+/// function and no other type of procedure.
+pub fn routine_type(word: &str) -> RoutineType {
     if word.trim().eq_ignore_ascii_case("PROCEDURE") {
-        RoutineKind::Procedure
+        RoutineType::Procedure
     } else {
-        RoutineKind::Function
+        RoutineType::Function
     }
 }
 
@@ -749,7 +749,7 @@ mod tests {
             10,
             Some("dbo".into()),
             "orders".into(),
-            TableKind::Table,
+            RelationType::Table,
             column("id"),
         ));
         assert!(add_snapshot_column(
@@ -757,7 +757,7 @@ mod tests {
             10,
             Some("dbo".into()),
             "orders".into(),
-            TableKind::Table,
+            RelationType::Table,
             column("total"),
         ));
         assert!(add_snapshot_column(
@@ -765,14 +765,14 @@ mod tests {
             10,
             Some("staging".into()),
             "orders".into(),
-            TableKind::View,
+            RelationType::View,
             column("id"),
         ));
 
         assert_eq!(snapshot.relations.len(), 2);
         assert_eq!(snapshot.relations[0].columns.len(), 2);
         assert_eq!(snapshot.relations[1].schema.as_deref(), Some("staging"));
-        assert_eq!(snapshot.relations[1].kind, TableKind::View);
+        assert_eq!(snapshot.relations[1].relation_type, RelationType::View);
         assert_eq!(snapshot.column_count, 3);
         assert!(snapshot.complete);
     }
@@ -792,7 +792,7 @@ mod tests {
             1,
             None,
             "orders".into(),
-            TableKind::Table,
+            RelationType::Table,
             column.clone(),
         ));
         assert!(!add_snapshot_column(
@@ -800,7 +800,7 @@ mod tests {
             1,
             None,
             "orders".into(),
-            TableKind::Table,
+            RelationType::Table,
             column,
         ));
         assert!(!snapshot.complete);
@@ -809,8 +809,8 @@ mod tests {
 
     #[test]
     fn the_word_of_the_catalog_names_a_view() {
-        assert_eq!(table_kind("VIEW"), TableKind::View);
-        assert_eq!(table_kind("BASE TABLE"), TableKind::Table);
+        assert_eq!(relation_type("VIEW"), RelationType::View);
+        assert_eq!(relation_type("BASE TABLE"), RelationType::Table);
     }
 
     #[test]
@@ -872,21 +872,21 @@ mod tests {
         add_constraint_column(
             &mut constraints,
             "pk_orders".into(),
-            ConstraintKind::PrimaryKey,
+            ConstraintType::PrimaryKey,
             Some("id".into()),
             None,
         );
         add_constraint_column(
             &mut constraints,
             "pk_orders".into(),
-            ConstraintKind::PrimaryKey,
+            ConstraintType::PrimaryKey,
             Some("region".into()),
             None,
         );
         add_constraint_column(
             &mut constraints,
             "total_positive".into(),
-            ConstraintKind::Check,
+            ConstraintType::Check,
             None,
             Some("total > 0".into()),
         );
@@ -900,21 +900,21 @@ mod tests {
     }
 
     #[test]
-    fn the_word_of_the_engine_names_the_kind() {
-        assert_eq!(constraint_kind("PRIMARY KEY"), ConstraintKind::PrimaryKey);
-        assert_eq!(constraint_kind("p"), ConstraintKind::PrimaryKey);
-        assert_eq!(constraint_kind("FOREIGN KEY"), ConstraintKind::ForeignKey);
-        assert_eq!(constraint_kind("f"), ConstraintKind::ForeignKey);
-        assert_eq!(constraint_kind("UNIQUE"), ConstraintKind::Unique);
-        assert_eq!(constraint_kind("u"), ConstraintKind::Unique);
-        assert_eq!(constraint_kind("c"), ConstraintKind::Check);
-        assert_eq!(constraint_kind("CHECK"), ConstraintKind::Check);
-        assert_eq!(constraint_kind("x"), ConstraintKind::Exclusion);
-        assert_eq!(constraint_kind("t"), ConstraintKind::Trigger);
-        assert_eq!(constraint_kind("n"), ConstraintKind::NotNull);
-        assert_eq!(constraint_kind("DEFAULT"), ConstraintKind::Default);
-        assert_eq!(routine_kind("PROCEDURE"), RoutineKind::Procedure);
-        assert_eq!(routine_kind("FUNCTION"), RoutineKind::Function);
+    fn the_word_of_the_engine_names_the_type() {
+        assert_eq!(constraint_type("PRIMARY KEY"), ConstraintType::PrimaryKey);
+        assert_eq!(constraint_type("p"), ConstraintType::PrimaryKey);
+        assert_eq!(constraint_type("FOREIGN KEY"), ConstraintType::ForeignKey);
+        assert_eq!(constraint_type("f"), ConstraintType::ForeignKey);
+        assert_eq!(constraint_type("UNIQUE"), ConstraintType::Unique);
+        assert_eq!(constraint_type("u"), ConstraintType::Unique);
+        assert_eq!(constraint_type("c"), ConstraintType::Check);
+        assert_eq!(constraint_type("CHECK"), ConstraintType::Check);
+        assert_eq!(constraint_type("x"), ConstraintType::Exclusion);
+        assert_eq!(constraint_type("t"), ConstraintType::Trigger);
+        assert_eq!(constraint_type("n"), ConstraintType::NotNull);
+        assert_eq!(constraint_type("DEFAULT"), ConstraintType::Default);
+        assert_eq!(routine_type("PROCEDURE"), RoutineType::Procedure);
+        assert_eq!(routine_type("FUNCTION"), RoutineType::Function);
     }
 
     #[test]
@@ -1058,7 +1058,7 @@ mod tests {
     #[test]
     fn a_driver_that_keeps_no_create_text_gives_no_statement() {
         assert!(BareDriver
-            .create_query(None, None, "t", TableKind::Table)
+            .create_query(None, None, "t", RelationType::Table)
             .is_none());
     }
 

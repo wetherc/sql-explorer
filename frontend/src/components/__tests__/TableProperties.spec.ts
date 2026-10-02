@@ -16,7 +16,7 @@ function overlayAll(test: string): Element[] {
 }
 const { mountWithPlugins, settle } = await import('./mount')
 const { useUiStore } = await import('@/stores/ui')
-const { TableKind } = await import('@/types/api')
+const { RelationType } = await import('@/types/api')
 
 function node(overrides: Record<string, unknown> = {}) {
   return {
@@ -45,14 +45,16 @@ const details = {
     { name: 'by_note', columns: ['note'], unique: true, primary: false, included: [] },
     { name: 'by_all', columns: ['id', 'note'], unique: false, primary: false, included: [] },
   ],
-  constraints: [{ name: 'pk_orders', kind: 'primaryKey' as const, columns: ['id'], detail: null }],
+  constraints: [
+    { name: 'pk_orders', constraintType: 'primaryKey' as const, columns: ['id'], detail: null },
+  ],
 }
 
 describe('TableProperties', () => {
   beforeEach(() => {
     document.body.innerHTML = ''
     Object.values(apiStub).forEach((fn) => fn.mockReset())
-    void TableKind
+    void RelationType
   })
 
   it('reads the parts of one relation and shows each of them', async () => {

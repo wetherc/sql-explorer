@@ -77,7 +77,7 @@
           @click="scriptHere(menuNode, 'create')"
         />
         <v-list-item
-          v-if="isRelation(menuNode) && menuNode.kind !== TableKind.Synonym"
+          v-if="isRelation(menuNode) && menuNode.kind !== RelationType.Synonym"
           prepend-icon="mdi-information-outline"
           title="Properties"
           data-test="menu-properties"
@@ -143,7 +143,7 @@ import TableProperties from './TableProperties.vue'
 import { api } from '@/lib/api'
 import { stoppedStatementsMessage } from '@/lib/format'
 import { isExpandable, isRelation, isTriggerOrEvent, type ExplorerNode } from '@/stores/explorer'
-import { TableKind, type ScriptKind } from '@/types/api'
+import { RelationType, type ScriptKind } from '@/types/api'
 import { useConnectionsStore } from '@/stores/connections'
 import { useExplorerStore } from '@/stores/explorer'
 import { useQueryStore } from '@/stores/query'
@@ -295,18 +295,18 @@ const scriptForms: { kind: ScriptKind; title: string }[] = [
  * table gets no CREATE, because the draft of its columns makes a plain
  * table.
  */
-const limitedForms: Partial<Record<TableKind, ScriptKind[]>> = {
-  [TableKind.MaterializedView]: ['create', 'select'],
-  [TableKind.ForeignTable]: ['select', 'insert', 'update'],
-  [TableKind.Synonym]: ['create', 'select'],
+const limitedForms: Partial<Record<RelationType, ScriptKind[]>> = {
+  [RelationType.MaterializedView]: ['create', 'select'],
+  [RelationType.ForeignTable]: ['select', 'insert', 'update'],
+  [RelationType.Synonym]: ['create', 'select'],
 }
 
 /**
  * The statements that the menu offers for one node. The menu shows them for
- * a relation alone, so the kind of the node is a `TableKind`.
+ * a relation alone, so the kind of the node is a `RelationType`.
  */
 function scriptFormsFor(node: ExplorerNode): { kind: ScriptKind; title: string }[] {
-  const only = limitedForms[node.kind as TableKind]
+  const only = limitedForms[node.kind as RelationType]
   return only ? scriptForms.filter((form) => only.includes(form.kind)) : scriptForms
 }
 
@@ -327,7 +327,7 @@ async function scriptHere(node: ExplorerNode, scriptKind: ScriptKind): Promise<v
       schemaName: node.schema ?? null,
       tableName: own ? node.label : (node.table ?? node.label),
       parentName: own ? (node.table ?? null) : null,
-      kind: own ? node.kind : (node.kind as TableKind),
+      kind: own ? node.kind : (node.kind as RelationType),
       scriptKind,
     })
     tabs.add({

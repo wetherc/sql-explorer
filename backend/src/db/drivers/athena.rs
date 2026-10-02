@@ -5,14 +5,14 @@
 //! The metadata comes from the data catalog through the same service.
 
 use crate::db::drivers::{
-    add_snapshot_column, f64_to_json, prefixed_plan, rows_affected_message, rows_returned_message,
-    table_kind, CancelHandle, DatabaseDriver,
+    add_snapshot_column, f64_to_json, prefixed_plan, relation_type, rows_affected_message,
+    rows_returned_message, CancelHandle, DatabaseDriver,
 };
 use crate::db::sink::{BufferSink, RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, CreateQuery, Database, DriverCapabilities, ExecOptions, Partition,
-    PartitionList, PlanKind, QueryParams, QueryResponse, QueryStats, ResultSet, Schema,
-    SchemaSnapshot, SnapshotColumn, Table, TableKind,
+    PartitionList, PlanKind, QueryParams, QueryResponse, QueryStats, RelationType, ResultSet,
+    Schema, SchemaSnapshot, SnapshotColumn, Table,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
@@ -181,9 +181,17 @@ fn quote_literal(value: &str) -> String {
 /// Builds the statement that reads the CREATE text of one object. Athena
 /// answers `SHOW CREATE` with one line of the text in each row of the first
 /// column.
-fn create_query_text(database: Option<&str>, table: &str, kind: TableKind) -> CreateQuery {
+fn create_query_text(
+    database: Option<&str>,
+    table: &str,
+    relation_type: RelationType,
+) -> CreateQuery {
     let name = Dialect::Athena.qualified_name(database, None, table);
-    let word = if kind.is_view() { "VIEW" } else { "TABLE" };
+    let word = if relation_type.is_view() {
+        "VIEW"
+    } else {
+        "TABLE"
+    };
     CreateQuery::new(format!("SHOW CREATE {word} {name}"), 0)
 }
 
@@ -692,8 +700,8 @@ impl AthenaDriver {
             .iter()
             .filter_map(|row| {
                 let name = cell_text(row, 0)?;
-                let kind = cell_text(row, 1).unwrap_or_default();
-                Some(if kind.eq_ignore_ascii_case("VIEW") {
+                let relation_type = cell_text(row, 1).unwrap_or_default();
+                Some(if relation_type.eq_ignore_ascii_case("VIEW") {
                     Table::view(name)
                 } else {
                     Table::table(name)
@@ -812,9 +820,9 @@ impl DatabaseDriver for AthenaDriver {
         database: Option<&str>,
         _schema: Option<&str>,
         table: &str,
-        kind: TableKind,
+        relation_type: RelationType,
     ) -> Option<CreateQuery> {
-        Some(create_query_text(database, table, kind))
+        Some(create_query_text(database, table, relation_type))
     }
 
     async fn ping(&mut self) -> Result<()> {
@@ -914,7 +922,9 @@ impl DatabaseDriver for AthenaDriver {
             for table in page.table_metadata_list() {
                 let name = table.name().to_string();
                 tables.push(match table.table_type() {
-                    Some(kind) if kind.eq_ignore_ascii_case("VIRTUAL_VIEW") => Table::view(name),
+                    Some(table_type) if table_type.eq_ignore_ascii_case("VIRTUAL_VIEW") => {
+                        Table::view(name)
+                    }
                     _ => Table::table(name),
                 });
             }
@@ -1015,7 +1025,7 @@ impl DatabaseDriver for AthenaDriver {
                 max_columns,
                 None,
                 relation,
-                table_kind(&cell_text(row, 1).unwrap_or_default()),
+                relation_type(&cell_text(row, 1).unwrap_or_default()),
                 SnapshotColumn {
                     name: cell_text(row, 2).unwrap_or_default(),
                     data_type: cell_text(row, 3).unwrap_or_else(|| "unknown".to_string()),
@@ -1325,12 +1335,12 @@ mod tests {
     }
 
     #[test]
-    fn the_create_statement_names_the_kind_of_the_object() {
-        let table = create_query_text(Some("db"), "t", TableKind::Table);
+    fn the_create_statement_names_the_type_of_the_object() {
+        let table = create_query_text(Some("db"), "t", RelationType::Table);
         assert_eq!(table.sql, "SHOW CREATE TABLE \"db\".\"t\"");
         assert_eq!(table.column, 0);
 
-        let view = create_query_text(None, "v", TableKind::View);
+        let view = create_query_text(None, "v", RelationType::View);
         assert_eq!(view.sql, "SHOW CREATE VIEW \"v\"");
     }
     use aws_sdk_athena::types::Datum;

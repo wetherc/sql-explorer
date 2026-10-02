@@ -31,7 +31,7 @@ import type {
   SchemaSnapshot,
   ScriptKind,
   TableDetails,
-  TableKind,
+  RelationType,
   TableRef,
   TriggerRef,
 } from '@/types/api'
@@ -274,7 +274,7 @@ export const api = {
     tableName: string
     /** The relation of a trigger. */
     parentName?: string | null
-    kind: TableKind | ObjectType
+    kind: RelationType | ObjectType
     scriptKind: ScriptKind
   }): Promise<string> {
     return call('script_object', request)

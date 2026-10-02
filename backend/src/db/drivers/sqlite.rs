@@ -11,9 +11,9 @@ use crate::db::drivers::{
 };
 use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{
-    AppColumn, ColumnInfo, Constraint, ConstraintKind, CreateQuery, Database, DriverCapabilities,
-    ExecOptions, IndexInfo, Message, ObjectType, PlanKind, QueryParams, QueryResponse, Schema,
-    Table, TableFact, TableKind, Trigger,
+    AppColumn, ColumnInfo, Constraint, ConstraintType, CreateQuery, Database, DriverCapabilities,
+    ExecOptions, IndexInfo, Message, ObjectType, PlanKind, QueryParams, QueryResponse,
+    RelationType, Schema, Table, TableFact, Trigger,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
@@ -178,7 +178,7 @@ impl DatabaseDriver for SqliteDriver {
         _database: Option<&str>,
         schema: Option<&str>,
         table: &str,
-        _kind: TableKind,
+        _relation_type: RelationType,
     ) -> Option<CreateQuery> {
         Some(create_query_text(schema_or_main(schema), table))
     }
@@ -345,8 +345,8 @@ impl DatabaseDriver for SqliteDriver {
             ))?;
             let rows = statement.query_map([], |row| {
                 let name: String = row.get(0)?;
-                let kind: String = row.get(1)?;
-                Ok(if kind == "view" {
+                let relation_type: String = row.get(1)?;
+                Ok(if relation_type == "view" {
                     Table::view(name)
                 } else {
                     Table::table(name)
@@ -535,7 +535,7 @@ impl DatabaseDriver for SqliteDriver {
             if !key_columns.is_empty() {
                 constraints.push(Constraint {
                     name: format!("Primary key on {}", key_columns.join(", ")),
-                    kind: ConstraintKind::PrimaryKey,
+                    constraint_type: ConstraintType::PrimaryKey,
                     columns: key_columns,
                     detail: None,
                 });
@@ -566,7 +566,7 @@ impl DatabaseDriver for SqliteDriver {
                         current = Some(id);
                         constraints.push(Constraint {
                             name: format!("Foreign key to {detail}"),
-                            kind: ConstraintKind::ForeignKey,
+                            constraint_type: ConstraintType::ForeignKey,
                             columns: vec![column],
                             detail: Some(detail),
                         });
@@ -598,7 +598,7 @@ impl DatabaseDriver for SqliteDriver {
                 }
                 constraints.push(Constraint {
                     name: format!("Unique on {}", columns.join(", ")),
-                    kind: ConstraintKind::Unique,
+                    constraint_type: ConstraintType::Unique,
                     columns,
                     detail: None,
                 });
@@ -617,7 +617,7 @@ impl DatabaseDriver for SqliteDriver {
             for expression in check_expressions(text.as_deref().unwrap_or("")) {
                 constraints.push(Constraint {
                     name: format!("Check ({expression})"),
-                    kind: ConstraintKind::Check,
+                    constraint_type: ConstraintType::Check,
                     columns: Vec::new(),
                     detail: Some(expression),
                 });
@@ -1590,7 +1590,7 @@ mod tests {
             .unwrap();
         let unique: Vec<&Constraint> = constraints
             .iter()
-            .filter(|constraint| constraint.kind == ConstraintKind::Unique)
+            .filter(|constraint| constraint.constraint_type == ConstraintType::Unique)
             .collect();
         assert_eq!(unique.len(), 1);
         assert_eq!(
@@ -1601,7 +1601,7 @@ mod tests {
 
         let checks: Vec<&Constraint> = constraints
             .iter()
-            .filter(|constraint| constraint.kind == ConstraintKind::Check)
+            .filter(|constraint| constraint.constraint_type == ConstraintType::Check)
             .collect();
         assert_eq!(checks.len(), 2);
         assert_eq!(checks[0].detail.as_deref(), Some("total > 0"));
@@ -1709,12 +1709,12 @@ mod tests {
             .list_constraints("keys.db", None, "orders")
             .await
             .unwrap();
-        assert_eq!(constraints[0].kind, ConstraintKind::PrimaryKey);
+        assert_eq!(constraints[0].constraint_type, ConstraintType::PrimaryKey);
         assert_eq!(
             constraints[0].columns,
             vec!["id".to_string(), "region".to_string()]
         );
-        assert_eq!(constraints[1].kind, ConstraintKind::ForeignKey);
+        assert_eq!(constraints[1].constraint_type, ConstraintType::ForeignKey);
         assert_eq!(constraints[1].columns, vec!["customer".to_string()]);
         assert_eq!(constraints[1].detail.as_deref(), Some("customers(id)"));
 
@@ -1725,7 +1725,7 @@ mod tests {
             .await
             .unwrap()
             .iter()
-            .all(|constraint| constraint.kind == ConstraintKind::PrimaryKey));
+            .all(|constraint| constraint.constraint_type == ConstraintType::PrimaryKey));
         assert!(driver
             .list_routines("keys.db", None)
             .await
@@ -1780,14 +1780,14 @@ mod tests {
             .iter()
             .find(|relation| relation.name == "orders")
             .unwrap();
-        assert_eq!(orders.kind, TableKind::Table);
+        assert_eq!(orders.relation_type, RelationType::Table);
         assert_eq!(orders.schema.as_deref(), Some("main"));
         assert_eq!(orders.columns[0].name, "id");
         assert_eq!(orders.columns[1].data_type, "REAL");
         assert!(snapshot
             .relations
             .iter()
-            .any(|relation| relation.kind == TableKind::View));
+            .any(|relation| relation.relation_type == RelationType::View));
 
         // The bound stops the read before the second relation.
         let part = driver.schema_snapshot("snap.db", 1).await.unwrap();
@@ -1872,20 +1872,21 @@ mod tests {
             .list_constraints("home.db", odd, "items")
             .await
             .unwrap();
-        let kinds: Vec<ConstraintKind> = constraints.iter().map(|c| c.kind).collect();
+        let constraint_types: Vec<ConstraintType> =
+            constraints.iter().map(|c| c.constraint_type).collect();
         assert_eq!(
-            kinds,
+            constraint_types,
             vec![
-                ConstraintKind::PrimaryKey,
-                ConstraintKind::ForeignKey,
-                ConstraintKind::Unique,
-                ConstraintKind::Check
+                ConstraintType::PrimaryKey,
+                ConstraintType::ForeignKey,
+                ConstraintType::Unique,
+                ConstraintType::Check
             ]
         );
 
         // The CREATE text comes from the catalog of the schema.
         let query = driver
-            .create_query(Some("home.db"), odd, "cheap", TableKind::View)
+            .create_query(Some("home.db"), odd, "cheap", RelationType::View)
             .unwrap();
         let text = driver
             .execute_query(&query.sql, None, &ExecOptions::default())

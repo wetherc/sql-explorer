@@ -7,17 +7,17 @@
 
 use crate::db::drivers::{
     add_constraint_column, add_included_column, add_index_column, add_snapshot_column,
-    add_trigger_event, constraint_kind, f32_to_json, f64_to_json, number_out_of_range,
-    number_value, parameter_type_refused, routine_kind, rows_affected_message,
-    rows_returned_message, single_statement, size_text, table_kind, trigger_event, CancelHandle,
+    add_trigger_event, constraint_type, f32_to_json, f64_to_json, number_out_of_range,
+    number_value, parameter_type_refused, relation_type, routine_type, rows_affected_message,
+    rows_returned_message, single_statement, size_text, trigger_event, CancelHandle,
     DatabaseDriver, NumberValue,
 };
 use crate::db::sink::{BufferSink, RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, Message, MessageLevel, ObjectType, PlanKind, QueryParams, QueryResponse, ResultSet,
-    Routine, Schema, SchemaSnapshot, SnapshotColumn, Table, TableFact, TableKind, Trigger,
-    TriggerTiming,
+    IndexInfo, Message, MessageLevel, ObjectType, PlanKind, QueryParams, QueryResponse,
+    RelationType, ResultSet, Routine, Schema, SchemaSnapshot, SnapshotColumn, Table, TableFact,
+    Trigger, TriggerTiming,
 };
 use crate::error::{Error, Result};
 use crate::sql::{only_reads, split_batches, split_statements, Dialect};
@@ -598,19 +598,19 @@ fn create_query_text(
     database: Option<&str>,
     schema: Option<&str>,
     table: &str,
-    kind: TableKind,
+    relation_type: RelationType,
 ) -> Option<CreateQuery> {
     let name = Dialect::MsSql.qualified_name(database, schema, table);
     let catalog = database
         .map(|database| format!("{}.", Dialect::MsSql.quote_identifier(database)))
         .unwrap_or_default();
     let object = Dialect::MsSql.quote_literal(&name);
-    let sql = match kind {
-        TableKind::View => format!(
+    let sql = match relation_type {
+        RelationType::View => format!(
             "SELECT m.definition FROM {catalog}sys.sql_modules AS m \
              WHERE m.object_id = OBJECT_ID({object});"
         ),
-        TableKind::Synonym => format!(
+        RelationType::Synonym => format!(
             "SELECT N'CREATE SYNONYM ' + QUOTENAME(s.name) + N'.' + QUOTENAME(sy.name) + \
              N' FOR ' + sy.base_object_name + N';' \
              FROM {catalog}sys.synonyms AS sy \
@@ -633,7 +633,7 @@ fn object_query_text(
     object_type: ObjectType,
 ) -> Option<CreateQuery> {
     match object_type {
-        ObjectType::Trigger => create_query_text(database, schema, name, TableKind::View),
+        ObjectType::Trigger => create_query_text(database, schema, name, RelationType::View),
         ObjectType::Event => None,
     }
 }
@@ -747,9 +747,9 @@ impl DatabaseDriver for MssqlDriver {
         database: Option<&str>,
         schema: Option<&str>,
         table: &str,
-        kind: TableKind,
+        relation_type: RelationType,
     ) -> Option<CreateQuery> {
-        create_query_text(database, schema, table, kind)
+        create_query_text(database, schema, table, relation_type)
     }
 
     fn object_create_query(
@@ -1067,7 +1067,7 @@ impl DatabaseDriver for MssqlDriver {
                 max_columns,
                 row.try_get::<&str, _>(0)?.map(str::to_string),
                 row.try_get::<&str, _>(1)?.unwrap_or_default().to_string(),
-                table_kind(row.try_get::<&str, _>(2)?.unwrap_or_default()),
+                relation_type(row.try_get::<&str, _>(2)?.unwrap_or_default()),
                 SnapshotColumn {
                     name: row.try_get::<&str, _>(3)?.unwrap_or_default().to_string(),
                     data_type: row.try_get::<&str, _>(4)?.unwrap_or_default().to_string(),
@@ -1093,7 +1093,7 @@ impl DatabaseDriver for MssqlDriver {
             if let QueryItem::Row(row) = item {
                 routines.push(Routine {
                     name: row.try_get::<&str, _>(0)?.unwrap_or_default().to_string(),
-                    kind: routine_kind(row.try_get::<&str, _>(1)?.unwrap_or_default()),
+                    routine_type: routine_type(row.try_get::<&str, _>(1)?.unwrap_or_default()),
                 });
             }
         }
@@ -1171,7 +1171,7 @@ impl DatabaseDriver for MssqlDriver {
                 add_constraint_column(
                     &mut constraints,
                     row.try_get::<&str, _>(0)?.unwrap_or_default().to_string(),
-                    constraint_kind(row.try_get::<&str, _>(1)?.unwrap_or_default()),
+                    constraint_type(row.try_get::<&str, _>(1)?.unwrap_or_default()),
                     row.try_get::<&str, _>(2)?.map(str::to_string),
                     target.or(check),
                 );
@@ -1227,13 +1227,13 @@ fn tables_query(catalog: &str) -> String {
     )
 }
 
-/// Turns one row of [`tables_query`] into its entry. The word of the kind is
+/// Turns one row of [`tables_query`] into its entry. The word of the type is
 /// `BASE TABLE`, `VIEW` or `SYNONYM`.
-fn relation_of(name: &str, kind: &str, target: Option<&str>) -> Table {
-    if kind.eq_ignore_ascii_case("SYNONYM") {
+fn relation_of(name: &str, word: &str, target: Option<&str>) -> Table {
+    if word.eq_ignore_ascii_case("SYNONYM") {
         Table::synonym(name, target.unwrap_or_default())
     } else {
-        Table::new(name, table_kind(kind))
+        Table::new(name, relation_type(word))
     }
 }
 
@@ -2948,7 +2948,7 @@ mod tests {
     }
 
     #[test]
-    fn the_snapshot_statement_reads_the_columns_and_the_kind() {
+    fn the_snapshot_statement_reads_the_columns_and_the_relation_type() {
         let text = snapshot_query("[Sales]");
         assert!(text.contains("FROM [Sales].INFORMATION_SCHEMA.COLUMNS AS c"));
         assert!(text.contains("JOIN [Sales].INFORMATION_SCHEMA.TABLES AS t"));
@@ -2999,7 +2999,7 @@ mod tests {
 
     #[test]
     fn the_create_statement_covers_a_view_alone() {
-        let view = create_query_text(Some("db"), Some("dbo"), "v", TableKind::View).unwrap();
+        let view = create_query_text(Some("db"), Some("dbo"), "v", RelationType::View).unwrap();
         assert_eq!(
             view.sql,
             "SELECT m.definition FROM [db].sys.sql_modules AS m \
@@ -3007,13 +3007,13 @@ mod tests {
         );
         assert_eq!(view.column, 0);
         // With no database the statement reads the current one.
-        let current = create_query_text(None, Some("dbo"), "v", TableKind::View).unwrap();
+        let current = create_query_text(None, Some("dbo"), "v", RelationType::View).unwrap();
         assert_eq!(
             current.sql,
             "SELECT m.definition FROM sys.sql_modules AS m \
              WHERE m.object_id = OBJECT_ID('[dbo].[v]');"
         );
-        assert!(create_query_text(Some("db"), Some("dbo"), "t", TableKind::Table).is_none());
+        assert!(create_query_text(Some("db"), Some("dbo"), "t", RelationType::Table).is_none());
     }
 
     #[test]
@@ -3044,7 +3044,8 @@ mod tests {
 
     #[test]
     fn the_create_statement_of_a_synonym_names_its_target() {
-        let synonym = create_query_text(Some("db"), Some("dbo"), "s", TableKind::Synonym).unwrap();
+        let synonym =
+            create_query_text(Some("db"), Some("dbo"), "s", RelationType::Synonym).unwrap();
         assert_eq!(
             synonym.sql,
             "SELECT N'CREATE SYNONYM ' + QUOTENAME(s.name) + N'.' + QUOTENAME(sy.name) + \

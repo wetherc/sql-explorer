@@ -7,8 +7,8 @@ use crate::db::drivers::{
 };
 use crate::db::{
     self, drivers::DatabaseDriver, AppColumn, Constraint, Database, ExecOptions, IndexInfo,
-    ObjectType, PartitionList, PlanKind, QueryParams, QueryResponse, Routine, ScheduledEvent,
-    Schema, SchemaSnapshot, Table, TableDetails, TableKind, Trigger,
+    ObjectType, PartitionList, PlanKind, QueryParams, QueryResponse, RelationType, Routine,
+    ScheduledEvent, Schema, SchemaSnapshot, Table, TableDetails, Trigger,
 };
 use crate::error::{Error, Result};
 use crate::files;
@@ -1402,7 +1402,7 @@ pub struct ScriptRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(untagged)]
 pub enum ScriptTarget {
-    Relation(TableKind),
+    Relation(RelationType),
     Object(ObjectType),
 }
 
@@ -2847,7 +2847,7 @@ mod tests {
             }))
         };
         let view = read("view").unwrap();
-        assert_eq!(view.kind, ScriptTarget::Relation(TableKind::View));
+        assert_eq!(view.kind, ScriptTarget::Relation(RelationType::View));
         assert_eq!(view.parent_name, None);
         assert_eq!(
             read("trigger").unwrap().kind,

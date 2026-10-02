@@ -231,10 +231,10 @@ pub struct Schema {
     pub name: String,
 }
 
-/// The kind of a relation. The explorer shows a different icon for each.
+/// The type of a relation. The explorer shows a different icon for each type.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub enum TableKind {
+pub enum RelationType {
     Table,
     View,
     /// A PostgreSQL view that keeps the rows of its query on disk.
@@ -247,11 +247,11 @@ pub enum TableKind {
     Synonym,
 }
 
-impl TableKind {
+impl RelationType {
     /// True for a plain view and for a materialized view. An engine reads
     /// the CREATE text of both from the query of the view.
     pub fn is_view(self) -> bool {
-        matches!(self, TableKind::View | TableKind::MaterializedView)
+        matches!(self, RelationType::View | RelationType::MaterializedView)
     }
 }
 
@@ -259,35 +259,35 @@ impl TableKind {
 #[serde(rename_all = "camelCase")]
 pub struct Table {
     pub name: String,
-    pub kind: TableKind,
+    pub relation_type: RelationType,
     /// The name of the object that a synonym points at, as the engine
-    /// keeps it. Every other kind has none.
+    /// keeps it. Every other type of relation has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
 }
 
 impl Table {
-    pub fn new(name: impl Into<String>, kind: TableKind) -> Self {
+    pub fn new(name: impl Into<String>, relation_type: RelationType) -> Self {
         Self {
             name: name.into(),
-            kind,
+            relation_type,
             target: None,
         }
     }
 
     #[allow(clippy::self_named_constructors)]
     pub fn table(name: impl Into<String>) -> Self {
-        Self::new(name, TableKind::Table)
+        Self::new(name, RelationType::Table)
     }
 
     pub fn view(name: impl Into<String>) -> Self {
-        Self::new(name, TableKind::View)
+        Self::new(name, RelationType::View)
     }
 
     pub fn synonym(name: impl Into<String>, target: impl Into<String>) -> Self {
         Self {
             target: Some(target.into()),
-            ..Self::new(name, TableKind::Synonym)
+            ..Self::new(name, RelationType::Synonym)
         }
     }
 }
@@ -301,10 +301,10 @@ pub struct AppColumn {
     pub is_primary_key: bool,
 }
 
-/// The kind of a routine that a schema holds.
+/// The type of a routine that a schema contains.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub enum RoutineKind {
+pub enum RoutineType {
     Procedure,
     Function,
 }
@@ -314,7 +314,7 @@ pub enum RoutineKind {
 #[serde(rename_all = "camelCase")]
 pub struct Routine {
     pub name: String,
-    pub kind: RoutineKind,
+    pub routine_type: RoutineType,
 }
 
 /// One index of a relation, with the columns it covers in their order.
@@ -332,10 +332,10 @@ pub struct IndexInfo {
     pub included: Vec<String>,
 }
 
-/// The kind of a constraint of a relation.
+/// The type of a constraint of a relation.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub enum ConstraintKind {
+pub enum ConstraintType {
     PrimaryKey,
     ForeignKey,
     Unique,
@@ -357,7 +357,7 @@ pub enum ConstraintKind {
 #[serde(rename_all = "camelCase")]
 pub struct Constraint {
     pub name: String,
-    pub kind: ConstraintKind,
+    pub constraint_type: ConstraintType,
     pub columns: Vec<String>,
     /// The relation a foreign key points at, or the rule of a check.
     pub detail: Option<String>,
@@ -477,7 +477,7 @@ pub struct SnapshotColumn {
 pub struct SnapshotRelation {
     pub name: String,
     pub schema: Option<String>,
-    pub kind: TableKind,
+    pub relation_type: RelationType,
     pub columns: Vec<SnapshotColumn>,
 }
 
@@ -772,51 +772,55 @@ mod tests {
     }
 
     #[test]
-    fn tables_and_views_carry_their_kind() {
-        assert_eq!(Table::table("t").kind, TableKind::Table);
-        assert_eq!(Table::view("v").kind, TableKind::View);
+    fn tables_and_views_name_their_relation_type() {
+        assert_eq!(Table::table("t").relation_type, RelationType::Table);
+        assert_eq!(Table::view("v").relation_type, RelationType::View);
         assert_eq!(
-            serde_json::to_value(TableKind::View).unwrap(),
+            serde_json::to_value(RelationType::View).unwrap(),
             serde_json::json!("view")
         );
-        for (kind, word) in [
-            (TableKind::MaterializedView, "materializedView"),
-            (TableKind::PartitionedTable, "partitionedTable"),
-            (TableKind::ForeignTable, "foreignTable"),
-            (TableKind::Synonym, "synonym"),
+        for (relation_type, word) in [
+            (RelationType::MaterializedView, "materializedView"),
+            (RelationType::PartitionedTable, "partitionedTable"),
+            (RelationType::ForeignTable, "foreignTable"),
+            (RelationType::Synonym, "synonym"),
         ] {
-            assert_eq!(serde_json::to_value(kind).unwrap(), serde_json::json!(word));
+            assert_eq!(
+                serde_json::to_value(relation_type).unwrap(),
+                serde_json::json!(word)
+            );
         }
     }
 
     #[test]
     fn a_materialized_view_counts_as_a_view() {
-        assert!(TableKind::View.is_view());
-        assert!(TableKind::MaterializedView.is_view());
-        for kind in [
-            TableKind::Table,
-            TableKind::PartitionedTable,
-            TableKind::ForeignTable,
-            TableKind::Synonym,
+        assert!(RelationType::View.is_view());
+        assert!(RelationType::MaterializedView.is_view());
+        for relation_type in [
+            RelationType::Table,
+            RelationType::PartitionedTable,
+            RelationType::ForeignTable,
+            RelationType::Synonym,
         ] {
-            assert!(!kind.is_view());
+            assert!(!relation_type.is_view());
         }
     }
 
     #[test]
     fn only_a_synonym_sends_its_target() {
         let synonym = Table::synonym("s", "[other].[dbo].[t]");
-        assert_eq!(synonym.kind, TableKind::Synonym);
+        assert_eq!(synonym.relation_type, RelationType::Synonym);
         assert_eq!(
             serde_json::to_value(&synonym).unwrap(),
-            serde_json::json!({ "name": "s", "kind": "synonym", "target": "[other].[dbo].[t]" })
+            serde_json::json!({ "name": "s", "relationType": "synonym", "target": "[other].[dbo].[t]" })
         );
         assert_eq!(
             serde_json::to_value(Table::table("t")).unwrap(),
-            serde_json::json!({ "name": "t", "kind": "table" })
+            serde_json::json!({ "name": "t", "relationType": "table" })
         );
         let read: Table =
-            serde_json::from_value(serde_json::json!({ "name": "t", "kind": "table" })).unwrap();
+            serde_json::from_value(serde_json::json!({ "name": "t", "relationType": "table" }))
+                .unwrap();
         assert_eq!(read, Table::table("t"));
     }
 

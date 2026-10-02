@@ -7,15 +7,15 @@
 
 use crate::db::drivers::{
     add_constraint_column, add_included_column, add_index_column, add_snapshot_column,
-    bytes_to_json, constraint_kind, f32_to_json, f64_to_json, number_out_of_range, number_value,
-    prefixed_plan, routine_kind, rows_affected_message, rows_returned_message, size_text,
+    bytes_to_json, constraint_type, f32_to_json, f64_to_json, number_out_of_range, number_value,
+    prefixed_plan, routine_type, rows_affected_message, rows_returned_message, size_text,
     system_roots, CancelHandle, DatabaseDriver, NumberValue,
 };
 use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
     IndexInfo, Message, MessageLevel, ObjectType, Partition, PartitionList, PlanKind, QueryParams,
-    QueryResponse, Routine, Schema, SchemaSnapshot, SnapshotColumn, Table, TableFact, TableKind,
+    QueryResponse, RelationType, Routine, Schema, SchemaSnapshot, SnapshotColumn, Table, TableFact,
     Trigger, TriggerEvent, TriggerTiming,
 };
 use crate::error::{Error, Result};
@@ -417,9 +417,9 @@ impl DatabaseDriver for PostgresDriver {
         _database: Option<&str>,
         schema: Option<&str>,
         table: &str,
-        kind: TableKind,
+        relation_type: RelationType,
     ) -> Option<CreateQuery> {
-        create_query_text(schema, table, kind)
+        create_query_text(schema, table, relation_type)
     }
 
     fn object_create_query(
@@ -639,7 +639,7 @@ impl DatabaseDriver for PostgresDriver {
                 max_columns,
                 row.get(0),
                 row.get(1),
-                relation_kind(row.get(2)),
+                relation_type_of(row.get(2)),
                 SnapshotColumn {
                     name: row.get(3),
                     data_type: row.get(4),
@@ -662,7 +662,7 @@ impl DatabaseDriver for PostgresDriver {
             .iter()
             .map(|row| Routine {
                 name: row.get(0),
-                kind: routine_kind(row.get(1)),
+                routine_type: routine_type(row.get(1)),
             })
             .collect())
     }
@@ -740,7 +740,7 @@ impl DatabaseDriver for PostgresDriver {
             add_constraint_column(
                 &mut constraints,
                 row.get(0),
-                constraint_kind(row.get(1)),
+                constraint_type(row.get(1)),
                 row.get(2),
                 row.get(3),
             );
@@ -1317,20 +1317,20 @@ const TABLES_QUERY: &str = "SELECT c.relname, c.relkind \
      ORDER BY c.relkind, c.relname";
 
 /// Turns the name and the `relkind` letter of a relation into its entry.
-fn relation_of(name: String, kind: i8) -> Table {
-    Table::new(name, relation_kind(kind))
+fn relation_of(name: String, letter: i8) -> Table {
+    Table::new(name, relation_type_of(letter))
 }
 
 /// Reads the `relkind` letter of a relation. [`TABLES_QUERY`] and the
 /// snapshot read only the letters of the relations that the tree shows, so
-/// a letter of another kind gives a plain table.
-fn relation_kind(letter: i8) -> TableKind {
+/// any other letter gives a plain table.
+fn relation_type_of(letter: i8) -> RelationType {
     match letter as u8 {
-        b'v' => TableKind::View,
-        b'm' => TableKind::MaterializedView,
-        b'p' => TableKind::PartitionedTable,
-        b'f' => TableKind::ForeignTable,
-        _ => TableKind::Table,
+        b'v' => RelationType::View,
+        b'm' => RelationType::MaterializedView,
+        b'p' => RelationType::PartitionedTable,
+        b'f' => RelationType::ForeignTable,
+        _ => RelationType::Table,
     }
 }
 
@@ -1461,13 +1461,17 @@ pub fn plan_prefix(kind: PlanKind) -> &'static str {
 ///
 /// `pg_get_viewdef` gives the query of the view alone, so the statement adds
 /// the CREATE clause and the name. A materialized view gets the clause of
-/// its own kind, because `CREATE VIEW` makes a plain view.
+/// its own relation type, because `CREATE VIEW` makes a plain view.
 ///
 /// The name goes into the statement as a literal that `regclass` reads. A
 /// name of another database cannot be read this way, so the name holds the
 /// schema and the table alone.
-fn create_query_text(schema: Option<&str>, table: &str, kind: TableKind) -> Option<CreateQuery> {
-    if !kind.is_view() {
+fn create_query_text(
+    schema: Option<&str>,
+    table: &str,
+    relation_type: RelationType,
+) -> Option<CreateQuery> {
+    if !relation_type.is_view() {
         return None;
     }
     let name = Dialect::Postgres.qualified_name(None, schema, table);
@@ -5347,16 +5351,19 @@ mod tests {
     }
 
     #[test]
-    fn the_letter_of_a_relation_names_its_kind() {
-        for (letter, kind) in [
-            (b'r', TableKind::Table),
-            (b'v', TableKind::View),
-            (b'm', TableKind::MaterializedView),
-            (b'p', TableKind::PartitionedTable),
-            (b'f', TableKind::ForeignTable),
-            (b'S', TableKind::Table),
+    fn the_letter_of_a_relation_names_its_type() {
+        for (letter, relation_type) in [
+            (b'r', RelationType::Table),
+            (b'v', RelationType::View),
+            (b'm', RelationType::MaterializedView),
+            (b'p', RelationType::PartitionedTable),
+            (b'f', RelationType::ForeignTable),
+            (b'S', RelationType::Table),
         ] {
-            assert_eq!(relation_of("r".into(), letter as i8).kind, kind);
+            assert_eq!(
+                relation_of("r".into(), letter as i8).relation_type,
+                relation_type
+            );
         }
         assert_eq!(relation_of("orders".into(), b'r' as i8).name, "orders");
     }
@@ -5445,7 +5452,7 @@ mod tests {
         assert!(text.ends_with("LIMIT 11"));
         assert!(text.contains("'m'"));
         assert!(text.contains("NOT c.relispartition"));
-        // The letter of the kind goes to the snapshot as the catalog keeps it.
+        // The letter of the relation type goes to the snapshot as the catalog keeps it.
         assert!(text.starts_with("SELECT n.nspname, c.relname, c.relkind, a.attname"));
         assert!(snapshot_query(usize::MAX).ends_with(&format!("LIMIT {}", i64::MAX)));
     }
@@ -5757,7 +5764,7 @@ mod tests {
 
     #[test]
     fn the_create_statement_covers_a_view_alone() {
-        let view = create_query_text(Some("public"), "v", TableKind::View).unwrap();
+        let view = create_query_text(Some("public"), "v", RelationType::View).unwrap();
         assert_eq!(
             view.sql,
             "SELECT 'CREATE ' || CASE c.relkind WHEN 'm' THEN 'MATERIALIZED VIEW ' \
@@ -5768,16 +5775,16 @@ mod tests {
         );
         assert_eq!(view.column, 0);
         // A materialized view reads the same statement, and the catalog
-        // gives the clause of its kind.
+        // gives the clause of its type.
         let materialized =
-            create_query_text(Some("public"), "v", TableKind::MaterializedView).unwrap();
+            create_query_text(Some("public"), "v", RelationType::MaterializedView).unwrap();
         assert_eq!(materialized, view);
-        for kind in [
-            TableKind::Table,
-            TableKind::PartitionedTable,
-            TableKind::ForeignTable,
+        for relation_type in [
+            RelationType::Table,
+            RelationType::PartitionedTable,
+            RelationType::ForeignTable,
         ] {
-            assert!(create_query_text(Some("public"), "t", kind).is_none());
+            assert!(create_query_text(Some("public"), "t", relation_type).is_none());
         }
     }
     use crate::storage::{ConnectionOptions, DbType};

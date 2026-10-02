@@ -8,11 +8,12 @@ import { emptySchemaIndex, type SchemaIndex } from '@/lib/sql'
 import {
   Dialect,
   ObjectType,
-  TableKind,
+  RelationType,
   TriggerTiming,
   type ColumnRef,
   type SchemaSnapshot,
   type ConstraintRef,
+  type ConstraintType,
   type IndexRef,
   type DriverCapabilities,
   type EventRef,
@@ -28,7 +29,7 @@ export type NodeKind =
   | 'database'
   | 'schema'
   | 'folder'
-  | TableKind
+  | RelationType
   | 'column'
   | 'routine'
   | 'index'
@@ -64,19 +65,22 @@ const LEAF_KINDS: NodeKind[] = [
   ObjectType.Event,
 ]
 
-/** The kinds of the relations, which are the kinds of nodes that `TableKind` names. */
-const RELATION_KINDS: readonly string[] = Object.values(TableKind)
+/** The types of relation, which are the node types that `RelationType` names. */
+const RELATION_TYPES: readonly string[] = Object.values(RelationType)
 
 /** The folders that list the relations of a schema. */
 type RelationFolder = 'tables' | 'views' | 'materializedViews' | 'foreignTables' | 'synonyms'
 
-/** The label of each folder of relations, and the kinds of relation it shows. */
-const RELATION_FOLDERS: Record<RelationFolder, { label: string; kinds: TableKind[] }> = {
-  tables: { label: 'Tables', kinds: [TableKind.Table, TableKind.PartitionedTable] },
-  views: { label: 'Views', kinds: [TableKind.View] },
-  materializedViews: { label: 'Materialized Views', kinds: [TableKind.MaterializedView] },
-  foreignTables: { label: 'Foreign Tables', kinds: [TableKind.ForeignTable] },
-  synonyms: { label: 'Synonyms', kinds: [TableKind.Synonym] },
+/** The label of each folder of relations, and the types of relation it shows. */
+const RELATION_FOLDERS: Record<RelationFolder, { label: string; relationTypes: RelationType[] }> = {
+  tables: { label: 'Tables', relationTypes: [RelationType.Table, RelationType.PartitionedTable] },
+  views: { label: 'Views', relationTypes: [RelationType.View] },
+  materializedViews: {
+    label: 'Materialized Views',
+    relationTypes: [RelationType.MaterializedView],
+  },
+  foreignTables: { label: 'Foreign Tables', relationTypes: [RelationType.ForeignTable] },
+  synonyms: { label: 'Synonyms', relationTypes: [RelationType.Synonym] },
 }
 
 /**
@@ -165,8 +169,8 @@ export function isExpandable(node: ExplorerNode): boolean {
 }
 
 /** True when the node is a relation, such as a table, a view or a synonym. */
-export function isRelation(node: ExplorerNode): node is ExplorerNode & { kind: TableKind } {
-  return RELATION_KINDS.includes(node.kind)
+export function isRelation(node: ExplorerNode): node is ExplorerNode & { kind: RelationType } {
+  return RELATION_TYPES.includes(node.kind)
 }
 
 /** True when the node is a trigger or an event, which gives a CREATE script alone. */
@@ -181,14 +185,14 @@ export function tableNode(
   database: string,
   schema: string | undefined,
 ): ExplorerNode {
-  const kind = table.kind
+  const relationType = table.relationType
   const node: ExplorerNode = {
-    // The kind is part of the key, because a table and a view of one schema
+    // The relation type is part of the key, because a table and a view of one schema
     // can carry the same name.
-    key: `${connectionId}/${database}/${schema ?? ''}/${kind}/${table.name}`,
+    key: `${connectionId}/${database}/${schema ?? ''}/${relationType}/${table.name}`,
     label: table.name,
-    kind,
-    icon: iconFor(kind),
+    kind: relationType,
+    icon: iconFor(relationType),
     children: [],
     loading: false,
     loaded: false,
@@ -197,7 +201,7 @@ export function tableNode(
     schema,
     table: table.name,
   }
-  if (kind === TableKind.Synonym) {
+  if (relationType === RelationType.Synonym) {
     // The object of a synonym can be in another database, where a read of
     // its columns can fail. The node is a leaf that names that object.
     node.hint = table.target || undefined
@@ -279,9 +283,9 @@ export function withUniqueKeys(nodes: ExplorerNode[]): ExplorerNode[] {
   })
 }
 
-/** Names one constraint for the tree: its kind, and its columns. */
+/** Names one constraint for the tree: its type, and its columns. */
 export function constraintHint(constraint: ConstraintRef): string {
-  const words: Record<ConstraintRef['kind'], string> = {
+  const words: Record<ConstraintType, string> = {
     primaryKey: 'primary key',
     foreignKey: 'foreign key',
     unique: 'unique',
@@ -291,7 +295,7 @@ export function constraintHint(constraint: ConstraintRef): string {
     notNull: 'not null',
     default: 'default',
   }
-  const parts = [words[constraint.kind]]
+  const parts = [words[constraint.constraintType]]
   if (constraint.columns.length > 0) {
     parts.push(constraint.columns.join(', '))
   }
@@ -1069,11 +1073,11 @@ export const useExplorerStore = defineStore('explorer', () => {
       case 'materializedViews':
       case 'foreignTables':
       case 'synonyms': {
-        const wanted = RELATION_FOLDERS[node.folder].kinds
+        const wanted = RELATION_FOLDERS[node.folder].relationTypes
         const folders = relationFolderKinds(capabilities).length
         const tables = await relationsOf(node, database, schema, folders)
         return tables
-          .filter((entry) => wanted.includes(entry.kind))
+          .filter((entry) => wanted.includes(entry.relationType))
           .map((entry) => tableNode(entry, connectionId, database, node.schema))
       }
       case 'procedures':
@@ -1081,7 +1085,7 @@ export const useExplorerStore = defineStore('explorer', () => {
         const wanted = node.folder === 'procedures' ? 'procedure' : 'function'
         const routines = await api.listRoutines(connectionId, database, schema)
         return routines
-          .filter((routine) => routine.kind === wanted)
+          .filter((routine) => routine.routineType === wanted)
           .map((routine) => leafNode(routine.name, 'routine', node))
       }
       case 'indexes': {

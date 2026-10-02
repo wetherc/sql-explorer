@@ -1,17 +1,18 @@
 //! The MySQL and MariaDB driver.
 
 use crate::db::drivers::{
-    add_constraint_column, add_index_column, add_snapshot_column, bytes_to_json, constraint_kind,
+    add_constraint_column, add_index_column, add_snapshot_column, bytes_to_json, constraint_type,
     f32_to_json, f64_to_json, next_values, number_out_of_range, number_value,
-    parameter_type_refused, prefixed_plan, routine_kind, rows_affected_message,
-    rows_returned_message, size_text, system_roots, table_kind, trigger_event, trigger_timing,
-    CancelHandle, DatabaseDriver, NumberValue,
+    parameter_type_refused, prefixed_plan, relation_type, routine_type, rows_affected_message,
+    rows_returned_message, size_text, system_roots, trigger_event, trigger_timing, CancelHandle,
+    DatabaseDriver, NumberValue,
 };
 use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, Message, MessageLevel, ObjectType, PlanKind, QueryParams, QueryResponse, Routine,
-    ScheduledEvent, Schema, SchemaSnapshot, SnapshotColumn, Table, TableFact, TableKind, Trigger,
+    IndexInfo, Message, MessageLevel, ObjectType, PlanKind, QueryParams, QueryResponse,
+    RelationType, Routine, ScheduledEvent, Schema, SchemaSnapshot, SnapshotColumn, Table,
+    TableFact, Trigger,
 };
 use crate::error::{is_mysql_stop, Error, Result};
 use crate::sql::{only_reads, split_statements, Dialect};
@@ -530,9 +531,9 @@ impl DatabaseDriver for MysqlDriver {
         database: Option<&str>,
         _schema: Option<&str>,
         table: &str,
-        kind: TableKind,
+        relation_type: RelationType,
     ) -> Option<CreateQuery> {
-        Some(create_query_text(database, table, kind))
+        Some(create_query_text(database, table, relation_type))
     }
 
     fn object_create_query(
@@ -647,8 +648,8 @@ impl DatabaseDriver for MysqlDriver {
             .await?;
         Ok(rows
             .into_iter()
-            .map(|(name, kind)| {
-                if kind.eq_ignore_ascii_case("VIEW") {
+            .map(|(name, relation_type)| {
+                if relation_type.eq_ignore_ascii_case("VIEW") {
                     Table::view(name)
                 } else {
                     Table::table(name)
@@ -758,13 +759,13 @@ impl DatabaseDriver for MysqlDriver {
             complete: true,
             ..SchemaSnapshot::default()
         };
-        for (relation, kind, name, data_type) in rows {
+        for (relation, word, name, data_type) in rows {
             if !add_snapshot_column(
                 &mut snapshot,
                 max_columns,
                 None,
                 relation,
-                table_kind(&kind),
+                relation_type(&word),
                 SnapshotColumn { name, data_type },
             ) {
                 break;
@@ -788,9 +789,9 @@ impl DatabaseDriver for MysqlDriver {
             .await?;
         Ok(rows
             .into_iter()
-            .map(|(name, kind)| Routine {
+            .map(|(name, word)| Routine {
                 name,
-                kind: routine_kind(&kind),
+                routine_type: routine_type(&word),
             })
             .collect())
     }
@@ -851,7 +852,7 @@ impl DatabaseDriver for MysqlDriver {
             )
             .await?;
         let mut constraints = Vec::new();
-        for (name, kind, column, target, target_column) in rows {
+        for (name, word, column, target, target_column) in rows {
             let detail = target.map(|target| match target_column {
                 Some(column) => format!("{target}({column})"),
                 None => target,
@@ -859,7 +860,7 @@ impl DatabaseDriver for MysqlDriver {
             add_constraint_column(
                 &mut constraints,
                 name,
-                constraint_kind(&kind),
+                constraint_type(&word),
                 column,
                 detail,
             );
@@ -952,9 +953,17 @@ pub fn plan_prefix(kind: PlanKind) -> &'static str {
 /// Builds the statement that reads the CREATE text of one object. MySQL and
 /// MariaDB answer `SHOW CREATE` with the name in the first column and the
 /// text in the second one.
-fn create_query_text(database: Option<&str>, table: &str, kind: TableKind) -> CreateQuery {
+fn create_query_text(
+    database: Option<&str>,
+    table: &str,
+    relation_type: RelationType,
+) -> CreateQuery {
     let name = Dialect::MySql.qualified_name(database, None, table);
-    let word = if kind.is_view() { "VIEW" } else { "TABLE" };
+    let word = if relation_type.is_view() {
+        "VIEW"
+    } else {
+        "TABLE"
+    };
     CreateQuery::new(format!("SHOW CREATE {word} {name};"), 1)
 }
 
@@ -1417,12 +1426,12 @@ mod tests {
     }
 
     #[test]
-    fn the_create_statement_names_the_kind_of_the_object() {
-        let table = create_query_text(Some("db"), "t", TableKind::Table);
+    fn the_create_statement_names_the_type_of_the_object() {
+        let table = create_query_text(Some("db"), "t", RelationType::Table);
         assert_eq!(table.sql, "SHOW CREATE TABLE `db`.`t`;");
         assert_eq!(table.column, 1);
 
-        let view = create_query_text(None, "v", TableKind::View);
+        let view = create_query_text(None, "v", RelationType::View);
         assert_eq!(view.sql, "SHOW CREATE VIEW `v`;");
     }
 

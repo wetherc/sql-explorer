@@ -30,7 +30,7 @@ const {
 type ExplorerNode = import('@/stores/explorer').ExplorerNode
 const { useConnectionsStore } = await import('@/stores/connections')
 const { useUiStore } = await import('@/stores/ui')
-const { TableKind } = await import('@/types/api')
+const { RelationType } = await import('@/types/api')
 const { emptySchemaIndex } = await import('@/lib/sql')
 
 /** Waits for the pause that the filter of the tree holds. */
@@ -130,7 +130,7 @@ describe('triggerHint and eventHint', () => {
 
 describe('isRelation', () => {
   it('holds for every kind of relation and for no other node', () => {
-    for (const kind of Object.values(TableKind)) {
+    for (const kind of Object.values(RelationType)) {
       expect(isRelation(node({ kind }))).toBe(true)
     }
     for (const kind of ['connection', 'database', 'schema', 'folder', 'column'] as const) {
@@ -187,50 +187,67 @@ describe('indexColumns', () => {
 
 describe('constraintHint', () => {
   it('names the kind, the columns and the detail', () => {
-    expect(constraintHint({ name: 'pk', kind: 'primaryKey', columns: ['id'], detail: null })).toBe(
-      'primary key \u00b7 id',
-    )
+    expect(
+      constraintHint({ name: 'pk', constraintType: 'primaryKey', columns: ['id'], detail: null }),
+    ).toBe('primary key \u00b7 id')
     expect(
       constraintHint({
         name: 'fk',
-        kind: 'foreignKey',
+        constraintType: 'foreignKey',
         columns: ['customer'],
         detail: 'customers(id)',
       }),
     ).toBe('foreign key \u00b7 customer \u00b7 customers(id)')
-    expect(constraintHint({ name: 'u', kind: 'unique', columns: [], detail: null })).toBe('unique')
-    expect(constraintHint({ name: 'c', kind: 'check', columns: [], detail: 'total > 0' })).toBe(
-      'check \u00b7 total > 0',
-    )
-    expect(constraintHint({ name: 'x', kind: 'exclusion', columns: ['room'], detail: null })).toBe(
-      'exclusion \u00b7 room',
-    )
-    expect(constraintHint({ name: 't', kind: 'trigger', columns: [], detail: null })).toBe(
-      'trigger',
-    )
-    expect(constraintHint({ name: 'n', kind: 'notNull', columns: ['id'], detail: null })).toBe(
-      'not null \u00b7 id',
+    expect(constraintHint({ name: 'u', constraintType: 'unique', columns: [], detail: null })).toBe(
+      'unique',
     )
     expect(
-      constraintHint({ name: 'df', kind: 'default', columns: ['made'], detail: '(getdate())' }),
+      constraintHint({ name: 'c', constraintType: 'check', columns: [], detail: 'total > 0' }),
+    ).toBe('check \u00b7 total > 0')
+    expect(
+      constraintHint({ name: 'x', constraintType: 'exclusion', columns: ['room'], detail: null }),
+    ).toBe('exclusion \u00b7 room')
+    expect(
+      constraintHint({ name: 't', constraintType: 'trigger', columns: [], detail: null }),
+    ).toBe('trigger')
+    expect(
+      constraintHint({ name: 'n', constraintType: 'notNull', columns: ['id'], detail: null }),
+    ).toBe('not null \u00b7 id')
+    expect(
+      constraintHint({
+        name: 'df',
+        constraintType: 'default',
+        columns: ['made'],
+        detail: '(getdate())',
+      }),
     ).toBe('default \u00b7 made \u00b7 (getdate())')
   })
 })
 
 describe('tableNode', () => {
   it('builds a node for a table and one for a view', () => {
-    const table = tableNode({ name: 'orders', kind: TableKind.Table }, 'c1', 'Sales', 'dbo')
+    const table = tableNode(
+      { name: 'orders', relationType: RelationType.Table },
+      'c1',
+      'Sales',
+      'dbo',
+    )
     expect(table.kind).toBe('table')
     expect(table.key).toBe('c1/Sales/dbo/table/orders')
     expect(table.children).toEqual([])
     expect(table.loaded).toBe(false)
 
-    const view = tableNode({ name: 'big', kind: TableKind.View }, 'c1', 'Sales', undefined)
+    const view = tableNode(
+      { name: 'big', relationType: RelationType.View },
+      'c1',
+      'Sales',
+      undefined,
+    )
     expect(view.kind).toBe('view')
     expect(view.key).toBe('c1/Sales//view/big')
 
     const parted = tableNode(
-      { name: 'events', kind: TableKind.PartitionedTable },
+      { name: 'events', relationType: RelationType.PartitionedTable },
       'c1',
       'logs',
       'public',
@@ -242,7 +259,11 @@ describe('tableNode', () => {
 
   it('builds a synonym as a leaf that names its target', () => {
     const synonym = tableNode(
-      { name: 'remote_orders', kind: TableKind.Synonym, target: '[Other].[dbo].[orders]' },
+      {
+        name: 'remote_orders',
+        relationType: RelationType.Synonym,
+        target: '[Other].[dbo].[orders]',
+      },
       'c1',
       'Sales',
       'dbo',
@@ -254,7 +275,12 @@ describe('tableNode', () => {
     expect(synonym.loaded).toBe(true)
     expect(synonym.table).toBe('remote_orders')
 
-    const bare = tableNode({ name: 's', kind: TableKind.Synonym, target: '' }, 'c1', 'Sales', 'dbo')
+    const bare = tableNode(
+      { name: 's', relationType: RelationType.Synonym, target: '' },
+      'c1',
+      'Sales',
+      'dbo',
+    )
     expect(bare.hint).toBeUndefined()
   })
 })
@@ -522,12 +548,12 @@ describe('explorer store', () => {
 
   it('sorts each kind of relation into its folder from one shared read', async () => {
     apiStub.listTables.mockResolvedValue([
-      { name: 'orders', kind: TableKind.Table },
-      { name: 'events', kind: TableKind.PartitionedTable },
-      { name: 'big_orders', kind: TableKind.View },
-      { name: 'totals', kind: TableKind.MaterializedView },
-      { name: 'remote', kind: TableKind.ForeignTable },
-      { name: 'alias', kind: TableKind.Synonym, target: 'other.dbo.orders' },
+      { name: 'orders', relationType: RelationType.Table },
+      { name: 'events', relationType: RelationType.PartitionedTable },
+      { name: 'big_orders', relationType: RelationType.View },
+      { name: 'totals', relationType: RelationType.MaterializedView },
+      { name: 'remote', relationType: RelationType.ForeignTable },
+      { name: 'alias', relationType: RelationType.Synonym, target: 'other.dbo.orders' },
     ])
     const explorer = await storeWithEveryKind()
     const schema = node({ kind: 'schema', database: 'Sales', schema: 'dbo' })
@@ -573,7 +599,7 @@ describe('explorer store', () => {
 
   it('offers the name of a synonym to the editor', async () => {
     apiStub.listTables.mockResolvedValue([
-      { name: 'alias', kind: TableKind.Synonym, target: 'other.dbo.orders' },
+      { name: 'alias', relationType: RelationType.Synonym, target: 'other.dbo.orders' },
     ])
     const explorer = await storeWithEveryKind()
     const root = explorer.addRoot('c1')
@@ -596,8 +622,8 @@ describe('explorer store', () => {
 
   it('reads the tables and the views of their own folders', async () => {
     apiStub.listTables.mockResolvedValue([
-      { name: 'orders', kind: TableKind.Table },
-      { name: 'big_orders', kind: TableKind.View },
+      { name: 'orders', relationType: RelationType.Table },
+      { name: 'big_orders', relationType: RelationType.View },
     ])
     const explorer = await readyStore()
     const schema = node({ kind: 'schema', database: 'Sales', schema: 'dbo' })
@@ -615,8 +641,8 @@ describe('explorer store', () => {
 
   it('shares one read of the relations between the two folders of a schema', async () => {
     apiStub.listTables.mockResolvedValue([
-      { name: 'orders', kind: TableKind.Table },
-      { name: 'big_orders', kind: TableKind.View },
+      { name: 'orders', relationType: RelationType.Table },
+      { name: 'big_orders', relationType: RelationType.View },
     ])
     const explorer = await readyStore()
     const schema = node({ kind: 'schema', database: 'Sales', schema: 'dbo' })
@@ -730,9 +756,9 @@ describe('explorer store', () => {
 
   it('reads the procedures and the functions of their own folders', async () => {
     apiStub.listRoutines.mockResolvedValue([
-      { name: 'add_order', kind: 'procedure' },
-      { name: 'order_total', kind: 'function' },
-      { name: 'order_total', kind: 'function' },
+      { name: 'add_order', routineType: 'procedure' },
+      { name: 'order_total', routineType: 'function' },
+      { name: 'order_total', routineType: 'function' },
     ])
     const explorer = await readyStore()
     const schema = node({ kind: 'schema', database: 'Sales', schema: 'dbo' })
@@ -902,7 +928,7 @@ describe('explorer store', () => {
       { name: 'by_total', columns: ['total'], unique: false, primary: false, included: [] },
     ])
     apiStub.listConstraints.mockResolvedValue([
-      { name: 'pk_orders', kind: 'primaryKey', columns: ['id'], detail: null },
+      { name: 'pk_orders', constraintType: 'primaryKey', columns: ['id'], detail: null },
     ])
     apiStub.listPartitions.mockResolvedValue({
       partitions: [{ values: 'day=2026-08-10' }],
@@ -978,13 +1004,13 @@ describe('explorer store', () => {
         {
           name: 'orders',
           schema: 'dbo',
-          kind: TableKind.Table,
+          relationType: RelationType.Table,
           columns: [{ name: 'id', dataType: 'int' }],
         },
         {
           name: 'orders',
           schema: 'staging',
-          kind: TableKind.View,
+          relationType: RelationType.View,
           columns: [{ name: 'raw', dataType: 'text' }],
         },
       ],
@@ -1126,7 +1152,7 @@ describe('explorer store', () => {
     const relations = Array.from({ length: 200 }, (_, table) => ({
       name: `table_${table}`,
       schema: 'dbo',
-      kind: TableKind.Table,
+      relationType: RelationType.Table,
       columns: Array.from({ length: 100 }, (_, column) => ({
         name: `column_${table}_${column}`,
         dataType: 'int',
@@ -1414,7 +1440,7 @@ describe('explorer store', () => {
   it('builds the names the editor offers, without repeating one', async () => {
     apiStub.listDatabases.mockResolvedValue([{ name: 'Sales' }])
     apiStub.listSchemas.mockResolvedValue([{ name: 'dbo' }])
-    apiStub.listTables.mockResolvedValue([{ name: 'orders', kind: TableKind.Table }])
+    apiStub.listTables.mockResolvedValue([{ name: 'orders', relationType: RelationType.Table }])
     apiStub.listColumns.mockResolvedValue([
       { name: 'id', dataType: 'int', nullable: false, isPrimaryKey: true },
     ])

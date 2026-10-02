@@ -273,7 +273,7 @@ export interface SchemaRef {
   name: string
 }
 
-export const TableKind = {
+export const RelationType = {
   Table: 'table',
   View: 'view',
   MaterializedView: 'materializedView',
@@ -281,24 +281,24 @@ export const TableKind = {
   ForeignTable: 'foreignTable',
   Synonym: 'synonym',
 } as const
-export type TableKind = (typeof TableKind)[keyof typeof TableKind]
+export type RelationType = (typeof RelationType)[keyof typeof RelationType]
 
 export interface TableRef {
   name: string
-  kind: TableKind
+  relationType: RelationType
   /** The name of the object that a synonym points at. */
   target?: string
 }
 
-export const RoutineKind = {
+export const RoutineType = {
   Procedure: 'procedure',
   Function: 'function',
 } as const
-export type RoutineKind = (typeof RoutineKind)[keyof typeof RoutineKind]
+export type RoutineType = (typeof RoutineType)[keyof typeof RoutineType]
 
 export interface RoutineRef {
   name: string
-  kind: RoutineKind
+  routineType: RoutineType
 }
 
 export interface IndexRef {
@@ -310,7 +310,7 @@ export interface IndexRef {
   included: string[]
 }
 
-export const ConstraintKind = {
+export const ConstraintType = {
   PrimaryKey: 'primaryKey',
   ForeignKey: 'foreignKey',
   Unique: 'unique',
@@ -320,11 +320,11 @@ export const ConstraintKind = {
   NotNull: 'notNull',
   Default: 'default',
 } as const
-export type ConstraintKind = (typeof ConstraintKind)[keyof typeof ConstraintKind]
+export type ConstraintType = (typeof ConstraintType)[keyof typeof ConstraintType]
 
 export interface ConstraintRef {
   name: string
-  kind: ConstraintKind
+  constraintType: ConstraintType
   columns: string[]
   detail: string | null
 }
@@ -403,7 +403,7 @@ export interface SnapshotColumn {
 export interface SnapshotRelation {
   name: string
   schema: string | null
-  kind: TableKind
+  relationType: RelationType
   columns: SnapshotColumn[]
 }
 

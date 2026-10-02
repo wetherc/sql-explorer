@@ -17,7 +17,7 @@ const { useQueryStore } = await import('@/stores/query')
 const { useSettingsStore } = await import('@/stores/settings')
 const { useTabsStore } = await import('@/stores/tabs')
 const { useUiStore } = await import('@/stores/ui')
-const { TableKind } = await import('@/types/api')
+const { RelationType } = await import('@/types/api')
 
 /** Opens the menu of a node and returns the item with the given name. */
 async function openMenu(wrapper: ReturnType<typeof mountWithPlugins>, rowIndex: number) {
@@ -37,7 +37,7 @@ describe('DbExplorer', () => {
     apiStub.listActiveConnections.mockResolvedValue([infoFixture()])
     apiStub.listDatabases.mockResolvedValue([{ name: 'Sales' }])
     apiStub.listSchemas.mockResolvedValue([{ name: 'dbo' }])
-    apiStub.listTables.mockResolvedValue([{ name: 'orders', kind: TableKind.Table }])
+    apiStub.listTables.mockResolvedValue([{ name: 'orders', relationType: RelationType.Table }])
     apiStub.listColumns.mockResolvedValue([
       { name: 'id', dataType: 'int', nullable: false, isPrimaryKey: true },
     ])
