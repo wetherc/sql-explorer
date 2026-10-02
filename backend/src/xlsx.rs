@@ -116,11 +116,19 @@ pub fn is_plain_number(text: &str) -> bool {
 /// a decimal number with at most 15 significant digits whose value is
 /// finite. A longer number goes in as text, because Excel would round
 /// 1234567890123456789 to 1234567890123456800.
+///
+/// A whole part with a zero in front of other digits, as in the code
+/// `00123`, also goes in as text. A database never writes a number in that
+/// form, and the number cell would lose the zeros.
 fn excel_number(text: &str) -> Option<String> {
     if !is_plain_number(text) {
         return None;
     }
     let mantissa = text.split(['e', 'E']).next().unwrap_or(text);
+    let whole = mantissa.trim_start_matches(['+', '-']).split('.').next();
+    if whole.is_some_and(|whole| whole.len() > 1 && whole.starts_with('0')) {
+        return None;
+    }
     let significant = mantissa
         .trim_start_matches(['+', '-'])
         .replace('.', "")
@@ -409,6 +417,7 @@ mod tests {
             ("1.25", "1.25"),
             ("+.5", "0.5"),
             ("0", "0"),
+            ("0.5", "0.5"),
             ("1e21", "1000000000000000000000"),
             ("123456789012345", "123456789012345"),
             ("0.000123456789012345", "0.000123456789012345"),
@@ -417,7 +426,7 @@ mod tests {
         }
         // Sixteen significant digits, an infinite value and a text that is
         // not a number stay text.
-        for value in ["1234567890123456", "1e400", "12a", "-"] {
+        for value in ["1234567890123456", "1e400", "12a", "-", "00123", "-07.5"] {
             assert_eq!(cell_xml("A1", &json!(value)), text(value), "{value}");
         }
         assert_eq!(
