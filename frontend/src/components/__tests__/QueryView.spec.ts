@@ -1915,6 +1915,24 @@ describe('QueryView edge paths', () => {
     expect(atob(request.contents).startsWith('PK')).toBe(true)
   })
 
+  it('reports a result too wide for an Excel sheet and opens no save dialog', async () => {
+    const wrapper = await mountedWithResult()
+    const wide = {
+      columns: Array.from({ length: 16385 }, (_, index) => ({
+        name: `c${index}`,
+        typeName: 'int',
+      })),
+      rows: [],
+      truncated: false,
+    }
+
+    await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export', 'xlsx', wide)
+    await settle()
+    expect(apiStub.saveBinaryFile).not.toHaveBeenCalled()
+    const notice = useUiStore().notices.find((item) => item.level === 'error')
+    expect(notice?.message).toContain('at most 16384 columns')
+  })
+
   it('writes nothing when the user closes the save dialog', async () => {
     apiStub.saveTextFile.mockResolvedValue(null)
     const wrapper = await mountedWithResult()

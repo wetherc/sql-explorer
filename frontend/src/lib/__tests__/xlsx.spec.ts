@@ -5,6 +5,7 @@ import {
   cellText,
   columnName,
   MAX_CELL_UNITS,
+  MAX_SHEET_COLUMNS,
   escapeXml,
   sheetName,
   sheetXml,
@@ -12,7 +13,7 @@ import {
   toXlsx,
   workbookXml,
 } from '@/lib/xlsx'
-import type { CellValue, ResultSet } from '@/types/api'
+import { ErrorKind, type CellValue, type ResultSet } from '@/types/api'
 
 const result: ResultSet = {
   columns: [
@@ -64,6 +65,24 @@ describe('sheetName', () => {
 
   it('cuts a long name at thirty one characters', () => {
     expect(sheetName('x'.repeat(40))).toHaveLength(31)
+  })
+
+  it('counts a character outside the basic plane as one character', () => {
+    expect(sheetName('😀'.repeat(40))).toBe('😀'.repeat(31))
+  })
+
+  it('puts no apostrophe at an end of the name', () => {
+    expect(sheetName("'q'")).toBe('_q_')
+    expect(sheetName("'")).toBe('_')
+    expect(sheetName("it's")).toBe("it's")
+    // The cut to 31 characters can leave an apostrophe at the end.
+    expect(sheetName(`${'x'.repeat(30)}'abc`)).toBe(`${'x'.repeat(30)}_`)
+  })
+
+  it('gives no sheet the name that Excel keeps for its own sheet', () => {
+    expect(sheetName('History')).toBe('History_')
+    expect(sheetName(' hIsToRy ')).toBe('hIsToRy_')
+    expect(sheetName('History 2')).toBe('History 2')
   })
 })
 
@@ -152,6 +171,33 @@ describe('toXlsx', () => {
   it('names the sheet Result when no name is given', () => {
     const parts = unzipSync(toXlsx(result))
     expect(strFromU8(parts['xl/workbook.xml']!)).toContain('name="Result"')
+  })
+
+  it('refuses more columns than a sheet can contain', () => {
+    const wide = (count: number): ResultSet => ({
+      columns: Array.from({ length: count }, (_, index) => ({
+        name: String(index),
+        typeName: 'int',
+      })),
+      rows: [],
+      truncated: false,
+    })
+    let caught: unknown = null
+    try {
+      toXlsx(wide(MAX_SHEET_COLUMNS + 1))
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(Error)
+    expect(caught).toMatchObject({
+      kind: ErrorKind.Unsupported,
+      message: expect.stringContaining('16384'),
+      detail: null,
+    })
+    expect((caught as Error).message).toContain('16385 columns')
+
+    const parts = unzipSync(toXlsx(wide(MAX_SHEET_COLUMNS)))
+    expect(strFromU8(parts['xl/worksheets/sheet1.xml']!)).toContain('<c r="XFD1" t="inlineStr">')
   })
 })
 

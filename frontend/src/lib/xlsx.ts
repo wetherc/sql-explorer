@@ -8,7 +8,7 @@
  * one pass over the rows.
  */
 import { zipSync, strToU8 } from 'fflate'
-import type { CellValue, ResultSet } from '@/types/api'
+import { ErrorKind, type CellValue, type ErrorPayload, type ResultSet } from '@/types/api'
 import { formatCell, isNullCell, isPlainNumber } from './format'
 
 /** Escapes the five characters that XML reserves. */
@@ -29,6 +29,9 @@ export function stripForbiddenXml(text: string): string {
   // eslint-disable-next-line no-control-regex
   return text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g, '')
 }
+
+/** The largest number of columns that a sheet can contain. The last is XFD. */
+export const MAX_SHEET_COLUMNS = 16384
 
 /** The largest number of significant digits that Excel keeps in a number. */
 const EXCEL_DIGITS = 15
@@ -164,15 +167,46 @@ export function workbookXml(sheetName: string): string {
 
 /**
  * Cleans a name for a sheet. A sheet name holds at most 31 characters and
- * none of the characters that Excel reserves.
+ * none of the characters that Excel reserves. Excel also refuses an
+ * apostrophe at the start or the end of the name, and it keeps the name
+ * `History` for a sheet of its own. Excel repairs a file that breaks one of
+ * these rules.
  */
 export function sheetName(name: string): string {
   const cleaned = name.replace(/[\\/?*[\]:]/g, '_').trim()
-  return (cleaned === '' ? 'Result' : cleaned).slice(0, 31)
+  // The backend counts code points, so a character outside the basic plane
+  // counts as one character here too.
+  const chars = Array.from(cleaned === '' ? 'Result' : cleaned).slice(0, 31)
+  // The cut to 31 characters can put an apostrophe at the end, so the ends
+  // are read after the cut.
+  for (const at of [0, chars.length - 1]) {
+    if (chars[at] === "'") {
+      chars[at] = '_'
+    }
+  }
+  const joined = chars.join('')
+  return joined.toLowerCase() === 'history' ? `${joined}_` : joined
 }
 
-/** Builds a whole XLSX file from one result set. */
+/**
+ * Builds a whole XLSX file from one result set.
+ *
+ * A result with more columns than a sheet can contain gives the error that
+ * the backend gives for the same result. Excel repairs a file with a column
+ * past XFD, and a cut of the columns would drop data with no sign of it in
+ * the file.
+ */
 export function toXlsx(result: ResultSet, name = 'Result'): Uint8Array {
+  const count = result.columns.length
+  if (count > MAX_SHEET_COLUMNS) {
+    const payload: ErrorPayload = {
+      kind: ErrorKind.Unsupported,
+      message: `An Excel sheet holds at most ${MAX_SHEET_COLUMNS} columns, and the result has ${count} columns. Export the result as CSV or JSON.`,
+      detail: null,
+    }
+    // The error is also a payload, so the notice shows the kind of fault.
+    throw Object.assign(new Error(payload.message), payload)
+  }
   return zipSync({
     '[Content_Types].xml': strToU8(CONTENT_TYPES),
     '_rels/.rels': strToU8(ROOT_RELATIONSHIPS),
