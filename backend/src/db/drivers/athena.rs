@@ -369,7 +369,7 @@ impl AthenaDriver {
                 let _ = self.stop(execution_id).await;
                 return Err(Error::Timeout(options.timeout_secs));
             }
-            tokio::time::sleep(wait).await;
+            tokio::time::sleep(pause_before_check(wait, deadline, Instant::now())).await;
             wait = next_wait(wait);
         }
     }
@@ -982,6 +982,15 @@ pub fn plan_prefix(kind: PlanKind) -> &'static str {
     }
 }
 
+/// The pause before the next check of the state. The pause ends at the
+/// deadline when the deadline comes first, so the stop of a statement that
+/// passed its time limit starts at that limit.
+pub fn pause_before_check(wait: Duration, deadline: Option<Instant>, now: Instant) -> Duration {
+    deadline.map_or(wait, |deadline| {
+        wait.min(deadline.saturating_duration_since(now))
+    })
+}
+
 /// Doubles the wait between two checks, up to two seconds.
 pub fn next_wait(current: Duration) -> Duration {
     std::cmp::min(current * 2, Duration::from_secs(2))
@@ -1069,6 +1078,21 @@ pub fn typed_value(text: &str, type_name: &str) -> JsonValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_pause_ends_at_the_deadline() {
+        let now = Instant::now();
+        let wait = Duration::from_secs(2);
+        assert_eq!(pause_before_check(wait, None, now), wait);
+        let near = now + Duration::from_millis(300);
+        assert_eq!(
+            pause_before_check(wait, Some(near), now),
+            Duration::from_millis(300)
+        );
+        let far = now + Duration::from_secs(10);
+        assert_eq!(pause_before_check(wait, Some(far), now), wait);
+        assert_eq!(pause_before_check(wait, Some(now), near), Duration::ZERO);
+    }
 
     #[test]
     fn a_time_limit_of_zero_sets_no_deadline() {
