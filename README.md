@@ -141,6 +141,10 @@ The filter keeps 6 of the 18 rows of the result.
   same time. The temporary tables, the `SET` options and the transactions of
   a tab stay with the session of that tab. A session limit in the options of
   the connection bounds the sessions of one server, with six as the default.
+- A second connection of the record reads the catalog for the explorer, so
+  the tree does not wait behind a statement. The temporary tables and the
+  attached databases of a tab do not show in the tree. A SQLite database in
+  memory has one session alone, and the tree reads it on that session.
 - Passwords go into the keychain of the operating system. The settings file
   holds no password.
 - A connection that stops answering is opened again, and the interface shows

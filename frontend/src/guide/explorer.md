@@ -14,6 +14,20 @@ The filter box keeps the path down to each match, so a name deep in the tree
 stays reachable. A match keeps all of its children, so an open match shows
 what it holds. A name that is wider than the panel scrolls across.
 
+## The connection of the tree
+
+The tree, the completion and the drafts of the menu read the catalog on a
+second connection of the record. A read of the catalog thus does not wait
+behind a statement of a tab. The temporary tables of a tab and the databases
+that a tab attaches stay in the session of that tab. The tree does not show
+them, and a refresh does not show them.
+
+A SQLite database in memory exists in one session alone. A second connection
+to it opens a separate empty database. Thus the tree reads that database on
+the session that all the tabs share. A read of the tree then waits while a
+tab runs a statement. Use the refresh button to read the tables that a tab
+made.
+
 ## What the menu of an object gives
 
 The context menu of an object builds statements in the backend, so every name

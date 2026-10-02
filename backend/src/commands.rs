@@ -399,7 +399,8 @@ async fn ensure_healthy<R: Runtime>(
 
 /// Starts a metadata read. The read goes to a second connection when one can
 /// open, so that the tree of the explorer does not wait behind a statement of
-/// the user.
+/// the user. A SQLite database in memory has one session alone, and the read
+/// runs on it.
 async fn metadata_read<'a, R: Runtime>(
     app: &AppHandle<R>,
     state: &'a AppState,
@@ -486,6 +487,17 @@ impl<'a> CatalogRead<'a> {
         if self.session.keeps_connection_after_stop {
             return;
         }
+        let open = self.state.connection(self.connection_id).await.ok();
+        // A database in memory exists in its one session alone. A new
+        // session opens an empty database, so the session stays.
+        if open.as_ref().is_some_and(|open| open.single_session) {
+            log::warn!(
+                "A read of the catalog of '{}' passed its limit. The session stays, because \
+                 it keeps the only copy of the database.",
+                self.connection_id
+            );
+            return;
+        }
         log::warn!(
             "A read of the catalog of '{}' passed its limit, so its session closes.",
             self.connection_id
@@ -498,7 +510,7 @@ impl<'a> CatalogRead<'a> {
         }
         // The read ran on the default session, because no second connection
         // could open. The next command opens a new default session.
-        if let Ok(open) = self.state.connection(self.connection_id).await {
+        if let Some(open) = open {
             if let Some(current) = open.sessions.get(DEFAULT_SESSION).await {
                 if Arc::ptr_eq(&current, &self.session) {
                     open.sessions.release(DEFAULT_SESSION).await;
@@ -1213,11 +1225,18 @@ async fn background_answers(session: &Arc<Session>) -> bool {
 /// connection has none or when the one it has stopped answering. A driver
 /// that cannot open gives the default session, because a snapshot that waits
 /// is better than no completions.
+///
+/// A connection with one session alone gives its default session and opens
+/// no second connection. A second connection to a SQLite database in memory
+/// opens a separate empty database, so the tree would show no table.
 async fn background_session(
     state: &AppState,
     connection_id: &str,
     open: &OpenConnection,
 ) -> Result<Arc<Session>> {
+    if open.single_session {
+        return open.default_session().await;
+    }
     if let Some(session) = state.background_session(connection_id).await {
         if background_answers(&session).await {
             return Ok(session);
@@ -3534,6 +3553,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_database_in_memory_reads_its_catalog_on_the_default_session() {
+        let descriptor = sqlite_connection(":memory:");
+        let (app, state) = state_with_sqlite(descriptor).await;
+        let open = state.connection("s1").await.unwrap();
+        let default = open.default_session().await.unwrap();
+        default
+            .driver
+            .lock()
+            .await
+            .execute_query("CREATE TABLE kept (a)", None, &ExecOptions::default())
+            .await
+            .unwrap();
+
+        // The read opens no second connection, so it sees the table that
+        // the session of the user made.
+        let read = metadata_read(app.handle(), &state, "s1").await.unwrap();
+        assert!(Arc::ptr_eq(&read.session, &default));
+        let mut guard = read.lock().await.unwrap();
+        let tables = read.run(guard.list_tables("main", None)).await.unwrap();
+        assert_eq!(tables[0].name, "kept");
+        assert!(state.background_session("s1").await.is_none());
+    }
+
+    #[tokio::test]
     async fn a_released_tab_session_leaves_the_pool() {
         use tauri::Manager;
         let (_dir, descriptor) = temp_sqlite();
@@ -3989,6 +4032,30 @@ mod tests {
         assert!(outcome.is_err());
         assert_eq!(stops(&calls), 1);
         assert!(open.default_session().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_catalog_read_past_its_limit_keeps_the_only_session_of_a_database_in_memory() {
+        let descriptor = sqlite_connection(":memory:");
+        let (_app, state) = state_with_sqlite(descriptor).await;
+        let open = state.connection("s1").await.unwrap();
+        // A driver that does not keep its connection after a stop sits in
+        // the default slot.
+        let (driver, calls) = catalog_driver(Some(false));
+        let default = open
+            .sessions
+            .insert(DEFAULT_SESSION, Session::new(driver))
+            .await;
+
+        let read = CatalogRead::new(&state, "s1", default.clone(), SHORT);
+        let outcome: Result<()> = read.run(std::future::pending()).await;
+
+        assert!(matches!(outcome, Err(Error::Timeout(0))));
+        assert_eq!(stops(&calls), 1);
+        assert!(Arc::ptr_eq(
+            &open.default_session().await.unwrap(),
+            &default
+        ));
     }
 
     #[tokio::test]
