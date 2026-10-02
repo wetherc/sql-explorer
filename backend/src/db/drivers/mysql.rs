@@ -13,14 +13,15 @@ use crate::db::{
     IndexInfo, Message, MessageLevel, PlanKind, QueryParams, QueryResponse, Routine, Schema,
     SchemaSnapshot, SnapshotColumn, Table, TableFact, TableKind,
 };
-use crate::error::{Error, Result};
-use crate::sql::{split_statements, Dialect};
+use crate::error::{is_mysql_stop, Error, Result};
+use crate::sql::{only_reads, split_statements, Dialect};
 use crate::storage::{SavedConnection, TlsMode};
 use async_trait::async_trait;
 use mysql_async::consts::{ColumnFlags, ColumnType, StatusFlags};
 use mysql_async::prelude::*;
 use mysql_async::{Conn, Opts, OptsBuilder, Row as MysqlRow, SslOpts, Value as MysqlValue};
 use serde_json::Value as JsonValue;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -257,11 +258,12 @@ pub fn bind_params(params: Option<&QueryParams>) -> Result<Option<Vec<MysqlValue
 /// `used` counts the values that earlier statements took.
 ///
 /// MySQL holds no packet that ends a statement on the connection that runs
-/// it. Its stop runs `KILL QUERY` from a second connection, which ends the
-/// statement with a fault of the server and leaves the session unfit for the
-/// next statement, so the drain covers the whole rest of a large result.
-/// The drain reads each remaining row from the network, so a stop of a
-/// large result costs the time to receive it.
+/// it. The drain reads each remaining row from the network, so a large
+/// result takes the time to receive it. A statement that only reads gets
+/// `kill`, which runs `KILL QUERY` from a second connection when the drain
+/// takes longer than `KILL_GRACE`, as `drain_with_kill` describes. Any other
+/// statement drains in full, because a stop in the middle of a procedure
+/// would leave its later writes undone.
 ///
 /// The flag `stopped` carries a stop of the sink back to the caller, and a
 /// run that arrives with the flag set drains its sets without a feed.
@@ -275,7 +277,10 @@ async fn stream_statement(
     sink: &mut dyn RowSink,
     rows_affected: &mut Option<u64>,
     stopped: &mut bool,
+    kill: &MysqlCancel,
 ) -> Result<()> {
+    let kill = only_reads(statement, Dialect::MySql).then_some(kill);
+    let mut killed = false;
     if options.one_statement || (values.is_some() && statement.contains('?')) {
         let prepared = conn.prep(statement).await?;
         let count = usize::from(prepared.num_params());
@@ -286,11 +291,85 @@ async fn stream_statement(
             mysql_async::Params::Positional(bound)
         };
         let result = conn.exec_iter(prepared, params).await?;
-        read_sets(result, options, sink, rows_affected, stopped).await
+        read_sets(
+            result,
+            options,
+            sink,
+            rows_affected,
+            stopped,
+            kill,
+            &mut killed,
+        )
+        .await?;
     } else {
         let result = conn.query_iter(statement).await?;
-        read_sets(result, options, sink, rows_affected, stopped).await
+        read_sets(
+            result,
+            options,
+            sink,
+            rows_affected,
+            stopped,
+            kill,
+            &mut killed,
+        )
+        .await?;
     }
+    if killed {
+        absorb_kill(conn).await?;
+    }
+    Ok(())
+}
+
+/// The time that the drain of a stopped set may take before the driver
+/// sends `KILL QUERY`. A short rest of a result drains faster than the login
+/// of a second connection.
+const KILL_GRACE: Duration = Duration::from_millis(200);
+
+/// Drains the rest of a set that the driver stopped reading. A drain that
+/// ends within `grace` needs nothing more. A longer drain runs `kill` beside
+/// it, so the server ends the statement and sends a fault in place of the
+/// remaining rows. That fault is the expected end of the drain. A kill that
+/// fails leaves the drain to read every row.
+///
+/// Gives true when the kill started. The kill can reach the session after
+/// the statement ended, so the caller then runs `absorb_kill`.
+async fn drain_with_kill<D, K>(drain: D, kill: K, grace: Duration) -> mysql_async::Result<bool>
+where
+    D: Future<Output = mysql_async::Result<()>>,
+    K: Future<Output = Result<()>>,
+{
+    tokio::pin!(drain);
+    tokio::select! {
+        drained = &mut drain => return drained.map(|()| false),
+        () = tokio::time::sleep(grace) => {}
+    }
+    let (killed, drained) = tokio::join!(kill, drain);
+    if let Err(error) = killed {
+        log::warn!("The server did not stop the rest of the result: {error}");
+    }
+    match drained {
+        Err(error) if !is_mysql_stop(&error) => Err(error),
+        _ => Ok(true),
+    }
+}
+
+/// Runs a statement that does nothing after a `KILL QUERY`. A server that
+/// keeps a kill which arrived between two statements stops the next
+/// statement of the session, so this statement takes the stop in place of
+/// the next statement of the user.
+async fn absorb_kill(conn: &mut Conn) -> Result<()> {
+    match conn.query_drop("DO 0").await {
+        Err(error) if is_mysql_stop(&error) => Ok(()),
+        other => other.map_err(Error::from),
+    }
+}
+
+/// Reads the rest of the current set of a result and drops the rows.
+async fn drain_set<P: Protocol>(
+    result: &mut mysql_async::QueryResult<'_, 'static, P>,
+) -> mysql_async::Result<()> {
+    while result.next().await?.is_some() {}
+    Ok(())
 }
 
 /// Reads each set of one statement into the sink, as `stream_statement`
@@ -301,6 +380,8 @@ async fn read_sets<P: Protocol>(
     sink: &mut dyn RowSink,
     rows_affected: &mut Option<u64>,
     stopped: &mut bool,
+    kill: Option<&MysqlCancel>,
+    killed: &mut bool,
 ) -> Result<()> {
     loop {
         let wire = result.columns().unwrap_or_default();
@@ -348,19 +429,23 @@ async fn read_sets<P: Protocol>(
         let mut count = 0usize;
         let mut truncated = false;
         while let Some(row) = result.next().await? {
-            if truncated || *stopped {
-                continue;
-            }
             if count >= options.max_rows {
                 truncated = true;
-                continue;
+                break;
             }
             if sink.row(row_to_json(&row, &kinds))? == SinkControl::Stop {
                 truncated = true;
                 *stopped = true;
-                continue;
+                break;
             }
             count += 1;
+        }
+        if truncated {
+            let drain = drain_set(&mut result);
+            match kill {
+                Some(kill) => *killed |= drain_with_kill(drain, kill.cancel(), KILL_GRACE).await?,
+                None => drain.await?,
+            }
         }
         sink.message(rows_returned_message(count, truncated));
         sink.end_set(truncated)?;
@@ -477,6 +562,11 @@ impl DatabaseDriver for MysqlDriver {
             if stopped {
                 break;
             }
+            let kill = MysqlCancel {
+                opts: self.opts.clone(),
+                connection_id: self.connection_id,
+                limit: self.connect_limit,
+            };
             let conn = self.conn()?;
             stream_statement(
                 conn,
@@ -487,6 +577,7 @@ impl DatabaseDriver for MysqlDriver {
                 sink,
                 &mut rows_affected,
                 &mut stopped,
+                &kill,
             )
             .await?;
             report_warnings(self.conn()?, sink).await;
@@ -1087,6 +1178,87 @@ mod tests {
         assert_eq!(error.kind(), crate::error::ErrorKind::Timeout);
         assert!(started.elapsed() < Duration::from_secs(5));
         server.abort();
+    }
+
+    fn server_error(code: u16) -> mysql_async::Error {
+        mysql_async::Error::Server(mysql_async::ServerError {
+            code,
+            message: "stopped".into(),
+            state: "70100".into(),
+        })
+    }
+
+    /// A drain that ends after the given time with the given outcome.
+    async fn slow_drain(
+        wait: Duration,
+        outcome: mysql_async::Result<()>,
+    ) -> mysql_async::Result<()> {
+        tokio::time::sleep(wait).await;
+        outcome
+    }
+
+    #[tokio::test]
+    async fn a_short_drain_sends_no_kill() {
+        let asked = std::sync::atomic::AtomicBool::new(false);
+        let kill = async {
+            asked.store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok::<(), Error>(())
+        };
+        let started = drain_with_kill(
+            async { Ok::<(), mysql_async::Error>(()) },
+            kill,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert!(!started);
+        assert!(!asked.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn a_long_drain_sends_a_kill_and_takes_the_stop_as_its_end() {
+        let grace = Duration::from_millis(10);
+        let wait = Duration::from_millis(50);
+
+        // The drain ends with the fault that the kill causes.
+        let stopped = drain_with_kill(
+            slow_drain(wait, Err(server_error(1317))),
+            async { Ok::<(), Error>(()) },
+            grace,
+        )
+        .await
+        .unwrap();
+        assert!(stopped);
+
+        // The drain ends before the kill lands.
+        let ended = drain_with_kill(
+            slow_drain(wait, Ok(())),
+            async { Ok::<(), Error>(()) },
+            grace,
+        )
+        .await
+        .unwrap();
+        assert!(ended);
+
+        // A kill that fails leaves the drain to read every row.
+        let failed = drain_with_kill(
+            slow_drain(wait, Ok(())),
+            async { Err::<(), Error>(Error::Connection("no login".into())) },
+            grace,
+        )
+        .await
+        .unwrap();
+        assert!(failed);
+
+        // A different fault of the server stays a fault.
+        let error = drain_with_kill(
+            slow_drain(wait, Err(server_error(1146))),
+            async { Ok::<(), Error>(()) },
+            grace,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, mysql_async::Error::Server(server) if server.code == 1146));
     }
 
     #[test]

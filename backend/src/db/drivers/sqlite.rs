@@ -139,7 +139,7 @@ impl SqliteDriver {
 impl DatabaseDriver for SqliteDriver {
     fn capabilities(&self) -> DriverCapabilities {
         DriverCapabilities {
-            supports_schemas: false,
+            supports_schemas: true,
             supports_multiple_databases: false,
             supports_cancel: true,
             supports_transactions: true,
@@ -168,11 +168,11 @@ impl DatabaseDriver for SqliteDriver {
     fn create_query(
         &self,
         _database: Option<&str>,
-        _schema: Option<&str>,
+        schema: Option<&str>,
         table: &str,
         _kind: TableKind,
     ) -> Option<CreateQuery> {
-        Some(create_query_text(table))
+        Some(create_query_text(schema_or_main(schema), table))
     }
 
     async fn ping(&mut self) -> Result<()> {
@@ -297,17 +297,33 @@ impl DatabaseDriver for SqliteDriver {
         Ok(vec![Database { name }])
     }
 
+    /// Lists the schemas of the connection: `main`, `temp` when the
+    /// connection made a temporary object, and each attached database.
+    ///
+    /// The explorer reads on a connection of its own, and a temporary table
+    /// and an attached database belong to the connection that made them. A
+    /// `CREATE TEMP TABLE` or an `ATTACH` in the tab of a query therefore
+    /// does not show in the explorer.
     async fn list_schemas(&mut self, _database: &str) -> Result<Vec<Schema>> {
-        Ok(Vec::new())
+        self.with_connection(|connection| {
+            let mut statement =
+                connection.prepare("SELECT name FROM pragma_database_list ORDER BY seq")?;
+            let names = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            Ok(names.into_iter().map(|name| Schema { name }).collect())
+        })
+        .await
     }
 
-    async fn list_tables(&mut self, _database: &str, _schema: Option<&str>) -> Result<Vec<Table>> {
-        self.with_connection(|connection| {
-            let mut statement = connection.prepare(
-                "SELECT name, type FROM sqlite_master \
+    async fn list_tables(&mut self, _database: &str, schema: Option<&str>) -> Result<Vec<Table>> {
+        let master = master_of(schema_or_main(schema));
+        self.with_connection(move |connection| {
+            let mut statement = connection.prepare(&format!(
+                "SELECT name, type FROM {master} \
                  WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' \
-                 ORDER BY type, name",
-            )?;
+                 ORDER BY type, name"
+            ))?;
             let rows = statement.query_map([], |row| {
                 let name: String = row.get(0)?;
                 let kind: String = row.get(1)?;
@@ -329,14 +345,14 @@ impl DatabaseDriver for SqliteDriver {
     async fn list_columns(
         &mut self,
         _database: &str,
-        _schema: Option<&str>,
+        schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<AppColumn>> {
-        let table = table.to_string();
+        let place = [table.to_string(), schema_or_main(schema).to_string()];
         self.with_connection(move |connection| {
             let mut statement = connection
-                .prepare("SELECT name, type, \"notnull\", pk FROM pragma_table_info(?1)")?;
-            let rows = statement.query_map([&table], |row| {
+                .prepare("SELECT name, type, \"notnull\", pk FROM pragma_table_info(?1, ?2)")?;
+            let rows = statement.query_map([&place[0], &place[1]], |row| {
                 let name: String = row.get(0)?;
                 let data_type: String = row.get(1)?;
                 let not_null: i64 = row.get(2)?;
@@ -361,17 +377,29 @@ impl DatabaseDriver for SqliteDriver {
         .await
     }
 
-    /// Counts the rows of one relation. SQLite keeps no such figure, so the
+    /// Counts the rows of one table. SQLite keeps no such figure, so the
     /// count is read with a statement. The file is local, so the read costs
-    /// little.
+    /// little. A view gives no facts, because a count of a view runs the
+    /// whole query of the view.
     async fn table_facts(
         &mut self,
         _database: &str,
-        _schema: Option<&str>,
+        schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<TableFact>> {
-        let name = Dialect::Sqlite.quote_identifier(table);
+        let schema = schema_or_main(schema);
+        let name = Dialect::Sqlite.quote_qualified(&[schema, table]);
+        let master = master_of(schema);
+        let table = table.to_string();
         self.with_connection(move |connection| {
+            let views: i64 = connection.query_row(
+                &format!("SELECT COUNT(*) FROM {master} WHERE type = 'view' AND name = ?1"),
+                [&table],
+                |row| row.get(0),
+            )?;
+            if views > 0 {
+                return Ok(Vec::new());
+            }
             let count: i64 =
                 connection.query_row(&format!("SELECT COUNT(*) FROM {name}"), [], |row| {
                     row.get(0)
@@ -387,13 +415,13 @@ impl DatabaseDriver for SqliteDriver {
     async fn list_indexes(
         &mut self,
         _database: &str,
-        _schema: Option<&str>,
+        schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<IndexInfo>> {
-        let table = table.to_string();
+        let place = [table.to_string(), schema_or_main(schema).to_string()];
         self.with_connection(move |connection| {
             let mut statement = connection.prepare(INDEX_QUERY)?;
-            let rows = statement.query_map([&table], |row| {
+            let rows = statement.query_map([&place[0], &place[1]], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)? != 0,
@@ -416,15 +444,17 @@ impl DatabaseDriver for SqliteDriver {
     async fn list_constraints(
         &mut self,
         _database: &str,
-        _schema: Option<&str>,
+        schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<Constraint>> {
-        let table = table.to_string();
+        let schema = schema_or_main(schema).to_string();
+        let master = master_of(&schema);
+        let place = [table.to_string(), schema];
         self.with_connection(move |connection| {
             let mut keys = connection
-                .prepare("SELECT name FROM pragma_table_info(?1) WHERE pk > 0 ORDER BY pk")?;
+                .prepare("SELECT name FROM pragma_table_info(?1, ?2) WHERE pk > 0 ORDER BY pk")?;
             let key_columns: Vec<String> = keys
-                .query_map([&table], |row| row.get::<_, String>(0))?
+                .query_map([&place[0], &place[1]], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<String>>>()?;
 
             let mut constraints: Vec<Constraint> = Vec::new();
@@ -438,10 +468,10 @@ impl DatabaseDriver for SqliteDriver {
             }
 
             let mut foreign = connection.prepare(
-                "SELECT id, \"from\", \"table\", \"to\" FROM pragma_foreign_key_list(?1) \
+                "SELECT id, \"from\", \"table\", \"to\" FROM pragma_foreign_key_list(?1, ?2) \
                  ORDER BY id, seq",
             )?;
-            let rows = foreign.query_map([&table], |row| {
+            let rows = foreign.query_map([&place[0], &place[1]], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
@@ -473,7 +503,7 @@ impl DatabaseDriver for SqliteDriver {
             // an index for it with the origin 'u', and the columns of that
             // index are the columns of the constraint.
             let mut unique = connection.prepare(UNIQUE_QUERY)?;
-            let rows = unique.query_map([&table], |row| {
+            let rows = unique.query_map([&place[0], &place[1]], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
             })?;
             let mut groups: Vec<(String, Vec<String>)> = Vec::new();
@@ -502,12 +532,12 @@ impl DatabaseDriver for SqliteDriver {
 
             // SQLite holds no pragma for a check, so the text of the table
             // gives it.
-            let mut created = connection.prepare(
-                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1 \
-                 AND sql IS NOT NULL",
-            )?;
+            let mut created = connection.prepare(&format!(
+                "SELECT sql FROM {master} WHERE type = 'table' AND name = ?1 \
+                 AND sql IS NOT NULL"
+            ))?;
             let text: Option<String> = created
-                .query_map([&table], |row| row.get::<_, String>(0))?
+                .query_map([&place[0]], |row| row.get::<_, String>(0))?
                 .next()
                 .transpose()?;
             for expression in check_expressions(text.as_deref().unwrap_or("")) {
@@ -529,8 +559,8 @@ impl DatabaseDriver for SqliteDriver {
 /// 'u' names such an index, and the origin 'c' names an index that a CREATE
 /// INDEX statement made.
 const UNIQUE_QUERY: &str = "SELECT list.name, info.name \
-     FROM pragma_index_list(?1) AS list \
-     LEFT JOIN pragma_index_info(list.name) AS info \
+     FROM pragma_index_list(?1, ?2) AS list \
+     LEFT JOIN pragma_index_info(list.name, ?2) AS info \
      WHERE list.origin = 'u' \
      ORDER BY list.name, info.seqno";
 
@@ -668,17 +698,30 @@ pub fn check_expressions(sql: &str) -> Vec<String> {
 /// Reads one column of one index for each row. The `origin` column of the
 /// pragma names `pk` for the index that carries the primary key.
 const INDEX_QUERY: &str = "SELECT list.name, list.\"unique\", list.origin, info.name \
-     FROM pragma_index_list(?1) AS list \
-     LEFT JOIN pragma_index_info(list.name) AS info \
+     FROM pragma_index_list(?1, ?2) AS list \
+     LEFT JOIN pragma_index_info(list.name, ?2) AS info \
      ORDER BY list.name, info.seqno";
+
+/// The schema that a request names. A request without one reads `main`.
+fn schema_or_main(schema: Option<&str>) -> &str {
+    schema.unwrap_or("main")
+}
+
+/// The quoted name of the catalog table of one schema. Each schema keeps its
+/// own `sqlite_master`, and the name `temp.sqlite_master` reads the catalog
+/// of the temporary objects.
+fn master_of(schema: &str) -> String {
+    format!("{}.sqlite_master", Dialect::Sqlite.quote_identifier(schema))
+}
 
 /// Builds the statement that reads the CREATE text of one object. SQLite
 /// keeps the text of every object in `sqlite_master`, so a table and a view
 /// come from the same place.
-fn create_query_text(table: &str) -> CreateQuery {
+fn create_query_text(schema: &str, table: &str) -> CreateQuery {
     CreateQuery::new(
         format!(
-            "SELECT sql FROM sqlite_master WHERE name = {} AND sql IS NOT NULL;",
+            "SELECT sql FROM {} WHERE name = {} AND sql IS NOT NULL;",
+            master_of(schema),
             Dialect::Sqlite.quote_literal(table)
         ),
         0,
@@ -760,6 +803,11 @@ fn stream_statement(
         .collect();
     send_event(sender, RowEvent::BeginSet(columns))?;
 
+    // An INSERT, an UPDATE or a DELETE with RETURNING gives rows and also
+    // changes rows. Its count is read after the rows, as for a statement
+    // without columns.
+    let writes = !statement.readonly();
+    let before = connection.total_changes();
     let mut rows = statement.query(rusqlite::params_from_iter(params.iter()))?;
     let mut block: Vec<Vec<JsonValue>> = Vec::new();
     let mut count = 0usize;
@@ -781,6 +829,17 @@ fn stream_statement(
     }
     if !block.is_empty() {
         send_event(sender, RowEvent::Rows(block))?;
+    }
+    // The drop resets the statement, and SQLite sets the count of changes
+    // when the statement ends.
+    drop(rows);
+    if writes {
+        let affected = if connection.total_changes() == before {
+            0
+        } else {
+            connection.changes()
+        };
+        *rows_affected = Some(rows_affected.unwrap_or(0) + affected);
     }
     send_event(
         sender,
@@ -863,10 +922,10 @@ mod tests {
 
     #[test]
     fn the_create_statement_reads_the_master_table() {
-        let query = create_query_text("it's");
+        let query = create_query_text("main", "it's");
         assert_eq!(
             query.sql,
-            "SELECT sql FROM sqlite_master WHERE name = 'it''s' AND sql IS NOT NULL;"
+            "SELECT sql FROM \"main\".sqlite_master WHERE name = 'it''s' AND sql IS NOT NULL;"
         );
         assert_eq!(query.column, 0);
     }
@@ -1056,7 +1115,7 @@ mod tests {
         let driver = open_memory().await;
         assert_eq!(driver.dialect(), Dialect::Sqlite);
         let capabilities = driver.capabilities();
-        assert!(!capabilities.supports_schemas);
+        assert!(capabilities.supports_schemas);
         assert!(!capabilities.supports_multiple_databases);
         assert!(capabilities.supports_transactions);
         assert!(capabilities.supports_cancel);
@@ -1266,7 +1325,12 @@ mod tests {
                 name: "meta.db".into()
             }]
         );
-        assert!(driver.list_schemas("meta.db").await.unwrap().is_empty());
+        assert_eq!(
+            driver.list_schemas("meta.db").await.unwrap(),
+            vec![Schema {
+                name: "main".into()
+            }]
+        );
 
         let tables = driver.list_tables("meta.db", None).await.unwrap();
         assert!(tables.contains(&Table::table("orders")));
@@ -1504,7 +1568,7 @@ mod tests {
             .find(|relation| relation.name == "orders")
             .unwrap();
         assert_eq!(orders.kind, TableKind::Table);
-        assert_eq!(orders.schema, None);
+        assert_eq!(orders.schema.as_deref(), Some("main"));
         assert_eq!(orders.columns[0].name, "id");
         assert_eq!(orders.columns[1].data_type, "REAL");
         assert!(snapshot
@@ -1516,6 +1580,118 @@ mod tests {
         let part = driver.schema_snapshot("snap.db", 1).await.unwrap();
         assert!(!part.complete);
         assert_eq!(part.relations.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_temporary_and_the_attached_schemas_are_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let main_path = directory.path().join("home.db");
+        let other_path = directory.path().join("other.db");
+        let mut driver = SqliteDriver::connect(&connection_for(&main_path.to_string_lossy()))
+            .await
+            .unwrap();
+        driver
+            .execute_query(
+                &format!(
+                    "CREATE TABLE local (id INTEGER); \
+                     CREATE TEMP TABLE scratch (id INTEGER PRIMARY KEY, note TEXT UNIQUE); \
+                     INSERT INTO scratch (note) VALUES ('a'), ('b'); \
+                     ATTACH DATABASE {} AS \"odd\"\"name\"; \
+                     CREATE TABLE \"odd\"\"name\".parent (id INTEGER PRIMARY KEY); \
+                     CREATE TABLE \"odd\"\"name\".items ( \
+                         id INTEGER PRIMARY KEY, \
+                         parent INTEGER REFERENCES parent (id), \
+                         code TEXT, total REAL CHECK (total > 0), UNIQUE (code)); \
+                     CREATE INDEX \"odd\"\"name\".items_total ON items (total); \
+                     CREATE VIEW \"odd\"\"name\".cheap AS SELECT * FROM items;",
+                    Dialect::Sqlite.quote_literal(&other_path.to_string_lossy())
+                ),
+                None,
+                &ExecOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        let names: Vec<String> = driver
+            .list_schemas("home.db")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|schema| schema.name)
+            .collect();
+        assert_eq!(names, vec!["main", "temp", "odd\"name"]);
+
+        let odd = Some("odd\"name");
+        assert_eq!(
+            driver.list_tables("home.db", None).await.unwrap(),
+            vec![Table::table("local")]
+        );
+        assert_eq!(
+            driver.list_tables("home.db", Some("temp")).await.unwrap(),
+            vec![Table::table("scratch")]
+        );
+        assert_eq!(
+            driver.list_tables("home.db", odd).await.unwrap(),
+            vec![
+                Table::table("items"),
+                Table::table("parent"),
+                Table::view("cheap")
+            ]
+        );
+
+        let columns = driver
+            .list_columns("home.db", Some("temp"), "scratch")
+            .await
+            .unwrap();
+        assert_eq!(columns.len(), 2);
+        assert!(columns[0].is_primary_key);
+        assert_eq!(
+            driver
+                .table_facts("home.db", Some("temp"), "scratch")
+                .await
+                .unwrap(),
+            vec![TableFact::new("Rows", "2")]
+        );
+
+        let indexes = driver.list_indexes("home.db", odd, "items").await.unwrap();
+        assert!(indexes.iter().any(|index| index.name == "items_total"));
+        let constraints = driver
+            .list_constraints("home.db", odd, "items")
+            .await
+            .unwrap();
+        let kinds: Vec<ConstraintKind> = constraints.iter().map(|c| c.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ConstraintKind::PrimaryKey,
+                ConstraintKind::ForeignKey,
+                ConstraintKind::Unique,
+                ConstraintKind::Check
+            ]
+        );
+
+        // The CREATE text comes from the catalog of the schema.
+        let query = driver
+            .create_query(Some("home.db"), odd, "cheap", TableKind::View)
+            .unwrap();
+        let text = driver
+            .execute_query(&query.sql, None, &ExecOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            text.results[0].rows[0][0],
+            serde_json::json!("CREATE VIEW cheap AS SELECT * FROM items")
+        );
+
+        // The snapshot reads every schema.
+        let snapshot = driver.schema_snapshot("home.db", 100).await.unwrap();
+        let places: Vec<(Option<String>, String)> = snapshot
+            .relations
+            .iter()
+            .map(|relation| (relation.schema.clone(), relation.name.clone()))
+            .collect();
+        assert!(places.contains(&(Some("temp".into()), "scratch".into())));
+        assert!(places.contains(&(Some("odd\"name".into()), "items".into())));
     }
 
     #[tokio::test]
@@ -1554,6 +1730,62 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(odd, vec![TableFact::new("Rows", "0")]);
+    }
+
+    #[tokio::test]
+    async fn a_view_gives_no_facts() {
+        let mut driver = open_memory().await;
+        driver
+            .execute_query(
+                "CREATE TABLE orders (id INTEGER); CREATE VIEW every AS SELECT * FROM orders;",
+                None,
+                &ExecOptions::default(),
+            )
+            .await
+            .unwrap();
+        let facts = driver.table_facts("db", None, "every").await.unwrap();
+        assert!(facts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_write_with_returning_counts_its_changes() {
+        let mut driver = open_memory().await;
+        let response = driver
+            .execute_query(
+                "CREATE TABLE pets (name TEXT); \
+                 INSERT INTO pets VALUES ('cat'), ('dog'), ('owl') RETURNING name; \
+                 DELETE FROM pets WHERE name = 'none' RETURNING name; \
+                 SELECT name FROM pets;",
+                None,
+                &ExecOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.results[0].rows.len(), 3);
+        assert_eq!(response.results[1].rows.len(), 0);
+        assert_eq!(response.rows_affected, Some(3));
+
+        // A read leaves the count as it was, and a write that stops at the
+        // row limit still counts every row that it changed.
+        let limited = driver
+            .execute_query(
+                "UPDATE pets SET name = name || '!' RETURNING name",
+                None,
+                &ExecOptions {
+                    max_rows: 1,
+                    timeout_secs: 10,
+                    one_statement: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(limited.results[0].truncated);
+        assert_eq!(limited.rows_affected, Some(3));
+        let read = driver
+            .execute_query("SELECT 1", None, &ExecOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(read.rows_affected, None);
     }
 
     #[tokio::test]

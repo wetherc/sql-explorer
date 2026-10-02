@@ -137,7 +137,7 @@ fn is_postgres_stop(error: &tokio_postgres::Error) -> bool {
 }
 
 /// True when the failure is the one MySQL sends after a stop.
-fn is_mysql_stop(error: &mysql_async::Error) -> bool {
+pub(crate) fn is_mysql_stop(error: &mysql_async::Error) -> bool {
     matches!(
         error,
         mysql_async::Error::Server(server) if server.code == MYSQL_QUERY_INTERRUPTED

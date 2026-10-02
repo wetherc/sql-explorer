@@ -55,9 +55,14 @@ impl Dialect {
     ) -> String {
         let mut parts: Vec<&str> = Vec::new();
         match self {
-            // One SQLite connection holds one database, so a qualified
-            // name would name an attached database that does not exist.
-            Dialect::Sqlite => {}
+            // The database of a SQLite connection is the name of its file,
+            // which no statement can name. The schema is `main`, `temp` or
+            // the name of an attached database.
+            Dialect::Sqlite => {
+                if let Some(schema) = schema {
+                    parts.push(schema);
+                }
+            }
             // MySQL has no schema level between the database and the table.
             Dialect::MySql => {
                 if let Some(database) = database {
@@ -1217,8 +1222,12 @@ mod tests {
             "`shop`.`orders`"
         );
         assert_eq!(
-            Dialect::Sqlite.qualified_name(Some("main"), None, "events"),
+            Dialect::Sqlite.qualified_name(Some("app.db"), None, "events"),
             "\"events\""
+        );
+        assert_eq!(
+            Dialect::Sqlite.qualified_name(Some("app.db"), Some("aux"), "events"),
+            "\"aux\".\"events\""
         );
     }
 
@@ -1241,8 +1250,8 @@ mod tests {
             "SELECT * FROM \"logs\".\"events\" LIMIT 10;"
         );
         assert_eq!(
-            Dialect::Sqlite.preview_query(Some("main"), None, "events", 10),
-            "SELECT * FROM \"events\" LIMIT 10;"
+            Dialect::Sqlite.preview_query(Some("app.db"), Some("main"), "events", 10),
+            "SELECT * FROM \"main\".\"events\" LIMIT 10;"
         );
         assert_eq!(
             Dialect::MySql.preview_query(None, None, "orders", 5),

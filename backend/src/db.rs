@@ -554,7 +554,7 @@ pub fn supported_engines() -> Vec<EngineInfo> {
             uses_tls: false,
             uses_file: true,
             uses_aws: false,
-            supports_schemas: false,
+            supports_schemas: true,
             supports_integrated_security: false,
             read_only: ReadOnlyKind::Session,
         },
@@ -618,6 +618,7 @@ mod tests {
             .unwrap();
         assert!(sqlite.uses_file);
         assert!(!sqlite.uses_database);
+        assert!(sqlite.supports_schemas);
 
         let mysql = engines.iter().find(|e| e.db_type == DbType::Mysql).unwrap();
         assert!(!mysql.supports_schemas);
