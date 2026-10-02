@@ -7,8 +7,8 @@ use crate::db::drivers::{
 };
 use crate::db::{
     self, drivers::DatabaseDriver, AppColumn, Constraint, Database, ExecOptions, IndexInfo,
-    PartitionList, PlanKind, QueryParams, QueryResponse, Routine, Schema, SchemaSnapshot, Table,
-    TableDetails, TableKind,
+    ObjectType, PartitionList, PlanKind, QueryParams, QueryResponse, Routine, ScheduledEvent,
+    Schema, SchemaSnapshot, Table, TableDetails, TableKind, Trigger,
 };
 use crate::error::{Error, Result};
 use crate::files;
@@ -1110,6 +1110,34 @@ pub async fn list_constraints<R: Runtime>(
 }
 
 #[tauri::command]
+pub async fn list_triggers<R: Runtime>(
+    app: AppHandle<R>,
+    request: TableScope,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<Trigger>> {
+    let read = metadata_read(&app, &state, &request.connection_id).await?;
+    let mut guard = read.lock().await?;
+    read.run(guard.list_triggers(
+        &request.database,
+        request.schema_name.as_deref(),
+        &request.table_name,
+    ))
+    .await
+}
+
+#[tauri::command]
+pub async fn list_events<R: Runtime>(
+    app: AppHandle<R>,
+    request: SchemaScope,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<ScheduledEvent>> {
+    let read = metadata_read(&app, &state, &request.connection_id).await?;
+    let mut guard = read.lock().await?;
+    read.run(guard.list_events(&request.database, request.schema_name.as_deref()))
+        .await
+}
+
+#[tauri::command]
 pub async fn list_partitions<R: Runtime>(
     app: AppHandle<R>,
     request: TableScope,
@@ -1282,6 +1310,7 @@ pub async fn script_object<R: Runtime>(
         database,
         schema_name,
         table_name,
+        parent_name,
         kind,
         script_kind,
     } = request;
@@ -1295,6 +1324,25 @@ pub async fn script_object<R: Runtime>(
     let session = background_session(&state, &connection_id, &open).await?;
     let read = CatalogRead::new(&state, &connection_id, session, CATALOG_LIMIT);
     let mut guard = read.lock().await?;
+    let relation = match kind {
+        ScriptTarget::Relation(relation) => relation,
+        ScriptTarget::Object(object_type) => {
+            let place = ObjectPlace {
+                database: database.as_deref(),
+                schema: schema_name.as_deref(),
+                parent: parent_name.as_deref(),
+                name: &table_name,
+            };
+            return read
+                .run(object_script(
+                    guard.as_mut(),
+                    place,
+                    object_type,
+                    script_kind,
+                ))
+                .await;
+        }
+    };
     let (columns, from_engine) = read
         .run(async {
             let columns = guard
@@ -1309,7 +1357,7 @@ pub async fn script_object<R: Runtime>(
                     database.as_deref(),
                     schema_name.as_deref(),
                     &table_name,
-                    kind,
+                    relation,
                 ) {
                     Some(query) => {
                         let response = guard
@@ -1336,11 +1384,71 @@ pub struct ScriptRequest {
     pub connection_id: String,
     pub database: Option<String>,
     pub schema_name: Option<String>,
+    /// The name of the object. A trigger and an event give their own name
+    /// here, as a view and a synonym do.
     pub table_name: String,
-    /// The kind of the object, which decides where the CREATE text lives.
-    pub kind: TableKind,
+    /// The relation of a trigger. Any other object has none.
+    #[serde(default)]
+    pub parent_name: Option<String>,
+    /// The type of the object, which decides where the CREATE text lives.
+    pub kind: ScriptTarget,
     /// The statement the user asked for.
     pub script_kind: ScriptKind,
+}
+
+/// The type of the object of a script. The interface sends one word. The
+/// words of the relations and the words of a trigger and an event are all
+/// different, so the two enums can share the field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(untagged)]
+pub enum ScriptTarget {
+    Relation(TableKind),
+    Object(ObjectType),
+}
+
+/// Where a trigger or an event lives, and its name.
+#[derive(Debug, Clone, Copy)]
+struct ObjectPlace<'a> {
+    database: Option<&'a str>,
+    schema: Option<&'a str>,
+    parent: Option<&'a str>,
+    name: &'a str,
+}
+
+/// Reads the CREATE text of a trigger or an event from the engine. The
+/// catalog of the columns says nothing about the body of such an object, so
+/// no draft can take the place of the text. A SELECT, an INSERT and an
+/// UPDATE do not apply to such an object.
+async fn object_script(
+    driver: &mut dyn DatabaseDriver,
+    place: ObjectPlace<'_>,
+    object_type: ObjectType,
+    statement: ScriptKind,
+) -> Result<String> {
+    if statement != ScriptKind::Create {
+        return Err(Error::Configuration(
+            "A trigger or an event gives a CREATE statement alone.".to_string(),
+        ));
+    }
+    let no_text = || {
+        Error::Configuration(format!(
+            "The engine gives no CREATE text for '{}'.",
+            place.name
+        ))
+    };
+    let query = driver
+        .object_create_query(
+            place.database,
+            place.schema,
+            place.parent,
+            place.name,
+            object_type,
+        )
+        .ok_or_else(no_text)?;
+    let response = driver
+        .execute_query(&query.sql, None, &ExecOptions::default())
+        .await?;
+    text_of_column(&response, query.column).ok_or_else(no_text)
 }
 
 /// Selects the statement for the kind that the user asked for. The text of
@@ -2724,6 +2832,92 @@ mod tests {
         let error = script_text(Dialect::Sqlite, "\"t\"", ScriptKind::Insert, &[], None)
             .expect_err("a statement cannot be built");
         assert!(error.to_string().contains("reports no column"));
+    }
+
+    #[test]
+    fn a_script_request_names_a_relation_or_another_object() {
+        let read = |word: &str| {
+            serde_json::from_value::<ScriptRequest>(serde_json::json!({
+                "connectionId": "c1",
+                "database": null,
+                "schemaName": null,
+                "tableName": "x",
+                "kind": word,
+                "scriptKind": "create",
+            }))
+        };
+        let view = read("view").unwrap();
+        assert_eq!(view.kind, ScriptTarget::Relation(TableKind::View));
+        assert_eq!(view.parent_name, None);
+        assert_eq!(
+            read("trigger").unwrap().kind,
+            ScriptTarget::Object(ObjectType::Trigger)
+        );
+        assert_eq!(
+            read("event").unwrap().kind,
+            ScriptTarget::Object(ObjectType::Event)
+        );
+        assert!(read("cursor").is_err());
+    }
+
+    #[tokio::test]
+    async fn a_trigger_gives_its_create_text_and_no_other_statement() {
+        let mut driver = open_driver(&sqlite_connection(":memory:")).await.unwrap();
+        driver
+            .execute_query(
+                "CREATE TABLE t (a); \
+                 CREATE TRIGGER audit AFTER INSERT ON t BEGIN SELECT 1; END;",
+                None,
+                &ExecOptions::default(),
+            )
+            .await
+            .unwrap();
+        let place = |name| ObjectPlace {
+            database: None,
+            schema: None,
+            parent: Some("t"),
+            name,
+        };
+        let text = object_script(
+            driver.as_mut(),
+            place("audit"),
+            ObjectType::Trigger,
+            ScriptKind::Create,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            text,
+            "CREATE TRIGGER audit AFTER INSERT ON t BEGIN SELECT 1; END"
+        );
+
+        let select = object_script(
+            driver.as_mut(),
+            place("audit"),
+            ObjectType::Trigger,
+            ScriptKind::Select,
+        )
+        .await
+        .unwrap_err();
+        assert!(select.to_string().contains("CREATE statement alone"));
+
+        // A trigger that is gone gives no text, and SQLite has no event.
+        for (name, object_type) in [
+            ("gone", ObjectType::Trigger),
+            ("nightly", ObjectType::Event),
+        ] {
+            let error = object_script(
+                driver.as_mut(),
+                place(name),
+                object_type,
+                ScriptKind::Create,
+            )
+            .await
+            .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains(&format!("no CREATE text for '{name}'")));
+        }
     }
 
     fn state() -> AppState {

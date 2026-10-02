@@ -12,8 +12,8 @@ use crate::db::drivers::{
 use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, ConstraintKind, CreateQuery, Database, DriverCapabilities,
-    ExecOptions, IndexInfo, Message, PlanKind, QueryParams, QueryResponse, Schema, Table,
-    TableFact, TableKind,
+    ExecOptions, IndexInfo, Message, ObjectType, PlanKind, QueryParams, QueryResponse, Schema,
+    Table, TableFact, TableKind, Trigger,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
@@ -25,6 +25,8 @@ use serde_json::Value as JsonValue;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+mod trigger;
 
 /// True when SQLite reads the text as one or more whole statements. The
 /// engine knows the `BEGIN ... END` body of a trigger, which the splitter of
@@ -151,6 +153,9 @@ impl DatabaseDriver for SqliteDriver {
             supports_materialized_views: false,
             supports_foreign_tables: false,
             supports_synonyms: false,
+            supports_triggers: true,
+            supports_view_triggers: true,
+            supports_events: false,
         }
     }
 
@@ -176,6 +181,17 @@ impl DatabaseDriver for SqliteDriver {
         _kind: TableKind,
     ) -> Option<CreateQuery> {
         Some(create_query_text(schema_or_main(schema), table))
+    }
+
+    fn object_create_query(
+        &self,
+        _database: Option<&str>,
+        schema: Option<&str>,
+        _parent: Option<&str>,
+        name: &str,
+        object_type: ObjectType,
+    ) -> Option<CreateQuery> {
+        object_query_text(schema_or_main(schema), name, object_type)
     }
 
     async fn ping(&mut self) -> Result<()> {
@@ -438,6 +454,61 @@ impl DatabaseDriver for SqliteDriver {
                 add_index_column(&mut indexes, name, unique, origin == "pk", column);
             }
             Ok(indexes)
+        })
+        .await
+    }
+
+    /// Reads the triggers of one relation from the catalog of its schema,
+    /// and the temporary triggers on it from the catalog of `temp`. SQLite
+    /// has no switch that disables a trigger.
+    async fn list_triggers(
+        &mut self,
+        _database: &str,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<Trigger>> {
+        let schema = schema_or_main(schema).to_string();
+        let table = table.to_string();
+        self.with_connection(move |connection| {
+            let read = |master: &str| -> Result<Vec<(String, String)>> {
+                let mut statement = connection.prepare(&format!(
+                    "SELECT name, sql FROM {master} \
+                     WHERE type = 'trigger' AND tbl_name = ?1 AND sql IS NOT NULL \
+                     ORDER BY name"
+                ))?;
+                let rows = statement
+                    .query_map([&table], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<rusqlite::Result<Vec<(String, String)>>>()?;
+                Ok(rows)
+            };
+            let mut rows = read(&master_of(&schema))?;
+            let in_temp = schema.eq_ignore_ascii_case("temp");
+            if !in_temp {
+                let shadowed: i64 = connection.query_row(
+                    "SELECT COUNT(*) FROM temp.sqlite_master \
+                     WHERE type IN ('table', 'view') AND name = ?1",
+                    [&table],
+                    |row| row.get(0),
+                )?;
+                for (name, sql) in read("temp.sqlite_master")? {
+                    let target = trigger::trigger_head(&sql).target_schema;
+                    if temp_trigger_is_on(&schema, target.as_deref(), shadowed > 0) {
+                        rows.push((name, sql));
+                    }
+                }
+            }
+            Ok(rows
+                .into_iter()
+                .map(|(name, sql)| {
+                    let head = trigger::trigger_head(&sql);
+                    Trigger {
+                        name,
+                        timing: head.timing,
+                        events: head.event.into_iter().collect(),
+                        enabled: true,
+                    }
+                })
+                .collect())
         })
         .await
     }
@@ -731,6 +802,39 @@ fn create_query_text(schema: &str, table: &str) -> CreateQuery {
     )
 }
 
+/// True when a temporary trigger fires on a relation of the schema. The
+/// `ON` clause of a temporary trigger can name a table of any schema. A
+/// clause without a schema names the temporary table of that name when one
+/// exists, and else the table of `main`. `shadowed` is true when `temp` has
+/// a relation of the name.
+fn temp_trigger_is_on(schema: &str, target: Option<&str>, shadowed: bool) -> bool {
+    match target {
+        Some(target) => target.eq_ignore_ascii_case(schema),
+        None => !shadowed && schema.eq_ignore_ascii_case("main"),
+    }
+}
+
+/// Builds the statement that reads the CREATE text of one trigger. The
+/// trigger is in the catalog of the schema, or in the catalog of `temp` when
+/// it is a temporary trigger on a table of another schema. The first match
+/// wins. SQLite has no scheduled events.
+fn object_query_text(schema: &str, name: &str, object_type: ObjectType) -> Option<CreateQuery> {
+    if object_type != ObjectType::Trigger {
+        return None;
+    }
+    let name = Dialect::Sqlite.quote_literal(name);
+    let select = |master: &str| {
+        format!(
+            "SELECT sql FROM {master} WHERE type = 'trigger' AND name = {name} AND sql IS NOT NULL"
+        )
+    };
+    let mut sql = select(&master_of(schema));
+    if !schema.eq_ignore_ascii_case("temp") {
+        sql = format!("{sql} UNION ALL {}", select("temp.sqlite_master"));
+    }
+    Some(CreateQuery::new(format!("{sql} LIMIT 1;"), 0))
+}
+
 /// One step of a run, sent from the blocking closure to the async side.
 enum RowEvent {
     BeginSet(Vec<ColumnInfo>),
@@ -892,7 +996,7 @@ pub fn value_to_json(value: ValueRef<'_>) -> JsonValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Message;
+    use crate::db::{Message, TriggerEvent, TriggerTiming};
 
     #[test]
     fn the_fragments_of_a_trigger_body_are_joined() {
@@ -1123,6 +1227,112 @@ mod tests {
         assert!(capabilities.supports_transactions);
         assert!(capabilities.supports_cancel);
         assert!(driver.cancel_handle().is_some());
+        // SQLite has triggers, also on a view, but no stored routine and no
+        // scheduled event.
+        assert!(!capabilities.supports_routines);
+        assert!(capabilities.supports_triggers);
+        assert!(capabilities.supports_view_triggers);
+        assert!(!capabilities.supports_events);
+    }
+
+    #[tokio::test]
+    async fn the_triggers_of_a_relation_give_their_time_and_their_event() {
+        let mut driver = open_memory().await;
+        driver
+            .execute_query(
+                "CREATE TABLE orders (id INTEGER, total REAL); \
+                 CREATE TABLE other (id INTEGER); \
+                 CREATE VIEW big AS SELECT * FROM orders WHERE total > 100; \
+                 CREATE TRIGGER stamp UPDATE OF total ON orders BEGIN SELECT 1; END; \
+                 CREATE TRIGGER audit AFTER INSERT ON orders BEGIN SELECT 1; END; \
+                 CREATE TRIGGER elsewhere AFTER DELETE ON other BEGIN SELECT 1; END; \
+                 CREATE TRIGGER write INSTEAD OF DELETE ON big BEGIN SELECT 1; END; \
+                 CREATE TEMP TRIGGER watch BEFORE DELETE ON main.orders BEGIN SELECT 1; END; \
+                 CREATE TEMP TRIGGER bare AFTER UPDATE ON orders BEGIN SELECT 1; END;",
+                None,
+                &ExecOptions::default(),
+            )
+            .await
+            .unwrap();
+        let trigger = |name: &str, timing, event| Trigger {
+            name: name.into(),
+            timing,
+            events: vec![event],
+            enabled: true,
+        };
+
+        // The triggers of the schema come first, and the temporary triggers
+        // on the table follow.
+        assert_eq!(
+            driver.list_triggers("db", None, "orders").await.unwrap(),
+            vec![
+                trigger("audit", TriggerTiming::After, TriggerEvent::Insert),
+                trigger("stamp", TriggerTiming::Before, TriggerEvent::Update),
+                trigger("bare", TriggerTiming::After, TriggerEvent::Update),
+                trigger("watch", TriggerTiming::Before, TriggerEvent::Delete),
+            ]
+        );
+        assert_eq!(
+            driver
+                .list_triggers("db", Some("main"), "big")
+                .await
+                .unwrap(),
+            vec![trigger(
+                "write",
+                TriggerTiming::InsteadOf,
+                TriggerEvent::Delete
+            )]
+        );
+        // The schema temp lists its own catalog alone.
+        let temp = driver
+            .list_triggers("db", Some("temp"), "orders")
+            .await
+            .unwrap();
+        assert_eq!(temp.len(), 2);
+
+        // The CREATE text of a temporary trigger on a table of main comes
+        // from the catalog of temp.
+        for (name, start) in [
+            ("audit", "CREATE TRIGGER audit"),
+            ("watch", "CREATE TRIGGER watch BEFORE DELETE ON main.orders"),
+        ] {
+            let query = driver
+                .object_create_query(None, None, Some("orders"), name, ObjectType::Trigger)
+                .unwrap();
+            let text = driver
+                .execute_query(&query.sql, None, &ExecOptions::default())
+                .await
+                .unwrap();
+            let sql = text.results[0].rows[0][0].as_str().unwrap().to_string();
+            assert!(sql.starts_with(start), "{sql}");
+        }
+        assert!(driver
+            .object_create_query(None, None, None, "e", ObjectType::Event)
+            .is_none());
+    }
+
+    #[test]
+    fn a_temporary_trigger_belongs_to_the_schema_that_its_table_names() {
+        assert!(temp_trigger_is_on("aux", Some("AUX"), true));
+        assert!(!temp_trigger_is_on("main", Some("aux"), false));
+        // A table without a schema is the temporary table of that name,
+        // and else the table of main.
+        assert!(temp_trigger_is_on("main", None, false));
+        assert!(!temp_trigger_is_on("main", None, true));
+        assert!(!temp_trigger_is_on("aux", None, false));
+    }
+
+    #[test]
+    fn the_create_statement_of_a_trigger_also_reads_the_temporary_catalog() {
+        let query = object_query_text("main", "it's", ObjectType::Trigger).unwrap();
+        assert_eq!(
+            query.sql,
+            "SELECT sql FROM \"main\".sqlite_master WHERE type = 'trigger' AND name = 'it''s' \
+             AND sql IS NOT NULL UNION ALL SELECT sql FROM temp.sqlite_master \
+             WHERE type = 'trigger' AND name = 'it''s' AND sql IS NOT NULL LIMIT 1;"
+        );
+        let temp = object_query_text("temp", "t", ObjectType::Trigger).unwrap();
+        assert!(!temp.sql.contains("UNION ALL"));
     }
 
     #[tokio::test]

@@ -7,15 +7,17 @@
 
 use crate::db::drivers::{
     add_constraint_column, add_included_column, add_index_column, add_snapshot_column,
-    constraint_kind, f32_to_json, f64_to_json, number_out_of_range, number_value,
-    parameter_type_refused, routine_kind, rows_affected_message, rows_returned_message,
-    single_statement, size_text, table_kind, CancelHandle, DatabaseDriver, NumberValue,
+    add_trigger_event, constraint_kind, f32_to_json, f64_to_json, number_out_of_range,
+    number_value, parameter_type_refused, routine_kind, rows_affected_message,
+    rows_returned_message, single_statement, size_text, table_kind, trigger_event, CancelHandle,
+    DatabaseDriver, NumberValue,
 };
 use crate::db::sink::{BufferSink, RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, Message, MessageLevel, PlanKind, QueryParams, QueryResponse, ResultSet, Routine,
-    Schema, SchemaSnapshot, SnapshotColumn, Table, TableFact, TableKind,
+    IndexInfo, Message, MessageLevel, ObjectType, PlanKind, QueryParams, QueryResponse, ResultSet,
+    Routine, Schema, SchemaSnapshot, SnapshotColumn, Table, TableFact, TableKind, Trigger,
+    TriggerTiming,
 };
 use crate::error::{Error, Result};
 use crate::sql::{only_reads, split_batches, split_statements, Dialect};
@@ -620,6 +622,22 @@ fn create_query_text(
     Some(CreateQuery::new(sql, 0))
 }
 
+/// Builds the statement that reads the text of a trigger. The text comes
+/// from `sys.sql_modules`, as for a view. A trigger belongs to the schema of
+/// its relation, so its name in that schema finds it. MS SQL Server has no
+/// scheduled events.
+fn object_query_text(
+    database: Option<&str>,
+    schema: Option<&str>,
+    name: &str,
+    object_type: ObjectType,
+) -> Option<CreateQuery> {
+    match object_type {
+        ObjectType::Trigger => create_query_text(database, schema, name, TableKind::View),
+        ObjectType::Event => None,
+    }
+}
+
 /// The name MS SQL Server gives the column that holds a plan. Both plan
 /// switches use this name.
 pub const PLAN_COLUMN: &str = "Microsoft SQL Server 2005 XML Showplan";
@@ -714,6 +732,9 @@ impl DatabaseDriver for MssqlDriver {
             supports_materialized_views: false,
             supports_foreign_tables: false,
             supports_synonyms: true,
+            supports_triggers: true,
+            supports_view_triggers: true,
+            supports_events: false,
         }
     }
 
@@ -729,6 +750,17 @@ impl DatabaseDriver for MssqlDriver {
         kind: TableKind,
     ) -> Option<CreateQuery> {
         create_query_text(database, schema, table, kind)
+    }
+
+    fn object_create_query(
+        &self,
+        database: Option<&str>,
+        schema: Option<&str>,
+        _parent: Option<&str>,
+        name: &str,
+        object_type: ObjectType,
+    ) -> Option<CreateQuery> {
+        object_query_text(database, schema, name, object_type)
     }
 
     async fn ping(&mut self) -> Result<()> {
@@ -1095,6 +1127,33 @@ impl DatabaseDriver for MssqlDriver {
         Ok(indexes)
     }
 
+    /// Reads the triggers with [`trigger_query`], one event of one trigger
+    /// in each row.
+    async fn list_triggers(
+        &mut self,
+        database: &str,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<Trigger>> {
+        let name =
+            Dialect::MsSql.qualified_name(Some(database), Some(schema.unwrap_or("dbo")), table);
+        let query = trigger_query(&Dialect::MsSql.quote_identifier(database));
+        let mut stream = self.client.query(query, &[&name.as_str()]).await?;
+        let mut triggers = Vec::new();
+        while let Some(item) = stream.try_next().await? {
+            if let QueryItem::Row(row) = item {
+                add_trigger_event(
+                    &mut triggers,
+                    row.try_get::<&str, _>(0)?.unwrap_or_default().to_string(),
+                    trigger_timing_of(row.try_get::<bool, _>(1)?.unwrap_or(false)),
+                    !row.try_get::<bool, _>(2)?.unwrap_or(false),
+                    row.try_get::<&str, _>(3)?.and_then(trigger_event),
+                );
+            }
+        }
+        Ok(triggers)
+    }
+
     async fn list_constraints(
         &mut self,
         database: &str,
@@ -1232,6 +1291,31 @@ fn index_query(catalog: &str) -> String {
          WHERE i.object_id = OBJECT_ID(@P1) AND i.name IS NOT NULL \
          ORDER BY i.name, ic.is_included_column, ic.key_ordinal, ic.index_column_id"
     )
+}
+
+/// Reads one event of one trigger of one relation for each row. The name
+/// of the relation reaches `OBJECT_ID` as a parameter. The parent class 1
+/// selects the triggers of a table or a view, so a trigger of the database,
+/// which fires on a change of the schema, stays out of the list.
+fn trigger_query(catalog: &str) -> String {
+    format!(
+        "SELECT tr.name, tr.is_instead_of_trigger, tr.is_disabled, te.type_desc \
+         FROM {catalog}.sys.triggers AS tr \
+         LEFT JOIN {catalog}.sys.trigger_events AS te ON te.object_id = tr.object_id \
+         WHERE tr.parent_class = 1 AND tr.parent_id = OBJECT_ID(@P1) \
+         ORDER BY tr.name, te.type"
+    )
+}
+
+/// Reads the time of a trigger from its `is_instead_of_trigger` flag. MS
+/// SQL Server has no `BEFORE` trigger, and a `FOR` trigger runs after the
+/// change.
+fn trigger_timing_of(instead_of: bool) -> TriggerTiming {
+    if instead_of {
+        TriggerTiming::InsteadOf
+    } else {
+        TriggerTiming::After
+    }
 }
 
 /// Reads one column of one constraint for each row. A foreign key carries the
@@ -2930,6 +3014,32 @@ mod tests {
              WHERE m.object_id = OBJECT_ID('[dbo].[v]');"
         );
         assert!(create_query_text(Some("db"), Some("dbo"), "t", TableKind::Table).is_none());
+    }
+
+    #[test]
+    fn the_triggers_come_from_the_catalog_of_the_named_database() {
+        let text = trigger_query("[Sales]");
+        assert!(text
+            .starts_with("SELECT tr.name, tr.is_instead_of_trigger, tr.is_disabled, te.type_desc"));
+        assert!(text.contains("FROM [Sales].sys.triggers AS tr"));
+        assert!(text.contains("LEFT JOIN [Sales].sys.trigger_events AS te"));
+        // A trigger of the database has the parent class 0.
+        assert!(text.contains("WHERE tr.parent_class = 1 AND tr.parent_id = OBJECT_ID(@P1)"));
+        assert!(text.ends_with("ORDER BY tr.name, te.type"));
+        assert_eq!(trigger_timing_of(true), TriggerTiming::InsteadOf);
+        assert_eq!(trigger_timing_of(false), TriggerTiming::After);
+    }
+
+    #[test]
+    fn the_create_statement_of_a_trigger_reads_its_module() {
+        let trigger =
+            object_query_text(Some("db"), Some("dbo"), "audit", ObjectType::Trigger).unwrap();
+        assert_eq!(
+            trigger.sql,
+            "SELECT m.definition FROM [db].sys.sql_modules AS m \
+             WHERE m.object_id = OBJECT_ID('[db].[dbo].[audit]');"
+        );
+        assert!(object_query_text(Some("db"), Some("dbo"), "e", ObjectType::Event).is_none());
     }
 
     #[test]

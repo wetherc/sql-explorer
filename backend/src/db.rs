@@ -363,6 +363,60 @@ pub struct Constraint {
     pub detail: Option<String>,
 }
 
+/// The time at which a trigger runs, against the change that fires it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TriggerTiming {
+    Before,
+    After,
+    /// The trigger runs in place of the change, as on a view.
+    InsteadOf,
+}
+
+/// A change that fires a trigger.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TriggerEvent {
+    Insert,
+    Update,
+    Delete,
+    /// A PostgreSQL `TRUNCATE`.
+    Truncate,
+}
+
+/// One trigger of a relation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Trigger {
+    pub name: String,
+    pub timing: TriggerTiming,
+    /// The changes that fire the trigger, in the order insert, update,
+    /// delete and truncate.
+    pub events: Vec<TriggerEvent>,
+    /// False when the engine keeps the trigger but does not run it.
+    pub enabled: bool,
+}
+
+/// One scheduled event of a MySQL or MariaDB database.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduledEvent {
+    pub name: String,
+    /// False when the server keeps the event but does not run it.
+    pub enabled: bool,
+    /// The schedule in the words of the engine, such as `EVERY 1 DAY`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
+}
+
+/// The types of object, other than a relation, that the explorer can script.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ObjectType {
+    Trigger,
+    Event,
+}
+
 /// One partition of a relation that holds its data in parts.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -492,6 +546,13 @@ pub struct DriverCapabilities {
     /// True when the engine has synonyms, which the explorer lists in a
     /// folder of their own.
     pub supports_synonyms: bool,
+    /// True when the driver lists the triggers of a table.
+    pub supports_triggers: bool,
+    /// True when a view can have triggers too, which run in place of a
+    /// change to the view.
+    pub supports_view_triggers: bool,
+    /// True when the driver lists the scheduled events of a database.
+    pub supports_events: bool,
 }
 
 /// What the read-only switch of the connection form does on one engine.
@@ -757,6 +818,46 @@ mod tests {
         let read: Table =
             serde_json::from_value(serde_json::json!({ "name": "t", "kind": "table" })).unwrap();
         assert_eq!(read, Table::table("t"));
+    }
+
+    #[test]
+    fn a_trigger_and_an_event_go_out_in_camel_case() {
+        let trigger = Trigger {
+            name: "audit".into(),
+            timing: TriggerTiming::InsteadOf,
+            events: vec![TriggerEvent::Insert, TriggerEvent::Truncate],
+            enabled: false,
+        };
+        assert_eq!(
+            serde_json::to_value(&trigger).unwrap(),
+            serde_json::json!({
+                "name": "audit",
+                "timing": "insteadOf",
+                "events": ["insert", "truncate"],
+                "enabled": false
+            })
+        );
+        let event = ScheduledEvent {
+            name: "nightly".into(),
+            enabled: true,
+            schedule: Some("EVERY 1 DAY".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&event).unwrap(),
+            serde_json::json!({ "name": "nightly", "enabled": true, "schedule": "EVERY 1 DAY" })
+        );
+        // An event without a schedule sends no such field.
+        let bare: ScheduledEvent =
+            serde_json::from_value(serde_json::json!({ "name": "e", "enabled": false })).unwrap();
+        assert_eq!(bare.schedule, None);
+        assert_eq!(
+            serde_json::to_value(&bare).unwrap(),
+            serde_json::json!({ "name": "e", "enabled": false })
+        );
+        assert_eq!(
+            serde_json::to_value(ObjectType::Trigger).unwrap(),
+            serde_json::json!("trigger")
+        );
     }
 
     #[test]

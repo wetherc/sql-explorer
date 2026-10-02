@@ -10,8 +10,9 @@ pub mod sqlite;
 use crate::db::sink::{BufferSink, RowSink, RunSummary};
 use crate::db::{
     AppColumn, Constraint, ConstraintKind, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, Message, PartitionList, PlanKind, QueryParams, QueryResponse, Routine, RoutineKind,
-    Schema, SchemaSnapshot, SnapshotColumn, SnapshotRelation, Table, TableFact, TableKind,
+    IndexInfo, Message, ObjectType, PartitionList, PlanKind, QueryParams, QueryResponse, Routine,
+    RoutineKind, ScheduledEvent, Schema, SchemaSnapshot, SnapshotColumn, SnapshotRelation, Table,
+    TableFact, TableKind, Trigger, TriggerEvent, TriggerTiming,
 };
 use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
@@ -149,6 +150,28 @@ pub trait DatabaseDriver: Send + Sync {
         Ok(PartitionList::default())
     }
 
+    /// Lists the triggers of one relation. An engine without triggers
+    /// answers with an empty list, and the capability record keeps the
+    /// folder out of the tree.
+    async fn list_triggers(
+        &mut self,
+        _database: &str,
+        _schema: Option<&str>,
+        _table: &str,
+    ) -> Result<Vec<Trigger>> {
+        Ok(Vec::new())
+    }
+
+    /// Lists the scheduled events of one database. An engine without events
+    /// answers with an empty list.
+    async fn list_events(
+        &mut self,
+        _database: &str,
+        _schema: Option<&str>,
+    ) -> Result<Vec<ScheduledEvent>> {
+        Ok(Vec::new())
+    }
+
     /// Reads the facts of one relation, such as the number of rows it holds
     /// and its size on disk. An engine that reports none answers with an
     /// empty list.
@@ -246,6 +269,22 @@ pub trait DatabaseDriver: Send + Sync {
         _schema: Option<&str>,
         _table: &str,
         _kind: TableKind,
+    ) -> Option<CreateQuery> {
+        None
+    }
+
+    /// Returns the statement that reads the CREATE text of one trigger or
+    /// one event from the engine. `parent` names the relation of a trigger.
+    /// An engine that gives no such text returns `None`. A draft cannot
+    /// take the place of the text, because the catalog of the columns says
+    /// nothing about the body of the object.
+    fn object_create_query(
+        &self,
+        _database: Option<&str>,
+        _schema: Option<&str>,
+        _parent: Option<&str>,
+        _name: &str,
+        _object_type: ObjectType,
     ) -> Option<CreateQuery> {
         None
     }
@@ -535,6 +574,58 @@ pub fn constraint_kind(word: &str) -> ConstraintKind {
         "N" => ConstraintKind::NotNull,
         "DEFAULT" => ConstraintKind::Default,
         _ => ConstraintKind::Check,
+    }
+}
+
+/// Adds one event to the record of its trigger, and starts a record when the
+/// trigger is new. MS SQL Server reports one event of one trigger in each
+/// row, so the rows are folded into one record for each trigger.
+pub fn add_trigger_event(
+    triggers: &mut Vec<Trigger>,
+    name: String,
+    timing: TriggerTiming,
+    enabled: bool,
+    event: Option<TriggerEvent>,
+) {
+    let entry = match triggers.iter_mut().find(|trigger| trigger.name == name) {
+        Some(entry) => entry,
+        None => {
+            triggers.push(Trigger {
+                name,
+                timing,
+                events: Vec::new(),
+                enabled,
+            });
+            triggers.last_mut().expect("the record was just added")
+        }
+    };
+    if let Some(event) = event {
+        if !entry.events.contains(&event) {
+            entry.events.push(event);
+        }
+    }
+}
+
+/// Reads the word of the catalog that names the change that fires a trigger.
+/// A word that names no such change gives `None`.
+pub fn trigger_event(word: &str) -> Option<TriggerEvent> {
+    match word.trim().to_uppercase().as_str() {
+        "INSERT" => Some(TriggerEvent::Insert),
+        "UPDATE" => Some(TriggerEvent::Update),
+        "DELETE" => Some(TriggerEvent::Delete),
+        "TRUNCATE" => Some(TriggerEvent::Truncate),
+        _ => None,
+    }
+}
+
+/// Reads the word of the catalog that names the time a trigger runs. A
+/// word that names no time gives `AFTER`, which is the time that MS SQL
+/// Server calls `FOR`.
+pub fn trigger_timing(word: &str) -> TriggerTiming {
+    match word.trim().to_uppercase().as_str() {
+        "BEFORE" => TriggerTiming::Before,
+        "INSTEAD OF" => TriggerTiming::InsteadOf,
+        _ => TriggerTiming::After,
     }
 }
 
@@ -969,6 +1060,71 @@ mod tests {
         assert!(BareDriver
             .create_query(None, None, "t", TableKind::Table)
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_driver_without_triggers_and_events_lists_none() {
+        let mut driver = BareDriver;
+        assert!(driver
+            .list_triggers("db", None, "t")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(driver.list_events("db", None).await.unwrap().is_empty());
+        for object_type in [ObjectType::Trigger, ObjectType::Event] {
+            assert!(driver
+                .object_create_query(None, None, Some("t"), "x", object_type)
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn the_events_of_a_trigger_fold_into_one_record() {
+        let mut triggers = Vec::new();
+        for (name, event) in [
+            ("audit", Some(TriggerEvent::Insert)),
+            ("audit", Some(TriggerEvent::Update)),
+            ("audit", Some(TriggerEvent::Update)),
+            ("other", None),
+        ] {
+            add_trigger_event(
+                &mut triggers,
+                name.into(),
+                TriggerTiming::After,
+                name == "audit",
+                event,
+            );
+        }
+        assert_eq!(
+            triggers,
+            vec![
+                Trigger {
+                    name: "audit".into(),
+                    timing: TriggerTiming::After,
+                    events: vec![TriggerEvent::Insert, TriggerEvent::Update],
+                    enabled: true,
+                },
+                Trigger {
+                    name: "other".into(),
+                    timing: TriggerTiming::After,
+                    events: Vec::new(),
+                    enabled: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn the_words_of_the_catalog_name_the_event_and_the_time() {
+        assert_eq!(trigger_event(" insert "), Some(TriggerEvent::Insert));
+        assert_eq!(trigger_event("UPDATE"), Some(TriggerEvent::Update));
+        assert_eq!(trigger_event("Delete"), Some(TriggerEvent::Delete));
+        assert_eq!(trigger_event("TRUNCATE"), Some(TriggerEvent::Truncate));
+        assert_eq!(trigger_event("CREATE_TABLE"), None);
+        assert_eq!(trigger_timing("before"), TriggerTiming::Before);
+        assert_eq!(trigger_timing("INSTEAD OF"), TriggerTiming::InsteadOf);
+        assert_eq!(trigger_timing("AFTER"), TriggerTiming::After);
+        assert_eq!(trigger_timing("FOR"), TriggerTiming::After);
     }
 
     /// A driver that has `execute_stream` alone, to prove that the default

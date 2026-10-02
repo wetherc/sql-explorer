@@ -785,6 +785,9 @@ impl DatabaseDriver for AthenaDriver {
             supports_materialized_views: false,
             supports_foreign_tables: false,
             supports_synonyms: false,
+            supports_triggers: false,
+            supports_view_triggers: false,
+            supports_events: false,
         }
     }
 

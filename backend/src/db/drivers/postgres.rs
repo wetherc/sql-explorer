@@ -14,8 +14,9 @@ use crate::db::drivers::{
 use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, Message, MessageLevel, Partition, PartitionList, PlanKind, QueryParams,
+    IndexInfo, Message, MessageLevel, ObjectType, Partition, PartitionList, PlanKind, QueryParams,
     QueryResponse, Routine, Schema, SchemaSnapshot, SnapshotColumn, Table, TableFact, TableKind,
+    Trigger, TriggerEvent, TriggerTiming,
 };
 use crate::error::{Error, Result};
 use crate::sql::{leading_keyword, only_reads, split_statements, Dialect};
@@ -401,6 +402,9 @@ impl DatabaseDriver for PostgresDriver {
             supports_materialized_views: true,
             supports_foreign_tables: true,
             supports_synonyms: false,
+            supports_triggers: true,
+            supports_view_triggers: true,
+            supports_events: false,
         }
     }
 
@@ -416,6 +420,17 @@ impl DatabaseDriver for PostgresDriver {
         kind: TableKind,
     ) -> Option<CreateQuery> {
         create_query_text(schema, table, kind)
+    }
+
+    fn object_create_query(
+        &self,
+        _database: Option<&str>,
+        schema: Option<&str>,
+        parent: Option<&str>,
+        name: &str,
+        object_type: ObjectType,
+    ) -> Option<CreateQuery> {
+        object_query_text(schema, parent?, name, object_type)
     }
 
     async fn ping(&mut self) -> Result<()> {
@@ -731,6 +746,24 @@ impl DatabaseDriver for PostgresDriver {
             );
         }
         Ok(constraints)
+    }
+
+    /// Reads the triggers with [`TRIGGERS_QUERY`].
+    async fn list_triggers(
+        &mut self,
+        _database: &str,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<Trigger>> {
+        let schema = schema.unwrap_or("public");
+        let rows = self
+            .client
+            .query(TRIGGERS_QUERY, &[&schema, &table])
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|row| trigger_of(row.get(0), row.get(1), row.get(2)))
+            .collect())
     }
 
     fn cancel_handle(&self) -> Option<Arc<dyn CancelHandle>> {
@@ -1445,6 +1478,80 @@ fn create_query_text(schema: Option<&str>, table: &str, kind: TableKind) -> Opti
              pg_catalog.pg_get_viewdef(c.oid, true) \
              FROM pg_catalog.pg_class AS c WHERE c.oid = {}::regclass;",
             Dialect::Postgres.quote_literal(&name)
+        ),
+        0,
+    ))
+}
+
+/// Lists the triggers of one relation. A foreign key makes triggers of its
+/// own, and `tgisinternal` marks these, so they stay out of the list.
+const TRIGGERS_QUERY: &str = "SELECT t.tgname, t.tgtype, t.tgenabled \
+     FROM pg_catalog.pg_trigger AS t \
+     JOIN pg_catalog.pg_class AS c ON c.oid = t.tgrelid \
+     JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace \
+     WHERE n.nspname = $1 AND c.relname = $2 AND NOT t.tgisinternal \
+     ORDER BY t.tgname";
+
+/// The bits of `tgtype`, as the header `pg_trigger.h` of the server names
+/// them. The bit of the row level does not change the time or the events.
+const TRIGGER_TYPE_BEFORE: i16 = 1 << 1;
+const TRIGGER_TYPE_INSERT: i16 = 1 << 2;
+const TRIGGER_TYPE_DELETE: i16 = 1 << 3;
+const TRIGGER_TYPE_UPDATE: i16 = 1 << 4;
+const TRIGGER_TYPE_TRUNCATE: i16 = 1 << 5;
+const TRIGGER_TYPE_INSTEAD: i16 = 1 << 6;
+
+/// Builds the record of one trigger from its name, its `tgtype` bits and
+/// its `tgenabled` letter. The letter `D` marks a disabled trigger. The
+/// letters `O`, `R` and `A` mark a trigger that runs, each for a different
+/// role of the session.
+fn trigger_of(name: String, bits: i16, enabled: i8) -> Trigger {
+    let timing = if bits & TRIGGER_TYPE_INSTEAD != 0 {
+        TriggerTiming::InsteadOf
+    } else if bits & TRIGGER_TYPE_BEFORE != 0 {
+        TriggerTiming::Before
+    } else {
+        TriggerTiming::After
+    };
+    let events = [
+        (TRIGGER_TYPE_INSERT, TriggerEvent::Insert),
+        (TRIGGER_TYPE_UPDATE, TriggerEvent::Update),
+        (TRIGGER_TYPE_DELETE, TriggerEvent::Delete),
+        (TRIGGER_TYPE_TRUNCATE, TriggerEvent::Truncate),
+    ]
+    .into_iter()
+    .filter(|(bit, _)| bits & bit != 0)
+    .map(|(_, event)| event)
+    .collect();
+    Trigger {
+        name,
+        timing,
+        events,
+        enabled: enabled != b'D' as i8,
+    }
+}
+
+/// Builds the statement that reads the CREATE text of one trigger. A
+/// trigger name is unique within its relation alone, so the statement finds
+/// the trigger by the relation and the name. PostgreSQL has no scheduled
+/// events.
+fn object_query_text(
+    schema: Option<&str>,
+    table: &str,
+    name: &str,
+    object_type: ObjectType,
+) -> Option<CreateQuery> {
+    if object_type != ObjectType::Trigger {
+        return None;
+    }
+    let relation = Dialect::Postgres.qualified_name(None, schema, table);
+    Some(CreateQuery::new(
+        format!(
+            "SELECT pg_catalog.pg_get_triggerdef(t.oid, true) || ';' \
+             FROM pg_catalog.pg_trigger AS t \
+             WHERE t.tgrelid = {}::regclass AND t.tgname = {};",
+            Dialect::Postgres.quote_literal(&relation),
+            Dialect::Postgres.quote_literal(name)
         ),
         0,
     ))
@@ -5189,6 +5296,54 @@ mod tests {
     fn the_list_of_tables_leaves_out_the_partitions() {
         assert!(TABLES_QUERY.contains("NOT c.relispartition"));
         assert!(TABLES_QUERY.contains("'p'"));
+    }
+
+    #[test]
+    fn the_bits_of_a_trigger_name_its_time_and_its_events() {
+        // A row trigger BEFORE INSERT OR UPDATE.
+        let before = trigger_of("audit".into(), 1 | 2 | 4 | 16, b'O' as i8);
+        assert_eq!(before.name, "audit");
+        assert_eq!(before.timing, TriggerTiming::Before);
+        assert_eq!(
+            before.events,
+            vec![TriggerEvent::Insert, TriggerEvent::Update]
+        );
+        assert!(before.enabled);
+        // A statement trigger AFTER DELETE OR TRUNCATE, which is disabled.
+        let after = trigger_of("purge".into(), 8 | 32, b'D' as i8);
+        assert_eq!(after.timing, TriggerTiming::After);
+        assert_eq!(
+            after.events,
+            vec![TriggerEvent::Delete, TriggerEvent::Truncate]
+        );
+        assert!(!after.enabled);
+        // An INSTEAD OF trigger of a view, which runs on a replica alone.
+        let instead = trigger_of("write".into(), 1 | 64 | 16, b'R' as i8);
+        assert_eq!(instead.timing, TriggerTiming::InsteadOf);
+        assert_eq!(instead.events, vec![TriggerEvent::Update]);
+        assert!(instead.enabled);
+        assert!(trigger_of("x".into(), 0, b'A' as i8).enabled);
+    }
+
+    #[test]
+    fn the_list_of_triggers_leaves_out_the_internal_ones() {
+        assert!(TRIGGERS_QUERY.contains("NOT t.tgisinternal"));
+        assert!(TRIGGERS_QUERY.contains("WHERE n.nspname = $1 AND c.relname = $2"));
+        assert!(TRIGGERS_QUERY.ends_with("ORDER BY t.tgname"));
+    }
+
+    #[test]
+    fn the_create_statement_of_a_trigger_names_its_relation() {
+        let trigger =
+            object_query_text(Some("public"), "orders", "it's", ObjectType::Trigger).unwrap();
+        assert_eq!(
+            trigger.sql,
+            "SELECT pg_catalog.pg_get_triggerdef(t.oid, true) || ';' \
+             FROM pg_catalog.pg_trigger AS t \
+             WHERE t.tgrelid = '\"public\".\"orders\"'::regclass AND t.tgname = 'it''s';"
+        );
+        assert_eq!(trigger.column, 0);
+        assert!(object_query_text(Some("public"), "orders", "e", ObjectType::Event).is_none());
     }
 
     #[test]

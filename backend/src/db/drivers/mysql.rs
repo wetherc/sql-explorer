@@ -4,14 +4,14 @@ use crate::db::drivers::{
     add_constraint_column, add_index_column, add_snapshot_column, bytes_to_json, constraint_kind,
     f32_to_json, f64_to_json, next_values, number_out_of_range, number_value,
     parameter_type_refused, prefixed_plan, routine_kind, rows_affected_message,
-    rows_returned_message, size_text, system_roots, table_kind, CancelHandle, DatabaseDriver,
-    NumberValue,
+    rows_returned_message, size_text, system_roots, table_kind, trigger_event, trigger_timing,
+    CancelHandle, DatabaseDriver, NumberValue,
 };
 use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, Message, MessageLevel, PlanKind, QueryParams, QueryResponse, Routine, Schema,
-    SchemaSnapshot, SnapshotColumn, Table, TableFact, TableKind,
+    IndexInfo, Message, MessageLevel, ObjectType, PlanKind, QueryParams, QueryResponse, Routine,
+    ScheduledEvent, Schema, SchemaSnapshot, SnapshotColumn, Table, TableFact, TableKind, Trigger,
 };
 use crate::error::{is_mysql_stop, Error, Result};
 use crate::sql::{only_reads, split_statements, Dialect};
@@ -515,6 +515,9 @@ impl DatabaseDriver for MysqlDriver {
             supports_materialized_views: false,
             supports_foreign_tables: false,
             supports_synonyms: false,
+            supports_triggers: true,
+            supports_view_triggers: false,
+            supports_events: true,
         }
     }
 
@@ -530,6 +533,17 @@ impl DatabaseDriver for MysqlDriver {
         kind: TableKind,
     ) -> Option<CreateQuery> {
         Some(create_query_text(database, table, kind))
+    }
+
+    fn object_create_query(
+        &self,
+        database: Option<&str>,
+        _schema: Option<&str>,
+        _parent: Option<&str>,
+        name: &str,
+        object_type: ObjectType,
+    ) -> Option<CreateQuery> {
+        Some(object_query_text(database, name, object_type))
     }
 
     async fn ping(&mut self) -> Result<()> {
@@ -853,6 +867,41 @@ impl DatabaseDriver for MysqlDriver {
         Ok(constraints)
     }
 
+    /// Reads the triggers from `TRIGGERS`. A trigger of MySQL fires on one
+    /// event alone, and the server has no switch that disables it.
+    async fn list_triggers(
+        &mut self,
+        database: &str,
+        _schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<Trigger>> {
+        let rows: Vec<(String, String, String)> = self
+            .conn()?
+            .exec(
+                "SELECT TRIGGER_NAME, ACTION_TIMING, EVENT_MANIPULATION \
+                 FROM information_schema.TRIGGERS \
+                 WHERE EVENT_OBJECT_SCHEMA = ? AND EVENT_OBJECT_TABLE = ? \
+                 ORDER BY TRIGGER_NAME",
+                (database, table),
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(name, timing, event)| trigger_of(name, &timing, &event))
+            .collect())
+    }
+
+    /// Reads the scheduled events from `EVENTS`, with the parts of each
+    /// schedule.
+    async fn list_events(
+        &mut self,
+        database: &str,
+        _schema: Option<&str>,
+    ) -> Result<Vec<ScheduledEvent>> {
+        let rows: Vec<EventRow> = self.conn()?.exec(EVENTS_QUERY, (database,)).await?;
+        Ok(rows.into_iter().map(event_of).collect())
+    }
+
     fn cancel_handle(&self) -> Option<Arc<dyn CancelHandle>> {
         Some(Arc::new(MysqlCancel {
             opts: self.opts.clone(),
@@ -907,6 +956,68 @@ fn create_query_text(database: Option<&str>, table: &str, kind: TableKind) -> Cr
     let name = Dialect::MySql.qualified_name(database, None, table);
     let word = if kind.is_view() { "VIEW" } else { "TABLE" };
     CreateQuery::new(format!("SHOW CREATE {word} {name};"), 1)
+}
+
+/// Builds the statement that reads the CREATE text of one trigger or one
+/// event. `SHOW CREATE TRIGGER` gives the text in its third column, and
+/// `SHOW CREATE EVENT` gives it in its fourth one.
+fn object_query_text(database: Option<&str>, name: &str, object_type: ObjectType) -> CreateQuery {
+    let name = Dialect::MySql.qualified_name(database, None, name);
+    match object_type {
+        ObjectType::Trigger => CreateQuery::new(format!("SHOW CREATE TRIGGER {name};"), 2),
+        ObjectType::Event => CreateQuery::new(format!("SHOW CREATE EVENT {name};"), 3),
+    }
+}
+
+/// Builds the record of one trigger from the words of `TRIGGERS`.
+fn trigger_of(name: String, timing: &str, event: &str) -> Trigger {
+    Trigger {
+        name,
+        timing: trigger_timing(timing),
+        events: trigger_event(event).into_iter().collect(),
+        enabled: true,
+    }
+}
+
+/// Lists the scheduled events of one database. The time of a single run
+/// goes out as text, so the row reads every column as text.
+const EVENTS_QUERY: &str = "SELECT EVENT_NAME, STATUS, EVENT_TYPE, \
+            CAST(EXECUTE_AT AS CHAR), INTERVAL_VALUE, INTERVAL_FIELD \
+     FROM information_schema.EVENTS \
+     WHERE EVENT_SCHEMA = ? ORDER BY EVENT_NAME";
+
+/// One row of [`EVENTS_QUERY`]: the name, the status, the type of the
+/// schedule, the time of a single run, and the value and the unit of a
+/// repeat.
+type EventRow = (
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+/// Builds the record of one event. The status `ENABLED` marks an event that
+/// runs. `DISABLED` and `SLAVESIDE_DISABLED`, which marks an event that a
+/// replica copied from its source, mark an event that does not run. A
+/// recurring event gives `EVERY` with its interval, and a single run gives
+/// `AT` with its time.
+fn event_of(row: EventRow) -> ScheduledEvent {
+    let (name, status, schedule_type, at, value, unit) = row;
+    let schedule = if schedule_type.eq_ignore_ascii_case("RECURRING") {
+        value.map(|value| match unit {
+            Some(unit) => format!("EVERY {value} {unit}"),
+            None => format!("EVERY {value}"),
+        })
+    } else {
+        at.map(|at| format!("AT {at}"))
+    };
+    ScheduledEvent {
+        name,
+        enabled: status.eq_ignore_ascii_case("ENABLED"),
+        schedule,
+    }
 }
 
 /// The kind of value that a column holds, as far as the conversion to JSON
@@ -1313,6 +1424,77 @@ mod tests {
 
         let view = create_query_text(None, "v", TableKind::View);
         assert_eq!(view.sql, "SHOW CREATE VIEW `v`;");
+    }
+
+    #[test]
+    fn the_create_statement_of_a_trigger_and_an_event_names_its_column() {
+        let trigger = object_query_text(Some("db"), "audit", ObjectType::Trigger);
+        assert_eq!(trigger.sql, "SHOW CREATE TRIGGER `db`.`audit`;");
+        assert_eq!(trigger.column, 2);
+        let event = object_query_text(None, "nightly", ObjectType::Event);
+        assert_eq!(event.sql, "SHOW CREATE EVENT `nightly`;");
+        assert_eq!(event.column, 3);
+    }
+
+    #[test]
+    fn a_trigger_of_mysql_has_one_event_and_is_always_enabled() {
+        let trigger = trigger_of("audit".into(), "BEFORE", "UPDATE");
+        assert_eq!(trigger.name, "audit");
+        assert_eq!(trigger.timing, crate::db::TriggerTiming::Before);
+        assert_eq!(trigger.events, vec![crate::db::TriggerEvent::Update]);
+        assert!(trigger.enabled);
+        let after = trigger_of("log".into(), "AFTER", "INSERT");
+        assert_eq!(after.timing, crate::db::TriggerTiming::After);
+        assert!(trigger_of("x".into(), "AFTER", "OTHER").events.is_empty());
+    }
+
+    #[test]
+    fn an_event_gives_its_status_and_its_schedule() {
+        let text = |value: &str| Some(value.to_string());
+        let recurring = event_of((
+            "nightly".into(),
+            "ENABLED".into(),
+            "RECURRING".into(),
+            None,
+            text("1"),
+            text("DAY"),
+        ));
+        assert_eq!(recurring.name, "nightly");
+        assert!(recurring.enabled);
+        assert_eq!(recurring.schedule.as_deref(), Some("EVERY 1 DAY"));
+
+        let once = event_of((
+            "once".into(),
+            "DISABLED".into(),
+            "ONE TIME".into(),
+            text("2026-01-01 00:00:00"),
+            None,
+            None,
+        ));
+        assert!(!once.enabled);
+        assert_eq!(once.schedule.as_deref(), Some("AT 2026-01-01 00:00:00"));
+
+        let copied = event_of((
+            "copied".into(),
+            "SLAVESIDE_DISABLED".into(),
+            "RECURRING".into(),
+            None,
+            text("5"),
+            None,
+        ));
+        assert!(!copied.enabled);
+        assert_eq!(copied.schedule.as_deref(), Some("EVERY 5"));
+
+        let bare = event_of((
+            "bare".into(),
+            "ENABLED".into(),
+            "RECURRING".into(),
+            None,
+            None,
+            None,
+        ));
+        assert_eq!(bare.schedule, None);
+        assert!(EVENTS_QUERY.contains("WHERE EVENT_SCHEMA = ?"));
     }
     use crate::storage::{ConnectionOptions, DbType};
 
