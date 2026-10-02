@@ -627,18 +627,7 @@ impl DatabaseDriver for PostgresDriver {
         database: &str,
         max_columns: usize,
     ) -> Result<SchemaSnapshot> {
-        let rows = self
-            .client
-            .query(
-                "SELECT c.table_schema, c.table_name, t.table_type, c.column_name, c.data_type \
-                 FROM information_schema.columns AS c \
-                 JOIN information_schema.tables AS t \
-                   ON t.table_schema = c.table_schema AND t.table_name = c.table_name \
-                 WHERE c.table_schema NOT IN ('pg_catalog', 'information_schema') \
-                 ORDER BY c.table_schema, c.table_name, c.ordinal_position",
-                &[],
-            )
-            .await?;
+        let rows = self.client.query(&snapshot_query(max_columns), &[]).await?;
         let mut snapshot = SchemaSnapshot {
             database: database.to_string(),
             complete: true,
@@ -1074,6 +1063,31 @@ impl PostgresDriver {
         sink.message(rows_affected_message(affected));
         Ok(Some(affected))
     }
+}
+
+/// Builds the statement that reads the columns of every relation for the
+/// schema snapshot. The statement reads the catalog directly, because the
+/// views of `information_schema` are slow on a large catalog, leave out the
+/// materialized views, and name an enumerated type `USER-DEFINED`. The
+/// limit is one row past the count of columns, so the walk can tell that
+/// the snapshot is not complete.
+fn snapshot_query(max_columns: usize) -> String {
+    format!(
+        "SELECT n.nspname, c.relname, \
+                CASE WHEN c.relkind IN ('v', 'm') THEN 'VIEW' ELSE 'BASE TABLE' END, \
+                a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod) \
+         FROM pg_catalog.pg_attribute AS a \
+         JOIN pg_catalog.pg_class AS c ON c.oid = a.attrelid \
+         JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace \
+         WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') \
+           AND a.attnum > 0 AND NOT a.attisdropped \
+           AND n.nspname NOT IN ('pg_toast', 'pg_catalog', 'information_schema') \
+           AND n.nspname NOT LIKE 'pg\\_temp\\_%' \
+           AND n.nspname NOT LIKE 'pg\\_toast\\_temp\\_%' \
+         ORDER BY n.nspname, c.relname, a.attnum \
+         LIMIT {}",
+        max_columns.saturating_add(1).min(i64::MAX as usize)
+    )
 }
 
 /// The keyword that asks PostgreSQL for a plan. The analysed form runs the
@@ -3495,6 +3509,14 @@ mod tests {
             decoded(&Type::MACADDR, b"ab"),
             JsonValue::String("ab".into())
         );
+    }
+
+    #[test]
+    fn the_snapshot_reads_one_column_past_its_limit() {
+        let text = snapshot_query(10);
+        assert!(text.ends_with("LIMIT 11"));
+        assert!(text.contains("'m'"));
+        assert!(snapshot_query(usize::MAX).ends_with(&format!("LIMIT {}", i64::MAX)));
     }
 
     #[test]
