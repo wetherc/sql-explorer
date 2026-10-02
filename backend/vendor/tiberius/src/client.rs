@@ -389,31 +389,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
     pub(crate) async fn rpc_perform_query<'a, 'b>(
         &'a mut self,
         proc_id: RpcProcId,
-        mut rpc_params: Vec<RpcParam<'b>>,
+        rpc_params: Vec<RpcParam<'b>>,
         params: impl Iterator<Item = ColumnData<'b>>,
     ) -> crate::Result<()>
     where
         'a: 'b,
     {
-        let mut param_str = String::new();
-
-        for (i, param) in params.enumerate() {
-            if i > 0 {
-                param_str.push(',')
-            }
-            param_str.push_str(&format!("@P{} ", i + 1));
-            param_str.push_str(&param.type_name());
-
-            rpc_params.push(RpcParam {
-                name: Cow::Owned(format!("@P{}", i + 1)),
-                flags: BitFlags::empty(),
-                value: param,
-            });
-        }
-
-        if let Some(params) = rpc_params.iter_mut().find(|x| x.name == "params") {
-            params.value = ColumnData::String(Some(param_str.into()));
-        }
+        let rpc_params = bind_rpc_params(rpc_params, params);
 
         let req = TokenRpcRequest::new(
             proc_id,
@@ -425,5 +407,79 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
         self.connection.send(PacketHeader::rpc(id), req).await?;
 
         Ok(())
+    }
+}
+
+/// Adds the values of the parameters to the arguments of the procedure, and
+/// writes their declarations into the argument `params`.
+///
+/// A call without values leaves out the argument `params`. The server parses
+/// a statement with an empty declaration as a parameterized statement, and
+/// then refuses a statement that must start its batch, such as `CREATE VIEW`
+/// or `CREATE SCHEMA`, with a syntax error.
+fn bind_rpc_params<'b>(
+    mut rpc_params: Vec<RpcParam<'b>>,
+    params: impl Iterator<Item = ColumnData<'b>>,
+) -> Vec<RpcParam<'b>> {
+    let mut param_str = String::new();
+
+    for (i, param) in params.enumerate() {
+        if i > 0 {
+            param_str.push(',')
+        }
+        param_str.push_str(&format!("@P{} ", i + 1));
+        param_str.push_str(&param.type_name());
+
+        rpc_params.push(RpcParam {
+            name: Cow::Owned(format!("@P{}", i + 1)),
+            flags: BitFlags::empty(),
+            value: param,
+        });
+    }
+
+    if param_str.is_empty() {
+        rpc_params.retain(|param| param.name != "params");
+    } else if let Some(params) = rpc_params.iter_mut().find(|x| x.name == "params") {
+        params.value = ColumnData::String(Some(param_str.into()));
+    }
+    rpc_params
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn arguments() -> Vec<RpcParam<'static>> {
+        vec![
+            RpcParam {
+                name: Cow::Borrowed("stmt"),
+                flags: BitFlags::empty(),
+                value: ColumnData::String(Some("SELECT @P1".into())),
+            },
+            RpcParam {
+                name: Cow::Borrowed("params"),
+                flags: BitFlags::empty(),
+                value: ColumnData::I32(Some(0)),
+            },
+        ]
+    }
+
+    #[test]
+    fn a_call_without_values_leaves_out_the_declarations() {
+        let bound = bind_rpc_params(arguments(), std::iter::empty());
+        let names: Vec<&str> = bound.iter().map(|param| param.name.as_ref()).collect();
+        assert_eq!(names, ["stmt"]);
+    }
+
+    #[test]
+    fn a_call_with_values_declares_each_value() {
+        let values = vec![ColumnData::I32(Some(1)), ColumnData::I32(Some(2))];
+        let bound = bind_rpc_params(arguments(), values.into_iter());
+        let names: Vec<&str> = bound.iter().map(|param| param.name.as_ref()).collect();
+        assert_eq!(names, ["stmt", "params", "@P1", "@P2"]);
+        assert_eq!(
+            bound[1].value,
+            ColumnData::String(Some("@P1 int,@P2 int".into()))
+        );
     }
 }

@@ -163,6 +163,11 @@ strip = true
 # `TrustServerCertificate=true` and `TrustServerCertificateCA`. The release
 # calls `trust_cert` and then `trust_cert_ca`, and the second call panics.
 #
+# The copy also leaves out the argument `@params` of `sp_executesql` when a
+# query has no parameters. The release sends an empty declaration, and the
+# server then refuses `CREATE VIEW`, `CREATE TRIGGER`, `CREATE SCHEMA` and the
+# other statements that must start a batch with a syntax error.
+#
 # `tokio-postgres` 0.7.18 drops the type OID of each column of the row
 # description in the simple protocol, so a driver cannot name the type of a
 # column of a statement without parameters. The copy under `vendor/`
