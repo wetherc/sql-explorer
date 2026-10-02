@@ -148,6 +148,9 @@ impl DatabaseDriver for SqliteDriver {
             supports_constraints: true,
             supports_partitions: false,
             supports_explain: true,
+            supports_materialized_views: false,
+            supports_foreign_tables: false,
+            supports_synonyms: false,
         }
     }
 

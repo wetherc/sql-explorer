@@ -9,7 +9,7 @@ use crate::db::drivers::{
     add_constraint_column, add_included_column, add_index_column, add_snapshot_column,
     bytes_to_json, constraint_kind, f32_to_json, f64_to_json, number_out_of_range, number_value,
     prefixed_plan, routine_kind, rows_affected_message, rows_returned_message, size_text,
-    system_roots, table_kind, CancelHandle, DatabaseDriver, NumberValue,
+    system_roots, CancelHandle, DatabaseDriver, NumberValue,
 };
 use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{
@@ -398,6 +398,9 @@ impl DatabaseDriver for PostgresDriver {
             supports_constraints: true,
             supports_partitions: true,
             supports_explain: true,
+            supports_materialized_views: true,
+            supports_foreign_tables: true,
+            supports_synonyms: false,
         }
     }
 
@@ -621,7 +624,7 @@ impl DatabaseDriver for PostgresDriver {
                 max_columns,
                 row.get(0),
                 row.get(1),
-                table_kind(row.get(2)),
+                relation_kind(row.get(2)),
                 SnapshotColumn {
                     name: row.get(3),
                     data_type: row.get(4),
@@ -1280,15 +1283,21 @@ const TABLES_QUERY: &str = "SELECT c.relname, c.relkind \
        AND NOT c.relispartition \
      ORDER BY c.relkind, c.relname";
 
-/// Turns the name and the `relkind` letter of a relation into its entry. A
-/// view and a materialized view show as views. A plain table, a partitioned
-/// table and a foreign table show as tables, because [`TableKind`] has no
-/// value of their own.
+/// Turns the name and the `relkind` letter of a relation into its entry.
 fn relation_of(name: String, kind: i8) -> Table {
-    if kind == b'v' as i8 || kind == b'm' as i8 {
-        Table::view(name)
-    } else {
-        Table::table(name)
+    Table::new(name, relation_kind(kind))
+}
+
+/// Reads the `relkind` letter of a relation. [`TABLES_QUERY`] and the
+/// snapshot read only the letters of the relations that the tree shows, so
+/// a letter of another kind gives a plain table.
+fn relation_kind(letter: i8) -> TableKind {
+    match letter as u8 {
+        b'v' => TableKind::View,
+        b'm' => TableKind::MaterializedView,
+        b'p' => TableKind::PartitionedTable,
+        b'f' => TableKind::ForeignTable,
+        _ => TableKind::Table,
     }
 }
 
@@ -1388,9 +1397,8 @@ fn partition_list(rows: Vec<(String, Option<String>)>) -> PartitionList {
 /// of a table with thousands of partitions then do not fill the limit.
 fn snapshot_query(max_columns: usize) -> String {
     format!(
-        "SELECT n.nspname, c.relname, \
-                CASE WHEN c.relkind IN ('v', 'm') THEN 'VIEW' ELSE 'BASE TABLE' END, \
-                a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod) \
+        "SELECT n.nspname, c.relname, c.relkind, a.attname, \
+                pg_catalog.format_type(a.atttypid, a.atttypmod) \
          FROM pg_catalog.pg_attribute AS a \
          JOIN pg_catalog.pg_class AS c ON c.oid = a.attrelid \
          JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace \
@@ -1414,8 +1422,8 @@ pub fn plan_prefix(kind: PlanKind) -> &'static str {
     }
 }
 
-/// Builds the statement that reads the CREATE text of one view. PostgreSQL
-/// keeps no text for a table, so a table gives no statement and the command
+/// Builds the statement that reads the CREATE text of one view or one
+/// materialized view. PostgreSQL keeps no text for a table, so a table gives no statement and the command
 /// layer builds a draft instead.
 ///
 /// `pg_get_viewdef` gives the query of the view alone, so the statement adds
@@ -1426,7 +1434,7 @@ pub fn plan_prefix(kind: PlanKind) -> &'static str {
 /// name of another database cannot be read this way, so the name holds the
 /// schema and the table alone.
 fn create_query_text(schema: Option<&str>, table: &str, kind: TableKind) -> Option<CreateQuery> {
-    if kind != TableKind::View {
+    if !kind.is_view() {
         return None;
     }
     let name = Dialect::Postgres.qualified_name(None, schema, table);
@@ -5185,11 +5193,15 @@ mod tests {
 
     #[test]
     fn the_letter_of_a_relation_names_its_kind() {
-        for &letter in b"vm" {
-            assert_eq!(relation_of("r".into(), letter as i8).kind, TableKind::View);
-        }
-        for &letter in b"rpf" {
-            assert_eq!(relation_of("r".into(), letter as i8).kind, TableKind::Table);
+        for (letter, kind) in [
+            (b'r', TableKind::Table),
+            (b'v', TableKind::View),
+            (b'm', TableKind::MaterializedView),
+            (b'p', TableKind::PartitionedTable),
+            (b'f', TableKind::ForeignTable),
+            (b'S', TableKind::Table),
+        ] {
+            assert_eq!(relation_of("r".into(), letter as i8).kind, kind);
         }
         assert_eq!(relation_of("orders".into(), b'r' as i8).name, "orders");
     }
@@ -5278,6 +5290,8 @@ mod tests {
         assert!(text.ends_with("LIMIT 11"));
         assert!(text.contains("'m'"));
         assert!(text.contains("NOT c.relispartition"));
+        // The letter of the kind goes to the snapshot as the catalog keeps it.
+        assert!(text.starts_with("SELECT n.nspname, c.relname, c.relkind, a.attname"));
         assert!(snapshot_query(usize::MAX).ends_with(&format!("LIMIT {}", i64::MAX)));
     }
 
@@ -5598,7 +5612,18 @@ mod tests {
              WHERE c.oid = '\"public\".\"v\"'::regclass;"
         );
         assert_eq!(view.column, 0);
-        assert!(create_query_text(Some("public"), "t", TableKind::Table).is_none());
+        // A materialized view reads the same statement, and the catalog
+        // gives the clause of its kind.
+        let materialized =
+            create_query_text(Some("public"), "v", TableKind::MaterializedView).unwrap();
+        assert_eq!(materialized, view);
+        for kind in [
+            TableKind::Table,
+            TableKind::PartitionedTable,
+            TableKind::ForeignTable,
+        ] {
+            assert!(create_query_text(Some("public"), "t", kind).is_none());
+        }
     }
     use crate::storage::{ConnectionOptions, DbType};
 

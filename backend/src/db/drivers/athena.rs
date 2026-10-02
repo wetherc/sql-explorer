@@ -183,10 +183,7 @@ fn quote_literal(value: &str) -> String {
 /// column.
 fn create_query_text(database: Option<&str>, table: &str, kind: TableKind) -> CreateQuery {
     let name = Dialect::Athena.qualified_name(database, None, table);
-    let word = match kind {
-        TableKind::Table => "TABLE",
-        TableKind::View => "VIEW",
-    };
+    let word = if kind.is_view() { "VIEW" } else { "TABLE" };
     CreateQuery::new(format!("SHOW CREATE {word} {name}"), 0)
 }
 
@@ -785,6 +782,9 @@ impl DatabaseDriver for AthenaDriver {
             supports_constraints: false,
             supports_partitions: true,
             supports_explain: true,
+            supports_materialized_views: false,
+            supports_foreign_tables: false,
+            supports_synonyms: false,
         }
     }
 

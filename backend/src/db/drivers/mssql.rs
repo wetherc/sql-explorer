@@ -583,33 +583,41 @@ async fn while_connecting<F: std::future::Future>(limit: Duration, future: F) ->
     })
 }
 
-/// Builds the statement that reads the CREATE text of one view. MS SQL
-/// Server keeps no text for a table, so a table gives no statement and the
-/// command layer builds a draft instead. `OBJECT_DEFINITION` looks in the
-/// current database, so the statement reads `sys.sql_modules` of the
-/// database of the view. `OBJECT_ID` finds the view in that database from
-/// its three-part name.
+/// Builds the statement that reads the CREATE text of one view or one
+/// synonym. MS SQL Server keeps no text for a table, so a table gives no
+/// statement and the command layer builds a draft instead.
+///
+/// `OBJECT_DEFINITION` looks in the current database, so the statement reads
+/// the catalog of the database of the object. `OBJECT_ID` finds the object
+/// in that database from its three-part name. A view gives its text from
+/// `sys.sql_modules`. A synonym keeps no text, so the statement builds
+/// `CREATE SYNONYM` from the name of the object it points at.
 fn create_query_text(
     database: Option<&str>,
     schema: Option<&str>,
     table: &str,
     kind: TableKind,
 ) -> Option<CreateQuery> {
-    if kind != TableKind::View {
-        return None;
-    }
     let name = Dialect::MsSql.qualified_name(database, schema, table);
     let catalog = database
         .map(|database| format!("{}.", Dialect::MsSql.quote_identifier(database)))
         .unwrap_or_default();
-    Some(CreateQuery::new(
-        format!(
+    let object = Dialect::MsSql.quote_literal(&name);
+    let sql = match kind {
+        TableKind::View => format!(
             "SELECT m.definition FROM {catalog}sys.sql_modules AS m \
-             WHERE m.object_id = OBJECT_ID({});",
-            Dialect::MsSql.quote_literal(&name)
+             WHERE m.object_id = OBJECT_ID({object});"
         ),
-        0,
-    ))
+        TableKind::Synonym => format!(
+            "SELECT N'CREATE SYNONYM ' + QUOTENAME(s.name) + N'.' + QUOTENAME(sy.name) + \
+             N' FOR ' + sy.base_object_name + N';' \
+             FROM {catalog}sys.synonyms AS sy \
+             JOIN {catalog}sys.schemas AS s ON s.schema_id = sy.schema_id \
+             WHERE sy.object_id = OBJECT_ID({object});"
+        ),
+        _ => return None,
+    };
+    Some(CreateQuery::new(sql, 0))
 }
 
 /// The name MS SQL Server gives the column that holds a plan. Both plan
@@ -703,6 +711,9 @@ impl DatabaseDriver for MssqlDriver {
             supports_constraints: true,
             supports_partitions: false,
             supports_explain: true,
+            supports_materialized_views: false,
+            supports_foreign_tables: false,
+            supports_synonyms: true,
         }
     }
 
@@ -905,22 +916,16 @@ impl DatabaseDriver for MssqlDriver {
 
     async fn list_tables(&mut self, database: &str, schema: Option<&str>) -> Result<Vec<Table>> {
         let schema = schema.unwrap_or("dbo");
-        let query = format!(
-            "SELECT TABLE_NAME, TABLE_TYPE FROM {}.INFORMATION_SCHEMA.TABLES \
-             WHERE TABLE_SCHEMA = @P1 ORDER BY TABLE_TYPE, TABLE_NAME",
-            Dialect::MsSql.quote_identifier(database)
-        );
+        let query = tables_query(&Dialect::MsSql.quote_identifier(database));
         let mut stream = self.client.query(query, &[&schema]).await?;
         let mut tables = Vec::new();
         while let Some(item) = stream.try_next().await? {
             if let QueryItem::Row(row) = item {
-                let name = row.try_get::<&str, _>(0)?.unwrap_or_default().to_string();
-                let kind = row.try_get::<&str, _>(1)?.unwrap_or_default();
-                tables.push(if kind.eq_ignore_ascii_case("VIEW") {
-                    Table::view(name)
-                } else {
-                    Table::table(name)
-                });
+                tables.push(relation_of(
+                    row.try_get::<&str, _>(0)?.unwrap_or_default(),
+                    row.try_get::<&str, _>(1)?.unwrap_or_default(),
+                    row.try_get::<&str, _>(2)?,
+                ));
             }
         }
         Ok(tables)
@@ -1146,6 +1151,31 @@ fn fact_query(catalog: &str) -> String {
          JOIN {catalog}.sys.objects AS o ON o.object_id = s.object_id \
          WHERE s.object_id = OBJECT_ID(@P1)"
     )
+}
+
+/// Lists the relations and the synonyms of one schema. `INFORMATION_SCHEMA`
+/// shows no synonym, so the synonyms come from `sys.synonyms`, with the
+/// name of the object that each one points at.
+fn tables_query(catalog: &str) -> String {
+    format!(
+        "SELECT TABLE_NAME, TABLE_TYPE, CAST(NULL AS nvarchar(1035)) \
+         FROM {catalog}.INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = @P1 \
+         UNION ALL SELECT sy.name, N'SYNONYM', sy.base_object_name \
+         FROM {catalog}.sys.synonyms AS sy \
+         JOIN {catalog}.sys.schemas AS s ON s.schema_id = sy.schema_id \
+         WHERE s.name = @P1 \
+         ORDER BY 2, 1"
+    )
+}
+
+/// Turns one row of [`tables_query`] into its entry. The word of the kind is
+/// `BASE TABLE`, `VIEW` or `SYNONYM`.
+fn relation_of(name: &str, kind: &str, target: Option<&str>) -> Table {
+    if kind.eq_ignore_ascii_case("SYNONYM") {
+        Table::synonym(name, target.unwrap_or_default())
+    } else {
+        Table::new(name, table_kind(kind))
+    }
 }
 
 /// Reads every relation and every column of one database in one statement.
@@ -2900,6 +2930,38 @@ mod tests {
              WHERE m.object_id = OBJECT_ID('[dbo].[v]');"
         );
         assert!(create_query_text(Some("db"), Some("dbo"), "t", TableKind::Table).is_none());
+    }
+
+    #[test]
+    fn the_create_statement_of_a_synonym_names_its_target() {
+        let synonym = create_query_text(Some("db"), Some("dbo"), "s", TableKind::Synonym).unwrap();
+        assert_eq!(
+            synonym.sql,
+            "SELECT N'CREATE SYNONYM ' + QUOTENAME(s.name) + N'.' + QUOTENAME(sy.name) + \
+             N' FOR ' + sy.base_object_name + N';' \
+             FROM [db].sys.synonyms AS sy \
+             JOIN [db].sys.schemas AS s ON s.schema_id = sy.schema_id \
+             WHERE sy.object_id = OBJECT_ID('[db].[dbo].[s]');"
+        );
+        assert_eq!(synonym.column, 0);
+    }
+
+    #[test]
+    fn the_list_of_tables_adds_the_synonyms_with_their_target() {
+        let text = tables_query("[Sales]");
+        assert!(text.contains("FROM [Sales].INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = @P1"));
+        assert!(text.contains("UNION ALL SELECT sy.name, N'SYNONYM', sy.base_object_name"));
+        assert!(text.contains("FROM [Sales].sys.synonyms AS sy"));
+        assert!(text.contains("JOIN [Sales].sys.schemas AS s"));
+        assert!(text.ends_with("ORDER BY 2, 1"));
+
+        assert_eq!(relation_of("t", "BASE TABLE", None), Table::table("t"));
+        assert_eq!(relation_of("v", "VIEW", None), Table::view("v"));
+        assert_eq!(
+            relation_of("s", "SYNONYM", Some("[Other].[dbo].[t]")),
+            Table::synonym("s", "[Other].[dbo].[t]")
+        );
+        assert_eq!(relation_of("s", "SYNONYM", None), Table::synonym("s", ""));
     }
     use crate::storage::{ConnectionOptions, DbType};
 

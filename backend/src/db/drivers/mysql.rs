@@ -512,6 +512,9 @@ impl DatabaseDriver for MysqlDriver {
             supports_constraints: true,
             supports_partitions: false,
             supports_explain: true,
+            supports_materialized_views: false,
+            supports_foreign_tables: false,
+            supports_synonyms: false,
         }
     }
 
@@ -902,10 +905,7 @@ pub fn plan_prefix(kind: PlanKind) -> &'static str {
 /// text in the second one.
 fn create_query_text(database: Option<&str>, table: &str, kind: TableKind) -> CreateQuery {
     let name = Dialect::MySql.qualified_name(database, None, table);
-    let word = match kind {
-        TableKind::Table => "TABLE",
-        TableKind::View => "VIEW",
-    };
+    let word = if kind.is_view() { "VIEW" } else { "TABLE" };
     CreateQuery::new(format!("SHOW CREATE {word} {name};"), 1)
 }
 

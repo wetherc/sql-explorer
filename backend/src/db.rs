@@ -237,6 +237,22 @@ pub struct Schema {
 pub enum TableKind {
     Table,
     View,
+    /// A PostgreSQL view that keeps the rows of its query on disk.
+    MaterializedView,
+    /// A PostgreSQL table that keeps its rows in partitions.
+    PartitionedTable,
+    /// A PostgreSQL table whose rows live on another server.
+    ForeignTable,
+    /// An MS SQL Server name that points at another object.
+    Synonym,
+}
+
+impl TableKind {
+    /// True for a plain view and for a materialized view. An engine reads
+    /// the CREATE text of both from the query of the view.
+    pub fn is_view(self) -> bool {
+        matches!(self, TableKind::View | TableKind::MaterializedView)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -244,21 +260,34 @@ pub enum TableKind {
 pub struct Table {
     pub name: String,
     pub kind: TableKind,
+    /// The name of the object that a synonym points at, as the engine
+    /// keeps it. Every other kind has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
 }
 
 impl Table {
-    #[allow(clippy::self_named_constructors)]
-    pub fn table(name: impl Into<String>) -> Self {
+    pub fn new(name: impl Into<String>, kind: TableKind) -> Self {
         Self {
             name: name.into(),
-            kind: TableKind::Table,
+            kind,
+            target: None,
         }
     }
 
+    #[allow(clippy::self_named_constructors)]
+    pub fn table(name: impl Into<String>) -> Self {
+        Self::new(name, TableKind::Table)
+    }
+
     pub fn view(name: impl Into<String>) -> Self {
+        Self::new(name, TableKind::View)
+    }
+
+    pub fn synonym(name: impl Into<String>, target: impl Into<String>) -> Self {
         Self {
-            name: name.into(),
-            kind: TableKind::View,
+            target: Some(target.into()),
+            ..Self::new(name, TableKind::Synonym)
         }
     }
 }
@@ -454,6 +483,15 @@ pub struct DriverCapabilities {
     pub supports_partitions: bool,
     /// True when the driver can read the plan of a statement.
     pub supports_explain: bool,
+    /// True when the engine has materialized views, which the explorer
+    /// lists in a folder of their own.
+    pub supports_materialized_views: bool,
+    /// True when the engine has foreign tables, which the explorer lists in
+    /// a folder of their own.
+    pub supports_foreign_tables: bool,
+    /// True when the engine has synonyms, which the explorer lists in a
+    /// folder of their own.
+    pub supports_synonyms: bool,
 }
 
 /// What the read-only switch of the connection form does on one engine.
@@ -680,6 +718,45 @@ mod tests {
             serde_json::to_value(TableKind::View).unwrap(),
             serde_json::json!("view")
         );
+        for (kind, word) in [
+            (TableKind::MaterializedView, "materializedView"),
+            (TableKind::PartitionedTable, "partitionedTable"),
+            (TableKind::ForeignTable, "foreignTable"),
+            (TableKind::Synonym, "synonym"),
+        ] {
+            assert_eq!(serde_json::to_value(kind).unwrap(), serde_json::json!(word));
+        }
+    }
+
+    #[test]
+    fn a_materialized_view_counts_as_a_view() {
+        assert!(TableKind::View.is_view());
+        assert!(TableKind::MaterializedView.is_view());
+        for kind in [
+            TableKind::Table,
+            TableKind::PartitionedTable,
+            TableKind::ForeignTable,
+            TableKind::Synonym,
+        ] {
+            assert!(!kind.is_view());
+        }
+    }
+
+    #[test]
+    fn only_a_synonym_sends_its_target() {
+        let synonym = Table::synonym("s", "[other].[dbo].[t]");
+        assert_eq!(synonym.kind, TableKind::Synonym);
+        assert_eq!(
+            serde_json::to_value(&synonym).unwrap(),
+            serde_json::json!({ "name": "s", "kind": "synonym", "target": "[other].[dbo].[t]" })
+        );
+        assert_eq!(
+            serde_json::to_value(Table::table("t")).unwrap(),
+            serde_json::json!({ "name": "t", "kind": "table" })
+        );
+        let read: Table =
+            serde_json::from_value(serde_json::json!({ "name": "t", "kind": "table" })).unwrap();
+        assert_eq!(read, Table::table("t"));
     }
 
     #[test]
