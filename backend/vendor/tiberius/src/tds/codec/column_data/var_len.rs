@@ -37,7 +37,7 @@ where
         Datetime2 => super::datetime2::decode(src, len).await?,
         #[cfg(feature = "tds73")]
         DatetimeOffsetn => super::datetimeoffsetn::decode(src, len).await?,
-        BigBinary | BigVarBin => super::binary::decode(src, len).await?,
+        BigBinary | BigVarBin | Udt => super::binary::decode(src, len).await?,
         Text => super::text::decode(src, collation).await?,
         NText => super::text::decode(src, None).await?,
         Image => super::image::decode(src).await?,

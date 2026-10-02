@@ -2105,6 +2105,55 @@ mod tests {
         assert_eq!(response.rows_affected, None);
     }
 
+    /// A `COLMETADATA` token for one column `g` of the user-defined type
+    /// `sys.hierarchyid`.
+    fn udt_metadata() -> Vec<u8> {
+        let mut token = vec![0x81];
+        token.extend_from_slice(&1u16.to_le_bytes());
+        token.extend_from_slice(&0u32.to_le_bytes());
+        token.extend_from_slice(&0u16.to_le_bytes());
+        token.push(0xF0);
+        token.extend_from_slice(&892u16.to_le_bytes());
+        for name in ["db", "sys", "hierarchyid"] {
+            token.push(name.len() as u8);
+            name.encode_utf16()
+                .for_each(|unit| token.extend_from_slice(&unit.to_le_bytes()));
+        }
+        token.extend_from_slice(&1u16.to_le_bytes());
+        token.extend_from_slice(&('h' as u16).to_le_bytes());
+        token.push(1);
+        token.extend_from_slice(&('g' as u16).to_le_bytes());
+        token
+    }
+
+    #[tokio::test]
+    async fn a_user_defined_type_shows_its_bytes() {
+        let mut answer = udt_metadata();
+        // A value of a user-defined type comes in chunks, as a `varbinary(max)`
+        // value does, whatever the maximum size of the type is.
+        answer.push(0xD1);
+        answer.extend_from_slice(&2u64.to_le_bytes());
+        answer.extend_from_slice(&2u32.to_le_bytes());
+        answer.extend_from_slice(&[0x58, 0x40]);
+        answer.extend_from_slice(&0u32.to_le_bytes());
+        answer.push(0xD1);
+        answer.extend_from_slice(&u64::MAX.to_le_bytes());
+        answer.extend_from_slice(&done_token(DONE_COUNT, 2));
+
+        let response = run_against_answer(
+            "INSERT INTO t(g) OUTPUT inserted.g VALUES (0x5840)",
+            answer,
+            10,
+        )
+        .await;
+
+        assert_eq!(response.results[0].columns[0].type_name, "udt");
+        assert_eq!(
+            response.results[0].rows,
+            vec![vec![JsonValue::from("WEA=")], vec![JsonValue::Null]]
+        );
+    }
+
     #[tokio::test]
     async fn a_block_shows_its_counts_and_its_rows() {
         // The server sends a `DONEINPROC` token for each statement of a

@@ -289,6 +289,23 @@ impl TypeInfo {
                     size: 0xfffffffffffffffe_usize,
                 })
             }
+            // A user-defined type, such as `geography` or `hierarchyid`,
+            // names its type in the metadata. Each value comes as a
+            // partially length-prefixed run of bytes, whatever the maximum
+            // size is, so the context gets the size of an unknown length.
+            Ok(VarLenType::Udt) => {
+                let _max_size = src.read_u16_le().await?;
+                let _db_name = src.read_b_varchar().await?;
+                let _schema_name = src.read_b_varchar().await?;
+                let _type_name = src.read_b_varchar().await?;
+                let _assembly_name = src.read_us_varchar().await?;
+
+                Ok(TypeInfo::VarLenSized(VarLenContext::new(
+                    VarLenType::Udt,
+                    usize::MAX,
+                    None,
+                )))
+            }
             Ok(ty) => {
                 let len = match ty {
                     #[cfg(feature = "tds73")]
@@ -361,6 +378,42 @@ impl TypeInfo {
 mod tests {
     use super::*;
     use crate::sql_read_bytes::test_utils::IntoSqlReadBytes;
+
+    #[tokio::test]
+    async fn decodes_a_user_defined_type_and_its_values() {
+        let mut buf = BytesMut::new();
+        buf.put_u8(VarLenType::Udt as u8);
+        buf.put_u16_le(892);
+        for name in ["db", "sys", "hierarchyid"] {
+            buf.put_u8(name.len() as u8);
+            name.encode_utf16().for_each(|unit| buf.put_u16_le(unit));
+        }
+        buf.put_u16_le(1);
+        buf.put_u16_le('a' as u16);
+        // One value of two bytes in one chunk, then a null value.
+        buf.put_u64_le(2);
+        buf.put_u32_le(2);
+        buf.put_slice(&[0x58, 0x40]);
+        buf.put_u32_le(0);
+        buf.put_u64_le(0xffffffffffffffff);
+
+        let mut src = buf.into_sql_read_bytes();
+        let ti = TypeInfo::decode(&mut src)
+            .await
+            .expect("decode must succeed");
+        assert_eq!(
+            ti,
+            TypeInfo::VarLenSized(VarLenContext::new(VarLenType::Udt, usize::MAX, None))
+        );
+
+        let value = crate::ColumnData::decode(&mut src, &ti).await.unwrap();
+        assert_eq!(
+            value,
+            crate::ColumnData::Binary(Some(vec![0x58, 0x40].into()))
+        );
+        let null = crate::ColumnData::decode(&mut src, &ti).await.unwrap();
+        assert_eq!(null, crate::ColumnData::Binary(None));
+    }
 
     #[tokio::test]
     async fn round_trip() {
