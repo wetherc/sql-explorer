@@ -1108,8 +1108,12 @@ mod tests {
     async fn a_connection_needs_a_file_path() {
         let mut input = connection_for("  ");
         assert_eq!(
-            SqliteDriver::connect(&input).await.err().unwrap().kind(),
-            crate::error::ErrorKind::Configuration
+            SqliteDriver::connect(&input)
+                .await
+                .err()
+                .unwrap()
+                .category(),
+            crate::error::ErrorCategory::Configuration
         );
         input.options.file_path = None;
         assert!(SqliteDriver::connect(&input).await.is_err());
@@ -1181,7 +1185,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(error.kind(), crate::error::ErrorKind::Configuration);
+        assert_eq!(error.category(), crate::error::ErrorCategory::Configuration);
     }
 
     #[tokio::test]
@@ -1212,8 +1216,8 @@ mod tests {
     async fn a_missing_file_in_a_missing_folder_gives_an_error() {
         let result = SqliteDriver::connect(&connection_for("/does/not/exist/a.db")).await;
         assert_eq!(
-            result.err().unwrap().kind(),
-            crate::error::ErrorKind::Database
+            result.err().unwrap().category(),
+            crate::error::ErrorCategory::Database
         );
     }
 
@@ -1511,7 +1515,7 @@ mod tests {
             .execute_query("SELECT FROM", None, &ExecOptions::default())
             .await
             .unwrap_err();
-        assert_eq!(error.kind(), crate::error::ErrorKind::Database);
+        assert_eq!(error.category(), crate::error::ErrorCategory::Database);
     }
 
     #[tokio::test]
@@ -2048,8 +2052,8 @@ mod tests {
             value: serde_json::json!(18446744073709551615u64),
         }];
         assert_eq!(
-            bind_params(Some(&params)).unwrap_err().kind(),
-            crate::error::ErrorKind::Configuration
+            bind_params(Some(&params)).unwrap_err().category(),
+            crate::error::ErrorCategory::Configuration
         );
     }
 

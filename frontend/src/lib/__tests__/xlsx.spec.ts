@@ -13,7 +13,7 @@ import {
   toXlsx,
   workbookXml,
 } from '@/lib/xlsx'
-import { ErrorKind, type CellValue, type ResultSet } from '@/types/api'
+import { ErrorCategory, type CellValue, type ResultSet } from '@/types/api'
 
 const result: ResultSet = {
   columns: [
@@ -190,7 +190,7 @@ describe('toXlsx', () => {
     }
     expect(caught).toBeInstanceOf(Error)
     expect(caught).toMatchObject({
-      kind: ErrorKind.Unsupported,
+      category: ErrorCategory.Unsupported,
       message: expect.stringContaining('16384'),
       detail: null,
     })

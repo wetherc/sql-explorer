@@ -1194,7 +1194,7 @@ describe('explorer store', () => {
   })
 
   it('reports a schema that cannot be read and keeps nothing', async () => {
-    apiStub.schemaSnapshot.mockRejectedValue({ kind: 'database', message: 'no', detail: null })
+    apiStub.schemaSnapshot.mockRejectedValue({ category: 'database', message: 'no', detail: null })
     const explorer = await readyStore()
     const answer = await explorer.readSnapshot('c1', 'Sales', {
       maxColumns: 10,
@@ -1335,7 +1335,7 @@ describe('explorer store', () => {
 
   it('reports a failure and leaves the branch closed', async () => {
     apiStub.listDatabases.mockRejectedValue({
-      kind: 'notConnected',
+      category: 'notConnected',
       message: 'gone',
       detail: null,
     })
@@ -1414,7 +1414,7 @@ describe('explorer store', () => {
     apiStub.listDatabases.mockResolvedValue([{ name: 'New' }])
     await explorer.refresh(root)
 
-    refuseFirst({ kind: 'notConnected', message: 'gone', detail: null })
+    refuseFirst({ category: 'notConnected', message: 'gone', detail: null })
     await first
     expect(useUiStore().notices).toEqual([])
     expect(root.children?.map((child) => child.label)).toEqual(['New'])

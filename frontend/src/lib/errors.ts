@@ -1,8 +1,8 @@
-import { ErrorKind, type ErrorPayload } from '@/types/api'
+import { ErrorCategory, type ErrorPayload } from '@/types/api'
 
 /**
  * Turns whatever a failed command threw into the payload the interface
- * shows. The backend sends an object with a kind, a message and a detail.
+ * shows. The backend sends an object with a category, a message and a detail.
  * Anything else, such as a fault inside the bridge itself, is wrapped so
  * that the caller always has the same three fields.
  */
@@ -11,13 +11,13 @@ export function toErrorPayload(error: unknown): ErrorPayload {
     return error
   }
   if (error instanceof Error) {
-    return { kind: ErrorKind.Internal, message: error.message, detail: null }
+    return { category: ErrorCategory.Internal, message: error.message, detail: null }
   }
   if (typeof error === 'string') {
-    return { kind: ErrorKind.Internal, message: error, detail: null }
+    return { category: ErrorCategory.Internal, message: error, detail: null }
   }
   return {
-    kind: ErrorKind.Internal,
+    category: ErrorCategory.Internal,
     message: 'The operation failed for a reason the application could not read.',
     detail: safeJson(error),
   }
@@ -29,7 +29,7 @@ export function isErrorPayload(value: unknown): value is ErrorPayload {
     return false
   }
   const candidate = value as Record<string, unknown>
-  return typeof candidate.kind === 'string' && typeof candidate.message === 'string'
+  return typeof candidate.category === 'string' && typeof candidate.message === 'string'
 }
 
 /** Writes a value as JSON, and falls back on its text form. */
@@ -48,28 +48,28 @@ export function fullErrorText(payload: ErrorPayload): string {
 
 /** True when the user stopped the operation, so no alarm is needed. */
 export function isCancellation(payload: ErrorPayload): boolean {
-  return payload.kind === ErrorKind.Cancelled
+  return payload.category === ErrorCategory.Cancelled
 }
 
-/** Selects the icon that stands for the kind of a failure. */
-export function errorIcon(kind: ErrorKind): string {
-  switch (kind) {
-    case ErrorKind.NotConnected:
-    case ErrorKind.Connection:
+/** Selects the icon that stands for the category of a failure. */
+export function errorIcon(category: ErrorCategory): string {
+  switch (category) {
+    case ErrorCategory.NotConnected:
+    case ErrorCategory.Connection:
       return 'mdi-lan-disconnect'
-    case ErrorKind.Timeout:
+    case ErrorCategory.Timeout:
       return 'mdi-timer-alert-outline'
-    case ErrorKind.Cancelled:
+    case ErrorCategory.Cancelled:
       return 'mdi-cancel'
-    case ErrorKind.Configuration:
+    case ErrorCategory.Configuration:
       return 'mdi-tune'
-    case ErrorKind.Authentication:
-    case ErrorKind.Secret:
+    case ErrorCategory.Authentication:
+    case ErrorCategory.Secret:
       return 'mdi-key-alert-outline'
-    case ErrorKind.Unsupported:
+    case ErrorCategory.Unsupported:
       return 'mdi-block-helper'
-    case ErrorKind.Io:
-    case ErrorKind.Storage:
+    case ErrorCategory.Io:
+    case ErrorCategory.Storage:
       return 'mdi-file-alert-outline'
     default:
       return 'mdi-alert-circle-outline'
@@ -81,18 +81,18 @@ export function errorIcon(kind: ErrorKind): string {
  * itself is enough.
  */
 export function errorAdvice(payload: ErrorPayload): string {
-  switch (payload.kind) {
-    case ErrorKind.NotConnected:
+  switch (payload.category) {
+    case ErrorCategory.NotConnected:
       return 'Open the connection again from the connection list.'
-    case ErrorKind.Connection:
+    case ErrorCategory.Connection:
       return 'Check the host, the port and the transport setting of the connection.'
-    case ErrorKind.Timeout:
+    case ErrorCategory.Timeout:
       return 'Raise the time limit in the connection options, or make the statement smaller.'
-    case ErrorKind.Configuration:
+    case ErrorCategory.Configuration:
       return 'Correct the connection details and try again.'
-    case ErrorKind.Authentication:
+    case ErrorCategory.Authentication:
       return 'Check the authentication method of the connection and the credentials it needs.'
-    case ErrorKind.Secret:
+    case ErrorCategory.Secret:
       return 'The keychain of the system refused the password. Type it again and save.'
     default:
       return ''

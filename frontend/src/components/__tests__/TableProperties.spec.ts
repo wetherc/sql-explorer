@@ -112,7 +112,7 @@ describe('TableProperties', () => {
 
   it('holds a failure of the read and stays open', async () => {
     apiStub.tableDetails.mockRejectedValue({
-      kind: 'database',
+      category: 'database',
       message: 'The relation is gone.',
       detail: 'relation "orders" does not exist',
     })
@@ -129,7 +129,7 @@ describe('TableProperties', () => {
 
   it('reads again on request, and shows what it found', async () => {
     apiStub.tableDetails.mockRejectedValueOnce({
-      kind: 'database',
+      category: 'database',
       message: 'The relation is gone.',
       detail: null,
     })
@@ -203,7 +203,7 @@ describe('TableProperties', () => {
     await wrapper.setProps({ node: node({ key: 'c1/Sales/dbo/table/lines', table: 'lines' }) })
     await settle()
 
-    rejectFirst({ kind: 'database', message: 'The relation is gone.', detail: null })
+    rejectFirst({ category: 'database', message: 'The relation is gone.', detail: null })
     await settle()
     expect(document.querySelector('[data-test="properties-error"]')).toBeNull()
     expect(overlayAll('property-column')).toHaveLength(2)

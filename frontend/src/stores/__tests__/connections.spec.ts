@@ -222,7 +222,11 @@ describe('connections store', () => {
   })
 
   it('reports a failure to read the engines', async () => {
-    apiStub.supportedEngines.mockRejectedValue({ kind: 'internal', message: 'no', detail: null })
+    apiStub.supportedEngines.mockRejectedValue({
+      category: 'internal',
+      message: 'no',
+      detail: null,
+    })
     const connections = useConnectionsStore()
     await connections.loadEngines()
     expect(useUiStore().notices).toHaveLength(1)
@@ -243,7 +247,7 @@ describe('connections store', () => {
   })
 
   it('reports a failure to read the connections', async () => {
-    apiStub.getConnections.mockRejectedValue({ kind: 'storage', message: 'no', detail: null })
+    apiStub.getConnections.mockRejectedValue({ category: 'storage', message: 'no', detail: null })
     const connections = useConnectionsStore()
     await connections.load()
     expect(useUiStore().notices[0]?.level).toBe('error')
@@ -278,7 +282,7 @@ describe('connections store', () => {
   })
 
   it('reports a failure to save', async () => {
-    apiStub.saveConnection.mockRejectedValue({ kind: 'storage', message: 'no', detail: null })
+    apiStub.saveConnection.mockRejectedValue({ category: 'storage', message: 'no', detail: null })
     const connections = useConnectionsStore()
     expect(await connections.save(connectionFixture())).toBe(false)
   })
@@ -299,7 +303,7 @@ describe('connections store', () => {
   })
 
   it('reports a failure to remove a record', async () => {
-    apiStub.deleteConnection.mockRejectedValue({ kind: 'storage', message: 'no', detail: null })
+    apiStub.deleteConnection.mockRejectedValue({ category: 'storage', message: 'no', detail: null })
     const connections = useConnectionsStore()
     await connections.remove('c1')
     expect(useUiStore().notices[0]?.level).toBe('error')
@@ -316,7 +320,7 @@ describe('connections store', () => {
   })
 
   it('reports a failure to open a connection', async () => {
-    apiStub.connect.mockRejectedValue({ kind: 'connection', message: 'refused', detail: null })
+    apiStub.connect.mockRejectedValue({ category: 'connection', message: 'refused', detail: null })
     const connections = useConnectionsStore()
     expect(await connections.connect(connectionFixture())).toBe(false)
     expect(connections.isActive('c1')).toBe(false)
@@ -336,7 +340,7 @@ describe('connections store', () => {
   })
 
   it('asks for a new token when a pasted one is refused', async () => {
-    apiStub.connect.mockRejectedValue({ kind: 'authentication', message: 'old', detail: null })
+    apiStub.connect.mockRejectedValue({ category: 'authentication', message: 'old', detail: null })
     const connections = useConnectionsStore()
     const withToken = connectionFixture({
       options: { ...connectionFixture().options, mssqlAuth: MssqlAuth.EntraAccessToken },
@@ -356,12 +360,12 @@ describe('connections store', () => {
     })
 
     // The method holds a token, but the server was not reached.
-    apiStub.connect.mockRejectedValue({ kind: 'connection', message: 'refused', detail: null })
+    apiStub.connect.mockRejectedValue({ category: 'connection', message: 'refused', detail: null })
     await connections.connect(withToken)
     expect(connections.expiredTokenId).toBeNull()
 
     // The login failed, and the method holds a password.
-    apiStub.connect.mockRejectedValue({ kind: 'authentication', message: 'no', detail: null })
+    apiStub.connect.mockRejectedValue({ category: 'authentication', message: 'no', detail: null })
     await connections.connect(connectionFixture())
     expect(connections.expiredTokenId).toBeNull()
   })
@@ -396,7 +400,7 @@ describe('connections store', () => {
   it('keeps a connection that the backend refused to close', async () => {
     apiStub.getConnections.mockResolvedValue([connectionFixture()])
     apiStub.listActiveConnections.mockResolvedValue([infoFixture()])
-    apiStub.disconnect.mockRejectedValue({ kind: 'internal', message: 'no', detail: null })
+    apiStub.disconnect.mockRejectedValue({ category: 'internal', message: 'no', detail: null })
     const connections = useConnectionsStore()
     await connections.load()
     await connections.disconnect('c1')
@@ -432,7 +436,11 @@ describe('connections store', () => {
   })
 
   it('reports a failed test', async () => {
-    apiStub.testConnection.mockRejectedValue({ kind: 'connection', message: 'no', detail: null })
+    apiStub.testConnection.mockRejectedValue({
+      category: 'connection',
+      message: 'no',
+      detail: null,
+    })
     const connections = useConnectionsStore()
     expect(await connections.test(connectionFixture())).toBe(false)
   })

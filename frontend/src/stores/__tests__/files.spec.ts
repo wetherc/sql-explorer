@@ -89,7 +89,7 @@ describe('files store', () => {
   })
 
   it('reports a folder that cannot be opened', async () => {
-    apiStub.pickFolder.mockRejectedValue({ kind: 'io', message: 'refused', detail: null })
+    apiStub.pickFolder.mockRejectedValue({ category: 'io', message: 'refused', detail: null })
     const files = useFilesStore()
 
     await files.openFolder()
@@ -198,7 +198,7 @@ describe('files store', () => {
 
     apiStub.listFolder.mockResolvedValue([entry('new.sql')])
     await files.refresh('/data')
-    refuseFirst({ kind: 'io', message: 'gone', detail: null })
+    refuseFirst({ category: 'io', message: 'gone', detail: null })
     await first
     expect(useUiStore().notices).toEqual([])
   })
@@ -223,7 +223,7 @@ describe('files store', () => {
     const files = useFilesStore()
     apiStub.fileRoots.mockResolvedValue(['/data'])
     await files.restoreRoots()
-    apiStub.listFolder.mockRejectedValue({ kind: 'configuration', message: 'no', detail: null })
+    apiStub.listFolder.mockRejectedValue({ category: 'configuration', message: 'no', detail: null })
 
     await files.expand('/data')
 
@@ -254,7 +254,7 @@ describe('files store', () => {
   })
 
   it('reports a file that cannot be read', async () => {
-    apiStub.readTextFile.mockRejectedValue({ kind: 'io', message: 'gone', detail: null })
+    apiStub.readTextFile.mockRejectedValue({ category: 'io', message: 'gone', detail: null })
     const files = useFilesStore()
     const tabs = useTabsStore()
 
@@ -312,7 +312,7 @@ describe('files store', () => {
   })
 
   it('reports a file of the dialog that cannot be read', async () => {
-    apiStub.openStatementFile.mockRejectedValue({ kind: 'io', message: 'gone', detail: null })
+    apiStub.openStatementFile.mockRejectedValue({ category: 'io', message: 'gone', detail: null })
     const files = useFilesStore()
 
     await files.openFileFromDialog()
@@ -335,7 +335,7 @@ describe('files store', () => {
 
   it('reports a record of folders that cannot be read', async () => {
     const files = useFilesStore()
-    apiStub.fileRoots.mockRejectedValue({ kind: 'io', message: 'gone', detail: null })
+    apiStub.fileRoots.mockRejectedValue({ category: 'io', message: 'gone', detail: null })
 
     await files.restoreRoots()
 
@@ -345,7 +345,7 @@ describe('files store', () => {
 
   it('reports a folder that the backend cannot close', async () => {
     apiStub.fileRoots.mockResolvedValue(['/data'])
-    apiStub.closeFolder.mockRejectedValue({ kind: 'io', message: 'no', detail: null })
+    apiStub.closeFolder.mockRejectedValue({ category: 'io', message: 'no', detail: null })
     const files = useFilesStore()
     await files.restoreRoots()
 

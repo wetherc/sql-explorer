@@ -1302,7 +1302,7 @@ mod tests {
         let channel = Channel::new(|_body| Err(tauri::Error::WebviewNotFound));
         let mut sink = ChunkSink::new(channel, 10);
         let error = sink.begin_set(columns()).err().unwrap();
-        assert_eq!(error.kind(), crate::error::ErrorKind::Internal);
+        assert_eq!(error.category(), crate::error::ErrorCategory::Internal);
     }
 
     #[test]

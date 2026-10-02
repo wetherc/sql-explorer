@@ -125,11 +125,11 @@ describe('StatusBar', () => {
     expect(wrapper.find('[data-test="status-running-elapsed"]').exists()).toBe(false)
   })
 
-  it('reports the kind of a failure', async () => {
+  it('reports the category of a failure', async () => {
     const wrapper = mountWithPlugins(StatusBar)
     const tab = useTabsStore().add({ connectionId: 'c1' })
     useQueryStore().stateFor(tab.id).error = {
-      kind: 'database',
+      category: 'database',
       message: 'no such column',
       detail: null,
     }

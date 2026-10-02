@@ -160,7 +160,7 @@ describe('query store', () => {
     await Promise.resolve()
     queries.clear('t1')
 
-    held.release({ kind: 'cancelled', message: 'The statement was stopped.', detail: null })
+    held.release({ category: 'cancelled', message: 'The statement was stopped.', detail: null })
     expect(await running).toBe(false)
     expect(report).not.toHaveBeenCalled()
     expect(record).toHaveBeenCalledWith(
@@ -323,7 +323,7 @@ describe('query store', () => {
 
   it('keeps the reason a statement failed', async () => {
     apiStub.executeQuery.mockRejectedValue({
-      kind: 'database',
+      category: 'database',
       message: 'no such column',
       detail: null,
     })
@@ -336,7 +336,7 @@ describe('query store', () => {
   it('reports a length of time even when the start is no longer known', async () => {
     apiStub.executeQuery.mockImplementation(async () => {
       useQueryStore().stateFor('t1').startedAt = null
-      throw { kind: 'database', message: 'no', detail: null }
+      throw { category: 'database', message: 'no', detail: null }
     })
     const queries = useQueryStore()
     await queries.execute('t1', 'c1', 'SELECT 1')

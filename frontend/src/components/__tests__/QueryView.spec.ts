@@ -524,7 +524,7 @@ describe('QueryView', () => {
   })
 
   it('holds the bar back when the names cannot be read', async () => {
-    apiStub.queryParameters.mockRejectedValue({ kind: 'database', message: 'no', detail: null })
+    apiStub.queryParameters.mockRejectedValue({ category: 'database', message: 'no', detail: null })
     const wrapper = await mountView('SELECT :id')
     await settle()
 
@@ -713,7 +713,7 @@ describe('QueryView', () => {
 
   it('shows the reason a statement failed', async () => {
     apiStub.executeQuery.mockRejectedValue({
-      kind: 'database',
+      category: 'database',
       message: 'no such column: bad',
       detail: 'line 1',
     })
@@ -893,7 +893,7 @@ describe('QueryView', () => {
 
   it('reports a failure to write a file', async () => {
     apiStub.executeQuery.mockImplementation(streamed(response))
-    apiStub.saveTextFile.mockRejectedValue({ kind: 'io', message: 'read only', detail: null })
+    apiStub.saveTextFile.mockRejectedValue({ category: 'io', message: 'read only', detail: null })
 
     const wrapper = await mountView()
     await wrapper.find('[data-test="run-button"]').trigger('click')
@@ -953,7 +953,7 @@ describe('QueryView', () => {
   })
 
   it('keeps the dialog open when the statement could not be saved', async () => {
-    apiStub.saveQuery.mockRejectedValue({ kind: 'storage', message: 'no', detail: null })
+    apiStub.saveQuery.mockRejectedValue({ category: 'storage', message: 'no', detail: null })
     const wrapper = await mountView()
 
     await wrapper.find('[data-test="save-query-button"]').trigger('click')
@@ -1088,7 +1088,7 @@ describe('QueryView', () => {
   })
 
   it('reports a write that the disk refused', async () => {
-    apiStub.writeTextFile.mockRejectedValue({ kind: 'io', message: 'read only', detail: null })
+    apiStub.writeTextFile.mockRejectedValue({ category: 'io', message: 'read only', detail: null })
     const wrapper = await mountView('SELECT 1', '/data/report.sql')
 
     await wrapper.find('[data-test="save-file-button"]').trigger('click')
@@ -1413,7 +1413,7 @@ describe('QueryView edge paths', () => {
 
   it('shows a failure that carries no cause', async () => {
     apiStub.executeQuery.mockRejectedValue({
-      kind: 'database',
+      category: 'database',
       message: 'no such table',
       detail: null,
     })
@@ -1844,7 +1844,7 @@ describe('QueryView edge paths', () => {
 
   it('reports a whole export that failed', async () => {
     apiStub.exportQuery.mockRejectedValue({
-      kind: 'unsupported',
+      category: 'unsupported',
       message: 'only a read',
       detail: null,
     })

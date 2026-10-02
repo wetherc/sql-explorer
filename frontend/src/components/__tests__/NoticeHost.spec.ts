@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import NoticeHost from '@/components/NoticeHost.vue'
 import { mountWithPlugins, settle } from './mount'
 import { useUiStore } from '@/stores/ui'
-import { ErrorKind } from '@/types/api'
+import { ErrorCategory } from '@/types/api'
 
 describe('NoticeHost', () => {
   it('draws nothing when there is no notice', () => {
@@ -29,7 +29,7 @@ describe('NoticeHost', () => {
     const wrapper = mountWithPlugins(NoticeHost)
     const ui = useUiStore()
     ui.reportError({
-      kind: ErrorKind.Database,
+      category: ErrorCategory.Database,
       message: 'no such column',
       detail: 'line 1, column 8',
     })
@@ -69,7 +69,7 @@ describe('NoticeHost dialog', () => {
   it('closes the dialog from its own button', async () => {
     const wrapper = mountWithPlugins(NoticeHost)
     const ui = useUiStore()
-    ui.reportError({ kind: ErrorKind.Database, message: 'no', detail: 'why' })
+    ui.reportError({ category: ErrorCategory.Database, message: 'no', detail: 'why' })
     await settle()
 
     const details = document.querySelector('[data-test="notice-details"]') as HTMLElement
@@ -89,7 +89,7 @@ describe('NoticeHost dialog', () => {
   it('closes the dialog when the overlay reports it', async () => {
     const wrapper = mountWithPlugins(NoticeHost)
     const ui = useUiStore()
-    ui.reportError({ kind: ErrorKind.Database, message: 'no', detail: 'why' })
+    ui.reportError({ category: ErrorCategory.Database, message: 'no', detail: 'why' })
     await settle()
     ui.openNotice(ui.notices[0]!)
     await settle()

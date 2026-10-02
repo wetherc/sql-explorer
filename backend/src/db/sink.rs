@@ -115,7 +115,7 @@ impl RowSink for BufferSink {
 mod tests {
     use super::*;
     use crate::db::MessageLevel;
-    use crate::error::ErrorKind;
+    use crate::error::ErrorCategory;
 
     fn columns() -> Vec<ColumnInfo> {
         vec![ColumnInfo::new("id", "int")]
@@ -221,9 +221,9 @@ mod tests {
     fn a_row_or_an_end_without_a_set_is_an_internal_error() {
         let mut sink = BufferSink::new(10);
         let error = sink.row(row(1)).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::Internal);
+        assert_eq!(error.category(), ErrorCategory::Internal);
         let error = sink.end_set(false).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::Internal);
+        assert_eq!(error.category(), ErrorCategory::Internal);
     }
 
     #[test]

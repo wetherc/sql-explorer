@@ -512,7 +512,7 @@ mod tests {
         let open = OpenConnection::new(descriptor(), Box::new(StubDriver));
         open.sessions.release(DEFAULT_SESSION).await;
         let error = open.default_session().await.err().unwrap();
-        assert_eq!(error.kind(), crate::error::ErrorKind::NotConnected);
+        assert_eq!(error.category(), crate::error::ErrorCategory::NotConnected);
     }
 
     #[tokio::test]
@@ -574,15 +574,15 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(error.kind(), crate::error::ErrorKind::Unsupported);
+        assert_eq!(error.category(), crate::error::ErrorCategory::Unsupported);
     }
 
     #[tokio::test]
     async fn a_connection_can_be_added_read_and_removed() {
         let state = state();
         assert_eq!(
-            state.connection("c1").await.err().unwrap().kind(),
-            crate::error::ErrorKind::NotConnected
+            state.connection("c1").await.err().unwrap().category(),
+            crate::error::ErrorCategory::NotConnected
         );
 
         let info = state

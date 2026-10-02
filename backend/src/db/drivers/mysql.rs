@@ -1295,7 +1295,7 @@ mod tests {
         };
         let started = std::time::Instant::now();
         let error = cancel.cancel().await.unwrap_err();
-        assert_eq!(error.kind(), crate::error::ErrorKind::Timeout);
+        assert_eq!(error.category(), crate::error::ErrorCategory::Timeout);
         assert!(started.elapsed() < Duration::from_secs(5));
         server.abort();
     }
@@ -1697,7 +1697,7 @@ mod tests {
                 name: "sha256_password".into(),
             },
         ));
-        assert_eq!(error.kind(), crate::error::ErrorKind::Connection);
+        assert_eq!(error.category(), crate::error::ErrorCategory::Connection);
         assert!(error.to_string().contains("sha256_password"));
         assert!(error.to_string().contains("caching_sha2_password"));
     }
@@ -1705,7 +1705,7 @@ mod tests {
     #[test]
     fn another_connection_error_keeps_its_own_text() {
         let error = describe_connect_error(mysql_async::Error::Other("boom".into()));
-        assert_eq!(error.kind(), crate::error::ErrorKind::Database);
+        assert_eq!(error.category(), crate::error::ErrorCategory::Database);
     }
 
     #[test]
@@ -1737,8 +1737,8 @@ mod tests {
             value: serde_json::json!({ "a": 1 }),
         }];
         assert_eq!(
-            bind_params(Some(&params)).unwrap_err().kind(),
-            crate::error::ErrorKind::Configuration
+            bind_params(Some(&params)).unwrap_err().category(),
+            crate::error::ErrorCategory::Configuration
         );
     }
 
@@ -1748,8 +1748,8 @@ mod tests {
             value: serde_json::json!(18446744073709551615u64),
         }];
         assert_eq!(
-            bind_params(Some(&params)).unwrap_err().kind(),
-            crate::error::ErrorKind::Configuration
+            bind_params(Some(&params)).unwrap_err().category(),
+            crate::error::ErrorCategory::Configuration
         );
     }
 

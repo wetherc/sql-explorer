@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { ERROR_TIMEOUT_MS, MAX_NOTICES, useUiStore } from '@/stores/ui'
-import { ErrorKind } from '@/types/api'
+import { ErrorCategory } from '@/types/api'
 
 describe('ui store', () => {
   beforeEach(() => {
@@ -78,11 +78,11 @@ describe('ui store', () => {
   it('reports a failure as an error that stays on screen', () => {
     const ui = useUiStore()
     const payload = ui.reportError({
-      kind: ErrorKind.Connection,
+      category: ErrorCategory.Connection,
       message: 'the host refused',
       detail: 'socket closed',
     })
-    expect(payload.kind).toBe(ErrorKind.Connection)
+    expect(payload.category).toBe(ErrorCategory.Connection)
     expect(ui.notices).toHaveLength(1)
     expect(ui.notices[0]?.level).toBe('error')
     expect(ui.notices[0]?.timeout).toBe(-1)
@@ -92,20 +92,22 @@ describe('ui store', () => {
 
   it('leaves the detail empty when there is no advice and no cause', () => {
     const ui = useUiStore()
-    ui.reportError({ kind: ErrorKind.Database, message: 'bad column', detail: null })
+    ui.reportError({ category: ErrorCategory.Database, message: 'bad column', detail: null })
     expect(ui.notices[0]?.detail).toBeNull()
   })
 
   it('reports a stopped statement as a note and not as an error', () => {
     const ui = useUiStore()
-    ui.reportError({ kind: ErrorKind.Cancelled, message: 'stopped', detail: null })
+    ui.reportError({ category: ErrorCategory.Cancelled, message: 'stopped', detail: null })
     expect(ui.notices).toHaveLength(1)
     expect(ui.notices[0]?.level).toBe('info')
   })
 
   it('exposes the helper that joins a message and its cause', () => {
     const ui = useUiStore()
-    expect(ui.fullErrorText({ kind: ErrorKind.Database, message: 'a', detail: 'b' })).toBe('a\nb')
+    expect(ui.fullErrorText({ category: ErrorCategory.Database, message: 'a', detail: 'b' })).toBe(
+      'a\nb',
+    )
   })
 })
 
@@ -187,7 +189,7 @@ describe('ui store holding the corner to a few notices', () => {
   it('keeps an error that stays while a burst of short notices arrives', () => {
     const ui = useUiStore()
 
-    ui.reportError({ kind: ErrorKind.Database, message: 'It failed', detail: null })
+    ui.reportError({ category: ErrorCategory.Database, message: 'It failed', detail: null })
     for (let index = 0; index < MAX_NOTICES + 3; index += 1) {
       ui.info(`Notice ${index}`)
     }
@@ -201,7 +203,7 @@ describe('ui store holding the corner to a few notices', () => {
     const ui = useUiStore()
 
     for (let index = 0; index < MAX_NOTICES + 1; index += 1) {
-      ui.reportError({ kind: ErrorKind.Database, message: `Fault ${index}`, detail: null })
+      ui.reportError({ category: ErrorCategory.Database, message: `Fault ${index}`, detail: null })
     }
 
     expect(ui.notices).toHaveLength(MAX_NOTICES)
@@ -211,7 +213,7 @@ describe('ui store holding the corner to a few notices', () => {
   it('holds an error in the corner until the user takes it away', () => {
     const ui = useUiStore()
 
-    ui.reportError({ kind: ErrorKind.Database, message: 'It failed', detail: null })
+    ui.reportError({ category: ErrorCategory.Database, message: 'It failed', detail: null })
 
     expect(ui.notices[0]?.timeout).toBe(-1)
   })
@@ -219,7 +221,10 @@ describe('ui store holding the corner to a few notices', () => {
   it('lets an error leave on its own when the same words are kept elsewhere', () => {
     const ui = useUiStore()
 
-    ui.reportError({ kind: ErrorKind.Database, message: 'It failed', detail: null }, { kept: true })
+    ui.reportError(
+      { category: ErrorCategory.Database, message: 'It failed', detail: null },
+      { kept: true },
+    )
 
     expect(ui.notices[0]?.timeout).toBe(ERROR_TIMEOUT_MS)
   })

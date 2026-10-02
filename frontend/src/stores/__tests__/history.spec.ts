@@ -46,7 +46,7 @@ describe('history store', () => {
   })
 
   it('reports a failure to read', async () => {
-    apiStub.getHistory.mockRejectedValue({ kind: 'storage', message: 'no', detail: null })
+    apiStub.getHistory.mockRejectedValue({ category: 'storage', message: 'no', detail: null })
     const history = useHistoryStore()
     await history.load()
     expect(useUiStore().notices[0]?.level).toBe('error')
@@ -232,7 +232,7 @@ describe('history store', () => {
   })
 
   it('reports a failure to empty the history', async () => {
-    apiStub.clearHistory.mockRejectedValue({ kind: 'storage', message: 'no', detail: null })
+    apiStub.clearHistory.mockRejectedValue({ category: 'storage', message: 'no', detail: null })
     const history = useHistoryStore()
     await history.clear()
     expect(useUiStore().notices[0]?.level).toBe('error')
@@ -277,7 +277,7 @@ describe('history store', () => {
   })
 
   it('reports a failure to save a statement', async () => {
-    apiStub.saveQuery.mockRejectedValue({ kind: 'storage', message: 'no', detail: null })
+    apiStub.saveQuery.mockRejectedValue({ category: 'storage', message: 'no', detail: null })
     const history = useHistoryStore()
     expect(await history.save({ name: 'Daily', query: 'SELECT 1' })).toBeNull()
   })
@@ -292,7 +292,7 @@ describe('history store', () => {
   })
 
   it('reports a failure to remove a saved statement', async () => {
-    apiStub.deleteSavedQuery.mockRejectedValue({ kind: 'storage', message: 'no', detail: null })
+    apiStub.deleteSavedQuery.mockRejectedValue({ category: 'storage', message: 'no', detail: null })
     const history = useHistoryStore()
     await history.remove('q1')
     expect(useUiStore().notices[0]?.level).toBe('error')

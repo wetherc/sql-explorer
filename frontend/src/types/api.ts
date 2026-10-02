@@ -495,7 +495,7 @@ export interface SavedQuery {
   updatedAt: string
 }
 
-export const ErrorKind = {
+export const ErrorCategory = {
   NotConnected: 'notConnected',
   Connection: 'connection',
   Timeout: 'timeout',
@@ -509,11 +509,11 @@ export const ErrorKind = {
   Unsupported: 'unsupported',
   Internal: 'internal',
 } as const
-export type ErrorKind = (typeof ErrorKind)[keyof typeof ErrorKind]
+export type ErrorCategory = (typeof ErrorCategory)[keyof typeof ErrorCategory]
 
 /** The payload the backend sends when a command fails. */
 export interface ErrorPayload {
-  kind: ErrorKind
+  category: ErrorCategory
   message: string
   detail: string | null
 }

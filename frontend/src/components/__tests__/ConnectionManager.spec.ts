@@ -112,7 +112,7 @@ describe('ConnectionManager', () => {
   })
 
   it('adds no root when the connection cannot open', async () => {
-    apiStub.connect.mockRejectedValue({ kind: 'connection', message: 'refused', detail: null })
+    apiStub.connect.mockRejectedValue({ category: 'connection', message: 'refused', detail: null })
     const wrapper = await mountManager()
     await wrapper.find('[data-test="toggle-connection"]').trigger('click')
     await settle()

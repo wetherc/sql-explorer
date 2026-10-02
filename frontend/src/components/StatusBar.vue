@@ -118,7 +118,7 @@ const stateLabel = computed(() => {
     return 'Running…'
   }
   if (state.value.error) {
-    return `Failed: ${state.value.error.kind}`
+    return `Failed: ${state.value.error.category}`
   }
   return 'Ready'
 })

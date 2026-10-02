@@ -3333,8 +3333,8 @@ mod tests {
             value: serde_json::json!({ "a": 1 }),
         }];
         assert_eq!(
-            bind_params(Some(&params)).err().unwrap().kind(),
-            crate::error::ErrorKind::Configuration
+            bind_params(Some(&params)).err().unwrap().category(),
+            crate::error::ErrorCategory::Configuration
         );
 
         let params = vec![crate::db::QueryParam {
@@ -3349,8 +3349,8 @@ mod tests {
             value: serde_json::json!(18446744073709551615u64),
         }];
         assert_eq!(
-            bind_params(Some(&params)).err().unwrap().kind(),
-            crate::error::ErrorKind::Configuration
+            bind_params(Some(&params)).err().unwrap().category(),
+            crate::error::ErrorCategory::Configuration
         );
     }
 
@@ -3447,8 +3447,8 @@ mod tests {
 
         for bad in [r#"{"accessToken":""}"#, r#"{"other":1}"#, "not json"] {
             assert_eq!(
-                token_from_cli_output(bad).err().unwrap().kind(),
-                crate::error::ErrorKind::Authentication
+                token_from_cli_output(bad).err().unwrap().category(),
+                crate::error::ErrorCategory::Authentication
             );
         }
     }
@@ -3523,8 +3523,8 @@ mod tests {
 
         input.password = None;
         assert_eq!(
-            auth_method(&input).await.err().unwrap().kind(),
-            crate::error::ErrorKind::Authentication
+            auth_method(&input).await.err().unwrap().category(),
+            crate::error::ErrorCategory::Authentication
         );
     }
 
@@ -3535,7 +3535,10 @@ mod tests {
         input.password = Some(token_with_claims(r#"{"exp":1000000000}"#));
 
         let error = auth_method(&input).await.err().unwrap();
-        assert_eq!(error.kind(), crate::error::ErrorKind::Authentication);
+        assert_eq!(
+            error.category(),
+            crate::error::ErrorCategory::Authentication
+        );
         assert!(error.to_string().contains("has expired"));
 
         // A date far ahead passes the check.
@@ -3549,7 +3552,10 @@ mod tests {
         input.options.mssql_auth = MssqlAuth::EntraAzureCli;
         input.options.azure_cli_path = Some("/nowhere/az".into());
         let error = auth_method(&input).await.err().unwrap();
-        assert_eq!(error.kind(), crate::error::ErrorKind::Authentication);
+        assert_eq!(
+            error.category(),
+            crate::error::ErrorCategory::Authentication
+        );
         assert!(error.to_string().contains("was not found"));
     }
 
@@ -3574,8 +3580,8 @@ mod tests {
         // The text of this error names no ticket, so it stays a database
         // error even for the integrated method.
         assert_eq!(
-            describe_login(TiberiusError::Utf8, MssqlAuth::Integrated).kind(),
-            crate::error::ErrorKind::Database
+            describe_login(TiberiusError::Utf8, MssqlAuth::Integrated).category(),
+            crate::error::ErrorCategory::Database
         );
 
         // A fault of the ticket becomes an error about the credentials.
@@ -3583,7 +3589,10 @@ mod tests {
             TiberiusError::Protocol("no credentials were supplied".into()),
             MssqlAuth::Integrated,
         );
-        assert_eq!(error.kind(), crate::error::ErrorKind::Authentication);
+        assert_eq!(
+            error.category(),
+            crate::error::ErrorCategory::Authentication
+        );
         assert!(error.to_string().contains("kinit"));
 
         // Another method keeps the error of the driver as it is.
@@ -3592,8 +3601,8 @@ mod tests {
                 TiberiusError::Protocol("no credentials were supplied".into()),
                 MssqlAuth::SqlLogin
             )
-            .kind(),
-            crate::error::ErrorKind::Database
+            .category(),
+            crate::error::ErrorCategory::Database
         );
     }
 
@@ -3609,14 +3618,17 @@ mod tests {
             TiberiusError::Protocol("Login failed for the user.".into()),
             MssqlAuth::EntraAccessToken,
         );
-        assert_eq!(error.kind(), crate::error::ErrorKind::Authentication);
+        assert_eq!(
+            error.category(),
+            crate::error::ErrorCategory::Authentication
+        );
         assert!(error.to_string().contains("has expired"));
 
         // Another fault keeps the error of the driver, because a token that
         // is old is not its cause.
         assert_eq!(
-            describe_login(TiberiusError::Utf8, MssqlAuth::EntraAccessToken).kind(),
-            crate::error::ErrorKind::Database
+            describe_login(TiberiusError::Utf8, MssqlAuth::EntraAccessToken).category(),
+            crate::error::ErrorCategory::Database
         );
     }
 }

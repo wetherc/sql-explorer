@@ -377,7 +377,7 @@ describe('DbExplorer', () => {
 
   it('reports a failure to build the statement of an object', async () => {
     apiStub.scriptObject.mockRejectedValue({
-      kind: 'configuration',
+      category: 'configuration',
       message: 'no column',
       detail: null,
     })
@@ -447,7 +447,11 @@ describe('DbExplorer', () => {
   })
 
   it('reports a failure to build the preview statement', async () => {
-    apiStub.previewQuery.mockRejectedValue({ kind: 'notConnected', message: 'gone', detail: null })
+    apiStub.previewQuery.mockRejectedValue({
+      category: 'notConnected',
+      message: 'gone',
+      detail: null,
+    })
     const wrapper = await mountExplorer()
     const explorer = useExplorerStore()
     explorer.addRoot('c1')
@@ -619,7 +623,7 @@ describe('DbExplorer', () => {
 
   it('reports a failure to quote a name', async () => {
     apiStub.quoteIdentifier.mockRejectedValue({
-      kind: 'notConnected',
+      category: 'notConnected',
       message: 'gone',
       detail: null,
     })

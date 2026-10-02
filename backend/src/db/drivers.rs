@@ -941,14 +941,14 @@ mod tests {
         let number = number.as_number().unwrap();
         assert_eq!(number_value(number), None);
         let error = number_out_of_range(number);
-        assert_eq!(error.kind(), crate::error::ErrorKind::Configuration);
+        assert_eq!(error.category(), crate::error::ErrorCategory::Configuration);
         assert!(error.to_string().contains("18446744073709551615"));
     }
 
     #[test]
     fn a_parameter_of_a_type_that_cannot_be_sent_is_refused() {
         let error = parameter_type_refused(&serde_json::json!({ "a": 1 }));
-        assert_eq!(error.kind(), crate::error::ErrorKind::Configuration);
+        assert_eq!(error.category(), crate::error::ErrorCategory::Configuration);
     }
 
     #[test]
@@ -1250,6 +1250,6 @@ mod tests {
             .execute_query("SELECT 1", None, &ExecOptions::default())
             .await
             .unwrap_err();
-        assert_eq!(error.kind(), crate::error::ErrorKind::Unsupported);
+        assert_eq!(error.category(), crate::error::ErrorCategory::Unsupported);
     }
 }

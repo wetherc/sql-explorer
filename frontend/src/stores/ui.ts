@@ -132,7 +132,7 @@ export const useUiStore = defineStore('ui', () => {
       level: 'error',
       message: payload.message,
       detail: [advice, payload.detail].filter(Boolean).join('\n\n') || null,
-      icon: errorIcon(payload.kind),
+      icon: errorIcon(payload.category),
       timeout: options.kept ? ERROR_TIMEOUT_MS : -1,
     })
     return payload

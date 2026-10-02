@@ -7,18 +7,18 @@ import {
   isErrorPayload,
   toErrorPayload,
 } from '@/lib/errors'
-import { ErrorKind } from '@/types/api'
+import { ErrorCategory } from '@/types/api'
 
 describe('toErrorPayload', () => {
   it('keeps a payload the backend sent', () => {
-    const payload = { kind: ErrorKind.Database, message: 'bad column', detail: 'line 1' }
+    const payload = { category: ErrorCategory.Database, message: 'bad column', detail: 'line 1' }
     expect(toErrorPayload(payload)).toBe(payload)
   })
 
   it('wraps a fault of the bridge itself', () => {
     const result = toErrorPayload(new Error('the bridge is closed'))
     expect(result).toEqual({
-      kind: ErrorKind.Internal,
+      category: ErrorCategory.Internal,
       message: 'the bridge is closed',
       detail: null,
     })
@@ -26,7 +26,7 @@ describe('toErrorPayload', () => {
 
   it('wraps a plain text', () => {
     expect(toErrorPayload('boom')).toEqual({
-      kind: ErrorKind.Internal,
+      category: ErrorCategory.Internal,
       message: 'boom',
       detail: null,
     })
@@ -34,7 +34,7 @@ describe('toErrorPayload', () => {
 
   it('wraps a value it cannot read', () => {
     const result = toErrorPayload({ unexpected: 1 })
-    expect(result.kind).toBe(ErrorKind.Internal)
+    expect(result.category).toBe(ErrorCategory.Internal)
     expect(result.detail).toBe('{"unexpected":1}')
   })
 
@@ -50,78 +50,86 @@ describe('toErrorPayload', () => {
 })
 
 describe('isErrorPayload', () => {
-  it('accepts an object with a kind and a message', () => {
-    expect(isErrorPayload({ kind: 'database', message: 'x' })).toBe(true)
+  it('accepts an object with a category and a message', () => {
+    expect(isErrorPayload({ category: 'database', message: 'x' })).toBe(true)
   })
 
   it('refuses anything else', () => {
     expect(isErrorPayload(null)).toBe(false)
     expect(isErrorPayload('text')).toBe(false)
-    expect(isErrorPayload({ kind: 1, message: 'x' })).toBe(false)
-    expect(isErrorPayload({ kind: 'database' })).toBe(false)
+    expect(isErrorPayload({ category: 1, message: 'x' })).toBe(false)
+    expect(isErrorPayload({ category: 'database' })).toBe(false)
   })
 })
 
 describe('fullErrorText', () => {
   it('joins the message and the detail', () => {
-    expect(fullErrorText({ kind: ErrorKind.Database, message: 'a', detail: 'b' })).toBe('a\nb')
+    expect(fullErrorText({ category: ErrorCategory.Database, message: 'a', detail: 'b' })).toBe(
+      'a\nb',
+    )
   })
 
   it('gives the message alone when there is no detail', () => {
-    expect(fullErrorText({ kind: ErrorKind.Database, message: 'a', detail: null })).toBe('a')
+    expect(fullErrorText({ category: ErrorCategory.Database, message: 'a', detail: null })).toBe(
+      'a',
+    )
   })
 })
 
 describe('isCancellation', () => {
   it('holds only for a stopped operation', () => {
-    expect(isCancellation({ kind: ErrorKind.Cancelled, message: '', detail: null })).toBe(true)
-    expect(isCancellation({ kind: ErrorKind.Database, message: '', detail: null })).toBe(false)
+    expect(isCancellation({ category: ErrorCategory.Cancelled, message: '', detail: null })).toBe(
+      true,
+    )
+    expect(isCancellation({ category: ErrorCategory.Database, message: '', detail: null })).toBe(
+      false,
+    )
   })
 })
 
 describe('errorIcon', () => {
-  it('gives an icon for every kind', () => {
-    const kinds = Object.values(ErrorKind)
-    for (const kind of kinds) {
-      expect(errorIcon(kind)).toMatch(/^mdi-/)
+  it('gives an icon for every category', () => {
+    const categories = Object.values(ErrorCategory)
+    for (const category of categories) {
+      expect(errorIcon(category)).toMatch(/^mdi-/)
     }
-    expect(errorIcon(ErrorKind.NotConnected)).toBe('mdi-lan-disconnect')
-    expect(errorIcon(ErrorKind.Connection)).toBe('mdi-lan-disconnect')
-    expect(errorIcon(ErrorKind.Timeout)).toBe('mdi-timer-alert-outline')
-    expect(errorIcon(ErrorKind.Cancelled)).toBe('mdi-cancel')
-    expect(errorIcon(ErrorKind.Configuration)).toBe('mdi-tune')
-    expect(errorIcon(ErrorKind.Secret)).toBe('mdi-key-alert-outline')
-    expect(errorIcon(ErrorKind.Unsupported)).toBe('mdi-block-helper')
-    expect(errorIcon(ErrorKind.Io)).toBe('mdi-file-alert-outline')
-    expect(errorIcon(ErrorKind.Storage)).toBe('mdi-file-alert-outline')
-    expect(errorIcon(ErrorKind.Database)).toBe('mdi-alert-circle-outline')
+    expect(errorIcon(ErrorCategory.NotConnected)).toBe('mdi-lan-disconnect')
+    expect(errorIcon(ErrorCategory.Connection)).toBe('mdi-lan-disconnect')
+    expect(errorIcon(ErrorCategory.Timeout)).toBe('mdi-timer-alert-outline')
+    expect(errorIcon(ErrorCategory.Cancelled)).toBe('mdi-cancel')
+    expect(errorIcon(ErrorCategory.Configuration)).toBe('mdi-tune')
+    expect(errorIcon(ErrorCategory.Secret)).toBe('mdi-key-alert-outline')
+    expect(errorIcon(ErrorCategory.Unsupported)).toBe('mdi-block-helper')
+    expect(errorIcon(ErrorCategory.Io)).toBe('mdi-file-alert-outline')
+    expect(errorIcon(ErrorCategory.Storage)).toBe('mdi-file-alert-outline')
+    expect(errorIcon(ErrorCategory.Database)).toBe('mdi-alert-circle-outline')
   })
 })
 
 describe('errorAdvice', () => {
-  const advise = (kind: ErrorKind) => errorAdvice({ kind, message: '', detail: null })
+  const advise = (category: ErrorCategory) => errorAdvice({ category, message: '', detail: null })
 
-  it('gives advice for the kinds a user can act on', () => {
-    expect(advise(ErrorKind.NotConnected)).toContain('Open the connection')
-    expect(advise(ErrorKind.Connection)).toContain('host')
-    expect(advise(ErrorKind.Timeout)).toContain('time limit')
-    expect(advise(ErrorKind.Configuration)).toContain('Correct')
-    expect(advise(ErrorKind.Secret)).toContain('keychain')
+  it('gives advice for the categories a user can act on', () => {
+    expect(advise(ErrorCategory.NotConnected)).toContain('Open the connection')
+    expect(advise(ErrorCategory.Connection)).toContain('host')
+    expect(advise(ErrorCategory.Timeout)).toContain('time limit')
+    expect(advise(ErrorCategory.Configuration)).toContain('Correct')
+    expect(advise(ErrorCategory.Secret)).toContain('keychain')
   })
 
   it('gives no advice when the message is enough', () => {
-    expect(advise(ErrorKind.Database)).toBe('')
+    expect(advise(ErrorCategory.Database)).toBe('')
   })
 })
 
-describe('the authentication kind', () => {
+describe('the authentication category', () => {
   it('gets an icon and advice of its own', () => {
     const payload = {
-      kind: ErrorKind.Authentication,
+      category: ErrorCategory.Authentication,
       message: 'The Azure CLI was not found.',
       detail: null,
     }
-    expect(errorIcon(payload.kind)).toBe('mdi-key-alert-outline')
+    expect(errorIcon(payload.category)).toBe('mdi-key-alert-outline')
     expect(errorAdvice(payload)).toContain('authentication method')
   })
 })

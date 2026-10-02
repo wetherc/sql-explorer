@@ -2,7 +2,7 @@
 //!
 //! The user interface must show the reason a connection or a query failed.
 //! Each error therefore serialises to an object with a machine-readable
-//! `kind`, a short `message` and an optional `detail` that holds the full
+//! `category`, a short `message` and an optional `detail` that holds the full
 //! chain of causes.
 
 use serde::Serialize;
@@ -12,7 +12,7 @@ use std::error::Error as StdError;
 /// recovery action from this value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub enum ErrorKind {
+pub enum ErrorCategory {
     /// No open connection has the given identifier.
     NotConnected,
     /// The driver could not open or keep a connection.
@@ -39,22 +39,22 @@ pub enum ErrorKind {
     Internal,
 }
 
-impl ErrorKind {
+impl ErrorCategory {
     /// Returns the identifier used in the serialised payload.
     pub fn as_str(&self) -> &'static str {
         match self {
-            ErrorKind::NotConnected => "notConnected",
-            ErrorKind::Connection => "connection",
-            ErrorKind::Timeout => "timeout",
-            ErrorKind::Cancelled => "cancelled",
-            ErrorKind::Database => "database",
-            ErrorKind::Configuration => "configuration",
-            ErrorKind::Authentication => "authentication",
-            ErrorKind::Io => "io",
-            ErrorKind::Storage => "storage",
-            ErrorKind::Secret => "secret",
-            ErrorKind::Unsupported => "unsupported",
-            ErrorKind::Internal => "internal",
+            ErrorCategory::NotConnected => "notConnected",
+            ErrorCategory::Connection => "connection",
+            ErrorCategory::Timeout => "timeout",
+            ErrorCategory::Cancelled => "cancelled",
+            ErrorCategory::Database => "database",
+            ErrorCategory::Configuration => "configuration",
+            ErrorCategory::Authentication => "authentication",
+            ErrorCategory::Io => "io",
+            ErrorCategory::Storage => "storage",
+            ErrorCategory::Secret => "secret",
+            ErrorCategory::Unsupported => "unsupported",
+            ErrorCategory::Internal => "internal",
         }
     }
 }
@@ -63,7 +63,7 @@ impl ErrorKind {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ErrorPayload {
-    pub kind: &'static str,
+    pub category: &'static str,
     pub message: String,
     pub detail: Option<String>,
 }
@@ -146,38 +146,38 @@ pub(crate) fn is_mysql_stop(error: &mysql_async::Error) -> bool {
 
 impl Error {
     /// Returns the category of the error.
-    pub fn kind(&self) -> ErrorKind {
+    pub fn category(&self) -> ErrorCategory {
         match self {
-            Error::NotConnected(_) => ErrorKind::NotConnected,
-            Error::Connection(_) => ErrorKind::Connection,
-            Error::Timeout(_) => ErrorKind::Timeout,
-            Error::Cancelled => ErrorKind::Cancelled,
-            Error::Configuration(_) | Error::MySqlUrl(_) => ErrorKind::Configuration,
-            Error::Authentication(_) => ErrorKind::Authentication,
-            Error::Unsupported(_) => ErrorKind::Unsupported,
+            Error::NotConnected(_) => ErrorCategory::NotConnected,
+            Error::Connection(_) => ErrorCategory::Connection,
+            Error::Timeout(_) => ErrorCategory::Timeout,
+            Error::Cancelled => ErrorCategory::Cancelled,
+            Error::Configuration(_) | Error::MySqlUrl(_) => ErrorCategory::Configuration,
+            Error::Authentication(_) => ErrorCategory::Authentication,
+            Error::Unsupported(_) => ErrorCategory::Unsupported,
             // A stop reaches the server on a channel of its own, and the
             // server then ends the statement and reports that through the
             // connection. That report is the answer to the Stop button of the
             // user, not a fault of the database.
-            Error::Postgres(error) if is_postgres_stop(error) => ErrorKind::Cancelled,
-            Error::MySql(error) if is_mysql_stop(error) => ErrorKind::Cancelled,
-            Error::Tiberius(tiberius::error::Error::Canceled) => ErrorKind::Cancelled,
+            Error::Postgres(error) if is_postgres_stop(error) => ErrorCategory::Cancelled,
+            Error::MySql(error) if is_mysql_stop(error) => ErrorCategory::Cancelled,
+            Error::Tiberius(tiberius::error::Error::Canceled) => ErrorCategory::Cancelled,
             Error::Tiberius(_)
             | Error::MySql(_)
             | Error::Postgres(_)
             | Error::Sqlite(_)
-            | Error::Athena(_) => ErrorKind::Database,
-            Error::Io(_) => ErrorKind::Io,
-            Error::Store(_) | Error::SerdeJson(_) => ErrorKind::Storage,
-            Error::Keyring(_) => ErrorKind::Secret,
-            Error::Tauri(_) | Error::Anyhow(_) => ErrorKind::Internal,
+            | Error::Athena(_) => ErrorCategory::Database,
+            Error::Io(_) => ErrorCategory::Io,
+            Error::Store(_) | Error::SerdeJson(_) => ErrorCategory::Storage,
+            Error::Keyring(_) => ErrorCategory::Secret,
+            Error::Tauri(_) | Error::Anyhow(_) => ErrorCategory::Internal,
         }
     }
 
     /// Builds the payload that the user interface receives.
     pub fn to_payload(&self) -> ErrorPayload {
         ErrorPayload {
-            kind: self.kind().as_str(),
+            category: self.category().as_str(),
             message: self.to_string(),
             detail: self.server_detail().or_else(|| source_chain(self)),
         }
@@ -280,24 +280,24 @@ mod tests {
     }
 
     #[test]
-    fn every_kind_has_an_identifier() {
-        let kinds = [
-            (ErrorKind::NotConnected, "notConnected"),
-            (ErrorKind::Connection, "connection"),
-            (ErrorKind::Timeout, "timeout"),
-            (ErrorKind::Cancelled, "cancelled"),
-            (ErrorKind::Database, "database"),
-            (ErrorKind::Configuration, "configuration"),
-            (ErrorKind::Io, "io"),
-            (ErrorKind::Storage, "storage"),
-            (ErrorKind::Secret, "secret"),
-            (ErrorKind::Unsupported, "unsupported"),
-            (ErrorKind::Internal, "internal"),
+    fn every_category_has_an_identifier() {
+        let categories = [
+            (ErrorCategory::NotConnected, "notConnected"),
+            (ErrorCategory::Connection, "connection"),
+            (ErrorCategory::Timeout, "timeout"),
+            (ErrorCategory::Cancelled, "cancelled"),
+            (ErrorCategory::Database, "database"),
+            (ErrorCategory::Configuration, "configuration"),
+            (ErrorCategory::Io, "io"),
+            (ErrorCategory::Storage, "storage"),
+            (ErrorCategory::Secret, "secret"),
+            (ErrorCategory::Unsupported, "unsupported"),
+            (ErrorCategory::Internal, "internal"),
         ];
-        for (kind, text) in kinds {
-            assert_eq!(kind.as_str(), text);
+        for (category, text) in categories {
+            assert_eq!(category.as_str(), text);
             assert_eq!(
-                serde_json::to_value(kind).unwrap(),
+                serde_json::to_value(category).unwrap(),
                 serde_json::Value::String(text.to_string())
             );
         }
@@ -307,7 +307,7 @@ mod tests {
     fn not_connected_names_the_connection() {
         let error = Error::NotConnected("abc".into());
         let payload = error.to_payload();
-        assert_eq!(payload.kind, "notConnected");
+        assert_eq!(payload.category, "notConnected");
         assert!(payload.message.contains("abc"));
         assert_eq!(payload.detail, None);
     }
@@ -315,13 +315,13 @@ mod tests {
     #[test]
     fn timeout_reports_the_limit() {
         let payload = Error::Timeout(30).to_payload();
-        assert_eq!(payload.kind, "timeout");
+        assert_eq!(payload.category, "timeout");
         assert!(payload.message.contains("30"));
     }
 
     #[test]
-    fn cancelled_has_its_own_kind() {
-        assert_eq!(Error::Cancelled.kind(), ErrorKind::Cancelled);
+    fn cancelled_has_its_own_category() {
+        assert_eq!(Error::Cancelled.category(), ErrorCategory::Cancelled);
     }
 
     #[test]
@@ -333,51 +333,51 @@ mod tests {
             "host is down"
         );
         assert_eq!(
-            Error::Configuration("port is missing".into()).kind(),
-            ErrorKind::Configuration
+            Error::Configuration("port is missing".into()).category(),
+            ErrorCategory::Configuration
         );
         assert_eq!(
-            Error::Unsupported("no schemas".into()).kind(),
-            ErrorKind::Unsupported
+            Error::Unsupported("no schemas".into()).category(),
+            ErrorCategory::Unsupported
         );
         assert_eq!(
-            Error::Athena("bad query".into()).kind(),
-            ErrorKind::Database
+            Error::Athena("bad query".into()).category(),
+            ErrorCategory::Database
         );
     }
 
     #[test]
-    fn driver_errors_map_to_the_database_kind() {
+    fn driver_errors_map_to_the_database_category() {
         let tiberius: Error = tiberius::error::Error::Tls("handshake".into()).into();
-        assert_eq!(tiberius.kind(), ErrorKind::Database);
+        assert_eq!(tiberius.category(), ErrorCategory::Database);
 
         let mysql: Error = mysql_async::Error::Other("boom".into()).into();
-        assert_eq!(mysql.kind(), ErrorKind::Database);
+        assert_eq!(mysql.category(), ErrorCategory::Database);
 
         let sqlite: Error = rusqlite::Error::InvalidQuery.into();
-        assert_eq!(sqlite.kind(), ErrorKind::Database);
+        assert_eq!(sqlite.category(), ErrorCategory::Database);
 
         let url: Error = mysql_async::UrlError::InvalidParamValue {
             param: "port".into(),
             value: "no".into(),
         }
         .into();
-        assert_eq!(url.kind(), ErrorKind::Configuration);
+        assert_eq!(url.category(), ErrorCategory::Configuration);
     }
 
     #[test]
-    fn io_and_storage_errors_keep_their_kind() {
+    fn io_and_storage_errors_keep_their_category() {
         let io: Error = std::io::Error::new(std::io::ErrorKind::NotFound, "gone").into();
-        assert_eq!(io.kind(), ErrorKind::Io);
+        assert_eq!(io.category(), ErrorCategory::Io);
 
         let json: Error = serde_json::from_str::<i32>("nope").unwrap_err().into();
-        assert_eq!(json.kind(), ErrorKind::Storage);
+        assert_eq!(json.category(), ErrorCategory::Storage);
 
         let anyhow: Error = anyhow::anyhow!("internal").into();
-        assert_eq!(anyhow.kind(), ErrorKind::Internal);
+        assert_eq!(anyhow.category(), ErrorCategory::Internal);
 
         let secret: Error = keyring::Error::NoEntry.into();
-        assert_eq!(secret.kind(), ErrorKind::Secret);
+        assert_eq!(secret.category(), ErrorCategory::Secret);
     }
 
     #[test]
@@ -392,18 +392,18 @@ mod tests {
     #[test]
     fn serialisation_produces_the_three_fields() {
         let value = serde_json::to_value(Error::Cancelled).unwrap();
-        assert_eq!(value["kind"], "cancelled");
+        assert_eq!(value["category"], "cancelled");
         assert_eq!(value["message"], "The operation was cancelled.");
         assert!(value["detail"].is_null());
     }
 
     #[test]
-    fn a_postgres_error_maps_to_the_database_kind() {
+    fn a_postgres_error_maps_to_the_database_category() {
         // `tokio_postgres::Error` has no public constructor, so build one
         // through a parse failure of a connection string.
         let error = "host=".parse::<tokio_postgres::Config>().unwrap_err();
         let mapped: Error = error.into();
-        assert_eq!(mapped.kind(), ErrorKind::Database);
+        assert_eq!(mapped.category(), ErrorCategory::Database);
     }
 
     #[test]
@@ -413,13 +413,13 @@ mod tests {
             state: "70100".to_string(),
             message: "Query execution was interrupted".to_string(),
         });
-        assert_eq!(Error::MySql(stopped).kind(), ErrorKind::Cancelled);
+        assert_eq!(Error::MySql(stopped).category(), ErrorCategory::Cancelled);
     }
 
     #[test]
     fn the_cancel_answer_of_mssql_is_a_stop() {
         let stopped = Error::Tiberius(tiberius::error::Error::Canceled);
-        assert_eq!(stopped.kind(), ErrorKind::Cancelled);
+        assert_eq!(stopped.category(), ErrorCategory::Cancelled);
     }
 
     #[test]
@@ -429,9 +429,9 @@ mod tests {
             state: "42000".to_string(),
             message: "You have an error in your SQL syntax".to_string(),
         });
-        assert_eq!(Error::MySql(other).kind(), ErrorKind::Database);
+        assert_eq!(Error::MySql(other).category(), ErrorCategory::Database);
 
         let outside: Error = mysql_async::Error::Other("boom".into()).into();
-        assert_eq!(outside.kind(), ErrorKind::Database);
+        assert_eq!(outside.category(), ErrorCategory::Database);
     }
 }

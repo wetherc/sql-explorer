@@ -7,7 +7,7 @@ import {
   AwsCredentialSource,
   ConnectionHealth,
   DbType,
-  ErrorKind,
+  ErrorCategory,
   MssqlAuth,
   defaultConnectionOptions,
   type ConnectionInfo,
@@ -284,7 +284,7 @@ export const useConnectionsStore = defineStore('connections', () => {
       const payload = ui.reportError(error)
       // A pasted access token lives for about one hour, and the stored one
       // cannot be made fresh again. The view asks for a new token.
-      if (payload.kind === ErrorKind.Authentication && usesAccessToken(connection)) {
+      if (payload.category === ErrorCategory.Authentication && usesAccessToken(connection)) {
         expiredTokenId.value = connection.id
       }
       return false

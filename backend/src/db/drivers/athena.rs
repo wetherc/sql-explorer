@@ -1514,7 +1514,7 @@ mod tests {
 
         // Neither part is there.
         let error = typed_credentials(&connection).err().unwrap();
-        assert_eq!(error.kind(), crate::error::ErrorKind::Configuration);
+        assert_eq!(error.category(), crate::error::ErrorCategory::Configuration);
         assert_eq!(error.to_string(), INCOMPLETE_KEYS_MESSAGE);
 
         // The access key ID alone is not enough.
@@ -1541,7 +1541,7 @@ mod tests {
         // The refusal comes before the first request, so the test reaches
         // no service.
         let error = AthenaDriver::connect(&connection).await.err().unwrap();
-        assert_eq!(error.kind(), crate::error::ErrorKind::Configuration);
+        assert_eq!(error.category(), crate::error::ErrorCategory::Configuration);
         assert_eq!(error.to_string(), INCOMPLETE_KEYS_MESSAGE);
     }
 
@@ -1553,8 +1553,8 @@ mod tests {
                 .await
                 .err()
                 .unwrap()
-                .kind(),
-            crate::error::ErrorKind::Configuration
+                .category(),
+            crate::error::ErrorCategory::Configuration
         );
     }
 

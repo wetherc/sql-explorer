@@ -8,7 +8,7 @@
  * one pass over the rows.
  */
 import { zipSync, strToU8 } from 'fflate'
-import { ErrorKind, type CellValue, type ErrorPayload, type ResultSet } from '@/types/api'
+import { ErrorCategory, type CellValue, type ErrorPayload, type ResultSet } from '@/types/api'
 import { formatCell, isNullCell, isPlainNumber } from './format'
 
 /** Escapes the five characters that XML reserves. */
@@ -200,7 +200,7 @@ export function toXlsx(result: ResultSet, name = 'Result'): Uint8Array {
   const count = result.columns.length
   if (count > MAX_SHEET_COLUMNS) {
     const payload: ErrorPayload = {
-      kind: ErrorKind.Unsupported,
+      category: ErrorCategory.Unsupported,
       message: `An Excel sheet holds at most ${MAX_SHEET_COLUMNS} columns, and the result has ${count} columns. Export the result as CSV or JSON.`,
       detail: null,
     }

@@ -312,7 +312,7 @@ mod tests {
         assert!(path_inside_roots(&inside, &roots).is_ok());
 
         let error = path_inside_roots(&outside, &roots).err().unwrap();
-        assert_eq!(error.kind(), crate::error::ErrorKind::Configuration);
+        assert_eq!(error.category(), crate::error::ErrorCategory::Configuration);
         assert!(error.to_string().contains("outside every folder"));
 
         // A path that no file holds is refused as well.
@@ -344,7 +344,7 @@ mod tests {
         std::os::unix::fs::symlink(&secret, &link).unwrap();
 
         let error = path_inside_roots(&link, &[root]).err().unwrap();
-        assert_eq!(error.kind(), crate::error::ErrorKind::Configuration);
+        assert_eq!(error.category(), crate::error::ErrorCategory::Configuration);
     }
 
     #[test]
@@ -462,7 +462,7 @@ mod tests {
         let large = root.join("large.sql");
         std::fs::write(&large, vec![b'-'; (MAX_FILE_BYTES + 1) as usize]).unwrap();
         let error = read_text(&large).err().unwrap();
-        assert_eq!(error.kind(), crate::error::ErrorKind::Configuration);
+        assert_eq!(error.category(), crate::error::ErrorCategory::Configuration);
         assert!(error.to_string().contains("larger than the editor accepts"));
 
         assert!(read_text(&root.join("gone.sql")).is_err());

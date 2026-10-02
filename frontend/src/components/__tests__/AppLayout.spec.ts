@@ -120,7 +120,7 @@ describe('AppLayout', () => {
   })
 
   it('reports a menu of the system that the window cannot hear', async () => {
-    apiStub.onMenuCommand.mockRejectedValue({ kind: 'internal', message: 'no', detail: null })
+    apiStub.onMenuCommand.mockRejectedValue({ category: 'internal', message: 'no', detail: null })
     const wrapper = mountWithPlugins(AppLayout)
     await settle()
 
@@ -157,7 +157,7 @@ describe('AppLayout', () => {
   })
 
   it('keeps working when the state of the menu cannot be sent', async () => {
-    apiStub.setMenuCommands.mockRejectedValue({ kind: 'internal', message: 'no', detail: null })
+    apiStub.setMenuCommands.mockRejectedValue({ category: 'internal', message: 'no', detail: null })
     const wrapper = mountWithPlugins(AppLayout)
     await settle()
 

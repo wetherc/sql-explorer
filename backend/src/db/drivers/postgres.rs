@@ -5921,8 +5921,8 @@ mod tests {
         let mut input = connection();
         input.options.connection_url = Some("host=".into());
         assert_eq!(
-            build_config(&input).unwrap_err().kind(),
-            crate::error::ErrorKind::Configuration
+            build_config(&input).unwrap_err().category(),
+            crate::error::ErrorCategory::Configuration
         );
     }
 
@@ -5960,8 +5960,8 @@ mod tests {
         let mut input = connection();
         input.options.ca_cert_path = Some("/does/not/exist.pem".into());
         assert_eq!(
-            build_tls_config(&input).unwrap_err().kind(),
-            crate::error::ErrorKind::Io
+            build_tls_config(&input).unwrap_err().category(),
+            crate::error::ErrorCategory::Io
         );
 
         input.options.ca_cert_path = Some("   ".into());
@@ -6065,8 +6065,8 @@ mod tests {
             value: serde_json::json!(18446744073709551615u64),
         }];
         assert_eq!(
-            bind_params(&params).unwrap_err().kind(),
-            crate::error::ErrorKind::Configuration
+            bind_params(&params).unwrap_err().category(),
+            crate::error::ErrorCategory::Configuration
         );
     }
 }

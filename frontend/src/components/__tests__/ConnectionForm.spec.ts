@@ -212,7 +212,7 @@ describe('ConnectionForm', () => {
   })
 
   it('reports a failure of the file dialog', async () => {
-    openDialog.mockRejectedValue({ kind: 'io', message: 'refused', detail: null })
+    openDialog.mockRejectedValue({ category: 'io', message: 'refused', detail: null })
     const wrapper = await mountForm(connectionFixture({ dbType: DbType.Sqlite }))
     await wrapper.find('[data-test="choose-file"]').trigger('click')
     await settle()
@@ -276,7 +276,7 @@ describe('ConnectionForm', () => {
   })
 
   it('stays open when the record could not be saved', async () => {
-    apiStub.saveConnection.mockRejectedValue({ kind: 'storage', message: 'no', detail: null })
+    apiStub.saveConnection.mockRejectedValue({ category: 'storage', message: 'no', detail: null })
     const wrapper = await mountForm()
     await wrapper.find('[data-test="save-button"]').trigger('click')
     await settle()

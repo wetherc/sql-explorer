@@ -2630,11 +2630,14 @@ mod tests {
     #[test]
     fn a_parameter_without_a_value_stops_the_run() {
         let error = prepare_parameters("SELECT :id", Dialect::MsSql, None).unwrap_err();
-        assert_eq!(error.kind(), crate::error::ErrorKind::Configuration);
+        assert_eq!(error.category(), crate::error::ErrorCategory::Configuration);
         assert!(error.to_string().contains("':id'"));
 
         let athena = prepare_parameters("SELECT :id", Dialect::Athena, None).unwrap_err();
-        assert_eq!(athena.kind(), crate::error::ErrorKind::Configuration);
+        assert_eq!(
+            athena.category(),
+            crate::error::ErrorCategory::Configuration
+        );
     }
 
     #[test]
@@ -2950,8 +2953,8 @@ mod tests {
         let mut connection = sqlite_connection("");
         connection.options.file_path = None;
         assert_eq!(
-            open_driver(&connection).await.err().unwrap().kind(),
-            crate::error::ErrorKind::Configuration
+            open_driver(&connection).await.err().unwrap().category(),
+            crate::error::ErrorCategory::Configuration
         );
     }
 
@@ -2988,7 +2991,7 @@ mod tests {
             connection.db_type = db_type;
             connection.options.connection_url = Some(with_password.into());
             let error = refuse_password_in_string(&connection).unwrap_err();
-            assert_eq!(error.kind(), crate::error::ErrorKind::Configuration);
+            assert_eq!(error.category(), crate::error::ErrorCategory::Configuration);
             assert!(error.to_string().contains("Password box"));
             connection.options.connection_url = Some(without.into());
             assert!(refuse_password_in_string(&connection).is_ok());
@@ -3223,7 +3226,7 @@ mod tests {
         let error = with_secrets_for_test(app.handle(), &state, changed.clone())
             .err()
             .unwrap();
-        assert_eq!(error.kind(), crate::error::ErrorKind::Configuration);
+        assert_eq!(error.category(), crate::error::ErrorCategory::Configuration);
         assert!(error.to_string().contains("Type the password"));
 
         // The same record with the password of the caller goes through, and
@@ -3289,7 +3292,7 @@ mod tests {
         // "PK" is the mark that a ZIP container starts with.
         assert_eq!(decode_base64("UEs=").unwrap(), b"PK");
         let error = decode_base64("not base64!").err().unwrap();
-        assert_eq!(error.kind(), crate::error::ErrorKind::Configuration);
+        assert_eq!(error.category(), crate::error::ErrorCategory::Configuration);
     }
     #[test]
     fn a_field_of_a_comma_separated_file_is_quoted_when_it_needs_it() {
@@ -3681,7 +3684,7 @@ mod tests {
             .await
             .err()
             .unwrap();
-        assert_eq!(error.kind(), crate::error::ErrorKind::Configuration);
+        assert_eq!(error.category(), crate::error::ErrorCategory::Configuration);
         assert!(error.to_string().contains("session limit"));
 
         // The tab that holds a session keeps it, and the default session
