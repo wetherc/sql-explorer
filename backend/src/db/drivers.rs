@@ -2,6 +2,8 @@
 //! implementations share.
 
 pub mod athena;
+#[cfg(test)]
+pub mod live;
 pub mod mssql;
 pub mod mysql;
 pub mod postgres;

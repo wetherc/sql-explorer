@@ -2788,6 +2788,9 @@ impl<'a> Reader<'a> {
 }
 
 #[cfg(test)]
+mod live;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::sink::BufferSink;

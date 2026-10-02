@@ -341,6 +341,60 @@ The unit tests need no server. SQLite runs in memory, and the other drivers are
 covered by tests of their configuration, their type conversion and their
 statement splitting.
 
+The live tests run the PostgreSQL, MySQL, MariaDB and MS SQL Server drivers
+against real servers in Docker. Each live test has a name that starts with
+`live_` and the `#[ignore]` mark, so `cargo test` and the pre-commit hook do
+not run them. The coverage gate also ignores their files.
+
+To run the live tests:
+
+1. Start the servers:
+
+   ```sh
+   docker compose -f backend/live/compose.yaml up -d
+   ```
+
+2. Wait until `docker compose -f backend/live/compose.yaml ps` shows each
+   server as healthy. The first start of MS SQL Server can take a minute.
+
+3. Run the tests:
+
+   ```sh
+   pnpm test:live
+   ```
+
+4. Stop the servers when you do not need them:
+
+   ```sh
+   docker compose -f backend/live/compose.yaml down
+   ```
+
+The script `backend/live/run.sh` reads the URL of each server from one
+variable. When a variable is not set, the script sets the URL of the server
+in `compose.yaml`. A test that runs without its variable, for example
+through `cargo test -- --ignored`, writes a line that says so, and it passes.
+
+| Variable            | Default URL                                         |
+| ------------------- | --------------------------------------------------- |
+| `SQLX_LIVE_PG`      | `postgres://postgres:LivePg16pass@127.0.0.1:15416`  |
+| `SQLX_LIVE_MYSQL`   | `mysql://root:LiveMysql84pass@127.0.0.1:13384`      |
+| `SQLX_LIVE_MARIADB` | `mysql://root:LiveMaria11pass@127.0.0.1:13311`      |
+| `SQLX_LIVE_MSSQL`   | `mssql://sa:Live%23Mssql2022Pass@127.0.0.1:11433`   |
+
+Write a special character of a password as its percent code. For example,
+the `#` of the SQL Server password is `%23`. To test the PostgreSQL 18
+server of `compose.yaml`, run:
+
+```sh
+SQLX_LIVE_PG=postgres://postgres:LivePg18pass@127.0.0.1:15418 pnpm test:live
+```
+
+Each test makes a database with a unique name, loads a fixture of
+`backend/live/fixtures` into it, and removes the database at the end. A test
+that fails also removes its database. An argument selects the tests by
+name, so `pnpm test:live live_mysql` runs the MySQL tests alone. The passwords in
+`compose.yaml` are for these local test servers alone.
+
 ## Layout
 
 ```

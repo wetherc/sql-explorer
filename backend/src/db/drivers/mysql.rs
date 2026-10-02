@@ -1273,6 +1273,9 @@ pub fn format_time(
 }
 
 #[cfg(test)]
+mod live;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

@@ -1,0 +1,74 @@
+# The test servers of the live tests.
+#
+# Start them with `docker compose -f backend/live/compose.yaml up -d`, and
+# then run `pnpm test:live`. The ports and the passwords match the defaults
+# of that script.
+#
+# The passwords are for local test servers alone. Each port binds to
+# 127.0.0.1, so no other host can reach the servers. Do not use these
+# passwords on a server that keeps real data.
+
+name: sql-explorer-live
+
+services:
+  postgres:
+    image: postgres:16.6
+    environment:
+      POSTGRES_PASSWORD: LivePg16pass
+    ports:
+      - "127.0.0.1:15416:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 2s
+      retries: 30
+
+  # A second PostgreSQL server of a newer release. The default run uses the
+  # server above. To test this one, set SQLX_LIVE_PG to its URL.
+  postgres18:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_PASSWORD: LivePg18pass
+    ports:
+      - "127.0.0.1:15418:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 2s
+      retries: 30
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: LiveMysql84pass
+    ports:
+      - "127.0.0.1:13384:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pLiveMysql84pass"]
+      interval: 2s
+      retries: 60
+
+  mariadb:
+    image: mariadb:11.4
+    environment:
+      MARIADB_ROOT_PASSWORD: LiveMaria11pass
+    ports:
+      - "127.0.0.1:13311:3306"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      retries: 60
+
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    # The image exists for amd64 alone. Docker emulates it on an arm64 Mac.
+    platform: linux/amd64
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "Live#Mssql2022Pass"
+    ports:
+      - "127.0.0.1:11433:1433"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$$MSSQL_SA_PASSWORD" -Q "SELECT 1" -b -o /dev/null
+      interval: 5s
+      retries: 30

@@ -1482,7 +1482,7 @@ fn script_text(
 /// Reads one column of every row as text and joins the lines. Athena gives
 /// the CREATE text one line for each row, and the other engines give it in
 /// one row. An answer that holds no text gives `None`.
-fn text_of_column(response: &QueryResponse, column: usize) -> Option<String> {
+pub(crate) fn text_of_column(response: &QueryResponse, column: usize) -> Option<String> {
     let lines: Vec<String> = response
         .results
         .iter()

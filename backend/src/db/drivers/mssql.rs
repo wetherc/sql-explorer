@@ -1598,6 +1598,9 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
+mod live;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

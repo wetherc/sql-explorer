@@ -77,7 +77,11 @@ printf '\033[36m[4/5]\033[0m Formatting and linting of the backend\n'
 
 printf '\033[36m[5/5]\033[0m Unit tests and coverage of the backend\n'
 command -v cargo-llvm-cov >/dev/null 2>&1 || fail 'cargo-llvm-cov is not installed'
-(cd backend && cargo llvm-cov --summary-only --fail-under-lines "$BACKEND_MIN_LINES") ||
+# The live tests have #[ignore], so the gate never runs them. The regex
+# keeps their files (src/db/drivers/live.rs and src/db/drivers/*/live.rs) out
+# of the report. Without it, their lines count as lines that no test runs.
+(cd backend && cargo llvm-cov --summary-only --fail-under-lines "$BACKEND_MIN_LINES" \
+    --ignore-filename-regex '/live(\.rs|/)') ||
     fail 'a backend test failed, or the coverage is too low'
 (cd backend && cargo test --manifest-path vendor/tiberius/Cargo.toml --no-default-features --features tds73 --lib) || fail 'a test of the vendored tiberius failed'
 (cd backend && cargo test --manifest-path vendor/tokio-postgres/Cargo.toml --lib) || fail 'a test of the vendored tokio-postgres failed'
