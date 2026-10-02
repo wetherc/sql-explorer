@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { nextTick } from 'vue'
+import { isReactive, nextTick } from 'vue'
 import ResultsGrid from '@/components/ResultsGrid.vue'
 import { mountWithPlugins } from './mount'
 import { ResultTable } from '@/lib/results'
@@ -124,6 +124,39 @@ describe('ResultsGrid', () => {
     await header.trigger('click')
     expect(cell.attributes('aria-sort')).toBe('none')
     expect(wrapper.findAll('[data-test="grid-row"]')[0]?.text()).toContain('Grace')
+  })
+
+  it('does not sort a new result by the sort of the result before it', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    await wrapper.findAll('[data-test="grid-header"]')[0]!.trigger('click')
+    const next = result({ rows: Array.from({ length: 500 }, (_, index) => [index, `n${index}`]) })
+    const cell = vi.spyOn(next, 'cell')
+    await wrapper.setProps({ result: next })
+    // The window reads the rows it draws. A sort would read the column of
+    // every row.
+    expect(cell.mock.calls.filter(([row]) => row >= 200)).toHaveLength(0)
+    expect(wrapper.findAll('[data-test="grid-row"]')[0]?.text()).toContain('n0')
+  })
+
+  it('keeps a selection of every row outside the deep reactivity', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    await wrapper.findAll('[data-test="grid-cell"]')[0]!.trigger('keydown', {
+      key: 'a',
+      ctrlKey: true,
+    })
+    const state = (wrapper.vm as unknown as { $: { setupState: { selected: Set<number> } } }).$
+      .setupState.selected
+    expect(isReactive(state)).toBe(false)
+    expect(state.size).toBe(3)
+  })
+
+  it('stops the drag of a grip when the grid goes away', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    const remove = vi.spyOn(globalThis, 'removeEventListener')
+    await wrapper.find('[data-test="grid-column-grip"]').trigger('pointerdown', { clientX: 10 })
+    wrapper.unmount()
+    expect(remove).toHaveBeenCalledWith('pointermove', expect.any(Function))
+    remove.mockRestore()
   })
 
   it('puts the sort on a button, which a key can reach', () => {

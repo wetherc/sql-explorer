@@ -394,6 +394,8 @@ onBeforeUnmount(() => {
   }
   dropRowTexts()
   stopSortTimer()
+  // A drag of a grip that runs at unmount leaves its listeners on the window.
+  endResize()
 })
 
 const inspecting = ref(false)
@@ -404,8 +406,12 @@ const inspectTitle = ref('')
  * The rows the user selected, held by their place in the result and not by
  * their place in the view. A sort or a filter moves a row in the view, and
  * the selection must follow the row and not the position.
+ *
+ * Each change gives a new set. The set stays outside the deep reactivity of
+ * Vue, so a selection of every row of a large result costs no proxy and no
+ * tracked read for each row.
  */
-const selected = ref(new Set<number>())
+const selected = shallowRef(new Set<number>())
 /** The row of the last plain click, from which a click with Shift reaches. */
 const anchor = ref<number | null>(null)
 
@@ -623,12 +629,20 @@ function baseOrder(): number[] {
     : matchesFor(props.result, needle)
 }
 
+/**
+ * The result that the user chose the sort for. A new result starts with no
+ * sort, but the watch that clears the sort runs after the order is built
+ * again. Without this check, a switch to a large result sorts every row of
+ * it once by the sort of the result that has gone.
+ */
+let sortSource: ResultTable | null = null
+
 /** Builds the order of the view again, with the sort when one is active. */
 function updateOrder(): void {
   stopSortTimer()
   const base = baseOrder()
   orderedCount = base.length
-  const index = sortIndex.value
+  const index = sortSource === props.result ? sortIndex.value : null
   if (index === null) {
     // The array of the places can be the one that the view holds already, so
     // the view is told of its new rows.
@@ -728,6 +742,7 @@ function onScroll(event: Event): void {
 }
 
 function toggleSort(index: number): void {
+  sortSource = props.result
   if (sortIndex.value === index) {
     if (sortDescending.value) {
       sortIndex.value = null
