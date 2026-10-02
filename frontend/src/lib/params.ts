@@ -4,7 +4,7 @@
  * A value carries the form the user chose, so no text is read as a number by
  * chance. An identifier such as `007` therefore stays as it is.
  */
-import { ParamKind, type ParamValue } from '@/types/api'
+import { ParamType, type ParamValue } from '@/types/api'
 
 /**
  * A number that holds digits alone, with a sign and a decimal point. The
@@ -38,21 +38,21 @@ export function booleanOfText(text: string): boolean | null {
 
 /** Builds the record for one name, with the form and the text it starts at. */
 export function newParamValue(name: string, held?: ParamValue): ParamValue {
-  return held ? { ...held } : { name, kind: ParamKind.Text, text: '' }
+  return held ? { ...held } : { name, valueType: ParamType.Text, text: '' }
 }
 
 /** Turns one value of the dialog into the JSON that the backend binds. */
 export function jsonOfParam(value: ParamValue): unknown {
-  if (value.kind === ParamKind.Null) {
+  if (value.valueType === ParamType.Null) {
     return null
   }
-  if (value.kind === ParamKind.Boolean) {
+  if (value.valueType === ParamType.Boolean) {
     // A text that names neither state goes to the server as it is, and the
     // server judges it. The dialog blocks such a text before the run.
     const flag = booleanOfText(value.text)
     return flag === null ? value.text : flag
   }
-  if (value.kind === ParamKind.Number) {
+  if (value.valueType === ParamType.Number) {
     // A double does not hold every number that the user can write. The value
     // goes as a number only if its digits come back unchanged. If they do
     // not, the digits go as text and the server reads them. A text that the
@@ -76,10 +76,10 @@ export function paramProblem(value: ParamValue): string | null {
   if (text === '') {
     return null
   }
-  if (value.kind === ParamKind.Number) {
+  if (value.valueType === ParamType.Number) {
     return Number.isFinite(Number(text)) ? null : 'Write a number.'
   }
-  if (value.kind === ParamKind.Boolean) {
+  if (value.valueType === ParamType.Boolean) {
     return booleanOfText(text) === null ? 'Write true or false.' : null
   }
   return null
@@ -95,7 +95,7 @@ export function paramChipLabel(name: string, values: ParamValue[]): string {
   if (!held || needsAValue(held)) {
     return `:${name} = unset`
   }
-  if (held.kind === ParamKind.Null) {
+  if (held.valueType === ParamType.Null) {
     return `:${name} = empty value`
   }
   return `:${name} = ${held.text}`
@@ -127,7 +127,7 @@ export function alignParams(names: string[], held: ParamValue[]): ParamValue[] {
 
 /** True when a value is still waiting for the user. */
 export function needsAValue(value: ParamValue): boolean {
-  return value.kind !== ParamKind.Null && value.text.trim() === ''
+  return value.valueType !== ParamType.Null && value.text.trim() === ''
 }
 
 /** Reads the parameter values of a tab out of the workspace file. */
@@ -135,13 +135,19 @@ export function parseParamValues(value: unknown): ParamValue[] {
   if (!Array.isArray(value)) {
     return []
   }
-  const kinds: string[] = Object.values(ParamKind)
+  const types: string[] = Object.values(ParamType)
   return value
     .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
     .filter((item) => typeof item.name === 'string' && typeof item.text === 'string')
-    .map((item) => ({
-      name: item.name as string,
-      kind: (kinds.includes(item.kind as string) ? item.kind : ParamKind.Text) as ParamKind,
-      text: item.text as string,
-    }))
+    .map((item) => {
+      // The workspace file of an earlier release names the type in the field
+      // `kind`. A value without `valueType` reads that field, so a saved tab
+      // keeps the types of its values.
+      const given = 'valueType' in item ? item.valueType : item.kind
+      return {
+        name: item.name as string,
+        valueType: (types.includes(given as string) ? given : ParamType.Text) as ParamType,
+        text: item.text as string,
+      }
+    })
 }

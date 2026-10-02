@@ -421,18 +421,18 @@ export interface SchemaSnapshot {
 }
 
 /** The form of one value that the user gave for a parameter. */
-export const ParamKind = {
+export const ParamType = {
   Text: 'text',
   Number: 'number',
   Boolean: 'boolean',
   Null: 'null',
 } as const
-export type ParamKind = (typeof ParamKind)[keyof typeof ParamKind]
+export type ParamType = (typeof ParamType)[keyof typeof ParamType]
 
 /** One value that the user gave for a named parameter of a statement. */
 export interface ParamValue {
   name: string
-  kind: ParamKind
+  valueType: ParamType
   text: string
 }
 

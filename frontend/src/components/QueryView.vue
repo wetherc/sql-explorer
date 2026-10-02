@@ -404,20 +404,20 @@
           >
             <div class="param-name text-medium-emphasis">:{{ row.name }}</div>
             <v-select
-              :model-value="row.kind"
-              :items="PARAM_KINDS"
+              :model-value="row.valueType"
+              :items="PARAM_TYPES"
               item-title="title"
               item-value="value"
               label="Form"
               hide-details
-              class="param-kind"
-              :data-test="`parameter-kind-${row.name}`"
-              @update:model-value="(kind) => onParamKindChange(row, kind as ParamKind)"
+              class="param-type"
+              :data-test="`parameter-type-${row.name}`"
+              @update:model-value="(valueType) => onParamTypeChange(row, valueType as ParamType)"
             />
             <!-- A value of the true or false form takes one of two words, so
                  it is chosen and not written. -->
             <v-select
-              v-if="row.kind === ParamKind.Boolean"
+              v-if="row.valueType === ParamType.Boolean"
               v-model="row.text"
               :items="BOOLEAN_VALUES"
               label="Value"
@@ -427,7 +427,7 @@
             <v-text-field
               v-else
               v-model="row.text"
-              :disabled="row.kind === ParamKind.Null"
+              :disabled="row.valueType === ParamType.Null"
               :error-messages="paramProblem(row) ?? undefined"
               label="Value"
               :data-test="`parameter-value-${row.name}`"
@@ -508,7 +508,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { useTabsStore } from '@/stores/tabs'
 import { useUiStore } from '@/stores/ui'
 import { alignParams, needsAValue, paramChipLabel, paramProblem, paramsForRun } from '@/lib/params'
-import { Dialect, ParamKind, PlanMode, type ParamValue, type ResultSet } from '@/types/api'
+import { Dialect, ParamType, PlanMode, type ParamValue, type ResultSet } from '@/types/api'
 import type { ExportAllFormat, ExportFormat } from './ResultsGrid.vue'
 import type { ResultPane } from '@/stores/query'
 import type { QueryTab } from '@/stores/tabs'
@@ -655,7 +655,7 @@ watch(
 function focusParamDialog(): void {
   const card = paramCard.value?.$el as HTMLElement | undefined
   // The value of the first parameter is what the dialog waits for, so the
-  // focus goes there and not to the kind that stands beside it.
+  // focus goes there and not to the type that stands beside it.
   const field =
     card?.querySelector<HTMLElement>('[data-test^="parameter-value-"] input') ??
     card?.querySelector<HTMLElement>('input, button')
@@ -676,11 +676,11 @@ function paneLabel(pane: ResultPane): string {
 }
 
 /** The forms a value can take in the parameter dialog. */
-const PARAM_KINDS = [
-  { title: 'Text', value: ParamKind.Text },
-  { title: 'Number', value: ParamKind.Number },
-  { title: 'True or false', value: ParamKind.Boolean },
-  { title: 'Empty value', value: ParamKind.Null },
+const PARAM_TYPES = [
+  { title: 'Text', value: ParamType.Text },
+  { title: 'Number', value: ParamType.Number },
+  { title: 'True or false', value: ParamType.Boolean },
+  { title: 'Empty value', value: ParamType.Null },
 ]
 
 /** The two words that a value of the true or false form takes. */
@@ -760,9 +760,9 @@ const paramsAreWrong = computed(() => paramRows.value.some((row) => paramProblem
  * false value takes one of the two words, because the box that shows it holds
  * those two alone.
  */
-function onParamKindChange(row: ParamValue, kind: ParamKind): void {
-  row.kind = kind
-  if (kind === ParamKind.Boolean && !BOOLEAN_VALUES.includes(row.text.trim().toLowerCase())) {
+function onParamTypeChange(row: ParamValue, valueType: ParamType): void {
+  row.valueType = valueType
+  if (valueType === ParamType.Boolean && !BOOLEAN_VALUES.includes(row.text.trim().toLowerCase())) {
     row.text = 'false'
   }
 }
@@ -1161,7 +1161,7 @@ defineExpose({ runStatement, runAll, formatStatement, readPlan, saveToFile })
   font-family: var(--app-font-mono);
 }
 
-.param-kind {
+.param-type {
   max-width: 150px;
 }
 

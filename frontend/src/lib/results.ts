@@ -39,12 +39,12 @@ const CACHE_CELL_WEIGHT = 16
 
 /** One column of one chunk, in the form the bytes carry. */
 type SegmentColumn =
-  | { kind: 'null' }
-  | { kind: 'bool'; nulls: Uint8Array; values: Uint8Array }
-  | { kind: 'int32'; nulls: Uint8Array; values: Int32Array }
-  | { kind: 'float64'; nulls: Uint8Array; values: Float64Array }
+  | { encoding: 'null' }
+  | { encoding: 'bool'; nulls: Uint8Array; values: Uint8Array }
+  | { encoding: 'int32'; nulls: Uint8Array; values: Int32Array }
+  | { encoding: 'float64'; nulls: Uint8Array; values: Float64Array }
   | {
-      kind: 'text' | 'json'
+      encoding: 'text' | 'json'
       nulls: Uint8Array
       ends: Uint32Array
       bytes: Uint8Array
@@ -58,7 +58,7 @@ type SegmentColumn =
       used: boolean
     }
   | {
-      kind: 'dict'
+      encoding: 'dict'
       nulls: Uint8Array
       /** The place in the dictionary of the text of each row. */
       codes: Uint32Array
@@ -80,10 +80,10 @@ interface Segment {
   plain?: CellValue[][]
 }
 
-type TextColumn = Extract<SegmentColumn, { kind: 'text' | 'json' }>
+type TextColumn = Extract<SegmentColumn, { encoding: 'text' | 'json' }>
 
 function isText(column: SegmentColumn): column is TextColumn {
-  return column.kind === 'text' || column.kind === 'json'
+  return column.encoding === 'text' || column.encoding === 'json'
 }
 
 /** The weight that the cache of one text column adds to the table. */
@@ -257,7 +257,7 @@ export class ResultTable {
 
 /** Reads one value of one column of one chunk that holds no text of its own. */
 function valueOf(column: Exclude<SegmentColumn, TextColumn>, row: number): CellValue {
-  switch (column.kind) {
+  switch (column.encoding) {
     case 'null':
       return null
     case 'bool':
@@ -276,7 +276,7 @@ function valueOf(column: Exclude<SegmentColumn, TextColumn>, row: number): CellV
  * one text gives back that one text, so a column of many rows costs one text
  * for each different value.
  */
-function dictValue(column: Extract<SegmentColumn, { kind: 'dict' }>, row: number): CellValue {
+function dictValue(column: Extract<SegmentColumn, { encoding: 'dict' }>, row: number): CellValue {
   if (bitSet(column.nulls, row)) {
     return null
   }
@@ -327,7 +327,7 @@ function textValue(
   const end = column.ends[row] ?? 0
   const start = row === 0 ? 0 : (column.ends[row - 1] ?? 0)
   const text = decoder.decode(column.bytes.subarray(start, end))
-  const value: CellValue = column.kind === 'json' ? parseJsonCell(text) : text
+  const value: CellValue = column.encoding === 'json' ? parseJsonCell(text) : text
   cache[row] = value
   return value
 }
@@ -474,9 +474,9 @@ export class ResultStream {
     const view = new DataView(buffer)
     let at = 0
     while (at < buffer.byteLength) {
-      const kind = view.getUint8(at)
+      const frameType = view.getUint8(at)
       at += 1
-      switch (kind) {
+      switch (frameType) {
         case FRAME_BEGIN_SET:
           at = this.readBeginSet(view, buffer, at)
           break
@@ -490,7 +490,7 @@ export class ResultStream {
           at = this.readEnd(view, buffer, at)
           break
         default:
-          throw new Error(`The rows hold a frame of the unknown kind ${kind}.`)
+          throw new Error(`The rows hold a frame of the unknown type ${frameType}.`)
       }
     }
   }
@@ -581,7 +581,7 @@ function readColumn(
   rows: number,
 ): { column: SegmentColumn; at: number } {
   if (encoding === ENCODING_NULL) {
-    return { column: { kind: 'null' }, at }
+    return { column: { encoding: 'null' }, at }
   }
   // A form the reader does not know says nothing about the bytes that
   // follow it, so the walk of the frames stops here and not further along.
@@ -593,14 +593,18 @@ function readColumn(
     case ENCODING_BOOL: {
       const values = readMask(buffer, nulls.at, rows)
       return {
-        column: { kind: 'bool', nulls: nulls.mask, values: values.mask },
+        column: { encoding: 'bool', nulls: nulls.mask, values: values.mask },
         at: values.at,
       }
     }
     case ENCODING_INT32: {
       const start = align(nulls.at, 4)
       return {
-        column: { kind: 'int32', nulls: nulls.mask, values: new Int32Array(buffer, start, rows) },
+        column: {
+          encoding: 'int32',
+          nulls: nulls.mask,
+          values: new Int32Array(buffer, start, rows),
+        },
         at: start + rows * 4,
       }
     }
@@ -608,7 +612,7 @@ function readColumn(
       const start = align(nulls.at, 8)
       return {
         column: {
-          kind: 'float64',
+          encoding: 'float64',
           nulls: nulls.mask,
           values: new Float64Array(buffer, start, rows),
         },
@@ -624,7 +628,7 @@ function readColumn(
       const bytes = new Uint8Array(buffer, lengthAt + 4, length)
       return {
         column: {
-          kind: encoding === ENCODING_JSON ? 'json' : 'text',
+          encoding: encoding === ENCODING_JSON ? 'json' : 'text',
           nulls: nulls.mask,
           ends,
           bytes,
@@ -646,7 +650,7 @@ function readColumn(
       const codesAt = align(lengthAt + 4 + length, 4)
       return {
         column: {
-          kind: 'dict',
+          encoding: 'dict',
           nulls: nulls.mask,
           codes: new Uint32Array(buffer, codesAt, rows),
           ends,

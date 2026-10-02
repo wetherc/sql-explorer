@@ -422,9 +422,9 @@ async fn read_sets<P: Protocol>(
             continue;
         }
 
-        let kinds: Vec<ValueKind> = wire
+        let formats: Vec<ValueFormat> = wire
             .iter()
-            .map(|column| value_kind(column.column_type(), column.character_set()))
+            .map(|column| value_format(column.column_type(), column.character_set()))
             .collect();
         sink.begin_set(columns.clone())?;
         let mut count = 0usize;
@@ -434,7 +434,7 @@ async fn read_sets<P: Protocol>(
                 truncated = true;
                 break;
             }
-            if sink.row(row_to_json(&row, &kinds))? == SinkControl::Stop {
+            if sink.row(row_to_json(&row, &formats))? == SinkControl::Stop {
                 truncated = true;
                 *stopped = true;
                 break;
@@ -488,13 +488,13 @@ async fn report_warnings(conn: &mut Conn, sink: &mut dyn RowSink) {
 /// level of the message, and the detail gives the level and the code as the
 /// server sent them.
 fn warning_message(level: &str, code: u32, text: String) -> Message {
-    let kind = match level {
+    let message_level = match level {
         "Note" => MessageLevel::Info,
         "Error" => MessageLevel::Error,
         _ => MessageLevel::Warning,
     };
     Message {
-        level: kind,
+        level: message_level,
         text,
         detail: Some(format!("{level}, Code {code}")),
     }
@@ -1029,12 +1029,12 @@ fn event_of(row: EventRow) -> ScheduledEvent {
     }
 }
 
-/// The kind of value that a column holds, as far as the conversion to JSON
+/// The format of the values of a column, as far as the conversion to JSON
 /// needs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ValueKind {
+pub enum ValueFormat {
     /// A DATE column. The driver gives the same value for DATE, DATETIME
-    /// and TIMESTAMP, so the kind decides whether the text has a time.
+    /// and TIMESTAMP, so the format decides whether the text has a time.
     DateOnly,
     /// A whole number. The text protocol sends it as text.
     Integer,
@@ -1055,16 +1055,16 @@ pub enum ValueKind {
 /// VARBINARY and BLOB columns, and also to numbers and dates.
 const BINARY_CHARSET: u16 = 63;
 
-/// Finds the kind of value from the wire type and the character set of a
-/// column.
-pub fn value_kind(column_type: ColumnType, charset: u16) -> ValueKind {
+/// Finds the format of the values from the wire type and the character set
+/// of a column.
+pub fn value_format(column_type: ColumnType, charset: u16) -> ValueFormat {
     use ColumnType::*;
     match column_type {
-        MYSQL_TYPE_DATE | MYSQL_TYPE_NEWDATE => ValueKind::DateOnly,
+        MYSQL_TYPE_DATE | MYSQL_TYPE_NEWDATE => ValueFormat::DateOnly,
         MYSQL_TYPE_TINY | MYSQL_TYPE_SHORT | MYSQL_TYPE_INT24 | MYSQL_TYPE_LONG
-        | MYSQL_TYPE_LONGLONG | MYSQL_TYPE_YEAR => ValueKind::Integer,
-        MYSQL_TYPE_FLOAT | MYSQL_TYPE_DOUBLE => ValueKind::Float,
-        MYSQL_TYPE_BIT => ValueKind::Bit,
+        | MYSQL_TYPE_LONGLONG | MYSQL_TYPE_YEAR => ValueFormat::Integer,
+        MYSQL_TYPE_FLOAT | MYSQL_TYPE_DOUBLE => ValueFormat::Float,
+        MYSQL_TYPE_BIT => ValueFormat::Bit,
         MYSQL_TYPE_STRING
         | MYSQL_TYPE_VAR_STRING
         | MYSQL_TYPE_VARCHAR
@@ -1074,9 +1074,9 @@ pub fn value_kind(column_type: ColumnType, charset: u16) -> ValueKind {
         | MYSQL_TYPE_LONG_BLOB
             if charset == BINARY_CHARSET =>
         {
-            ValueKind::Binary
+            ValueFormat::Binary
         }
-        _ => ValueKind::Other,
+        _ => ValueFormat::Other,
     }
 }
 
@@ -1147,35 +1147,35 @@ pub fn type_label(column_type: ColumnType, charset: u16, flags: ColumnFlags) -> 
 /// Converts one row into an array of JSON values. The values stay in the row
 /// while they are read, so a row of text costs no copy of that text.
 ///
-/// `kinds` holds one kind for each column, as `value_kind` reads it.
-pub fn row_to_json(row: &MysqlRow, kinds: &[ValueKind]) -> Vec<JsonValue> {
-    kinds
+/// `formats` holds one format for each column, as `value_format` reads it.
+pub fn row_to_json(row: &MysqlRow, formats: &[ValueFormat]) -> Vec<JsonValue> {
+    formats
         .iter()
         .enumerate()
-        .map(|(index, kind)| {
+        .map(|(index, format)| {
             row.as_ref(index)
-                .map_or(JsonValue::Null, |value| value_to_json(value, *kind))
+                .map_or(JsonValue::Null, |value| value_to_json(value, *format))
         })
         .collect()
 }
 
 /// Converts a number that the text protocol sends as text. Text that does
 /// not parse stays text.
-fn number_text_to_json(text: &str, kind: ValueKind) -> Option<JsonValue> {
-    match kind {
-        ValueKind::Integer => text
+fn number_text_to_json(text: &str, format: ValueFormat) -> Option<JsonValue> {
+    match format {
+        ValueFormat::Integer => text
             .parse::<i64>()
             .map(JsonValue::from)
             .or_else(|_| text.parse::<u64>().map(JsonValue::from))
             .ok(),
-        ValueKind::Float => text.parse::<f64>().ok().map(f64_to_json),
-        ValueKind::DateOnly | ValueKind::Bit | ValueKind::Binary | ValueKind::Other => None,
+        ValueFormat::Float => text.parse::<f64>().ok().map(f64_to_json),
+        ValueFormat::DateOnly | ValueFormat::Bit | ValueFormat::Binary | ValueFormat::Other => None,
     }
 }
 
-/// Converts one value of the driver into JSON. `kind` is the kind of value
-/// of the column.
-pub fn value_to_json(value: &MysqlValue, kind: ValueKind) -> JsonValue {
+/// Converts one value of the driver into JSON. `format` is the format of
+/// the values of the column.
+pub fn value_to_json(value: &MysqlValue, format: ValueFormat) -> JsonValue {
     match value {
         MysqlValue::NULL => JsonValue::Null,
         MysqlValue::Int(number) => JsonValue::from(*number),
@@ -1185,17 +1185,19 @@ pub fn value_to_json(value: &MysqlValue, kind: ValueKind) -> JsonValue {
         // A BIT value is a whole number of at most 64 bits, first byte
         // highest, so BIT(1) that holds 1 gives 1 and BIT(8) gives 65, not
         // "A".
-        MysqlValue::Bytes(bytes) if kind == ValueKind::Bit && bytes.len() <= 8 => JsonValue::from(
-            bytes
-                .iter()
-                .fold(0u64, |value, byte| (value << 8) | u64::from(*byte)),
-        ),
-        MysqlValue::Bytes(bytes) if kind == ValueKind::Binary => bytes_to_json(bytes),
+        MysqlValue::Bytes(bytes) if format == ValueFormat::Bit && bytes.len() <= 8 => {
+            JsonValue::from(
+                bytes
+                    .iter()
+                    .fold(0u64, |value, byte| (value << 8) | u64::from(*byte)),
+            )
+        }
+        MysqlValue::Bytes(bytes) if format == ValueFormat::Binary => bytes_to_json(bytes),
         // The server sends text and decimals as bytes. Text that is not
         // valid UTF-8 becomes base64.
         MysqlValue::Bytes(bytes) => match std::str::from_utf8(bytes) {
             Ok(text) => {
-                number_text_to_json(text, kind).unwrap_or_else(|| JsonValue::String(text.into()))
+                number_text_to_json(text, format).unwrap_or_else(|| JsonValue::String(text.into()))
             }
             Err(_) => bytes_to_json(bytes),
         },
@@ -1208,7 +1210,7 @@ pub fn value_to_json(value: &MysqlValue, kind: ValueKind) -> JsonValue {
                 *minute,
                 *second,
                 *microsecond,
-                kind == ValueKind::DateOnly,
+                format == ValueFormat::DateOnly,
             ))
         }
         MysqlValue::Time(negative, days, hours, minutes, seconds, microseconds) => {
@@ -1404,17 +1406,18 @@ mod tests {
     fn a_bit_column_gives_a_whole_number() {
         use serde_json::json;
         assert_eq!(
-            value_kind(ColumnType::MYSQL_TYPE_BIT, BINARY_CHARSET),
-            ValueKind::Bit
+            value_format(ColumnType::MYSQL_TYPE_BIT, BINARY_CHARSET),
+            ValueFormat::Bit
         );
-        let bit = |bytes: &[u8]| value_to_json(&MysqlValue::Bytes(bytes.to_vec()), ValueKind::Bit);
+        let bit =
+            |bytes: &[u8]| value_to_json(&MysqlValue::Bytes(bytes.to_vec()), ValueFormat::Bit);
         assert_eq!(bit(&[1]), json!(1));
         assert_eq!(bit(&[0x41]), json!(65));
         assert_eq!(bit(&[0x01, 0x00]), json!(256));
         assert_eq!(bit(&[0xFF; 8]), json!(u64::MAX));
         // Another column that holds the same bytes keeps its text.
         assert_eq!(
-            value_to_json(&MysqlValue::Bytes(vec![0x41]), ValueKind::Other),
+            value_to_json(&MysqlValue::Bytes(vec![0x41]), ValueFormat::Other),
             json!("A")
         );
     }
@@ -1756,36 +1759,36 @@ mod tests {
     #[test]
     fn every_value_type_becomes_json() {
         assert_eq!(
-            value_to_json(&MysqlValue::NULL, ValueKind::Other),
+            value_to_json(&MysqlValue::NULL, ValueFormat::Other),
             JsonValue::Null
         );
         assert_eq!(
-            value_to_json(&MysqlValue::Int(-4), ValueKind::Other),
+            value_to_json(&MysqlValue::Int(-4), ValueFormat::Other),
             serde_json::json!(-4)
         );
         assert_eq!(
-            value_to_json(&MysqlValue::UInt(4), ValueKind::Other),
+            value_to_json(&MysqlValue::UInt(4), ValueFormat::Other),
             serde_json::json!(4)
         );
         assert_eq!(
-            value_to_json(&MysqlValue::Double(1.25), ValueKind::Other),
+            value_to_json(&MysqlValue::Double(1.25), ValueFormat::Other),
             serde_json::json!(1.25)
         );
         assert_eq!(
-            value_to_json(&MysqlValue::Float(0.5), ValueKind::Other),
+            value_to_json(&MysqlValue::Float(0.5), ValueFormat::Other),
             serde_json::json!(0.5)
         );
         assert_eq!(
-            value_to_json(&MysqlValue::Float(0.1), ValueKind::Other),
+            value_to_json(&MysqlValue::Float(0.1), ValueFormat::Other),
             serde_json::json!(0.1)
         );
         assert_eq!(
-            value_to_json(&MysqlValue::Bytes(b"hello".to_vec()), ValueKind::Other),
+            value_to_json(&MysqlValue::Bytes(b"hello".to_vec()), ValueFormat::Other),
             serde_json::json!("hello")
         );
         // Bytes that are not valid text become base64.
         assert_eq!(
-            value_to_json(&MysqlValue::Bytes(vec![0xff, 0xfe]), ValueKind::Other),
+            value_to_json(&MysqlValue::Bytes(vec![0xff, 0xfe]), ValueFormat::Other),
             serde_json::json!("//4=")
         );
     }
@@ -1796,52 +1799,55 @@ mod tests {
         assert_eq!(
             value_to_json(
                 &MysqlValue::Date(2026, 8, 10, 0, 0, 0, 0),
-                ValueKind::DateOnly
+                ValueFormat::DateOnly
             ),
             serde_json::json!("2026-08-10")
         );
         // A DATETIME column keeps the time, also at midnight.
         assert_eq!(
-            value_to_json(&MysqlValue::Date(2026, 8, 10, 0, 0, 0, 0), ValueKind::Other),
+            value_to_json(
+                &MysqlValue::Date(2026, 8, 10, 0, 0, 0, 0),
+                ValueFormat::Other
+            ),
             serde_json::json!("2026-08-10 00:00:00")
         );
         assert_eq!(
             value_to_json(
                 &MysqlValue::Date(2026, 8, 10, 13, 5, 6, 0),
-                ValueKind::Other
+                ValueFormat::Other
             ),
             serde_json::json!("2026-08-10 13:05:06")
         );
         assert_eq!(
             value_to_json(
                 &MysqlValue::Date(2026, 8, 10, 13, 5, 6, 123456),
-                ValueKind::Other
+                ValueFormat::Other
             ),
             serde_json::json!("2026-08-10 13:05:06.123456")
         );
     }
 
     #[test]
-    fn the_type_of_a_column_gives_the_kind_of_value() {
+    fn the_type_of_a_column_gives_the_format_of_its_values() {
         use ColumnType::*;
         let text = 255;
         assert_eq!(
-            value_kind(MYSQL_TYPE_DATE, BINARY_CHARSET),
-            ValueKind::DateOnly
+            value_format(MYSQL_TYPE_DATE, BINARY_CHARSET),
+            ValueFormat::DateOnly
         );
         assert_eq!(
-            value_kind(MYSQL_TYPE_NEWDATE, BINARY_CHARSET),
-            ValueKind::DateOnly
+            value_format(MYSQL_TYPE_NEWDATE, BINARY_CHARSET),
+            ValueFormat::DateOnly
         );
         assert_eq!(
-            value_kind(MYSQL_TYPE_DATETIME, BINARY_CHARSET),
-            ValueKind::Other
+            value_format(MYSQL_TYPE_DATETIME, BINARY_CHARSET),
+            ValueFormat::Other
         );
         assert_eq!(
-            value_kind(MYSQL_TYPE_TIMESTAMP, BINARY_CHARSET),
-            ValueKind::Other
+            value_format(MYSQL_TYPE_TIMESTAMP, BINARY_CHARSET),
+            ValueFormat::Other
         );
-        for kind in [
+        for column_type in [
             MYSQL_TYPE_TINY,
             MYSQL_TYPE_SHORT,
             MYSQL_TYPE_INT24,
@@ -1849,21 +1855,24 @@ mod tests {
             MYSQL_TYPE_LONGLONG,
             MYSQL_TYPE_YEAR,
         ] {
-            assert_eq!(value_kind(kind, BINARY_CHARSET), ValueKind::Integer);
+            assert_eq!(
+                value_format(column_type, BINARY_CHARSET),
+                ValueFormat::Integer
+            );
         }
         assert_eq!(
-            value_kind(MYSQL_TYPE_FLOAT, BINARY_CHARSET),
-            ValueKind::Float
+            value_format(MYSQL_TYPE_FLOAT, BINARY_CHARSET),
+            ValueFormat::Float
         );
         assert_eq!(
-            value_kind(MYSQL_TYPE_DOUBLE, BINARY_CHARSET),
-            ValueKind::Float
+            value_format(MYSQL_TYPE_DOUBLE, BINARY_CHARSET),
+            ValueFormat::Float
         );
         assert_eq!(
-            value_kind(MYSQL_TYPE_NEWDECIMAL, BINARY_CHARSET),
-            ValueKind::Other
+            value_format(MYSQL_TYPE_NEWDECIMAL, BINARY_CHARSET),
+            ValueFormat::Other
         );
-        for kind in [
+        for column_type in [
             MYSQL_TYPE_STRING,
             MYSQL_TYPE_VAR_STRING,
             MYSQL_TYPE_VARCHAR,
@@ -1872,8 +1881,11 @@ mod tests {
             MYSQL_TYPE_MEDIUM_BLOB,
             MYSQL_TYPE_LONG_BLOB,
         ] {
-            assert_eq!(value_kind(kind, BINARY_CHARSET), ValueKind::Binary);
-            assert_eq!(value_kind(kind, text), ValueKind::Other);
+            assert_eq!(
+                value_format(column_type, BINARY_CHARSET),
+                ValueFormat::Binary
+            );
+            assert_eq!(value_format(column_type, text), ValueFormat::Other);
         }
     }
 
@@ -1933,45 +1945,45 @@ mod tests {
     #[test]
     fn a_binary_column_gives_base64_for_every_value() {
         assert_eq!(
-            value_to_json(&MysqlValue::Bytes(b"AB".to_vec()), ValueKind::Binary),
+            value_to_json(&MysqlValue::Bytes(b"AB".to_vec()), ValueFormat::Binary),
             serde_json::json!("QUI=")
         );
         assert_eq!(
-            value_to_json(&MysqlValue::Bytes(vec![0xFF]), ValueKind::Binary),
-            value_to_json(&MysqlValue::Bytes(vec![0xFF]), ValueKind::Other)
+            value_to_json(&MysqlValue::Bytes(vec![0xFF]), ValueFormat::Binary),
+            value_to_json(&MysqlValue::Bytes(vec![0xFF]), ValueFormat::Other)
         );
     }
 
     #[test]
     fn a_number_in_the_text_protocol_becomes_a_json_number() {
-        let text = |value: &str, kind| value_to_json(&MysqlValue::Bytes(value.into()), kind);
-        assert_eq!(text("-4", ValueKind::Integer), serde_json::json!(-4));
+        let text = |value: &str, format| value_to_json(&MysqlValue::Bytes(value.into()), format);
+        assert_eq!(text("-4", ValueFormat::Integer), serde_json::json!(-4));
         assert_eq!(
-            text("18446744073709551615", ValueKind::Integer),
+            text("18446744073709551615", ValueFormat::Integer),
             serde_json::json!(u64::MAX)
         );
-        assert_eq!(text("0.1", ValueKind::Float), serde_json::json!(0.1));
-        assert_eq!(text("1e20", ValueKind::Float), serde_json::json!(1e20));
+        assert_eq!(text("0.1", ValueFormat::Float), serde_json::json!(0.1));
+        assert_eq!(text("1e20", ValueFormat::Float), serde_json::json!(1e20));
         // A DECIMAL keeps its text, so no digit is lost.
-        assert_eq!(text("1.50", ValueKind::Other), serde_json::json!("1.50"));
+        assert_eq!(text("1.50", ValueFormat::Other), serde_json::json!("1.50"));
         // A date in the text protocol is already text.
         assert_eq!(
-            text("2026-08-10", ValueKind::DateOnly),
+            text("2026-08-10", ValueFormat::DateOnly),
             serde_json::json!("2026-08-10")
         );
         // Text that does not parse stays text.
-        assert_eq!(text("x", ValueKind::Integer), serde_json::json!("x"));
-        assert_eq!(text("x", ValueKind::Float), serde_json::json!("x"));
+        assert_eq!(text("x", ValueFormat::Integer), serde_json::json!("x"));
+        assert_eq!(text("x", ValueFormat::Float), serde_json::json!("x"));
     }
 
     #[test]
     fn an_interval_folds_the_days_into_the_hours() {
         assert_eq!(
-            value_to_json(&MysqlValue::Time(false, 1, 2, 3, 4, 0), ValueKind::Other),
+            value_to_json(&MysqlValue::Time(false, 1, 2, 3, 4, 0), ValueFormat::Other),
             serde_json::json!("26:03:04")
         );
         assert_eq!(
-            value_to_json(&MysqlValue::Time(true, 0, 2, 3, 4, 500), ValueKind::Other),
+            value_to_json(&MysqlValue::Time(true, 0, 2, 3, 4, 500), ValueFormat::Other),
             serde_json::json!("-02:03:04.000500")
         );
     }
@@ -1985,7 +1997,7 @@ mod tests {
         ];
         let json: Vec<JsonValue> = values
             .iter()
-            .map(|value| value_to_json(value, ValueKind::Other))
+            .map(|value| value_to_json(value, ValueFormat::Other))
             .collect();
         assert_eq!(
             json,

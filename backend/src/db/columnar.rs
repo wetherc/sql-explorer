@@ -10,7 +10,7 @@
 //! number for each row.
 //!
 //! Every number in the form is little-endian. One message holds one or more
-//! frames, and each frame starts with one byte that names its kind.
+//! frames, and each frame starts with one byte that names its type.
 
 use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{ColumnInfo, Message, QueryStats};
@@ -20,7 +20,7 @@ use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use tauri::ipc::{Channel, InvokeResponseBody};
 
-/// The kind byte of each frame.
+/// The type byte of each frame.
 pub const FRAME_BEGIN_SET: u8 = 1;
 pub const FRAME_CHUNK: u8 = 2;
 pub const FRAME_END_SET: u8 = 3;
@@ -806,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn each_kind_of_value_takes_the_encoding_that_holds_it() {
+    fn each_type_of_value_takes_its_own_encoding() {
         let rows = vec![
             vec![
                 JsonValue::Null,

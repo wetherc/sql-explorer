@@ -27,7 +27,7 @@ describe('parseWorkspace', () => {
           connectionId: 'c1',
           dirty: true,
           savedQueryId: 'q1',
-          params: [{ name: 'id', kind: 'number', text: '7' }],
+          params: [{ name: 'id', valueType: 'number', text: '7' }],
           filePath: '/data/one.sql',
         },
         { id: 'b', query: 'SELECT 2' },
@@ -45,7 +45,7 @@ describe('parseWorkspace', () => {
       connectionId: 'c1',
       dirty: true,
       savedQueryId: 'q1',
-      params: [{ name: 'id', kind: 'number', text: '7' }],
+      params: [{ name: 'id', valueType: 'number', text: '7' }],
       filePath: '/data/one.sql',
     })
     expect(workspace.tabs[1]).toEqual({
@@ -332,7 +332,7 @@ describe('tabs store', () => {
   it('holds the values of the parameters of one tab', () => {
     const tabs = useTabsStore()
     const tab = tabs.add({ query: 'SELECT :id' })
-    const values = [{ name: 'id', kind: 'number' as const, text: '7' }]
+    const values = [{ name: 'id', valueType: 'number' as const, text: '7' }]
 
     tabs.setParams(tab.id, values)
     expect(tabs.tabs[0]?.params).toEqual(values)

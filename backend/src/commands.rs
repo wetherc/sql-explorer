@@ -3572,20 +3572,20 @@ mod tests {
     }
 
     /// A channel that keeps the first byte of every message, which names
-    /// the kind of the first frame of that message.
-    fn kind_channel() -> (
+    /// the type of the first frame of that message.
+    fn frame_type_channel() -> (
         Channel<InvokeResponseBody>,
         std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
     ) {
-        let kinds = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let kept = kinds.clone();
+        let frame_types = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = frame_types.clone();
         let channel = Channel::new(move |body| {
             if let InvokeResponseBody::Raw(bytes) = body {
                 kept.lock().unwrap().push(bytes[0]);
             }
             Ok(())
         });
-        (channel, kinds)
+        (channel, frame_types)
     }
 
     fn run_request(connection_id: &str, query: &str) -> ExecuteRequest {
@@ -3607,7 +3607,7 @@ mod tests {
         let (app, state) = state_with_sqlite(descriptor).await;
         app.manage(state);
 
-        let (channel, kinds) = kind_channel();
+        let (channel, frame_types) = frame_type_channel();
         execute_query(
             app.handle().clone(),
             run_request("s1", "SELECT 1"),
@@ -3616,11 +3616,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(kinds.lock().unwrap().last(), Some(&FRAME_END));
+        assert_eq!(frame_types.lock().unwrap().last(), Some(&FRAME_END));
 
         // A run that fails before it reaches the server sends the end frame
         // too, because the window waits for it.
-        let (channel, kinds) = kind_channel();
+        let (channel, frame_types) = frame_type_channel();
         let error = execute_query(
             app.handle().clone(),
             run_request("missing", "SELECT 1"),
@@ -3631,7 +3631,7 @@ mod tests {
         .err()
         .unwrap();
         assert!(!error.to_string().is_empty());
-        assert_eq!(*kinds.lock().unwrap(), vec![FRAME_END]);
+        assert_eq!(*frame_types.lock().unwrap(), vec![FRAME_END]);
     }
 
     #[tokio::test]

@@ -208,10 +208,10 @@ describe('ResultTable from plain rows', () => {
     const hollow = { length: 2 } as unknown as Uint32Array
     table.addSegment(
       [
-        { kind: 'int32', nulls: empty, values: Int32Array.of(4) },
-        { kind: 'float64', nulls: empty, values: Float64Array.of(1.5) },
+        { encoding: 'int32', nulls: empty, values: Int32Array.of(4) },
+        { encoding: 'float64', nulls: empty, values: Float64Array.of(1.5) },
         {
-          kind: 'dict',
+          encoding: 'dict',
           nulls: empty,
           codes: new Uint32Array(0),
           ends: hollow,
@@ -219,7 +219,7 @@ describe('ResultTable from plain rows', () => {
           cache: [],
         },
         {
-          kind: 'dict',
+          encoding: 'dict',
           nulls: empty,
           codes: Uint32Array.of(1),
           ends: hollow,
@@ -227,7 +227,7 @@ describe('ResultTable from plain rows', () => {
           cache: [],
         },
         {
-          kind: 'text',
+          encoding: 'text',
           nulls: empty,
           ends: new Uint32Array(0),
           bytes: empty,
@@ -243,7 +243,7 @@ describe('ResultTable from plain rows', () => {
     // A set bit of the mask marks a number that holds no value.
     const floats = new ResultTable([{ name: 'f', typeName: 'float' }])
     floats.addSegment(
-      [{ kind: 'float64', nulls: Uint8Array.of(1), values: Float64Array.of(2.5) }],
+      [{ encoding: 'float64', nulls: Uint8Array.of(1), values: Float64Array.of(2.5) }],
       1,
     )
     expect(floats.cell(0, 0)).toBeNull()
@@ -256,7 +256,7 @@ describe('ResultTable from plain rows', () => {
     for (let chunk = 0; chunk < 50; chunk += 1) {
       const length = chunk % 5
       const values = Int32Array.from({ length }, () => next++)
-      table.addSegment([{ kind: 'int32', nulls: new Uint8Array(1), values }], length)
+      table.addSegment([{ encoding: 'int32', nulls: new Uint8Array(1), values }], length)
     }
     expect(table.rowCount).toBe(next)
     // Reads that jump back and forth find each row, and a read at a place
@@ -275,7 +275,7 @@ describe('ResultTable from plain rows', () => {
 
 type TextChunk = Extract<
   Parameters<ResultTable['addSegment']>[0][number],
-  { kind: 'text' | 'json' }
+  { encoding: 'text' | 'json' }
 >
 
 /** One column of text of one chunk, as the reader builds it. */
@@ -288,7 +288,7 @@ function textChunk(values: string[]): TextChunk {
     ends.push(end)
   }
   return {
-    kind: 'text',
+    encoding: 'text',
     nulls: new Uint8Array(Math.ceil(values.length / 8)),
     ends: Uint32Array.from(ends),
     bytes: encoder.encode(values.join('')),
@@ -494,7 +494,7 @@ describe('the reader of the chunks', () => {
   it('refuses a frame and a form that it does not know', () => {
     const first = collect()
     first.stream.feed(new Uint8Array([99]).buffer)
-    expect(first.stream.failure?.message).toMatch(/frame of the unknown kind 99/)
+    expect(first.stream.failure?.message).toMatch(/frame of the unknown type 99/)
 
     const writer = new Writer()
     writer.u8(FRAME_BEGIN_SET).u32(0).u32(1).text('n').text('int')

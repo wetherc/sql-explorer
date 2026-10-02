@@ -262,7 +262,7 @@ describe('QueryView', () => {
           connectionId: 'c1',
           dirty: false,
           savedQueryId: null,
-          params: [{ name: 'id', kind: 'number', text: '7' }],
+          params: [{ name: 'id', valueType: 'number', text: '7' }],
         },
       },
     })
@@ -318,7 +318,7 @@ describe('QueryView', () => {
 
     const select = wrapper
       .findAllComponents({ name: 'VSelect' })
-      .find((item) => String(item.attributes('data-test')).startsWith('parameter-kind'))!
+      .find((item) => String(item.attributes('data-test')).startsWith('parameter-type'))!
     await select.vm.$emit('update:modelValue', 'null')
     await settle()
     ;(document.querySelector('[data-test="parameters-confirm"]') as HTMLElement).click()
@@ -338,10 +338,10 @@ describe('QueryView', () => {
     await wrapper.find('[data-test="run-button"]').trigger('click')
     await settle()
 
-    const kind = wrapper
+    const typeSelect = wrapper
       .findAllComponents({ name: 'VSelect' })
-      .find((item) => String(item.attributes('data-test')).startsWith('parameter-kind'))!
-    await kind.vm.$emit('update:modelValue', 'number')
+      .find((item) => String(item.attributes('data-test')).startsWith('parameter-type'))!
+    await typeSelect.vm.$emit('update:modelValue', 'number')
     await settle()
 
     const field = document.querySelector(
@@ -377,10 +377,10 @@ describe('QueryView', () => {
     await wrapper.find('[data-test="run-button"]').trigger('click')
     await settle()
 
-    const kind = wrapper
+    const typeSelect = wrapper
       .findAllComponents({ name: 'VSelect' })
-      .find((item) => String(item.attributes('data-test')).startsWith('parameter-kind'))!
-    await kind.vm.$emit('update:modelValue', 'boolean')
+      .find((item) => String(item.attributes('data-test')).startsWith('parameter-type'))!
+    await typeSelect.vm.$emit('update:modelValue', 'boolean')
     await settle()
 
     // The value becomes a box of two words, which starts at false.
@@ -415,10 +415,10 @@ describe('QueryView', () => {
     field.dispatchEvent(new Event('input'))
     await settle()
 
-    const kind = wrapper
+    const typeSelect = wrapper
       .findAllComponents({ name: 'VSelect' })
-      .find((item) => String(item.attributes('data-test')).startsWith('parameter-kind'))!
-    await kind.vm.$emit('update:modelValue', 'boolean')
+      .find((item) => String(item.attributes('data-test')).startsWith('parameter-type'))!
+    await typeSelect.vm.$emit('update:modelValue', 'boolean')
     await settle()
 
     const value = wrapper
@@ -452,7 +452,7 @@ describe('QueryView', () => {
           connectionId: 'c1',
           dirty: false,
           savedQueryId: null,
-          params: [{ name: 'id', kind: 'number', text: '7' }],
+          params: [{ name: 'id', valueType: 'number', text: '7' }],
         },
       },
     })
@@ -592,7 +592,7 @@ describe('QueryView', () => {
           connectionId: 'c1',
           dirty: false,
           savedQueryId: null,
-          params: [{ name: 'id', kind: 'text', text: 'a' }],
+          params: [{ name: 'id', valueType: 'text', text: 'a' }],
         },
       },
     })
