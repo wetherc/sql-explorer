@@ -38,24 +38,33 @@ function suggestionsOf(
 function stubEditor(value = 'SELECT 1;\nSELECT 2') {
   const actions: Record<string, Handler> = {}
   let contentHandler: Handler = () => {}
+  const model = {
+    uri: { toString: () => 'model:test' },
+    getValue: () => value,
+    // The whole range gives the whole text; any other range stands for
+    // the selection of the user.
+    getValueInRange: vi.fn((range: { whole?: boolean }) => (range.whole ? value : 'SELECTED')),
+    getFullModelRange: vi.fn(() => ({ whole: true })),
+    getOffsetAt: vi.fn(() => 0),
+    getWordUntilPosition: vi.fn(() => ({ startColumn: 1, endColumn: 4 })),
+    pushStackElement: vi.fn(),
+    pushEditOperations: vi.fn(
+      (_before: unknown, edits: Array<{ text: string }>, _cursor: () => unknown) => {
+        value = edits[0]!.text
+        // The real model reports an edit as a change of its content.
+        contentHandler()
+        return null
+      },
+    ),
+  }
   const editor = {
     getValue: vi.fn(() => value),
-    setValue: vi.fn((next: string) => {
-      value = next
-      // The real editor reports a write as a change of its model.
-      contentHandler()
-    }),
-    getModel: vi.fn(() => ({
-      uri: { toString: () => 'model:test' },
-      getValue: () => value,
-      // The whole range gives the whole text; any other range stands for
-      // the selection of the user.
-      getValueInRange: vi.fn((range: { whole?: boolean }) => (range.whole ? value : 'SELECTED')),
-      getFullModelRange: vi.fn(() => ({ whole: true })),
-      getOffsetAt: vi.fn(() => 0),
-      getWordUntilPosition: vi.fn(() => ({ startColumn: 1, endColumn: 4 })),
-    })),
+    setValue: vi.fn(),
+    getModel: vi.fn(() => model),
     getSelection: vi.fn(() => ({ isEmpty: () => true })),
+    getSelections: vi.fn(() => [{ cursor: 'user' }]),
+    setPosition: vi.fn(),
+    setScrollTop: vi.fn(),
     getPosition: vi.fn(() => ({ lineNumber: 1, column: 1 })),
     onDidChangeModelContent: vi.fn((handler: Handler) => {
       contentHandler = handler
@@ -71,6 +80,7 @@ function stubEditor(value = 'SELECT 1;\nSELECT 2') {
   }
   return {
     editor,
+    model,
     actions,
     fireContentChange: () => contentHandler(),
     setValue: (next: string) => {
@@ -207,8 +217,45 @@ describe('SqlEditor', () => {
     const wrapper = mount(SqlEditor, { props: { modelValue: 'old' } })
 
     await wrapper.setProps({ modelValue: 'new' })
-    expect(stub.editor.setValue).toHaveBeenCalledWith('new')
+    expect(stub.editor.getValue()).toBe('new')
     expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+  })
+
+  it('writes a new text as one edit that undo takes back', async () => {
+    const stub = stubEditor('old')
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
+    const wrapper = mount(SqlEditor, { props: { modelValue: 'old', readOnly: true } })
+    await wrapper.setProps({ modelValue: 'new' })
+
+    // `setValue` clears the undo stack, so the editor does not call it.
+    expect(stub.editor.setValue).not.toHaveBeenCalled()
+    const model = stub.model
+    expect(model.pushEditOperations).toHaveBeenCalledWith(
+      [{ cursor: 'user' }],
+      [{ range: { whole: true }, text: 'new' }],
+      expect.any(Function),
+    )
+    expect(model.pushEditOperations.mock.calls[0]![2]()).toBeNull()
+    // A stop of the undo stack stands on each side of the edit, so the
+    // edit is a step of its own.
+    expect(model.pushStackElement).toHaveBeenCalledTimes(2)
+    expect(model.pushStackElement.mock.invocationCallOrder[0]).toBeLessThan(
+      model.pushEditOperations.mock.invocationCallOrder[0]!,
+    )
+    expect(model.pushStackElement.mock.invocationCallOrder[1]).toBeGreaterThan(
+      model.pushEditOperations.mock.invocationCallOrder[0]!,
+    )
+    expect(stub.editor.setPosition).toHaveBeenCalledWith({ lineNumber: 1, column: 1 })
+    expect(stub.editor.setScrollTop).toHaveBeenCalledWith(0)
+  })
+
+  it('writes nothing when the editor has no model', async () => {
+    const stub = stubEditor('old')
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
+    const wrapper = mount(SqlEditor, { props: { modelValue: 'old' } })
+    stub.editor.getModel.mockReturnValue(null as never)
+    await wrapper.setProps({ modelValue: 'new' })
+    expect(stub.model.pushEditOperations).not.toHaveBeenCalled()
   })
 
   it('leaves the editor alone when the text already matches', async () => {
@@ -216,7 +263,7 @@ describe('SqlEditor', () => {
     vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
     const wrapper = mount(SqlEditor, { props: { modelValue: 'other' } })
     await wrapper.setProps({ modelValue: 'same' })
-    expect(stub.editor.setValue).not.toHaveBeenCalled()
+    expect(stub.model.pushEditOperations).not.toHaveBeenCalled()
   })
 
   it('changes the theme and the settings of the editor', async () => {

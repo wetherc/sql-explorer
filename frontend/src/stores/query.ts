@@ -111,6 +111,14 @@ export function totalRows(results: ResultTable[]): number {
   return results.reduce((sum, result) => sum + result.rowCount, 0)
 }
 
+/** The tables of one run, and whether the tab of the run has closed. */
+interface Run {
+  fresh: ResultTable[]
+  abandoned: boolean
+  /** The rows of the run at the moment that its tab closed. */
+  rowsAtClose: number
+}
+
 /** Gives the last result of a list, or nothing when the list is empty. */
 function lastPane(panes: ResultPane[]): ResultPane | undefined {
   return panes.length > 0 ? panes[panes.length - 1] : undefined
@@ -132,6 +140,8 @@ export const useQueryStore = defineStore('query', () => {
   const settings = useSettingsStore()
 
   const states = reactive<Record<string, QueryState>>({})
+  /** The run of each tab that runs a statement. */
+  const runs = new Map<string, Run>()
   /** The bytes every statement of this session scanned, over all tabs. */
   const sessionScannedBytes = ref(0)
 
@@ -151,7 +161,23 @@ export const useQueryStore = defineStore('query', () => {
     return states[tabId]
   }
 
+  /**
+   * Forgets the state of a tab that closed. A run of that tab goes on until
+   * the backend answers, so the store marks it abandoned. The run then opens
+   * no result, and the tables it read go now and not when the backend
+   * answers. The close of the tab sends the stop of the statement through
+   * `cancel` before it calls this.
+   */
   function clear(tabId: string): void {
+    const run = runs.get(tabId)
+    if (run) {
+      run.abandoned = true
+      run.rowsAtClose = totalRows(run.fresh)
+      run.fresh = []
+      // A run stands in the map only while the state of its tab exists.
+      states[tabId]!.panes = []
+      runs.delete(tabId)
+    }
     delete states[tabId]
   }
 
@@ -220,13 +246,17 @@ export const useQueryStore = defineStore('query', () => {
     const connectionName = connections.nameFor(connectionId)
     let succeeded = false
     let failure: ErrorPayload | null = null
-    const fresh: ResultTable[] = []
+    const run: Run = { fresh: [], abandoned: false, rowsAtClose: 0 }
+    runs.set(tabId, run)
 
     try {
       const ranAt = Date.now()
       state.lastRunAt = ranAt
       const openPane = (table: ResultTable): void => {
-        fresh.push(table)
+        if (run.abandoned) {
+          return
+        }
+        run.fresh.push(table)
         const pane: ResultPane = {
           id: createId(),
           // The table holds the bytes of the rows and changes only while
@@ -236,7 +266,7 @@ export const useQueryStore = defineStore('query', () => {
           result: markRaw(table),
           rows: table.rowCount,
           truncated: table.truncated,
-          number: fresh.length,
+          number: run.fresh.length,
           ranAt,
           pinned: false,
           label,
@@ -285,16 +315,21 @@ export const useQueryStore = defineStore('query', () => {
       )
       recordScan(state.stats)
       succeeded = true
-      if (fresh.some((table) => table.truncated)) {
+      if (run.fresh.some((table) => table.truncated)) {
         ui.warn('The row limit stopped the read. Raise it in the settings to see more rows.')
       }
     } catch (error) {
       // The messages of the tab hold the same failure, with its whole detail,
-      // so the notice in the corner leaves on its own.
-      failure = ui.reportError(error, { kept: true })
+      // so the notice in the corner leaves on its own. A tab that closed
+      // shows no messages, and the stop that its close sent fails the run,
+      // so that failure gives no notice.
+      failure = run.abandoned ? toErrorPayload(error) : ui.reportError(error, { kept: true })
       state.error = failure
       state.elapsedMs = Date.now() - (state.startedAt ?? Date.now())
     } finally {
+      if (!run.abandoned) {
+        runs.delete(tabId)
+      }
       state.running = false
       state.requestId = null
       state.requestConnectionId = null
@@ -302,14 +337,15 @@ export const useQueryStore = defineStore('query', () => {
     }
 
     // A plan is not the statement of the user, so the history holds the runs
-    // alone.
+    // alone. The history also holds a run whose tab closed, because the
+    // statement reached the server and can have changed data there.
     if (label === undefined) {
       await history.record({
         connectionId,
         connectionName,
         query: trimmed,
         elapsedMs: state.elapsedMs,
-        rowCount: totalRows(fresh),
+        rowCount: run.abandoned ? run.rowsAtClose : totalRows(run.fresh),
         succeeded,
         error: failure ? failure.message : null,
       })

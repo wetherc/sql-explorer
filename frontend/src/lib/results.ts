@@ -27,6 +27,16 @@ const ENCODING_DICT = 6
 
 const decoder = new TextDecoder()
 
+/**
+ * The most that the kept values of the text columns of one table weigh, as
+ * the weight that `cacheWeight` gives. A grid that scrolls through a large
+ * result reads each chunk once, and without a limit the texts of every chunk
+ * it read stay in memory beside the bytes of that chunk.
+ */
+export const CACHE_WEIGHT = 16 * 1024 * 1024
+/** The weight of one kept value besides its bytes: its slot and its object. */
+const CACHE_CELL_WEIGHT = 16
+
 /** One column of one chunk, in the form the bytes carry. */
 type SegmentColumn =
   | { kind: 'null' }
@@ -38,8 +48,14 @@ type SegmentColumn =
       nulls: Uint8Array
       ends: Uint32Array
       bytes: Uint8Array
-      /** The values that were read already, so a filter reads each once. */
-      cache: Array<CellValue | undefined>
+      /**
+       * The values that were read already, or null when the table keeps
+       * none of them. The table drops the cache of a column that no read
+       * used for a while, when the caches pass their limit.
+       */
+      cache: Array<CellValue | undefined> | null
+      /** True when a read used the cache after the last pass of the limit. */
+      used: boolean
     }
   | {
       kind: 'dict'
@@ -64,6 +80,17 @@ interface Segment {
   plain?: CellValue[][]
 }
 
+type TextColumn = Extract<SegmentColumn, { kind: 'text' | 'json' }>
+
+function isText(column: SegmentColumn): column is TextColumn {
+  return column.kind === 'text' || column.kind === 'json'
+}
+
+/** The weight that the cache of one text column adds to the table. */
+function cacheWeight(column: TextColumn): number {
+  return column.bytes.byteLength + column.ends.length * CACHE_CELL_WEIGHT
+}
+
 /** True when the bit of one row is set in a mask of bits. */
 function bitSet(mask: Uint8Array, row: number): boolean {
   const byte = mask[row >> 3] ?? 0
@@ -81,9 +108,16 @@ export class ResultTable {
   private rows_ = 0
   /** The segment of the last read, from which most reads go on. */
   private lastSegment = 0
+  /** The text columns that keep a cache, the oldest first. */
+  private readonly cached = new Set<TextColumn>()
+  /** The weight of the caches of `cached`. */
+  private cachedWeight = 0
+  private readonly cacheLimit: number
 
-  constructor(columns: ColumnInfo[]) {
+  /** `cacheLimit` is the most that the caches of the text columns weigh. */
+  constructor(columns: ColumnInfo[], cacheLimit = CACHE_WEIGHT) {
     this.columns = columns
+    this.cacheLimit = cacheLimit
   }
 
   /** Builds a table from plain rows, for a plan of a statement and for tests. */
@@ -149,7 +183,44 @@ export class ResultTable {
     if (!values) {
       return null
     }
+    if (isText(values)) {
+      return textValue(values, this.cacheOf(values), row - segment.start)
+    }
     return valueOf(values, row - segment.start)
+  }
+
+  /**
+   * The cache of one text column. A column without one gets a new cache, and
+   * the table then drops old caches until their weight is under the limit.
+   * The drop gives each cache that a read used a second turn, so the chunks
+   * on screen keep their texts while a scroll passes over others.
+   */
+  private cacheOf(column: TextColumn): Array<CellValue | undefined> {
+    column.used = true
+    if (column.cache) {
+      return column.cache
+    }
+    const cache: Array<CellValue | undefined> = new Array(column.ends.length)
+    column.cache = cache
+    this.cached.add(column)
+    this.cachedWeight += cacheWeight(column)
+    // A set visits the entries that join it while the loop runs, so a column
+    // that goes to the end for its second turn comes up again. Each column
+    // comes up at most twice, because its mark is clear on its second turn.
+    for (const held of this.cached) {
+      if (this.cachedWeight <= this.cacheLimit || this.cached.size === 1) {
+        break
+      }
+      this.cached.delete(held)
+      if (held.used) {
+        held.used = false
+        this.cached.add(held)
+      } else {
+        held.cache = null
+        this.cachedWeight -= cacheWeight(held)
+      }
+    }
+    return cache
   }
 
   /**
@@ -184,8 +255,8 @@ export class ResultTable {
   }
 }
 
-/** Reads one value of one column of one chunk. */
-function valueOf(column: SegmentColumn, row: number): CellValue {
+/** Reads one value of one column of one chunk that holds no text of its own. */
+function valueOf(column: Exclude<SegmentColumn, TextColumn>, row: number): CellValue {
   switch (column.kind) {
     case 'null':
       return null
@@ -195,10 +266,8 @@ function valueOf(column: SegmentColumn, row: number): CellValue {
       return bitSet(column.nulls, row) ? null : (column.values[row] ?? null)
     case 'float64':
       return bitSet(column.nulls, row) ? null : (column.values[row] ?? null)
-    case 'dict':
-      return dictValue(column, row)
     default:
-      return textValue(column, row)
+      return dictValue(column, row)
   }
 }
 
@@ -241,24 +310,25 @@ export function parseJsonCell(text: string): CellValue {
   return JSON.parse(text) as CellValue
 }
 
-/** Reads one value of a column of text or of JSON, and keeps it. */
+/** Reads one value of a column of text or of JSON, and keeps it in `cache`. */
 function textValue(
-  column: Extract<SegmentColumn, { kind: 'text' | 'json' }>,
+  column: TextColumn,
+  cache: Array<CellValue | undefined>,
   row: number,
 ): CellValue {
-  const held = column.cache[row]
+  const held = cache[row]
   if (held !== undefined) {
     return held
   }
   if (bitSet(column.nulls, row)) {
-    column.cache[row] = null
+    cache[row] = null
     return null
   }
   const end = column.ends[row] ?? 0
   const start = row === 0 ? 0 : (column.ends[row - 1] ?? 0)
   const text = decoder.decode(column.bytes.subarray(start, end))
   const value: CellValue = column.kind === 'json' ? parseJsonCell(text) : text
-  column.cache[row] = value
+  cache[row] = value
   return value
 }
 
@@ -558,7 +628,8 @@ function readColumn(
           nulls: nulls.mask,
           ends,
           bytes,
-          cache: new Array(rows),
+          cache: null,
+          used: false,
         },
         at: lengthAt + 4 + length,
       }

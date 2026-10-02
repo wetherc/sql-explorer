@@ -138,6 +138,36 @@ describe('ResultsGrid', () => {
     expect(wrapper.findAll('[data-test="grid-row"]')[0]?.text()).toContain('n0')
   })
 
+  it('reads no row of a new result for the filter of the result before it', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    await wrapper.find('[data-test="grid-filter"] input').setValue('ada')
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    expect(wrapper.findAll('[data-test="grid-row"]')).toHaveLength(1)
+    const next = result({ rows: Array.from({ length: 500 }, (_, index) => [index, `n${index}`]) })
+    const row = vi.spyOn(next, 'row')
+    await wrapper.setProps({ result: next })
+    // The window reads the rows it draws. The text of the filter would read
+    // every row.
+    expect(row.mock.calls.filter(([index]) => index >= 200)).toHaveLength(0)
+    expect(wrapper.findAll('[data-test="grid-row"]')[0]?.text()).toContain('n0')
+  })
+
+  it('builds the keys of a sort again after the sort cleared', async () => {
+    const table = result({ rows: Array.from({ length: 500 }, (_, index) => [index, `n${index}`]) })
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: table } })
+    const header = wrapper.findAll('[data-test="grid-header"]')[0]!
+    // Up, down, and then no sort.
+    await header.trigger('click')
+    await header.trigger('click')
+    await header.trigger('click')
+    const cell = vi.spyOn(table, 'cell')
+    await header.trigger('click')
+    // The window reads the first rows alone, so a read of a later row comes
+    // from the keys of the sort, which the clear dropped.
+    expect(cell.mock.calls.filter(([row]) => row >= 200).length).toBeGreaterThan(0)
+    expect(wrapper.findAll('[data-test="grid-row"]')[0]?.text()).toContain('n0')
+  })
+
   it('keeps a selection of every row outside the deep reactivity', async () => {
     const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
     await wrapper.findAll('[data-test="grid-cell"]')[0]!.trigger('keydown', {

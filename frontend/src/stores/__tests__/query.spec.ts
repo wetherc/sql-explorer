@@ -98,6 +98,80 @@ describe('query store', () => {
     expect(Object.keys(queries.states)).toEqual([])
   })
 
+  /**
+   * A run that opens a set of two rows and then waits. The release lets it
+   * give a second set, which the row limit stopped, and then end or fail.
+   */
+  function heldRun() {
+    let release: (failure?: unknown) => void = () => {}
+    apiStub.executeQuery.mockImplementation(
+      async (_request: unknown, handlers: import('@/lib/results').ResultStreamHandlers) => {
+        handlers.onBegin?.(ResultTable.fromRows([], [[1], [2]]))
+        const failure = await new Promise((resolve) => {
+          release = resolve
+        })
+        handlers.onSet(ResultTable.fromRows([], [[3]], true))
+        if (failure !== undefined) {
+          throw failure
+        }
+        handlers.onEnd({ messages: [], rowsAffected: null, elapsedMs: 5, stats: null })
+      },
+    )
+    return { release: (failure?: unknown) => release(failure) }
+  }
+
+  it('drops the results of a run whose tab closed, and keeps it in the history', async () => {
+    const held = heldRun()
+    const record = vi.spyOn(useHistoryStore(), 'record')
+    const ui = useUiStore()
+    const warn = vi.spyOn(ui, 'warn')
+    const queries = useQueryStore()
+    const running = queries.execute('t1', 'c1', 'SELECT 1')
+    await Promise.resolve()
+    const state = queries.stateFor('t1')
+    expect(state.panes).toHaveLength(1)
+
+    queries.clear('t1')
+    expect(Object.keys(queries.states)).toEqual([])
+    expect(state.panes).toEqual([])
+
+    held.release()
+    expect(await running).toBe(true)
+    // The set that came after the close opens no result.
+    expect(state.panes).toEqual([])
+    expect(warn).not.toHaveBeenCalled()
+    expect(Object.keys(queries.states)).toEqual([])
+    expect(record).toHaveBeenCalledWith(
+      expect.objectContaining({ query: 'SELECT 1', rowCount: 2, succeeded: true }),
+    )
+    // A new run of a tab of the same name is a run of its own.
+    apiStub.executeQuery.mockImplementation(streamed(response()))
+    expect(await queries.execute('t1', 'c1', 'SELECT 2')).toBe(true)
+    expect(queries.stateFor('t1').panes).toHaveLength(1)
+  })
+
+  it('gives no notice for the failure of a run whose tab closed', async () => {
+    const held = heldRun()
+    const record = vi.spyOn(useHistoryStore(), 'record')
+    const ui = useUiStore()
+    const report = vi.spyOn(ui, 'reportError')
+    const queries = useQueryStore()
+    const running = queries.execute('t1', 'c1', 'SELECT 1')
+    await Promise.resolve()
+    queries.clear('t1')
+
+    held.release({ kind: 'cancelled', message: 'The statement was stopped.', detail: null })
+    expect(await running).toBe(false)
+    expect(report).not.toHaveBeenCalled()
+    expect(record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rowCount: 2,
+        succeeded: false,
+        error: 'The statement was stopped.',
+      }),
+    )
+  })
+
   it('refuses an empty statement', async () => {
     const queries = useQueryStore()
     expect(await queries.execute('t1', 'c1', '   ')).toBe(false)

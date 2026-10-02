@@ -338,6 +338,13 @@ const search = ref('')
  * a short pause, so that a keystroke does not scan every row at once.
  */
 const appliedSearch = ref('')
+/**
+ * The result that the user set the filter for. A new result starts with no
+ * filter, but the watch that clears the filter runs after the watch that
+ * reads the text of the rows. Without this check, a switch to a new result
+ * reads one slice of its rows for the filter of the result that has gone.
+ */
+let filterSource: ResultTable | null = null
 const FILTER_DELAY_MS = 200
 let filterTimer: ReturnType<typeof setTimeout> | null = null
 watch(search, (value) => {
@@ -346,6 +353,7 @@ watch(search, (value) => {
   }
   filterTimer = setTimeout(() => {
     filterTimer = null
+    filterSource = props.result
     appliedSearch.value = (value ?? '').trim().toLowerCase()
   }, FILTER_DELAY_MS)
 })
@@ -530,7 +538,7 @@ function buildRowTexts(): void {
  * set streams costs its own text alone.
  */
 function refreshRowTexts(): void {
-  if (appliedSearch.value === '') {
+  if (appliedSearch.value === '' || filterSource !== props.result) {
     dropRowTexts()
     activeFilter.value = ''
     return
@@ -580,7 +588,8 @@ function matchesFor(table: ResultTable, needle: string): number[] {
  * The value of one column for every row, which the sort compares. The keys
  * are built once for a column, so a sort of many rows builds the text of a
  * cell once and not once for each comparison. The keys of rows that arrive
- * while the set streams go on the end of the same array.
+ * while the set streams go on the end of the same array. The keys go when
+ * the sort clears.
  */
 let sortKeys: SortKey[] = []
 let sortKeysSource: ResultTable | null = null
@@ -644,6 +653,10 @@ function updateOrder(): void {
   orderedCount = base.length
   const index = sortSource === props.result ? sortIndex.value : null
   if (index === null) {
+    // The keys weigh as much as one column of the result, so they go with
+    // the sort. A sort of the same column later builds them again.
+    sortKeys = []
+    sortKeysSource = null
     // The array of the places can be the one that the view holds already, so
     // the view is told of its new rows.
     sortedOrder.value = base

@@ -226,7 +226,14 @@ describe('ResultTable from plain rows', () => {
           bytes: empty,
           cache: [],
         },
-        { kind: 'text', nulls: empty, ends: new Uint32Array(0), bytes: empty, cache: [] },
+        {
+          kind: 'text',
+          nulls: empty,
+          ends: new Uint32Array(0),
+          bytes: empty,
+          cache: null,
+          used: false,
+        },
       ],
       2,
     )
@@ -263,6 +270,97 @@ describe('ResultTable from plain rows', () => {
 
   it('keeps the mark of a read that a limit stopped', () => {
     expect(ResultTable.fromRows(columns, [[1, 'a']], true).truncated).toBe(true)
+  })
+})
+
+type TextChunk = Extract<
+  Parameters<ResultTable['addSegment']>[0][number],
+  { kind: 'text' | 'json' }
+>
+
+/** One column of text of one chunk, as the reader builds it. */
+function textChunk(values: string[]): TextChunk {
+  const encoder = new TextEncoder()
+  const ends: number[] = []
+  let end = 0
+  for (const value of values) {
+    end += encoder.encode(value).length
+    ends.push(end)
+  }
+  return {
+    kind: 'text',
+    nulls: new Uint8Array(Math.ceil(values.length / 8)),
+    ends: Uint32Array.from(ends),
+    bytes: encoder.encode(values.join('')),
+    cache: null,
+    used: false,
+  }
+}
+
+/** The weight that the table gives the cache of one chunk of `textChunk`. */
+function weightOf(chunk: TextChunk): number {
+  return chunk.bytes.byteLength + chunk.ends.length * 16
+}
+
+describe('the texts that a table keeps', () => {
+  const text = [{ name: 't', typeName: 'text' }]
+
+  /** The text of one row, which has the same length for each row. */
+  function valueAt(row: number): string {
+    return `value ${String(row).padStart(3, '0')}`
+  }
+
+  /** A table of `count` chunks of four texts each, and the chunks. */
+  function chunkedTable(count: number, limitInChunks: number) {
+    const chunks = Array.from({ length: count }, (_, chunk) =>
+      textChunk([0, 1, 2, 3].map((row) => valueAt(chunk * 4 + row))),
+    )
+    const table = new ResultTable(text, weightOf(chunks[0]!) * limitInChunks)
+    for (const chunk of chunks) {
+      table.addSegment([chunk], 4)
+    }
+    return { table, chunks }
+  }
+
+  it('keeps the weight of its caches under the limit while every row is read', () => {
+    const { table, chunks } = chunkedTable(50, 3)
+    const limit = weightOf(chunks[0]!) * 3
+    for (let row = 0; row < table.rowCount; row += 1) {
+      expect(table.cell(row, 0)).toBe(valueAt(row))
+      const kept = chunks.filter((chunk) => chunk.cache !== null)
+      expect(kept.reduce((sum, chunk) => sum + weightOf(chunk), 0)).toBeLessThanOrEqual(limit)
+    }
+    expect(chunks.filter((chunk) => chunk.cache !== null)).toHaveLength(3)
+    // A chunk whose cache went reads its texts out of the bytes again.
+    expect(chunks[0]!.cache).toBeNull()
+    expect(table.cell(1, 0)).toBe(valueAt(1))
+    expect(chunks[0]!.cache).not.toBeNull()
+  })
+
+  it('gives a cache that a read used a second turn', () => {
+    const { table, chunks } = chunkedTable(4, 2)
+    const [a, b, c, d] = chunks as [TextChunk, TextChunk, TextChunk, TextChunk]
+    table.cell(0, 0)
+    table.cell(4, 0)
+    // Every cache was used, so the oldest goes.
+    table.cell(8, 0)
+    expect([a.cache, b.cache !== null, c.cache !== null]).toEqual([null, true, true])
+    // B was read again and C was not, so C goes and B stays.
+    table.cell(5, 0)
+    table.cell(12, 0)
+    expect([b.cache !== null, c.cache, d.cache !== null]).toEqual([true, null, true])
+  })
+
+  it('keeps the cache of one chunk that weighs more than the limit', () => {
+    const chunks = [textChunk(['a long text', 'another one']), textChunk(['x', 'y'])]
+    const table = new ResultTable(text, 1)
+    table.addSegment([chunks[0]!], 2)
+    table.addSegment([chunks[1]!], 2)
+    expect(table.cell(0, 0)).toBe('a long text')
+    expect(chunks[0]!.cache).not.toBeNull()
+    expect(table.cell(3, 0)).toBe('y')
+    expect(chunks[0]!.cache).toBeNull()
+    expect(chunks[1]!.cache).toEqual([undefined, 'y'])
   })
 })
 

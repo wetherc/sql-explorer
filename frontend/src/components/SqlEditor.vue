@@ -113,6 +113,32 @@ function registerCompletions(): void {
   installSqlCompletions()
 }
 
+/**
+ * Puts a text that came from outside the editor, such as an opened file or an
+ * entry of the history, into the model. `setValue` clears the undo stack, so
+ * the write replaces the whole range as one edit, and one undo step gives the
+ * text before it back. The model takes the edit also in a read-only editor,
+ * where `executeEdits` refuses it. The cursor then goes to the start, as it
+ * does after `setValue`.
+ */
+function applyExternalValue(instance: monaco.editor.IStandaloneCodeEditor, value: string): void {
+  const model = instance.getModel()
+  if (!model || model.getValue() === value) {
+    return
+  }
+  applyingExternalValue = true
+  model.pushStackElement()
+  model.pushEditOperations(
+    instance.getSelections(),
+    [{ range: model.getFullModelRange(), text: value }],
+    () => null,
+  )
+  model.pushStackElement()
+  applyingExternalValue = false
+  instance.setPosition({ lineNumber: 1, column: 1 })
+  instance.setScrollTop(0)
+}
+
 onMounted(() => {
   registerMonacoThemes()
   registerSqlParameters()
@@ -181,19 +207,15 @@ onMounted(() => {
     run: () => formatText(),
   })
 
+  // The watch stands inside the hook, so it reads the editor of this mount,
+  // and Vue stops it at unmount.
+  watch(
+    () => props.modelValue,
+    (value) => applyExternalValue(instance, value),
+  )
+
   registerCompletions()
 })
-
-watch(
-  () => props.modelValue,
-  (value) => {
-    if (editor && editor.getValue() !== value) {
-      applyingExternalValue = true
-      editor.setValue(value)
-      applyingExternalValue = false
-    }
-  },
-)
 
 watch(
   () => props.theme,
