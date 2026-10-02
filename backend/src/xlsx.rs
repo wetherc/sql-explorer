@@ -22,6 +22,9 @@ use zip::{CompressionMethod, ZipWriter};
 /// sheet therefore holds one row of data fewer than this number.
 pub const MAX_SHEET_ROWS: usize = 1_048_576;
 
+/// The largest number of columns a sheet holds. The last column is XFD.
+pub const MAX_SHEET_COLUMNS: usize = 16_384;
+
 /// The name of the sheet part inside the container.
 const SHEET_PART: &str = "xl/worksheets/sheet1.xml";
 
@@ -173,7 +176,10 @@ pub fn column_name(index: usize) -> String {
 }
 
 /// Cleans a name for a sheet. A sheet name holds at most 31 characters and
-/// none of the characters that Excel reserves.
+/// none of the characters that Excel reserves. Excel also refuses an
+/// apostrophe at the start or the end of the name, and it keeps the name
+/// `History` for a sheet of its own. Excel repairs a file that breaks one
+/// of these rules.
 pub fn sheet_name(name: &str) -> String {
     let cleaned: String = name
         .chars()
@@ -188,7 +194,21 @@ pub fn sheet_name(name: &str) -> String {
     } else {
         cleaned
     };
-    cleaned.chars().take(31).collect()
+    let mut chars: Vec<char> = cleaned.chars().take(31).collect();
+    // The cut to 31 characters can put an apostrophe at the end, so the
+    // ends are read after the cut.
+    let last = chars.len() - 1;
+    for at in [0, last] {
+        if chars[at] == '\'' {
+            chars[at] = '_';
+        }
+    }
+    let cleaned: String = chars.into_iter().collect();
+    if cleaned.eq_ignore_ascii_case("history") {
+        format!("{cleaned}_")
+    } else {
+        cleaned
+    }
 }
 
 /// Writes the workbook part, which names the one sheet of the file.
@@ -267,7 +287,17 @@ pub struct SheetWriter<W: Write + Seek> {
 
 impl<W: Write + Seek> SheetWriter<W> {
     /// Starts the container and writes the header row of the sheet.
+    ///
+    /// A result with more columns than a sheet holds gives an error. Excel
+    /// repairs a file with a column past XFD, and a cut of the columns would
+    /// drop data with no sign of it in the file.
     pub fn create(writer: W, sheet: &str, columns: &[String]) -> Result<Self> {
+        if columns.len() > MAX_SHEET_COLUMNS {
+            return Err(crate::error::Error::Unsupported(format!(
+                "An Excel sheet holds at most {MAX_SHEET_COLUMNS} columns, and the result has {} columns. Export the result as CSV or JSON.",
+                columns.len()
+            )));
+        }
         let mut zip = ZipWriter::new(writer);
         let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
         for (name, body) in [
@@ -380,6 +410,36 @@ mod tests {
         assert_eq!(sheet_name("   "), "Result");
         assert_eq!(sheet_name(""), "Result");
         assert_eq!(sheet_name(&"x".repeat(40)), "x".repeat(31));
+    }
+
+    #[test]
+    fn a_sheet_name_has_no_apostrophe_at_an_end_and_is_not_history() {
+        assert_eq!(sheet_name("'q'"), "_q_");
+        assert_eq!(sheet_name("'"), "_");
+        assert_eq!(sheet_name("it's"), "it's");
+        // The cut to 31 characters can leave an apostrophe at the end.
+        assert_eq!(
+            sheet_name(&format!("{}'abc", "x".repeat(30))),
+            format!("{}_", "x".repeat(30))
+        );
+        assert_eq!(sheet_name("History"), "History_");
+        assert_eq!(sheet_name(" hIsToRy "), "hIsToRy_");
+        assert_eq!(sheet_name("History 2"), "History 2");
+    }
+
+    #[test]
+    fn a_sheet_refuses_more_columns_than_excel_holds() {
+        let names: Vec<String> = (0..=MAX_SHEET_COLUMNS).map(|i| i.to_string()).collect();
+        let error = SheetWriter::create(Cursor::new(Vec::new()), "Result", &names)
+            .err()
+            .expect("too many columns");
+        assert!(matches!(error, crate::error::Error::Unsupported(_)));
+        assert!(error.to_string().contains("16384"));
+
+        let widest = &names[..MAX_SHEET_COLUMNS];
+        let writer = SheetWriter::create(Cursor::new(Vec::new()), "Result", widest).unwrap();
+        let sheet = part_of(writer.finish().unwrap().into_inner(), SHEET_PART);
+        assert!(sheet.contains("<c r=\"XFD1\" t=\"inlineStr\">"));
     }
 
     #[test]

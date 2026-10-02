@@ -159,8 +159,7 @@ pub fn leading_keyword(statement: &str, dialect: Dialect) -> String {
             index += 1;
             continue;
         }
-        if (dialect.hash_comments() && current == '#')
-            || (current == '-' && chars.get(index + 1) == Some(&'-'))
+        if (dialect.hash_comments() && current == '#') || opens_dash_comment(&chars, index, dialect)
         {
             index = copy_to_end_of_line(&chars, index, &mut skipped);
             continue;
@@ -298,7 +297,7 @@ fn scan_words(sql: &str, dialect: Dialect, mut visit: impl FnMut(&str)) {
         // The words do not need that text, so the buffer is emptied here.
         skipped.clear();
 
-        if c == '-' && chars.get(index + 1) == Some(&'-') {
+        if opens_dash_comment(&chars, index, dialect) {
             index = copy_to_end_of_line(&chars, index, &mut skipped);
             continue;
         }
@@ -497,7 +496,8 @@ fn skip_blanks(chars: &[char], mut index: usize) -> usize {
 /// holds one of these stays whole.
 ///
 /// The MySQL `DELIMITER` command changes the terminator for the statements
-/// that follow it.
+/// that follow it. A PostgreSQL routine with a `BEGIN ATOMIC ... END` body
+/// stays whole, because each statement of the body ends with a semicolon.
 pub fn split_statements(script: &str, dialect: Dialect) -> Vec<String> {
     let chars: Vec<char> = script.chars().collect();
     let mut statements: Vec<String> = Vec::new();
@@ -512,6 +512,7 @@ pub fn split_statements(script: &str, dialect: Dialect) -> Vec<String> {
     // comments. A comment above a `DELIMITER` line, as in a dump file, does
     // not hide the command.
     let mut code_seen = false;
+    let mut words = BodyWords::default();
 
     while index < chars.len() {
         let c = chars[index];
@@ -531,7 +532,7 @@ pub fn split_statements(script: &str, dialect: Dialect) -> Vec<String> {
 
         // A line comment runs to the end of the line, and its line break
         // starts the next line.
-        if c == '-' && chars.get(index + 1) == Some(&'-') || dialect.hash_comments() && c == '#' {
+        if opens_dash_comment(&chars, index, dialect) || dialect.hash_comments() && c == '#' {
             index = copy_to_end_of_line(&chars, index, &mut current);
             at_line_start = chars[index - 1] == '\n';
             continue;
@@ -583,11 +584,26 @@ pub fn split_statements(script: &str, dialect: Dialect) -> Vec<String> {
             }
         }
 
+        if dialect == Dialect::Postgres
+            && (c.is_alphanumeric() || c == '_')
+            && (index == 0 || !in_a_word(chars[index - 1]))
+        {
+            let start = index;
+            while chars.get(index).is_some_and(|&c| in_a_word(c)) {
+                index += 1;
+            }
+            let word: String = chars[start..index].iter().collect();
+            words.read(&word.to_ascii_lowercase());
+            current.push_str(&word);
+            continue;
+        }
+
         // The terminator ends the statement.
-        if starts_with(&chars, index, &delimiter) {
+        if words.depth == 0 && starts_with(&chars, index, &delimiter) {
             push_statement(&mut statements, &mut current);
             index += delimiter.len();
             code_seen = false;
+            words = BodyWords::default();
             continue;
         }
 
@@ -597,6 +613,36 @@ pub fn split_statements(script: &str, dialect: Dialect) -> Vec<String> {
 
     push_statement(&mut statements, &mut current);
     statements
+}
+
+/// Follows the words of one PostgreSQL statement to find a routine body in
+/// the form `BEGIN ATOMIC ... END`. The body can hold `CASE ... END`, so
+/// each `CASE` inside the body also waits for an `END`.
+#[derive(Default)]
+struct BodyWords {
+    /// The first word of the statement.
+    first: String,
+    /// The word in front of the current word.
+    previous: String,
+    /// The number of `BEGIN ATOMIC` and `CASE` words that have no `END` yet.
+    depth: usize,
+}
+
+impl BodyWords {
+    /// Reads the next bare word of the statement, in small letters.
+    fn read(&mut self, word: &str) {
+        if self.first.is_empty() {
+            self.first = word.to_string();
+        }
+        if self.depth > 0 && word == "case" {
+            self.depth += 1;
+        } else if self.depth > 0 && word == "end" {
+            self.depth -= 1;
+        } else if word == "atomic" && self.previous == "begin" && self.first == "create" {
+            self.depth += 1;
+        }
+        self.previous = word.to_string();
+    }
 }
 
 /// Adds the buffer to the list when it holds more than blank space, then
@@ -643,7 +689,7 @@ fn scan_parameters(sql: &str, dialect: Dialect, mut emit: impl FnMut(&str) -> St
     while index < chars.len() {
         let c = chars[index];
 
-        if c == '-' && chars.get(index + 1) == Some(&'-') {
+        if opens_dash_comment(&chars, index, dialect) {
             index = copy_to_end_of_line(&chars, index, &mut out);
             continue;
         }
@@ -849,6 +895,19 @@ fn read_delimiter_command(chars: &[char], index: usize) -> Option<(String, usize
     }
 }
 
+/// True when two dashes at the given position start a comment that runs to
+/// the end of the line. MySQL reads them so only when a blank, a control
+/// character or the end of the text follows them, so `5--1` is a
+/// subtraction there.
+fn opens_dash_comment(chars: &[char], index: usize, dialect: Dialect) -> bool {
+    chars[index] == '-'
+        && chars.get(index + 1) == Some(&'-')
+        && (dialect != Dialect::MySql
+            || chars
+                .get(index + 2)
+                .is_none_or(|c| c.is_whitespace() || c.is_control()))
+}
+
 /// Copies the characters up to and including the end of the line.
 fn copy_to_end_of_line(chars: &[char], mut index: usize, out: &mut String) -> usize {
     while let Some(&c) = chars.get(index) {
@@ -970,7 +1029,8 @@ fn copy_dollar_quoted(chars: &[char], index: usize, out: &mut String) -> Option<
         if c == '$' {
             break;
         }
-        if !(c.is_alphanumeric() || c == '_') {
+        // A tag starts as a name starts, so `$1$` holds the parameter `$1`.
+        if !(c.is_alphabetic() || c == '_' || (!tag.is_empty() && c.is_numeric())) {
             return None;
         }
         tag.push(c);
@@ -1324,6 +1384,119 @@ mod tests {
             split_statements("SELECT /* never closed ; 1", Dialect::MySql),
             vec!["SELECT /* never closed ; 1"]
         );
+    }
+
+    #[test]
+    fn a_dollar_tag_starts_with_a_letter_or_a_low_line() {
+        // `$1$` is the parameter `$1` and a dollar sign, so it opens no tag.
+        assert_eq!(
+            split_statements("SELECT $1$; SELECT 2; SELECT $1$", Dialect::Postgres),
+            vec!["SELECT $1$", "SELECT 2", "SELECT $1$"]
+        );
+        assert_eq!(
+            split_statements(
+                "SELECT $_1$ a; b $_1$; SELECT $t2$ c; $t2$",
+                Dialect::Postgres
+            ),
+            vec!["SELECT $_1$ a; b $_1$", "SELECT $t2$ c; $t2$"]
+        );
+        assert_eq!(
+            find_parameters("SELECT $1$ :a $1$", Dialect::Postgres),
+            vec!["a".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_begin_atomic_body_stays_in_one_statement() {
+        let function = "CREATE FUNCTION f(x int) RETURNS int LANGUAGE sql \
+                        BEGIN ATOMIC SELECT CASE WHEN x > 0 THEN 1 ELSE 0 END; \
+                        SELECT x + 1; END";
+        assert_eq!(
+            split_statements(&format!("{function}; SELECT 2;"), Dialect::Postgres),
+            vec![function, "SELECT 2"]
+        );
+        let procedure = "create procedure p() begin atomic \
+                         insert into t values (1); /* ; */ insert into t values (2); end";
+        assert_eq!(
+            split_statements(&format!("{procedure};select 3"), Dialect::Postgres),
+            vec![procedure, "select 3"]
+        );
+        // A body that no END closes runs to the end of the script.
+        assert_eq!(
+            split_statements(
+                "CREATE FUNCTION f() BEGIN ATOMIC SELECT 1; SELECT 2",
+                Dialect::Postgres
+            ),
+            vec!["CREATE FUNCTION f() BEGIN ATOMIC SELECT 1; SELECT 2"]
+        );
+        // Outside a CREATE statement, and in another dialect, the words
+        // open no body. A CASE outside a body counts nothing.
+        assert_eq!(
+            split_statements("SELECT 1 AS begin, 2 atomic; SELECT 3", Dialect::Postgres),
+            vec!["SELECT 1 AS begin, 2 atomic", "SELECT 3"]
+        );
+        assert_eq!(
+            split_statements("SELECT CASE WHEN a THEN 1 END; SELECT 2", Dialect::Postgres),
+            vec!["SELECT CASE WHEN a THEN 1 END", "SELECT 2"]
+        );
+        assert_eq!(
+            split_statements(
+                "CREATE FUNCTION f() BEGIN ATOMIC SELECT 1; END",
+                Dialect::MySql
+            ),
+            vec!["CREATE FUNCTION f() BEGIN ATOMIC SELECT 1", "END"]
+        );
+        // A word that a quote or a name holds is no keyword.
+        assert_eq!(
+            split_statements(
+                "CREATE TABLE begin_atomic (\"begin atomic\" int); SELECT 4",
+                Dialect::Postgres
+            ),
+            vec![
+                "CREATE TABLE begin_atomic (\"begin atomic\" int)",
+                "SELECT 4"
+            ]
+        );
+        assert_eq!(
+            split_statements(
+                "CREATE VIEW v AS SELECT a$begin atomic; SELECT 5",
+                Dialect::Postgres
+            ),
+            vec!["CREATE VIEW v AS SELECT a$begin atomic", "SELECT 5"]
+        );
+    }
+
+    #[test]
+    fn two_dashes_start_a_mysql_comment_only_before_a_blank() {
+        assert_eq!(
+            split_statements("SELECT 5--1; SELECT 2;", Dialect::MySql),
+            vec!["SELECT 5--1", "SELECT 2"]
+        );
+        assert_eq!(
+            split_statements(
+                "SELECT 1 -- a; b\nSELECT 2;--\tc;\nSELECT 3;--",
+                Dialect::MySql
+            ),
+            vec!["SELECT 1 -- a; b\nSELECT 2", "--\tc;\nSELECT 3", "--"]
+        );
+        // Every other dialect reads two dashes as a comment at once.
+        assert_eq!(
+            split_statements("SELECT 5--1; SELECT 2;", Dialect::Postgres),
+            vec!["SELECT 5--1; SELECT 2;"]
+        );
+        assert_eq!(
+            find_parameters("SELECT 5--:a\n, :b", Dialect::MySql),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        assert_eq!(
+            find_parameters("SELECT 5-- :a\n, :b", Dialect::MySql),
+            vec!["b".to_string()]
+        );
+        assert_eq!(leading_keyword("--x\nSELECT 1", Dialect::MySql), "");
+        assert_eq!(leading_keyword("--\nSELECT 1", Dialect::MySql), "select");
+        // The words after `5--` are code, so the export refuses the script.
+        assert!(!only_reads("SELECT 5--1 INTO @x", Dialect::MySql));
+        assert!(only_reads("SELECT 5-- 1 INTO @x", Dialect::MySql));
     }
 
     #[test]

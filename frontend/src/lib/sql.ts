@@ -250,6 +250,10 @@ interface SplitRules {
   delimiterCommand: boolean
   /** The `BEGIN ... END` body of a trigger holds semicolons. */
   triggerBodies: boolean
+  /** The `BEGIN ATOMIC ... END` body of a routine holds semicolons. */
+  atomicBodies: boolean
+  /** Two dashes start a comment only when a blank or a control character follows. */
+  spacedDashComments: boolean
 }
 
 /**
@@ -269,6 +273,53 @@ function splitRules(dialect?: Dialect): SplitRules {
     batchSeparator: dialect === Dialect.MsSql,
     delimiterCommand: dialect === Dialect.MySql,
     triggerBodies: dialect === Dialect.Sqlite,
+    atomicBodies: dialect === Dialect.Postgres,
+    spacedDashComments: dialect === Dialect.MySql,
+  }
+}
+
+/**
+ * True when two dashes at the given position start a comment that runs to
+ * the end of the line. MySQL reads them so only when a blank, a control
+ * character or the end of the text follows them, so `5--1` is a subtraction
+ * there.
+ */
+function dashCommentAt(script: string, index: number, rules: SplitRules): boolean {
+  if (!script.startsWith('--', index)) {
+    return false
+  }
+  // The end of the script gives an empty text, which the pattern accepts.
+  return !rules.spacedDashComments || /^[\s\p{Cc}]?$/u.test(script.charAt(index + 2))
+}
+
+/** A bare word that starts at the `lastIndex` of the pattern. */
+const BARE_WORD = /[\p{L}\p{N}_$]+/uy
+
+/**
+ * Follows the words of one PostgreSQL statement to find a routine body in
+ * the form `BEGIN ATOMIC ... END`. The body can hold `CASE ... END`, so each
+ * `CASE` inside the body also waits for an `END`. The backend splitter
+ * follows the same words.
+ */
+class BodyWords {
+  /** The number of `BEGIN ATOMIC` and `CASE` words that have no `END` yet. */
+  depth = 0
+  private first = ''
+  private previous = ''
+
+  /** Reads the next bare word of the statement, in small letters. */
+  read(word: string): void {
+    if (this.first === '') {
+      this.first = word
+    }
+    if (this.depth > 0 && word === 'case') {
+      this.depth += 1
+    } else if (this.depth > 0 && word === 'end') {
+      this.depth -= 1
+    } else if (word === 'atomic' && this.previous === 'begin' && this.first === 'create') {
+      this.depth += 1
+    }
+    this.previous = word
   }
 }
 
@@ -382,7 +433,8 @@ function endOfBracket(script: string, index: number): number {
  * the dollar sign opens no tag.
  */
 function endOfDollarQuoted(script: string, index: number): number {
-  const match = /^\$[A-Za-z0-9_]*\$/.exec(script.slice(index))
+  // A tag starts as a name starts, so `$1$` holds the parameter `$1`.
+  const match = /^\$(?:[\p{L}_][\p{L}\p{N}_]*)?\$/u.exec(script.slice(index))
   if (!match) {
     return -1
   }
@@ -434,6 +486,7 @@ function statementSpans(script: string, dialect?: Dialect, whole = false): State
   // comments. A comment above a DELIMITER line, as in a dump file, does not
   // hide the command.
   let codeSeen = false
+  let words = new BodyWords()
 
   while (index < script.length) {
     const character = script[index]
@@ -461,7 +514,7 @@ function statementSpans(script: string, dialect?: Dialect, whole = false): State
         continue
       }
     }
-    if (character === '-' && next === '-') {
+    if (dashCommentAt(script, index, rules)) {
       index = endOfLine(script, index)
       continue
     }
@@ -495,6 +548,19 @@ function statementSpans(script: string, dialect?: Dialect, whole = false): State
       }
     }
     if (
+      rules.atomicBodies &&
+      /[\p{L}\p{N}_]/u.test(script.charAt(index)) &&
+      !inAWord(script[index - 1])
+    ) {
+      BARE_WORD.lastIndex = index
+      // The character itself matches the pattern, so the match is never null.
+      const word = (BARE_WORD.exec(script) as RegExpExecArray)[0]
+      words.read(word.toLowerCase())
+      index += word.length
+      continue
+    }
+    if (
+      words.depth === 0 &&
       !(whole && rules.batchSeparator) &&
       script.startsWith(delimiter, index) &&
       !(whole && rules.triggerBodies && insideTriggerBody(script.slice(start, index)))
@@ -503,6 +569,7 @@ function statementSpans(script: string, dialect?: Dialect, whole = false): State
       index += delimiter.length
       start = index
       codeSeen = false
+      words = new BodyWords()
       continue
     }
     index += 1

@@ -242,6 +242,65 @@ describe('statementBounds', () => {
     ])
   })
 
+  it('opens a dollar tag only with a letter or a low line', () => {
+    // `$1$` is the parameter `$1` and a dollar sign, so it opens no tag.
+    expect(statementBounds('SELECT $1$; SELECT 2', Dialect.Postgres)).toEqual([
+      [0, 10],
+      [11, 20],
+    ])
+    const tagged = 'SELECT $_1$ a; $_1$; SELECT $t2$;$t2$'
+    expect(statementBounds(tagged, Dialect.Postgres)).toEqual([
+      [0, 19],
+      [20, tagged.length],
+    ])
+  })
+
+  it('keeps a BEGIN ATOMIC body of PostgreSQL in one statement', () => {
+    const body =
+      'CREATE FUNCTION f(x int) RETURNS int BEGIN ATOMIC SELECT CASE WHEN x > 0 THEN 1 END; SELECT x; END'
+    const script = `${body}; SELECT 2`
+    expect(statementBounds(script, Dialect.Postgres)).toEqual([
+      [0, body.length],
+      [body.length + 1, script.length],
+    ])
+    expect(statementAt(script, 60, Dialect.Postgres)).toBe(body)
+    // Outside a CREATE statement and in another dialect the words open no body.
+    expect(statementBounds('SELECT begin atomic; SELECT 3', Dialect.Postgres)).toEqual([
+      [0, 19],
+      [20, 29],
+    ])
+    expect(statementBounds('SELECT CASE WHEN a THEN 1 END; SELECT 2', Dialect.Postgres)).toEqual([
+      [0, 29],
+      [30, 39],
+    ])
+    expect(statementBounds('CREATE f BEGIN ATOMIC SELECT 1; END', Dialect.MySql)).toEqual([
+      [0, 30],
+      [31, 35],
+    ])
+    // A name with a dollar sign is one word.
+    expect(
+      statementBounds('CREATE VIEW v AS SELECT a$begin atomic; SELECT 5', Dialect.Postgres),
+    ).toEqual([
+      [0, 38],
+      [39, 48],
+    ])
+  })
+
+  it('reads two dashes as a MySQL comment only before a blank', () => {
+    expect(statementBounds('SELECT 5--1; SELECT 2', Dialect.MySql)).toEqual([
+      [0, 11],
+      [12, 21],
+    ])
+    const spaced = 'SELECT 1 -- a; b\nSELECT 2;--\tc;\nSELECT 3;--'
+    expect(statementBounds(spaced, Dialect.MySql)).toEqual([
+      [0, 25],
+      [26, 40],
+      [41, spaced.length],
+    ])
+    // Every other dialect reads two dashes as a comment at once.
+    expect(statementBounds('SELECT 5--1; SELECT 2', Dialect.Postgres)).toEqual([[0, 21]])
+  })
+
   it('reads a dollar sign inside a PostgreSQL name as part of the name', () => {
     const script = 'SELECT a$x$ FROM t; SELECT $x$;$x$'
     expect(statementBounds(script, Dialect.Postgres)).toEqual([

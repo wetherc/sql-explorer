@@ -2119,10 +2119,14 @@ impl FileSink {
                 ExportFormat::Csv => {}
             }
         }
-        let mut out = self.out.take().expect("the file is open until here");
-        out.flush()?;
-        drop(out);
+        let out = self.out.take().expect("the file is open until here");
+        // The rows go to the disk before the rename, so a power loss cannot
+        // leave an empty or a partial file at the path the user chose.
+        let file = out.into_inner().map_err(|error| error.into_error())?;
+        file.sync_all()?;
+        drop(file);
         std::fs::rename(&self.temp_path, &self.final_path)?;
+        files::sync_folder_of(&self.final_path);
         self.finished = true;
         Ok(ExportSummary {
             rows: self.rows,

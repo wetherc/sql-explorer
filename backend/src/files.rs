@@ -232,9 +232,35 @@ pub fn write_bytes(path: &Path, contents: &[u8]) -> Result<()> {
     use std::io::Write;
     let mut temp = temp_file_beside(path)?;
     temp.write_all(contents)?;
+    // The content goes to the disk before the rename. A power loss after
+    // the rename otherwise can leave an empty file at the path.
+    temp.as_file().sync_all()?;
     // A failed rename drops the temporary file, which removes it.
     temp.persist(path).map_err(|error| error.error)?;
+    sync_folder_of(path);
     Ok(())
+}
+
+/// The folder that holds the file at `path`. A bare file name gives the
+/// current folder.
+fn folder_of(path: &Path) -> &Path {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
+}
+
+/// Writes the entries of the folder that holds `path` to the disk, so a
+/// rename into that folder stays after a power loss. Windows cannot open a
+/// folder as a file, and some file systems refuse the sync of a folder. The
+/// rename is then already done, so a fault here is ignored.
+pub fn sync_folder_of(path: &Path) {
+    #[cfg(unix)]
+    if let Ok(folder) = std::fs::File::open(folder_of(path)) {
+        let _ = folder.sync_all();
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 /// Creates the temporary file for a write of `path`, in the same folder so
@@ -245,10 +271,7 @@ pub fn write_bytes(path: &Path, contents: &[u8]) -> Result<()> {
 /// write to another file. It takes the permissions of the file it replaces,
 /// so a file that only its owner can read stays that way.
 pub fn temp_file_beside(path: &Path) -> Result<tempfile::NamedTempFile> {
-    let folder = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        _ => Path::new("."),
-    };
+    let folder = folder_of(path);
     let mut prefix = std::ffi::OsString::from(".");
     prefix.push(path.file_name().unwrap_or_default());
     prefix.push(".");
@@ -497,6 +520,17 @@ mod tests {
         write_bytes(&file, &[0, 1, 2, 255]).unwrap();
         assert_eq!(std::fs::read(&file).unwrap(), vec![0, 1, 2, 255]);
         assert!(leftovers(&root).is_empty());
+    }
+
+    #[test]
+    fn the_sync_of_a_folder_ignores_a_folder_that_does_not_open() {
+        let root = temp_folder("sync-folder");
+        assert_eq!(folder_of(&root.join("a.sql")), root.as_path());
+        assert_eq!(folder_of(Path::new("a.sql")), Path::new("."));
+        assert_eq!(folder_of(Path::new("/")), Path::new("."));
+        sync_folder_of(&root.join("a.sql"));
+        // The folder is not there, so the sync does nothing.
+        sync_folder_of(&root.join("missing").join("a.sql"));
     }
 
     #[test]
