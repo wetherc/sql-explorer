@@ -855,6 +855,41 @@ where
 /// moment. Inside a block the transaction started with an earlier statement.
 const OUTSIDE_A_BLOCK: &str = "SELECT now() = statement_timestamp()";
 
+/// The type names of the columns of a prepared statement.
+fn type_names(statement: &tokio_postgres::Statement) -> Vec<String> {
+    statement
+        .columns()
+        .iter()
+        .map(|column| column.type_().name().to_string())
+        .collect()
+}
+
+/// Names the columns of a set of the simple protocol from the pairs of a
+/// name and a type OID. The type names of the prepared statement apply
+/// when their count is the count of the columns. Otherwise each column
+/// takes the name of its OID, see [`oid_type_name`].
+fn simple_columns(prepared: Option<&[String]>, columns: &[(&str, u32)]) -> Vec<ColumnInfo> {
+    match prepared {
+        Some(names) if names.len() == columns.len() => columns
+            .iter()
+            .zip(names)
+            .map(|((name, _), type_name)| ColumnInfo::new(*name, type_name))
+            .collect(),
+        _ => columns
+            .iter()
+            .map(|(name, oid)| ColumnInfo::new(*name, oid_type_name(*oid)))
+            .collect(),
+    }
+}
+
+/// The name of a built-in type, or the number of the OID for any other
+/// type. The driver cannot read the catalog while the stream of a statement
+/// is open. The response channel of the client has a fixed size, so a second
+/// query inside the walk would wait for ever.
+fn oid_type_name(oid: u32) -> String {
+    Type::from_oid(oid).map_or_else(|| oid.to_string(), |type_| type_.name().to_string())
+}
+
 impl PostgresDriver {
     /// True when a cancel at the row limit loses no work. The statement must
     /// only read, and the session must be outside a transaction block.
@@ -869,6 +904,35 @@ impl PostgresDriver {
             return false;
         }
         self.outside_a_block().await.unwrap_or(false)
+    }
+
+    /// Prepares a statement that only reads, and gives the type names of
+    /// its columns together with the answer of [`Self::may_cancel`]. The
+    /// prepare and the probe [`OUTSIDE_A_BLOCK`] go to the server in one
+    /// round trip. The prepare also finds the names of types that a user
+    /// or an extension defines. A statement that writes is not prepared
+    /// and gives no names.
+    ///
+    /// Outside a transaction block a failed prepare gives no names, and the
+    /// simple query then reports the error. Inside a block the failed
+    /// prepare aborts the block, and the simple query would only report
+    /// the aborted block. The error of the prepare then ends the run.
+    async fn describe_read(&self, statement: &str) -> Result<(Option<Vec<String>>, bool)> {
+        if !only_reads(statement, Dialect::Postgres) {
+            return Ok((None, false));
+        }
+        let (prepared, outside) =
+            futures_util::future::join(self.client.prepare(statement), self.outside_a_block())
+                .await;
+        let alone = outside.unwrap_or(false);
+        match prepared {
+            Ok(prepared) => Ok((Some(type_names(&prepared)), alone)),
+            Err(error) if !alone => Err(error.into()),
+            Err(error) => {
+                log::debug!("The statement could not be prepared: {error}");
+                Ok((None, alone))
+            }
+        }
     }
 
     /// Reads the time zone of the session. The binary form of a `timestamptz`
@@ -958,22 +1022,25 @@ impl PostgresDriver {
     /// refuses to prepare a text of more than one statement, so the run then
     /// stops before the simple protocol runs any part of it. The prepared
     /// statement closes at once, and the rows keep the text form of the
-    /// simple protocol. Such a text goes to the server whole.
+    /// simple protocol. Such a text goes to the server whole, and its
+    /// columns take the type names of the prepared statement.
     async fn stream_simple(
         &mut self,
         query: &str,
         options: &ExecOptions,
         sink: &mut dyn RowSink,
     ) -> Result<Option<u64>> {
-        let statements = if options.one_statement {
-            self.client.prepare(query).await?;
-            vec![query.to_string()]
+        let (statements, mut prepared) = if options.one_statement {
+            let statement = self.client.prepare(query).await?;
+            (vec![query.to_string()], Some(type_names(&statement)))
         } else {
-            split_statements(query, Dialect::Postgres)
+            (split_statements(query, Dialect::Postgres), None)
         };
         let mut rows_affected: Option<u64> = None;
         for statement in &statements {
-            let (affected, stopped) = self.stream_statement(statement, options, sink).await?;
+            let (affected, stopped) = self
+                .stream_statement(statement, prepared.take(), options, sink)
+                .await?;
             if let Some(affected) = affected {
                 rows_affected = Some(rows_affected.unwrap_or(0) + affected);
             }
@@ -1003,15 +1070,23 @@ impl PostgresDriver {
     /// limit. The driver holds one message while it walks, so the memory cost
     /// does not grow with the size of the answer.
     ///
+    /// The columns take their type names from `prepared`. Without these
+    /// names the driver prepares a statement that only reads, as
+    /// [`Self::describe_read`] does. See [`simple_columns`].
+    ///
     /// A `COPY` through the client fails before it goes to the server.
     async fn stream_statement(
         &mut self,
         statement: &str,
+        prepared: Option<Vec<String>>,
         options: &ExecOptions,
         sink: &mut dyn RowSink,
     ) -> Result<(Option<u64>, bool)> {
         refuse_client_copy(statement)?;
-        let alone = self.may_cancel(statement).await;
+        let (prepared, alone) = match prepared {
+            Some(names) => (Some(names), self.may_cancel(statement).await),
+            None => self.describe_read(statement).await?,
+        };
         let stop = self.stop.clone();
         let messages = self.client.simple_query_raw(statement).await?;
         pin_mut!(messages);
@@ -1044,12 +1119,11 @@ impl PostgresDriver {
                         sink.message(rows_returned_message(count, truncated));
                         sink.end_set(truncated)?;
                     }
-                    sink.begin_set(
-                        columns
-                            .iter()
-                            .map(|column| ColumnInfo::new(column.name(), "text"))
-                            .collect(),
-                    )?;
+                    let columns: Vec<(&str, u32)> = columns
+                        .iter()
+                        .map(|column| (column.name(), column.type_oid()))
+                        .collect();
+                    sink.begin_set(simple_columns(prepared.as_deref(), &columns))?;
                     open = true;
                     count = 0;
                     truncated = false;
@@ -2622,15 +2696,22 @@ mod tests {
     }
 
     /// Names the columns of a result set. Each column takes the type of a
-    /// text value, which the simple protocol always sends.
+    /// text value.
     fn row_description(names: &[&str]) -> Vec<u8> {
-        let mut body = (names.len() as i16).to_be_bytes().to_vec();
-        for (index, name) in names.iter().enumerate() {
+        let columns: Vec<(&str, u32)> = names.iter().map(|name| (*name, 25)).collect();
+        simple_row_description(&columns)
+    }
+
+    /// Names the columns of a result set of the simple protocol, with the
+    /// type OID of each column. The values come in their text form.
+    fn simple_row_description(columns: &[(&str, u32)]) -> Vec<u8> {
+        let mut body = (columns.len() as i16).to_be_bytes().to_vec();
+        for (index, (name, oid)) in columns.iter().enumerate() {
             body.extend_from_slice(name.as_bytes());
             body.push(0);
             body.extend_from_slice(&0i32.to_be_bytes());
             body.extend_from_slice(&(index as i16 + 1).to_be_bytes());
-            body.extend_from_slice(&25i32.to_be_bytes());
+            body.extend_from_slice(&oid.to_be_bytes());
             body.extend_from_slice(&(-1i16).to_be_bytes());
             body.extend_from_slice(&(-1i32).to_be_bytes());
             body.extend_from_slice(&0i16.to_be_bytes());
@@ -2751,6 +2832,33 @@ mod tests {
         server.write_all(&answer).await.unwrap();
     }
 
+    /// Answers the prepare of a statement that only reads with the columns
+    /// given, then the probe that comes in the same round trip, and then
+    /// the close of the prepared statement.
+    async fn answer_described(server: &mut DuplexStream, columns: &[(&str, u32)], outside: bool) {
+        read_until_sync(server).await;
+        let mut answer = message(b'1', &[]);
+        answer.extend_from_slice(&message(b't', &0i16.to_be_bytes()));
+        answer.extend_from_slice(&typed_row_description(columns));
+        answer.extend_from_slice(&ready_for_query());
+        server.write_all(&answer).await.unwrap();
+        answer_probe(server, outside).await;
+        read_until_sync(server).await;
+        let mut closed = message(b'3', &[]);
+        closed.extend_from_slice(&ready_for_query());
+        server.write_all(&closed).await.unwrap();
+    }
+
+    /// Answers the prepare of a statement with an error, and then the probe
+    /// that comes in the same round trip.
+    async fn refuse_described(server: &mut DuplexStream, outside: bool) {
+        read_until_sync(server).await;
+        let mut answer = error_response("42P01", "relation \"t\" does not exist");
+        answer.extend_from_slice(&ready_for_query());
+        server.write_all(&answer).await.unwrap();
+        answer_probe(server, outside).await;
+    }
+
     /// Reads the messages of the client up to the one that asks the server
     /// to answer.
     async fn read_until_sync(server: &mut DuplexStream) {
@@ -2848,7 +2956,7 @@ mod tests {
         let (client_end, mut server) = tokio::io::duplex(64 * 1024);
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
-            answer_probe(&mut server, true).await;
+            answer_described(&mut server, &[("id", 23)], true).await;
             answer_query(
                 &mut server,
                 "SELECT 1",
@@ -2867,7 +2975,7 @@ mod tests {
                 &[command_complete("UPDATE 3")],
             )
             .await;
-            answer_probe(&mut server, true).await;
+            answer_described(&mut server, &[("id", 23)], true).await;
             answer_query(
                 &mut server,
                 "SELECT 7",
@@ -2908,7 +3016,7 @@ mod tests {
         let (client_end, mut server) = tokio::io::duplex(64 * 1024);
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
-            answer_probe(&mut server, true).await;
+            answer_described(&mut server, &[("id", 23)], true).await;
             answer_query(
                 &mut server,
                 "SELECT 1",
@@ -2981,7 +3089,7 @@ mod tests {
         let (client_end, mut server) = tokio::io::duplex(64 * 1024);
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
-            answer_probe(&mut server, false).await;
+            answer_described(&mut server, &[("id", 23)], false).await;
             answer_query(
                 &mut server,
                 "SELECT id FROM t",
@@ -3036,7 +3144,7 @@ mod tests {
         let waiter = signal.clone();
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
-            answer_probe(&mut server, true).await;
+            answer_described(&mut server, &[("id", 23)], true).await;
             assert_eq!(read_query(&mut server).await, "SELECT id FROM t");
             let mut answer = row_description(&["id"]);
             answer.extend_from_slice(&data_row(&[Some("1")]));
@@ -3077,7 +3185,7 @@ mod tests {
         let (client_end, mut server) = tokio::io::duplex(64 * 1024);
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
-            answer_probe(&mut server, false).await;
+            answer_described(&mut server, &[("id", 23)], false).await;
             answer_query(
                 &mut server,
                 "SELECT id FROM t",
@@ -3117,7 +3225,7 @@ mod tests {
         let waiter = signal.clone();
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
-            answer_probe(&mut server, true).await;
+            answer_described(&mut server, &[("id", 23)], true).await;
             read_query(&mut server).await;
 
             let mut answer = row_description(&["id"]);
@@ -3249,7 +3357,7 @@ mod tests {
         let (stop, calls, _signal) = test_stop(false);
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
-            answer_probe(&mut server, true).await;
+            answer_described(&mut server, &[("id", 23)], true).await;
             read_query(&mut server).await;
 
             let mut answer = row_description(&["id"]);
@@ -3290,7 +3398,7 @@ mod tests {
         let waiter = signal.clone();
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
-            answer_probe(&mut server, true).await;
+            answer_described(&mut server, &[("id", 23)], true).await;
             read_query(&mut server).await;
 
             let mut answer = row_description(&["id"]);
@@ -3328,7 +3436,7 @@ mod tests {
         let waiter = signal.clone();
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
-            answer_probe(&mut server, true).await;
+            answer_described(&mut server, &[("id", 23)], true).await;
             read_query(&mut server).await;
 
             let mut answer = row_description(&["id"]);
@@ -3792,7 +3900,7 @@ mod tests {
         let waiter = signal.clone();
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
-            answer_probe(&mut server, true).await;
+            answer_described(&mut server, &[("id", 23)], true).await;
             assert_eq!(read_query(&mut server).await, "SELECT id FROM t");
             let mut answer = row_description(&["id"]);
             answer.extend_from_slice(&data_row(&[Some("1")]));
@@ -3891,7 +3999,7 @@ mod tests {
         let (stop, calls, _signal) = test_stop(true);
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
-            answer_probe(&mut server, false).await;
+            answer_described(&mut server, &[("id", 23)], false).await;
             read_query(&mut server).await;
 
             let mut answer = row_description(&["id"]);
@@ -3930,10 +4038,20 @@ mod tests {
         let (stop, calls, _signal) = test_stop(true);
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
+            read_until_sync(&mut server).await;
+            let mut answer = message(b'1', &[]);
+            answer.extend_from_slice(&message(b't', &0i16.to_be_bytes()));
+            answer.extend_from_slice(&typed_row_description(&[("id", 23)]));
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
             assert_eq!(read_query(&mut server).await, OUTSIDE_A_BLOCK);
             let mut refusal = error_response("25P02", "current transaction is aborted");
             refusal.extend_from_slice(&ready_for_query());
             server.write_all(&refusal).await.unwrap();
+            read_until_sync(&mut server).await;
+            let mut closed = message(b'3', &[]);
+            closed.extend_from_slice(&ready_for_query());
+            server.write_all(&closed).await.unwrap();
             read_query(&mut server).await;
 
             let mut answer = row_description(&["id"]);
@@ -4001,8 +4119,133 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(response.results[0].rows.len(), 1);
         assert!(response.results[0].truncated);
+        // A write is not prepared, so the column takes the name of its OID.
+        assert_eq!(response.results[0].columns[0].type_name, "text");
 
         task.await.unwrap();
+    }
+
+    /// The type names of the columns of the first set of a response.
+    fn type_names_of(response: &crate::db::QueryResponse) -> Vec<&str> {
+        response.results[0]
+            .columns
+            .iter()
+            .map(|column| column.type_name.as_str())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_read_takes_the_type_names_of_its_prepared_statement() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            answer_described(&mut server, &[("id", 23), ("at", 1184)], true).await;
+            answer_query(
+                &mut server,
+                "SELECT id, at FROM t",
+                &[
+                    simple_row_description(&[("id", 25), ("at", 25)]),
+                    data_row(&[Some("1"), None]),
+                    command_complete("SELECT 1"),
+                ],
+            )
+            .await;
+        });
+
+        let mut driver = driver_on(client_end).await;
+        let mut sink = BufferSink::new(10);
+        driver
+            .stream_simple("SELECT id, at FROM t", &no_limit(), &mut sink)
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        assert_eq!(type_names_of(&response), ["int4", "timestamptz"]);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_read_that_cannot_be_prepared_outside_a_block_names_its_types_by_oid() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            refuse_described(&mut server, true).await;
+            answer_query(
+                &mut server,
+                "SELECT id, mood FROM t",
+                &[
+                    simple_row_description(&[("id", 23), ("mood", 16423)]),
+                    data_row(&[Some("1"), Some("happy")]),
+                    command_complete("SELECT 1"),
+                ],
+            )
+            .await;
+        });
+
+        let mut driver = driver_on(client_end).await;
+        let mut sink = BufferSink::new(10);
+        driver
+            .stream_simple("SELECT id, mood FROM t", &no_limit(), &mut sink)
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        assert_eq!(type_names_of(&response), ["int4", "16423"]);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_read_that_cannot_be_prepared_inside_a_block_ends_with_the_error_of_the_prepare() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            refuse_described(&mut server, false).await;
+            // The client sends no simple query after the prepare.
+            let mut rest = Vec::new();
+            server.read_to_end(&mut rest).await.unwrap();
+            assert!(!rest.contains(&b'Q'));
+        });
+
+        let mut driver = driver_on(client_end).await;
+        let mut sink = BufferSink::new(10);
+        let error = driver
+            .stream_simple("SELECT id FROM t", &no_limit(), &mut sink)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::Postgres(ref error) if error.code() == Some(&SqlState::UNDEFINED_TABLE)
+        ));
+        drop(driver);
+        task.await.unwrap();
+    }
+
+    #[test]
+    fn the_columns_of_a_simple_set_take_the_prepared_names_or_the_names_of_their_oids() {
+        let names = |columns: Vec<ColumnInfo>| -> Vec<(String, String)> {
+            columns
+                .into_iter()
+                .map(|column| (column.name, column.type_name))
+                .collect()
+        };
+        let columns = [("id", 23), ("mood", 16423)];
+        let prepared = vec!["int4".to_string(), "mood".to_string()];
+
+        assert_eq!(
+            names(simple_columns(Some(&prepared), &columns)),
+            [("id".into(), "int4".into()), ("mood".into(), "mood".into())]
+        );
+        // A count that differs, or no prepared names, falls back on the OIDs.
+        let fallback = [
+            ("id".into(), "int4".into()),
+            ("mood".into(), "16423".into()),
+        ];
+        assert_eq!(
+            names(simple_columns(Some(&prepared[..1]), &columns)),
+            fallback
+        );
+        assert_eq!(names(simple_columns(None, &columns)), fallback);
     }
 
     #[tokio::test]
