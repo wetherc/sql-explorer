@@ -524,12 +524,15 @@ pub fn add_constraint_column(
 
 /// Reads the kind of a constraint from the word the engine reports. The
 /// engines answer with the words of `INFORMATION_SCHEMA` or with the one
-/// letter of PostgreSQL.
+/// letter of PostgreSQL. A word that no rule names gives a check.
 pub fn constraint_kind(word: &str) -> ConstraintKind {
     match word.trim().to_uppercase().as_str() {
         "PRIMARY KEY" | "P" => ConstraintKind::PrimaryKey,
         "FOREIGN KEY" | "F" => ConstraintKind::ForeignKey,
         "UNIQUE" | "U" => ConstraintKind::Unique,
+        "X" => ConstraintKind::Exclusion,
+        "T" => ConstraintKind::Trigger,
+        "N" => ConstraintKind::NotNull,
         _ => ConstraintKind::Check,
     }
 }
@@ -813,6 +816,10 @@ mod tests {
         assert_eq!(constraint_kind("UNIQUE"), ConstraintKind::Unique);
         assert_eq!(constraint_kind("u"), ConstraintKind::Unique);
         assert_eq!(constraint_kind("c"), ConstraintKind::Check);
+        assert_eq!(constraint_kind("CHECK"), ConstraintKind::Check);
+        assert_eq!(constraint_kind("x"), ConstraintKind::Exclusion);
+        assert_eq!(constraint_kind("t"), ConstraintKind::Trigger);
+        assert_eq!(constraint_kind("n"), ConstraintKind::NotNull);
         assert_eq!(routine_kind("PROCEDURE"), RoutineKind::Procedure);
         assert_eq!(routine_kind("FUNCTION"), RoutineKind::Function);
     }

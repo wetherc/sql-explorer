@@ -303,6 +303,9 @@ export const ConstraintKind = {
   ForeignKey: 'foreignKey',
   Unique: 'unique',
   Check: 'check',
+  Exclusion: 'exclusion',
+  Trigger: 'trigger',
+  NotNull: 'notNull',
 } as const
 export type ConstraintKind = (typeof ConstraintKind)[keyof typeof ConstraintKind]
 

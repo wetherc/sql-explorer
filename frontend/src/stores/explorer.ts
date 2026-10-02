@@ -200,6 +200,9 @@ export function constraintHint(constraint: ConstraintRef): string {
     foreignKey: 'foreign key',
     unique: 'unique',
     check: 'check',
+    exclusion: 'exclusion',
+    trigger: 'trigger',
+    notNull: 'not null',
   }
   const parts = [words[constraint.kind]]
   if (constraint.columns.length > 0) {

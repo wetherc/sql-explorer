@@ -6,19 +6,19 @@
 //! type mapping can fail.
 
 use crate::db::drivers::{
-    add_constraint_column, add_index_column, add_snapshot_column, bytes_to_json, constraint_kind,
-    f32_to_json, f64_to_json, number_out_of_range, number_value, prefixed_plan, routine_kind,
-    rows_affected_message, rows_returned_message, size_text, system_roots, table_kind,
-    CancelHandle, DatabaseDriver, NumberValue,
+    add_constraint_column, add_included_column, add_index_column, add_snapshot_column,
+    bytes_to_json, constraint_kind, f32_to_json, f64_to_json, number_out_of_range, number_value,
+    prefixed_plan, routine_kind, rows_affected_message, rows_returned_message, size_text,
+    system_roots, table_kind, CancelHandle, DatabaseDriver, NumberValue,
 };
 use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, Message, MessageLevel, PlanKind, QueryParams, QueryResponse, Routine, Schema,
-    SchemaSnapshot, SnapshotColumn, Table, TableFact, TableKind,
+    IndexInfo, Message, MessageLevel, Partition, PartitionList, PlanKind, QueryParams,
+    QueryResponse, Routine, Schema, SchemaSnapshot, SnapshotColumn, Table, TableFact, TableKind,
 };
 use crate::error::{Error, Result};
-use crate::sql::{only_reads, split_statements, Dialect};
+use crate::sql::{leading_keyword, only_reads, split_statements, Dialect};
 use crate::storage::{SavedConnection, TlsMode};
 use async_trait::async_trait;
 use bytes::BytesMut;
@@ -396,7 +396,7 @@ impl DatabaseDriver for PostgresDriver {
             supports_routines: true,
             supports_indexes: true,
             supports_constraints: true,
-            supports_partitions: false,
+            supports_partitions: true,
             supports_explain: true,
         }
     }
@@ -521,28 +521,10 @@ impl DatabaseDriver for PostgresDriver {
 
     async fn list_tables(&mut self, _database: &str, schema: Option<&str>) -> Result<Vec<Table>> {
         let schema = schema.unwrap_or("public");
-        let rows = self
-            .client
-            .query(
-                "SELECT c.relname, c.relkind \
-                 FROM pg_catalog.pg_class AS c \
-                 JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace \
-                 WHERE n.nspname = $1 AND c.relkind IN ('r', 'p', 'v', 'm', 'f') \
-                 ORDER BY c.relkind, c.relname",
-                &[&schema],
-            )
-            .await?;
+        let rows = self.client.query(TABLES_QUERY, &[&schema]).await?;
         Ok(rows
             .iter()
-            .map(|row| {
-                let name: String = row.get(0);
-                let kind: i8 = row.get(1);
-                if kind == b'v' as i8 || kind == b'm' as i8 {
-                    Table::view(name)
-                } else {
-                    Table::table(name)
-                }
-            })
+            .map(|row| relation_of(row.get(0), row.get(1)))
             .collect())
     }
 
@@ -657,14 +639,7 @@ impl DatabaseDriver for PostgresDriver {
         schema: Option<&str>,
     ) -> Result<Vec<Routine>> {
         let schema = schema.unwrap_or("public");
-        let rows = self
-            .client
-            .query(
-                "SELECT routine_name, routine_type FROM information_schema.routines \
-                 WHERE specific_schema = $1 ORDER BY routine_type, routine_name",
-                &[&schema],
-            )
-            .await?;
+        let rows = self.client.query(ROUTINES_QUERY, &[&schema]).await?;
         Ok(rows
             .iter()
             .map(|row| Routine {
@@ -674,9 +649,7 @@ impl DatabaseDriver for PostgresDriver {
             .collect())
     }
 
-    /// Reads the indexes from the catalog. The list of columns of an index is
-    /// an array, so the array is opened with its order kept, which gives one
-    /// column of one index in each row.
+    /// Reads the indexes from the catalog with [`INDEXES_QUERY`].
     async fn list_indexes(
         &mut self,
         _database: &str,
@@ -684,27 +657,39 @@ impl DatabaseDriver for PostgresDriver {
         table: &str,
     ) -> Result<Vec<IndexInfo>> {
         let schema = schema.unwrap_or("public");
-        let rows = self
-            .client
-            .query(
-                "SELECT i.relname, idx.indisunique, idx.indisprimary, a.attname \
-                 FROM pg_catalog.pg_index AS idx \
-                 JOIN pg_catalog.pg_class AS i ON i.oid = idx.indexrelid \
-                 JOIN pg_catalog.pg_class AS t ON t.oid = idx.indrelid \
-                 JOIN pg_catalog.pg_namespace AS n ON n.oid = t.relnamespace \
-                 JOIN LATERAL unnest(idx.indkey) WITH ORDINALITY AS k(attnum, ord) ON true \
-                 LEFT JOIN pg_catalog.pg_attribute AS a \
-                        ON a.attrelid = t.oid AND a.attnum = k.attnum \
-                 WHERE n.nspname = $1 AND t.relname = $2 \
-                 ORDER BY i.relname, k.ord",
-                &[&schema, &table],
-            )
-            .await?;
+        let rows = self.client.query(INDEXES_QUERY, &[&schema, &table]).await?;
         let mut indexes = Vec::new();
         for row in &rows {
-            add_index_column(&mut indexes, row.get(0), row.get(1), row.get(2), row.get(3));
+            add_postgres_index_column(
+                &mut indexes,
+                row.get(0),
+                row.get(1),
+                row.get(2),
+                row.get(3),
+                row.get(4),
+            );
         }
         Ok(indexes)
+    }
+
+    /// Reads the partitions of a partitioned table with
+    /// [`PARTITIONS_QUERY`]. Any other relation has no partition and gives
+    /// an empty list.
+    async fn list_partitions(
+        &mut self,
+        _database: &str,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<PartitionList> {
+        let schema = schema.unwrap_or("public");
+        let limit = PARTITION_LIMIT as i64 + 1;
+        let rows = self
+            .client
+            .query(PARTITIONS_QUERY, &[&schema, &table, &limit])
+            .await?;
+        Ok(partition_list(
+            rows.iter().map(|row| (row.get(0), row.get(1))).collect(),
+        ))
     }
 
     async fn list_constraints(
@@ -769,6 +754,60 @@ fn is_query_cancelled(error: &tokio_postgres::Error) -> bool {
     error.code() == Some(&SqlState::QUERY_CANCELED)
 }
 
+/// Reads the rest of a statement after the driver sent a cancel for it.
+/// Gives true when the statement ended without an error, which tells that
+/// the cancel did not stop it. Any error ends the read, because a closed
+/// connection gives the same error each time the stream is read.
+async fn ended_before_cancel<S, T>(mut rest: std::pin::Pin<&mut S>) -> bool
+where
+    S: stream::Stream<Item = std::result::Result<T, tokio_postgres::Error>>,
+{
+    loop {
+        match rest.try_next().await {
+            Ok(Some(_)) => {}
+            Ok(None) => return true,
+            Err(_) => return false,
+        }
+    }
+}
+
+/// The statement that gives a late cancel a statement to stop. See
+/// [`PostgresDriver::absorb_late_cancel`].
+const CANCEL_PROBE: &str = "SELECT 1";
+
+/// True for a `COPY ... FROM STDIN` or a `COPY ... TO STDOUT` statement.
+/// The server answers such a statement with a copy exchange, and this
+/// client does not take part in that exchange. The words are compared one
+/// pair at a time, so a line break between the two words does not hide the
+/// statement.
+fn copies_through_the_client(statement: &str) -> bool {
+    if leading_keyword(statement, Dialect::Postgres) != "copy" {
+        return false;
+    }
+    let lower = statement.to_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|word| !word.is_empty())
+        .collect();
+    words
+        .windows(2)
+        .any(|pair| matches!(pair, ["from", "stdin"] | ["to", "stdout"]))
+}
+
+/// Refuses a statement that [`copies_through_the_client`] accepts, before
+/// the statement goes to the server. A copy exchange that the client does
+/// not answer leaves the connection waiting for copy data.
+fn refuse_client_copy(statement: &str) -> Result<()> {
+    if copies_through_the_client(statement) {
+        return Err(Error::Unsupported(
+            "This client does not support COPY with STDIN or STDOUT. Use COPY with a \
+             file on the server, or use \\copy in psql."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// A token that asks the server to stop the statement that runs on this
 /// connection. It opens its own socket, so it works while the connection
 /// is busy.
@@ -828,6 +867,28 @@ impl PostgresDriver {
             }
         };
         name.map_or(TimeZone::UTC, |name| zone_of(&name))
+    }
+
+    /// Runs [`CANCEL_PROBE`] after a statement that ended before its cancel
+    /// reached the server.
+    ///
+    /// The cancel request goes on a second socket, and the future of the
+    /// request ends when the request is written. The server can then send
+    /// the signal of the cancel after the statement ended. A signal that
+    /// arrives while the session waits for a statement has no effect. A
+    /// signal that arrives while a later statement runs stops that statement
+    /// with the error 57014. The probe runs first, so such a signal stops the
+    /// probe and the probe drops the error.
+    ///
+    /// A signal that comes later than the end of the probe still stops the
+    /// next statement. The client cannot see when the server applies the
+    /// cancel, so the probe makes the window smaller and does not close it.
+    async fn absorb_late_cancel(&self) {
+        if let Err(error) = self.client.simple_query(CANCEL_PROBE).await {
+            if !is_query_cancelled(&error) {
+                log::warn!("The probe after a cancel failed: {error}");
+            }
+        }
     }
 
     /// Runs the probe [`OUTSIDE_A_BLOCK`] and reads its answer.
@@ -890,15 +951,21 @@ impl PostgresDriver {
     /// server answers the cancel with the error 57014, which the walk reads
     /// as the end of the set.
     ///
+    /// A statement that ends before its cancel reaches the server is followed
+    /// by [`Self::absorb_late_cancel`].
+    ///
     /// Every other statement keeps the walk and drops the rows past the
     /// limit. The driver holds one message while it walks, so the memory cost
     /// does not grow with the size of the answer.
+    ///
+    /// A `COPY` through the client fails before it goes to the server.
     async fn stream_statement(
         &mut self,
         statement: &str,
         options: &ExecOptions,
         sink: &mut dyn RowSink,
     ) -> Result<(Option<u64>, bool)> {
+        refuse_client_copy(statement)?;
         let alone = self.may_cancel(statement).await;
         let stop = self.stop.clone();
         let messages = self.client.simple_query_raw(statement).await?;
@@ -911,6 +978,8 @@ impl PostgresDriver {
         // True after the cancel reached the server. The error that the
         // cancel raises then ends the walk and is not a fault of the run.
         let mut cancelled = false;
+        // True when the error of the cancel ended the statement.
+        let mut stopped_by_cancel = false;
 
         loop {
             let message = match messages.try_next().await {
@@ -918,6 +987,7 @@ impl PostgresDriver {
                 Ok(None) => break,
                 Err(error) => {
                     if cancelled && is_query_cancelled(&error) {
+                        stopped_by_cancel = true;
                         break;
                     }
                     return Err(error.into());
@@ -979,6 +1049,9 @@ impl PostgresDriver {
                 _ => {}
             }
         }
+        if cancelled && !stopped_by_cancel {
+            self.absorb_late_cancel().await;
+        }
         if open {
             sink.message(rows_returned_message(count, truncated));
             sink.end_set(truncated)?;
@@ -994,6 +1067,10 @@ impl PostgresDriver {
     /// rows past the stop. A fault that the server reports after those rows
     /// then still ends the run.
     ///
+    /// After a cancel the walk reads the rest of the stream. A stream that
+    /// ends without the error of the cancel is followed by
+    /// [`Self::absorb_late_cancel`].
+    ///
     /// The statement is prepared first, so the columns of the answer are
     /// known before the first row arrives. A `SELECT` that matches no row
     /// then still shows its columns, and a statement that returns no
@@ -1005,6 +1082,7 @@ impl PostgresDriver {
         options: &ExecOptions,
         sink: &mut dyn RowSink,
     ) -> Result<Option<u64>> {
+        refuse_client_copy(query)?;
         let bound = bind_params(params)?;
         let may_cancel = self.may_cancel(query).await;
 
@@ -1045,6 +1123,9 @@ impl PostgresDriver {
                 // The cancel ends it there, so those rows never cross the
                 // wire.
                 if may_cancel && request_stop(&stop).await {
+                    if ended_before_cancel(rows.as_mut()).await {
+                        self.absorb_late_cancel().await;
+                    }
                     break;
                 }
                 continue;
@@ -1065,12 +1146,122 @@ impl PostgresDriver {
     }
 }
 
+/// Lists the relations of one schema. A partition shows below its parent in
+/// the partitions folder, so the list leaves out each relation that is a
+/// partition. A table with thousands of partitions then gives one entry.
+const TABLES_QUERY: &str = "SELECT c.relname, c.relkind \
+     FROM pg_catalog.pg_class AS c \
+     JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace \
+     WHERE n.nspname = $1 AND c.relkind IN ('r', 'p', 'v', 'm', 'f') \
+       AND NOT c.relispartition \
+     ORDER BY c.relkind, c.relname";
+
+/// Turns the name and the `relkind` letter of a relation into its entry. A
+/// view and a materialized view show as views. A plain table, a partitioned
+/// table and a foreign table show as tables, because [`TableKind`] has no
+/// value of their own.
+fn relation_of(name: String, kind: i8) -> Table {
+    if kind == b'v' as i8 || kind == b'm' as i8 {
+        Table::view(name)
+    } else {
+        Table::table(name)
+    }
+}
+
+/// Lists the routines of one schema from `pg_proc`. Each overload of a name
+/// is a row of its own, so the name of the entry contains the types of the
+/// arguments. The view `information_schema.routines` shows only the
+/// routines that the user owns or can run, and gives the same name to every
+/// overload.
+const ROUTINES_QUERY: &str = "SELECT p.proname || '(' || \
+            pg_catalog.pg_get_function_identity_arguments(p.oid) || ')', \
+            CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END \
+     FROM pg_catalog.pg_proc AS p \
+     JOIN pg_catalog.pg_namespace AS n ON n.oid = p.pronamespace \
+     WHERE n.nspname = $1 \
+     ORDER BY 2, 1";
+
+/// Lists the columns of the indexes of one relation, one column of one index
+/// in each row. The array `indkey` is opened with its order kept. Its first
+/// `indnkeyatts` entries are the key, and the entries after them are the
+/// `INCLUDE` columns. An entry of zero is an expression, which
+/// `pg_get_indexdef` gives as text.
+const INDEXES_QUERY: &str = "SELECT i.relname, idx.indisunique, idx.indisprimary, \
+            COALESCE(a.attname::text, \
+                     pg_catalog.pg_get_indexdef(idx.indexrelid, k.ord::int, true)), \
+            k.ord > idx.indnkeyatts \
+     FROM pg_catalog.pg_index AS idx \
+     JOIN pg_catalog.pg_class AS i ON i.oid = idx.indexrelid \
+     JOIN pg_catalog.pg_class AS t ON t.oid = idx.indrelid \
+     JOIN pg_catalog.pg_namespace AS n ON n.oid = t.relnamespace \
+     JOIN LATERAL unnest(idx.indkey) WITH ORDINALITY AS k(attnum, ord) ON true \
+     LEFT JOIN pg_catalog.pg_attribute AS a \
+            ON a.attrelid = t.oid AND a.attnum = k.attnum AND k.attnum > 0 \
+     WHERE n.nspname = $1 AND t.relname = $2 \
+     ORDER BY i.relname, k.ord";
+
+/// Adds one row of [`INDEXES_QUERY`] to the record of its index. An
+/// `INCLUDE` column goes into the list of the included columns.
+fn add_postgres_index_column(
+    indexes: &mut Vec<IndexInfo>,
+    name: String,
+    unique: bool,
+    primary: bool,
+    column: Option<String>,
+    included: bool,
+) {
+    match column {
+        Some(column) if included => add_included_column(indexes, name, unique, primary, column),
+        column => add_index_column(indexes, name, unique, primary, column),
+    }
+}
+
+/// The largest number of partitions that the tree shows for one table.
+const PARTITION_LIMIT: usize = 1000;
+
+/// Lists the partitions of one table with the bound of each. The cast to
+/// `regclass` gives the name with its schema when the schema is not on the
+/// search path. The third parameter is the limit of the rows.
+const PARTITIONS_QUERY: &str = "SELECT c.oid::pg_catalog.regclass::text, \
+            pg_catalog.pg_get_expr(c.relpartbound, c.oid) \
+     FROM pg_catalog.pg_inherits AS h \
+     JOIN pg_catalog.pg_class AS c ON c.oid = h.inhrelid \
+     JOIN pg_catalog.pg_class AS p ON p.oid = h.inhparent \
+     JOIN pg_catalog.pg_namespace AS n ON n.oid = p.relnamespace \
+     WHERE n.nspname = $1 AND p.relname = $2 AND c.relispartition \
+     ORDER BY c.relname \
+     LIMIT $3";
+
+/// Turns the rows of [`PARTITIONS_QUERY`] into the list of the tree. Each
+/// entry names the partition and then its bound. The query reads one row
+/// more than [`PARTITION_LIMIT`], and that row marks the list as truncated.
+fn partition_list(rows: Vec<(String, Option<String>)>) -> PartitionList {
+    let truncated = rows.len() > PARTITION_LIMIT;
+    let partitions = rows
+        .into_iter()
+        .take(PARTITION_LIMIT)
+        .map(|(name, bound)| Partition {
+            values: match bound {
+                Some(bound) => format!("{name} {bound}"),
+                None => name,
+            },
+        })
+        .collect();
+    PartitionList {
+        partitions,
+        truncated,
+    }
+}
+
 /// Builds the statement that reads the columns of every relation for the
 /// schema snapshot. The statement reads the catalog directly, because the
 /// views of `information_schema` are slow on a large catalog, leave out the
 /// materialized views, and name an enumerated type `USER-DEFINED`. The
 /// limit is one row past the count of columns, so the walk can tell that
 /// the snapshot is not complete.
+///
+/// The statement leaves out the partitions, as the tree does. The columns
+/// of a table with thousands of partitions then do not fill the limit.
 fn snapshot_query(max_columns: usize) -> String {
     format!(
         "SELECT n.nspname, c.relname, \
@@ -1079,7 +1270,7 @@ fn snapshot_query(max_columns: usize) -> String {
          FROM pg_catalog.pg_attribute AS a \
          JOIN pg_catalog.pg_class AS c ON c.oid = a.attrelid \
          JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace \
-         WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') \
+         WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND NOT c.relispartition \
            AND a.attnum > 0 AND NOT a.attisdropped \
            AND n.nspname NOT IN ('pg_toast', 'pg_catalog', 'information_schema') \
            AND n.nspname NOT LIKE 'pg\\_temp\\_%' \
@@ -2853,6 +3044,15 @@ mod tests {
             answer.extend_from_slice(&command_complete("SELECT 3"));
             answer.extend_from_slice(&ready_for_query());
             server.write_all(&answer).await.unwrap();
+
+            // The statement ended before the cancel stopped it, so the
+            // probe follows. A fault of the probe goes to the log alone.
+            answer_query(
+                &mut server,
+                CANCEL_PROBE,
+                &[error_response("XX000", "internal error")],
+            )
+            .await;
         });
 
         let mut driver = driver_with_stop(client_end, stop).await;
@@ -2873,11 +3073,180 @@ mod tests {
             .unwrap();
         let response = sink.into_response(RunSummary::default());
 
-        // The rest of the result stays on the server.
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(response.results[0].rows.len(), 1);
         assert!(response.results[0].truncated);
 
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_parameterised_select_that_the_cancel_stops_needs_no_probe() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let (stop, calls, signal) = test_stop(true);
+        let waiter = signal.clone();
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            answer_probe(&mut server, true).await;
+            read_until_sync(&mut server).await;
+            server
+                .write_all(&prepared(Some(&[("id", 23)])))
+                .await
+                .unwrap();
+
+            read_until_sync(&mut server).await;
+            let mut answer = message(b'2', &[]);
+            for value in 0..2i32 {
+                answer.extend_from_slice(&binary_data_row(&[Some(&value.to_be_bytes())]));
+            }
+            server.write_all(&answer).await.unwrap();
+
+            waiter.notified().await;
+            let mut end = error_response("57014", "canceling statement due to user request");
+            end.extend_from_slice(&ready_for_query());
+            server.write_all(&end).await.unwrap();
+
+            // The drop of the prepared statement sends a close and a sync,
+            // and the connection ends only after the server answers them.
+            // No simple query comes, so no probe ran.
+            let mut kind = [0u8; 1];
+            while server.read_exact(&mut kind).await.is_ok() {
+                assert_ne!(kind[0], b'Q');
+                let mut length = [0u8; 4];
+                server.read_exact(&mut length).await.unwrap();
+                let mut body = vec![0u8; i32::from_be_bytes(length) as usize - 4];
+                server.read_exact(&mut body).await.unwrap();
+                if kind[0] == b'S' {
+                    let mut answer = message(b'3', &[]);
+                    answer.extend_from_slice(&ready_for_query());
+                    server.write_all(&answer).await.unwrap();
+                }
+            }
+        });
+
+        let mut driver = driver_with_stop(client_end, stop).await;
+        let options = ExecOptions {
+            max_rows: 1,
+            timeout_secs: 30,
+            one_statement: false,
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        driver
+            .stream_with_params(
+                "SELECT id FROM t WHERE id > $1",
+                &one_param(),
+                &options,
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(response.results[0].rows.len(), 1);
+        assert!(response.results[0].truncated);
+
+        drop(driver);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_cancel_that_comes_after_the_end_of_its_statement_stops_the_probe() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let (stop, calls, signal) = test_stop(true);
+        let waiter = signal.clone();
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            answer_probe(&mut server, true).await;
+            assert_eq!(read_query(&mut server).await, "SELECT id FROM t");
+            let mut answer = row_description(&["id"]);
+            answer.extend_from_slice(&data_row(&[Some("1")]));
+            answer.extend_from_slice(&data_row(&[Some("2")]));
+            server.write_all(&answer).await.unwrap();
+
+            // The statement ends before the cancel reaches it.
+            waiter.notified().await;
+            let mut end = command_complete("SELECT 2");
+            end.extend_from_slice(&ready_for_query());
+            server.write_all(&end).await.unwrap();
+
+            // The cancel then stops the probe and not the next statement.
+            answer_query(
+                &mut server,
+                CANCEL_PROBE,
+                &[error_response(
+                    "57014",
+                    "canceling statement due to user request",
+                )],
+            )
+            .await;
+            answer_query(
+                &mut server,
+                "DELETE FROM t",
+                &[command_complete("DELETE 5")],
+            )
+            .await;
+        });
+
+        let mut driver = driver_with_stop(client_end, stop).await;
+        let options = ExecOptions {
+            max_rows: 1,
+            ..no_limit()
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        let rows_affected = driver
+            .stream_simple("SELECT id FROM t; DELETE FROM t", &options, &mut sink)
+            .await
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(rows_affected, Some(5));
+
+        task.await.unwrap();
+    }
+
+    #[test]
+    fn a_copy_through_the_client_is_found() {
+        assert!(copies_through_the_client("COPY t FROM STDIN"));
+        assert!(copies_through_the_client(
+            "-- load\ncopy t (a, b) from\n  stdin with (format csv)"
+        ));
+        assert!(copies_through_the_client(
+            "COPY (SELECT * FROM t) TO STDOUT WITH CSV HEADER"
+        ));
+        assert!(!copies_through_the_client("COPY t FROM '/tmp/t.csv'"));
+        assert!(!copies_through_the_client("COPY t TO '/tmp/t.csv'"));
+        assert!(!copies_through_the_client("SELECT 'from stdin'"));
+        assert!(!copies_through_the_client("COPY"));
+    }
+
+    #[tokio::test]
+    async fn a_copy_through_the_client_fails_before_it_reaches_the_server() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            let mut rest = Vec::new();
+            server.read_to_end(&mut rest).await.unwrap();
+            assert!(!rest.contains(&b'Q'));
+            assert!(!rest.contains(&b'P'));
+        });
+
+        let mut driver = driver_on(client_end).await;
+        let mut sink = BufferSink::new(10);
+        let error = driver
+            .stream_simple("COPY t FROM STDIN", &no_limit(), &mut sink)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::Unsupported(_)));
+        assert!(error.to_string().contains("\\copy"));
+
+        let error = driver
+            .stream_with_params("COPY t TO STDOUT", &one_param(), &no_limit(), &mut sink)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::Unsupported(_)));
+
+        drop(driver);
         task.await.unwrap();
     }
 
@@ -3512,10 +3881,106 @@ mod tests {
     }
 
     #[test]
+    fn the_list_of_tables_leaves_out_the_partitions() {
+        assert!(TABLES_QUERY.contains("NOT c.relispartition"));
+        assert!(TABLES_QUERY.contains("'p'"));
+    }
+
+    #[test]
+    fn the_letter_of_a_relation_names_its_kind() {
+        for &letter in b"vm" {
+            assert_eq!(relation_of("r".into(), letter as i8).kind, TableKind::View);
+        }
+        for &letter in b"rpf" {
+            assert_eq!(relation_of("r".into(), letter as i8).kind, TableKind::Table);
+        }
+        assert_eq!(relation_of("orders".into(), b'r' as i8).name, "orders");
+    }
+
+    #[test]
+    fn the_list_of_routines_names_each_overload_with_its_arguments() {
+        assert!(ROUTINES_QUERY.contains("pg_catalog.pg_proc"));
+        assert!(ROUTINES_QUERY.contains("pg_get_function_identity_arguments(p.oid)"));
+        assert!(ROUTINES_QUERY.contains("WHEN 'p' THEN 'PROCEDURE'"));
+        assert!(!ROUTINES_QUERY.contains("information_schema"));
+    }
+
+    #[test]
+    fn the_list_of_indexes_reads_the_included_columns_and_the_expressions() {
+        assert!(INDEXES_QUERY.contains("k.ord > idx.indnkeyatts"));
+        assert!(INDEXES_QUERY.contains("pg_get_indexdef(idx.indexrelid, k.ord::int, true)"));
+    }
+
+    #[test]
+    fn a_row_of_an_index_goes_to_the_key_or_to_the_included_columns() {
+        let mut indexes = Vec::new();
+        add_postgres_index_column(
+            &mut indexes,
+            "ix".into(),
+            true,
+            false,
+            Some("a".into()),
+            false,
+        );
+        add_postgres_index_column(
+            &mut indexes,
+            "ix".into(),
+            true,
+            false,
+            Some("lower(b)".into()),
+            false,
+        );
+        add_postgres_index_column(
+            &mut indexes,
+            "ix".into(),
+            true,
+            false,
+            Some("c".into()),
+            true,
+        );
+        add_postgres_index_column(&mut indexes, "ix".into(), true, false, None, true);
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(
+            indexes[0].columns,
+            vec!["a".to_string(), "lower(b)".to_string()]
+        );
+        assert_eq!(indexes[0].included, vec!["c".to_string()]);
+        assert!(indexes[0].unique);
+    }
+
+    #[test]
+    fn the_partitions_show_their_bounds_up_to_the_limit() {
+        assert!(PARTITIONS_QUERY.contains("c.relispartition"));
+        assert!(PARTITIONS_QUERY.ends_with("LIMIT $3"));
+
+        let list = partition_list(vec![
+            (
+                "orders_2024".to_string(),
+                Some("FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')".to_string()),
+            ),
+            ("orders_rest".to_string(), None),
+        ]);
+        assert!(!list.truncated);
+        assert_eq!(
+            list.partitions[0].values,
+            "orders_2024 FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')"
+        );
+        assert_eq!(list.partitions[1].values, "orders_rest");
+
+        let rows = (0..=PARTITION_LIMIT)
+            .map(|index| (format!("p{index}"), Some("DEFAULT".to_string())))
+            .collect();
+        let list = partition_list(rows);
+        assert!(list.truncated);
+        assert_eq!(list.partitions.len(), PARTITION_LIMIT);
+    }
+
+    #[test]
     fn the_snapshot_reads_one_column_past_its_limit() {
         let text = snapshot_query(10);
         assert!(text.ends_with("LIMIT 11"));
         assert!(text.contains("'m'"));
+        assert!(text.contains("NOT c.relispartition"));
         assert!(snapshot_query(usize::MAX).ends_with(&format!("LIMIT {}", i64::MAX)));
     }
 

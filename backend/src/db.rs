@@ -311,6 +311,13 @@ pub enum ConstraintKind {
     ForeignKey,
     Unique,
     Check,
+    /// A PostgreSQL `EXCLUDE` constraint.
+    Exclusion,
+    /// A PostgreSQL constraint trigger.
+    Trigger,
+    /// A PostgreSQL `NOT NULL` constraint, which the catalog of version 18
+    /// keeps as a record of its own.
+    NotNull,
 }
 
 /// One constraint of a relation.

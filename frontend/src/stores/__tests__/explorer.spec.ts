@@ -120,6 +120,15 @@ describe('constraintHint', () => {
     expect(constraintHint({ name: 'c', kind: 'check', columns: [], detail: 'total > 0' })).toBe(
       'check \u00b7 total > 0',
     )
+    expect(constraintHint({ name: 'x', kind: 'exclusion', columns: ['room'], detail: null })).toBe(
+      'exclusion \u00b7 room',
+    )
+    expect(constraintHint({ name: 't', kind: 'trigger', columns: [], detail: null })).toBe(
+      'trigger',
+    )
+    expect(constraintHint({ name: 'n', kind: 'notNull', columns: ['id'], detail: null })).toBe(
+      'not null \u00b7 id',
+    )
   })
 })
 
