@@ -823,8 +823,29 @@ struct PostgresCancel {
 #[async_trait]
 impl CancelHandle for PostgresCancel {
     async fn cancel(&self) -> Result<()> {
-        self.token.cancel_query(self.tls.clone()).await?;
-        Ok(())
+        wait_for_cancel(self.token.cancel_query(self.tls.clone()), CANCEL_WAIT).await
+    }
+}
+
+/// The longest time that the driver waits for the server to close the socket
+/// of a cancel.
+const CANCEL_WAIT: Duration = Duration::from_secs(5);
+
+/// Waits for a cancel request until the server closes its socket, or until
+/// the limit runs out. A network that drops the socket without a close would
+/// otherwise stop the read of the statement for good. After the limit the
+/// request counts as sent, and [`PostgresDriver::absorb_late_cancel`] runs
+/// when the statement then ends without the error of the cancel.
+async fn wait_for_cancel<F>(request: F, limit: Duration) -> Result<()>
+where
+    F: std::future::Future<Output = std::result::Result<(), tokio_postgres::Error>>,
+{
+    match tokio::time::timeout(limit, request).await {
+        Ok(result) => Ok(result?),
+        Err(_) => {
+            log::warn!("The server did not close the socket of the cancel in time.");
+            Ok(())
+        }
     }
 }
 
@@ -872,17 +893,19 @@ impl PostgresDriver {
     /// Runs [`CANCEL_PROBE`] after a statement that ended before its cancel
     /// reached the server.
     ///
-    /// The cancel request goes on a second socket, and the future of the
-    /// request ends when the request is written. The server can then send
-    /// the signal of the cancel after the statement ended. A signal that
+    /// The cancel request goes on a second socket. The future of the request
+    /// ends when the server closes that socket, and the server sends the
+    /// signal of the cancel to the session before the close. A signal that
     /// arrives while the session waits for a statement has no effect. A
     /// signal that arrives while a later statement runs stops that statement
-    /// with the error 57014. The probe runs first, so such a signal stops the
-    /// probe and the probe drops the error.
+    /// with the error 57014.
     ///
-    /// A signal that comes later than the end of the probe still stops the
-    /// next statement. The client cannot see when the server applies the
-    /// cancel, so the probe makes the window smaller and does not close it.
+    /// The probe runs for a request whose close did not arrive within
+    /// [`CANCEL_WAIT`], and for a pooler that closes the socket before the
+    /// server applies the cancel. In these cases the signal can still come
+    /// late. The probe runs first, so such a signal stops the probe and the
+    /// probe drops the error. A signal that comes later than the end of the
+    /// probe still stops the next statement.
     async fn absorb_late_cancel(&self) {
         if let Err(error) = self.client.simple_query(CANCEL_PROBE).await {
             if !is_query_cancelled(&error) {
@@ -3743,6 +3766,23 @@ mod tests {
 
         drop(driver);
         task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_cancel_that_the_server_closes_gives_its_own_result() {
+        assert!(wait_for_cancel(async { Ok(()) }, CANCEL_WAIT).await.is_ok());
+        let refused = wait_for_cancel(
+            async { Err(tokio_postgres::Error::__private_api_timeout()) },
+            CANCEL_WAIT,
+        )
+        .await;
+        assert!(refused.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancel_without_a_close_counts_as_sent_after_the_limit() {
+        let never = std::future::pending::<std::result::Result<(), tokio_postgres::Error>>();
+        assert!(wait_for_cancel(never, CANCEL_WAIT).await.is_ok());
     }
 
     #[tokio::test]

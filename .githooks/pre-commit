@@ -80,5 +80,6 @@ command -v cargo-llvm-cov >/dev/null 2>&1 || fail 'cargo-llvm-cov is not install
 (cd backend && cargo llvm-cov --summary-only --fail-under-lines "$BACKEND_MIN_LINES") ||
     fail 'a backend test failed, or the coverage is too low'
 (cd backend && cargo test --manifest-path vendor/tiberius/Cargo.toml --no-default-features --features tds73 --lib) || fail 'a test of the vendored tiberius failed'
+(cd backend && cargo test --manifest-path vendor/tokio-postgres/Cargo.toml --lib) || fail 'a test of the vendored tokio-postgres failed'
 
 printf '\n\033[32mEvery check passed.\033[0m\n'

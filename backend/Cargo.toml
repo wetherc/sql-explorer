@@ -162,5 +162,17 @@ strip = true
 # The copy also refuses a connection string that sets both
 # `TrustServerCertificate=true` and `TrustServerCertificateCA`. The release
 # calls `trust_cert` and then `trust_cert_ca`, and the second call panics.
+#
+# `tokio-postgres` 0.7.18 drops the type OID of each column of the row
+# description in the simple protocol, so a driver cannot name the type of a
+# column of a statement without parameters. The copy under `vendor/`
+# keeps the OID, and `SimpleColumn::type_oid` gives it.
+#
+# The cancel of the release writes the request, closes its side of the socket
+# and returns. The server sends the signal of the cancel to the session before
+# it closes its own side, so the next statement of the driver can start
+# before the signal and receive it. The cancel of the copy waits until the
+# server closes the socket, as libpq does.
 [patch.crates-io]
 tiberius = { path = "vendor/tiberius" }
+tokio-postgres = { path = "vendor/tokio-postgres" }
