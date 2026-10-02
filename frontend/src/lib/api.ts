@@ -22,14 +22,14 @@ import type {
   HistoryEntry,
   IndexRef,
   PartitionList,
-  PlanKind,
+  PlanMode,
   QueryResponse,
   RoutineRef,
   SavedConnection,
   SavedQuery,
   SchemaRef,
   SchemaSnapshot,
-  ScriptKind,
+  ScriptStatement,
   TableDetails,
   RelationType,
   TableRef,
@@ -136,7 +136,7 @@ export const api = {
     connectionId: string
     requestId: string
     query: string
-    kind: PlanKind
+    mode: PlanMode
     tabId?: string
     queryParams?: Record<string, unknown>
     options?: ExecOptions
@@ -263,7 +263,7 @@ export const api = {
   },
 
   /**
-   * Asks the backend for one statement of an object of the tree. The kinds
+   * Asks the backend for one statement of an object of the tree. The statements
    * are `create`, `select`, `insert` and `update`.
    */
   scriptObject(request: {
@@ -274,8 +274,8 @@ export const api = {
     tableName: string
     /** The relation of a trigger. */
     parentName?: string | null
-    kind: RelationType | ObjectType
-    scriptKind: ScriptKind
+    target: RelationType | ObjectType
+    statement: ScriptStatement
   }): Promise<string> {
     return call('script_object', request)
   },

@@ -14,7 +14,7 @@ use crate::db::drivers::{
 use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, Message, MessageLevel, ObjectType, Partition, PartitionList, PlanKind, QueryParams,
+    IndexInfo, Message, MessageLevel, ObjectType, Partition, PartitionList, PlanMode, QueryParams,
     QueryResponse, RelationType, Routine, Schema, SchemaSnapshot, SnapshotColumn, Table, TableFact,
     Trigger, TriggerEvent, TriggerTiming,
 };
@@ -497,10 +497,10 @@ impl DatabaseDriver for PostgresDriver {
         &mut self,
         query: &str,
         params: Option<&QueryParams>,
-        kind: PlanKind,
+        mode: PlanMode,
         options: &ExecOptions,
     ) -> Result<QueryResponse> {
-        let statement = prefixed_plan(query, Dialect::Postgres, plan_prefix(kind))?;
+        let statement = prefixed_plan(query, Dialect::Postgres, plan_prefix(mode))?;
         self.execute_query(&statement, params, options).await
     }
 
@@ -1448,10 +1448,10 @@ fn snapshot_query(max_columns: usize) -> String {
 
 /// The keyword that asks PostgreSQL for a plan. The analysed form runs the
 /// statement, so a statement that writes rows writes them.
-pub fn plan_prefix(kind: PlanKind) -> &'static str {
-    match kind {
-        PlanKind::Estimated => "EXPLAIN (FORMAT TEXT)",
-        PlanKind::Actual => "EXPLAIN (ANALYZE, BUFFERS)",
+pub fn plan_prefix(mode: PlanMode) -> &'static str {
+    match mode {
+        PlanMode::Estimated => "EXPLAIN (FORMAT TEXT)",
+        PlanMode::Actual => "EXPLAIN (ANALYZE, BUFFERS)",
     }
 }
 
@@ -5719,8 +5719,8 @@ mod tests {
 
     #[test]
     fn the_plan_keyword_names_the_form_of_the_answer() {
-        assert_eq!(plan_prefix(PlanKind::Estimated), "EXPLAIN (FORMAT TEXT)");
-        assert_eq!(plan_prefix(PlanKind::Actual), "EXPLAIN (ANALYZE, BUFFERS)");
+        assert_eq!(plan_prefix(PlanMode::Estimated), "EXPLAIN (FORMAT TEXT)");
+        assert_eq!(plan_prefix(PlanMode::Actual), "EXPLAIN (ANALYZE, BUFFERS)");
     }
 
     #[test]

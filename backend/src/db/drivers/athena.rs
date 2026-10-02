@@ -11,7 +11,7 @@ use crate::db::drivers::{
 use crate::db::sink::{BufferSink, RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, CreateQuery, Database, DriverCapabilities, ExecOptions, Partition,
-    PartitionList, PlanKind, QueryParams, QueryResponse, QueryStats, RelationType, ResultSet,
+    PartitionList, PlanMode, QueryParams, QueryResponse, QueryStats, RelationType, ResultSet,
     Schema, SchemaSnapshot, SnapshotColumn, Table,
 };
 use crate::error::{Error, Result};
@@ -879,10 +879,10 @@ impl DatabaseDriver for AthenaDriver {
         &mut self,
         query: &str,
         params: Option<&QueryParams>,
-        kind: PlanKind,
+        mode: PlanMode,
         options: &ExecOptions,
     ) -> Result<QueryResponse> {
-        let statement = prefixed_plan(query, Dialect::Athena, plan_prefix(kind))?;
+        let statement = prefixed_plan(query, Dialect::Athena, plan_prefix(mode))?;
         self.execute_query(&statement, params, options).await
     }
 
@@ -1133,10 +1133,10 @@ fn names_an_expired_token(text: &str) -> bool {
 
 /// The keyword that asks Athena for a plan. The analysed form runs the
 /// statement, so it scans data and it costs money.
-pub fn plan_prefix(kind: PlanKind) -> &'static str {
-    match kind {
-        PlanKind::Estimated => "EXPLAIN",
-        PlanKind::Actual => "EXPLAIN ANALYZE",
+pub fn plan_prefix(mode: PlanMode) -> &'static str {
+    match mode {
+        PlanMode::Estimated => "EXPLAIN",
+        PlanMode::Actual => "EXPLAIN ANALYZE",
     }
 }
 
@@ -1281,8 +1281,8 @@ mod tests {
 
     #[test]
     fn the_analysed_plan_of_athena_scans_data() {
-        assert_eq!(plan_prefix(PlanKind::Estimated), "EXPLAIN");
-        assert_eq!(plan_prefix(PlanKind::Actual), "EXPLAIN ANALYZE");
+        assert_eq!(plan_prefix(PlanMode::Estimated), "EXPLAIN");
+        assert_eq!(plan_prefix(PlanMode::Actual), "EXPLAIN ANALYZE");
     }
 
     #[test]

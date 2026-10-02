@@ -180,17 +180,17 @@ pub fn unique_column_names(columns: &[ColumnInfo]) -> Vec<String> {
 /// Which plan of a statement the user asked for.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub enum PlanKind {
+pub enum PlanMode {
     /// The plan the engine builds without running the statement.
     Estimated,
     /// The plan the engine reports after it ran the statement.
     Actual,
 }
 
-impl PlanKind {
+impl PlanMode {
     /// True when the engine runs the statement to give this plan.
     pub fn runs_the_statement(self) -> bool {
-        self == PlanKind::Actual
+        self == PlanMode::Actual
     }
 }
 
@@ -558,7 +558,7 @@ pub struct DriverCapabilities {
 /// What the read-only switch of the connection form does on one engine.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub enum ReadOnlyKind {
+pub enum ReadOnlyMode {
     /// The server refuses a write in the session.
     Session,
     /// The login asks for a readable replica. A primary or a standalone
@@ -585,7 +585,7 @@ pub struct EngineInfo {
     pub uses_aws: bool,
     pub supports_schemas: bool,
     pub supports_integrated_security: bool,
-    pub read_only: ReadOnlyKind,
+    pub read_only: ReadOnlyMode,
 }
 
 /// Lists the engines this build supports.
@@ -605,7 +605,7 @@ pub fn supported_engines() -> Vec<EngineInfo> {
             uses_aws: false,
             supports_schemas: true,
             supports_integrated_security: true,
-            read_only: ReadOnlyKind::Intent,
+            read_only: ReadOnlyMode::Intent,
         },
         EngineInfo {
             db_type: DbType::Athena,
@@ -620,7 +620,7 @@ pub fn supported_engines() -> Vec<EngineInfo> {
             uses_aws: true,
             supports_schemas: false,
             supports_integrated_security: false,
-            read_only: ReadOnlyKind::None,
+            read_only: ReadOnlyMode::None,
         },
         EngineInfo {
             db_type: DbType::Postgres,
@@ -635,7 +635,7 @@ pub fn supported_engines() -> Vec<EngineInfo> {
             uses_aws: false,
             supports_schemas: true,
             supports_integrated_security: false,
-            read_only: ReadOnlyKind::Session,
+            read_only: ReadOnlyMode::Session,
         },
         EngineInfo {
             db_type: DbType::Mysql,
@@ -650,7 +650,7 @@ pub fn supported_engines() -> Vec<EngineInfo> {
             uses_aws: false,
             supports_schemas: false,
             supports_integrated_security: false,
-            read_only: ReadOnlyKind::Session,
+            read_only: ReadOnlyMode::Session,
         },
         EngineInfo {
             db_type: DbType::Sqlite,
@@ -665,7 +665,7 @@ pub fn supported_engines() -> Vec<EngineInfo> {
             uses_aws: false,
             supports_schemas: true,
             supports_integrated_security: false,
-            read_only: ReadOnlyKind::Session,
+            read_only: ReadOnlyMode::Session,
         },
     ]
 }
@@ -676,14 +676,14 @@ mod tests {
 
     #[test]
     fn the_actual_plan_is_the_one_that_runs_the_statement() {
-        assert!(PlanKind::Actual.runs_the_statement());
-        assert!(!PlanKind::Estimated.runs_the_statement());
+        assert!(PlanMode::Actual.runs_the_statement());
+        assert!(!PlanMode::Estimated.runs_the_statement());
         assert_eq!(
-            serde_json::to_string(&PlanKind::Estimated).unwrap(),
+            serde_json::to_string(&PlanMode::Estimated).unwrap(),
             "\"estimated\""
         );
-        let parsed: PlanKind = serde_json::from_str("\"actual\"").unwrap();
-        assert_eq!(parsed, PlanKind::Actual);
+        let parsed: PlanMode = serde_json::from_str("\"actual\"").unwrap();
+        assert_eq!(parsed, PlanMode::Actual);
     }
 
     #[test]
@@ -709,14 +709,14 @@ mod tests {
         assert_eq!(mssql.default_port, Some(1433));
         assert!(mssql.uses_tls);
         assert!(mssql.supports_integrated_security);
-        assert_eq!(mssql.read_only, ReadOnlyKind::Intent);
+        assert_eq!(mssql.read_only, ReadOnlyMode::Intent);
 
         let athena = &engines[1];
         assert_eq!(athena.db_type, DbType::Athena);
-        assert_eq!(athena.read_only, ReadOnlyKind::None);
+        assert_eq!(athena.read_only, ReadOnlyMode::None);
         assert!(engines[2..]
             .iter()
-            .all(|engine| engine.read_only == ReadOnlyKind::Session));
+            .all(|engine| engine.read_only == ReadOnlyMode::Session));
         assert!(athena.uses_aws);
         assert!(!athena.uses_host);
         assert!(!athena.uses_credentials);

@@ -385,7 +385,7 @@ describe('query store', () => {
       connectionId: 'c1',
       requestId: expect.any(String),
       query: 'SELECT 1',
-      kind: 'estimated',
+      mode: 'estimated',
       tabId: 't1',
       queryParams: undefined,
       options: { maxRows: 10000, timeoutSecs: 300 },
@@ -400,7 +400,7 @@ describe('query store', () => {
     const queries = useQueryStore()
     await queries.explain('t1', 'c1', 'SELECT 1', 'actual')
     expect(queries.stateFor('t1').panes[0]?.label).toBe('Actual plan')
-    expect(apiStub.explainQuery).toHaveBeenCalledWith(expect.objectContaining({ kind: 'actual' }))
+    expect(apiStub.explainQuery).toHaveBeenCalledWith(expect.objectContaining({ mode: 'actual' }))
   })
 
   it('refuses a plan of an empty statement', async () => {

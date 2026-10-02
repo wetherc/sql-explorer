@@ -62,11 +62,11 @@
         <template v-if="isRelation(menuNode)">
           <v-list-item
             v-for="form of scriptFormsFor(menuNode)"
-            :key="form.kind"
+            :key="form.statement"
             prepend-icon="mdi-script-text-outline"
             :title="form.title"
-            :data-test="`menu-script-${form.kind}`"
-            @click="scriptHere(menuNode, form.kind)"
+            :data-test="`menu-script-${form.statement}`"
+            @click="scriptHere(menuNode, form.statement)"
           />
         </template>
         <v-list-item
@@ -143,7 +143,7 @@ import TableProperties from './TableProperties.vue'
 import { api } from '@/lib/api'
 import { stoppedStatementsMessage } from '@/lib/format'
 import { isExpandable, isRelation, isTriggerOrEvent, type ExplorerNode } from '@/stores/explorer'
-import { RelationType, type ScriptKind } from '@/types/api'
+import { RelationType, type ScriptStatement } from '@/types/api'
 import { useConnectionsStore } from '@/stores/connections'
 import { useExplorerStore } from '@/stores/explorer'
 import { useQueryStore } from '@/stores/query'
@@ -282,20 +282,20 @@ async function previewRows(node: ExplorerNode): Promise<void> {
  * says "draft" for an engine that keeps no text of its own, and the backend
  * decides which of the two the user gets.
  */
-const scriptForms: { kind: ScriptKind; title: string }[] = [
-  { kind: 'create', title: 'Script as CREATE' },
-  { kind: 'select', title: 'Script as SELECT' },
-  { kind: 'insert', title: 'Script as INSERT' },
-  { kind: 'update', title: 'Script as UPDATE' },
+const scriptForms: { statement: ScriptStatement; title: string }[] = [
+  { statement: 'create', title: 'Script as CREATE' },
+  { statement: 'select', title: 'Script as SELECT' },
+  { statement: 'insert', title: 'Script as INSERT' },
+  { statement: 'update', title: 'Script as UPDATE' },
 ]
 
 /**
- * The statements that a kind offers when it does not offer all four. A
+ * The statements that a type of relation offers when it does not offer all four. A
  * materialized view and a synonym take no INSERT and no UPDATE. A foreign
  * table gets no CREATE, because the draft of its columns makes a plain
  * table.
  */
-const limitedForms: Partial<Record<RelationType, ScriptKind[]>> = {
+const limitedForms: Partial<Record<RelationType, ScriptStatement[]>> = {
   [RelationType.MaterializedView]: ['create', 'select'],
   [RelationType.ForeignTable]: ['select', 'insert', 'update'],
   [RelationType.Synonym]: ['create', 'select'],
@@ -305,9 +305,9 @@ const limitedForms: Partial<Record<RelationType, ScriptKind[]>> = {
  * The statements that the menu offers for one node. The menu shows them for
  * a relation alone, so the kind of the node is a `RelationType`.
  */
-function scriptFormsFor(node: ExplorerNode): { kind: ScriptKind; title: string }[] {
+function scriptFormsFor(node: ExplorerNode): { statement: ScriptStatement; title: string }[] {
   const only = limitedForms[node.kind as RelationType]
-  return only ? scriptForms.filter((form) => only.includes(form.kind)) : scriptForms
+  return only ? scriptForms.filter((form) => only.includes(form.statement)) : scriptForms
 }
 
 /**
@@ -318,22 +318,22 @@ function scriptFormsFor(node: ExplorerNode): { kind: ScriptKind; title: string }
  * trigger therefore sends its own name from its label, and the name of its
  * relation as the parent.
  */
-async function scriptHere(node: ExplorerNode, scriptKind: ScriptKind): Promise<void> {
+async function scriptHere(node: ExplorerNode, statement: ScriptStatement): Promise<void> {
   const own = isTriggerOrEvent(node)
   try {
-    const statement = await api.scriptObject({
+    const text = await api.scriptObject({
       connectionId: node.connectionId,
       database: node.database ?? null,
       schemaName: node.schema ?? null,
       tableName: own ? node.label : (node.table ?? node.label),
       parentName: own ? (node.table ?? null) : null,
-      kind: own ? node.kind : (node.kind as RelationType),
-      scriptKind,
+      target: own ? node.kind : (node.kind as RelationType),
+      statement,
     })
     tabs.add({
       connectionId: node.connectionId,
-      query: statement,
-      title: `${node.label} (${scriptKind})`,
+      query: text,
+      title: `${node.label} (${statement})`,
     })
   } catch (error) {
     ui.reportError(error)

@@ -19,7 +19,7 @@ pub const MAX_FILE_BYTES: u64 = 5 * 1024 * 1024;
 /// What one entry of a folder is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub enum EntryKind {
+pub enum EntryType {
     Folder,
     File,
 }
@@ -30,7 +30,7 @@ pub enum EntryKind {
 pub struct FolderEntry {
     pub name: String,
     pub path: String,
-    pub kind: EntryKind,
+    pub entry_type: EntryType,
 }
 
 /// Resolves the links of a path and returns the result.
@@ -124,33 +124,33 @@ pub fn read_folder(path: &Path) -> Result<Vec<FolderEntry>> {
         if is_hidden(&name) {
             continue;
         }
-        // An entry whose kind cannot be read is left out, because neither a
+        // An entry whose file type cannot be read is left out, because neither a
         // read nor a walk of it can work either.
-        let Ok(kind) = entry.file_type() else {
+        let Ok(file_type) = entry.file_type() else {
             continue;
         };
         entries.push(FolderEntry {
             name,
             path: entry.path().to_string_lossy().to_string(),
-            kind: if kind.is_dir() {
-                EntryKind::Folder
+            entry_type: if file_type.is_dir() {
+                EntryType::Folder
             } else {
-                EntryKind::File
+                EntryType::File
             },
         });
     }
     entries.sort_by(|left, right| {
-        let group = folder_first(left.kind).cmp(&folder_first(right.kind));
+        let group = folder_first(left.entry_type).cmp(&folder_first(right.entry_type));
         group.then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
     });
     Ok(entries)
 }
 
-/// The order of the two kinds: a folder stands above a file.
-fn folder_first(kind: EntryKind) -> u8 {
-    match kind {
-        EntryKind::Folder => 0,
-        EntryKind::File => 1,
+/// The order of the two types of entry: a folder stands above a file.
+fn folder_first(entry_type: EntryType) -> u8 {
+    match entry_type {
+        EntryType::Folder => 0,
+        EntryType::File => 1,
     }
 }
 
@@ -441,8 +441,8 @@ mod tests {
 
         let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
         assert_eq!(names, vec!["zeta", "A.sql", "b.sql"]);
-        assert_eq!(entries[0].kind, EntryKind::Folder);
-        assert_eq!(entries[1].kind, EntryKind::File);
+        assert_eq!(entries[0].entry_type, EntryType::Folder);
+        assert_eq!(entries[1].entry_type, EntryType::File);
         assert!(entries[1].path.ends_with("A.sql"));
     }
 

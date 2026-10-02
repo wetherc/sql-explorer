@@ -10,7 +10,7 @@ use crate::sql::Dialect;
 /// The statement that the user asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum ScriptKind {
+pub enum ScriptStatement {
     Create,
     Select,
     Insert,
@@ -188,12 +188,12 @@ mod tests {
     }
 
     #[test]
-    fn the_kind_round_trips_through_json() {
-        let text = serde_json::to_string(&ScriptKind::Create).unwrap();
+    fn the_statement_round_trips_through_json() {
+        let text = serde_json::to_string(&ScriptStatement::Create).unwrap();
         assert_eq!(text, "\"create\"");
         assert_eq!(
-            serde_json::from_str::<ScriptKind>("\"update\"").unwrap(),
-            ScriptKind::Update
+            serde_json::from_str::<ScriptStatement>("\"update\"").unwrap(),
+            ScriptStatement::Update
         );
     }
 

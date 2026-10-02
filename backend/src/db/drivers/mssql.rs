@@ -15,7 +15,7 @@ use crate::db::drivers::{
 use crate::db::sink::{BufferSink, RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, Message, MessageLevel, ObjectType, PlanKind, QueryParams, QueryResponse,
+    IndexInfo, Message, MessageLevel, ObjectType, PlanMode, QueryParams, QueryResponse,
     RelationType, ResultSet, Routine, Schema, SchemaSnapshot, SnapshotColumn, Table, TableFact,
     Trigger, TriggerTiming,
 };
@@ -645,10 +645,10 @@ pub const PLAN_COLUMN: &str = "Microsoft SQL Server 2005 XML Showplan";
 /// The switch that asks the session for a plan. `SHOWPLAN_XML` compiles the
 /// statement and does not run it. `STATISTICS XML` runs it and adds the plan
 /// after each result set of the statement.
-pub fn plan_switch(kind: PlanKind) -> &'static str {
-    match kind {
-        PlanKind::Estimated => "SHOWPLAN_XML",
-        PlanKind::Actual => "STATISTICS XML",
+pub fn plan_switch(mode: PlanMode) -> &'static str {
+    match mode {
+        PlanMode::Estimated => "SHOWPLAN_XML",
+        PlanMode::Actual => "STATISTICS XML",
     }
 }
 
@@ -861,14 +861,14 @@ impl DatabaseDriver for MssqlDriver {
         &mut self,
         query: &str,
         params: Option<&QueryParams>,
-        kind: PlanKind,
+        mode: PlanMode,
         options: &ExecOptions,
     ) -> Result<QueryResponse> {
         let statement = single_statement(query, Dialect::MsSql)?;
         let bound = bind_params(params)?;
         let borrowed: Vec<&dyn tiberius::ToSql> =
             bound.iter().map(|value| value.as_ref()).collect();
-        let switch = plan_switch(kind);
+        let switch = plan_switch(mode);
         let started = Instant::now();
 
         self.run_switch(&format!("SET {switch} ON")).await?;
@@ -876,7 +876,7 @@ impl DatabaseDriver for MssqlDriver {
         let mut sink = BufferSink::new(options.max_rows);
         // The server does not run a statement under the estimated plan, so
         // an attention packet there rolls back no work.
-        let may_end_early = kind == PlanKind::Estimated;
+        let may_end_early = mode == PlanMode::Estimated;
         let outcome = self
             .stream_sets(
                 &statement,
@@ -1933,7 +1933,7 @@ mod tests {
             one_statement: false,
         };
         let response = driver
-            .explain("SELECT a FROM b", None, PlanKind::Actual, &options)
+            .explain("SELECT a FROM b", None, PlanMode::Actual, &options)
             .await
             .unwrap();
 
@@ -2915,8 +2915,8 @@ mod tests {
 
     #[test]
     fn each_plan_has_its_own_session_switch() {
-        assert_eq!(plan_switch(PlanKind::Estimated), "SHOWPLAN_XML");
-        assert_eq!(plan_switch(PlanKind::Actual), "STATISTICS XML");
+        assert_eq!(plan_switch(PlanMode::Estimated), "SHOWPLAN_XML");
+        assert_eq!(plan_switch(PlanMode::Actual), "STATISTICS XML");
     }
 
     #[test]

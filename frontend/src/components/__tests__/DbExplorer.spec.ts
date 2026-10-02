@@ -229,8 +229,8 @@ describe('DbExplorer', () => {
       schemaName: 'dbo',
       tableName: 'orders',
       parentName: null,
-      kind: 'view',
-      scriptKind: 'select',
+      target: 'view',
+      statement: 'select',
     })
     expect(useTabsStore().tabs[0]?.query).toBe('SELECT\n    [id]\nFROM [dbo].[orders];')
     expect(useTabsStore().tabs[0]?.title).toBe('orders (select)')
@@ -272,8 +272,8 @@ describe('DbExplorer', () => {
       schemaName: null,
       tableName: 'orders',
       parentName: null,
-      kind: 'table',
-      scriptKind: 'create',
+      target: 'table',
+      statement: 'create',
     })
   })
 
@@ -316,7 +316,7 @@ describe('DbExplorer', () => {
     menuItem('menu-script-create')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     await settle()
     expect(apiStub.scriptObject).toHaveBeenCalledWith(
-      expect.objectContaining({ tableName: 'r', kind: 'synonym', scriptKind: 'create' }),
+      expect.objectContaining({ tableName: 'r', target: 'synonym', statement: 'create' }),
     )
   })
 
@@ -361,8 +361,8 @@ describe('DbExplorer', () => {
       schemaName: null,
       tableName: 'audit',
       parentName: 'orders',
-      kind: 'trigger',
-      scriptKind: 'create',
+      target: 'trigger',
+      statement: 'create',
     })
     const tabs = useTabsStore().tabs
     expect(tabs[tabs.length - 1]?.title).toBe('audit (create)')
@@ -371,7 +371,7 @@ describe('DbExplorer', () => {
     menuItem('menu-script-create')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     await settle()
     expect(apiStub.scriptObject).toHaveBeenLastCalledWith(
-      expect.objectContaining({ tableName: 'audit', parentName: null, kind: 'event' }),
+      expect.objectContaining({ tableName: 'audit', parentName: null, target: 'event' }),
     )
   })
 

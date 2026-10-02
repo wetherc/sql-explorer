@@ -11,8 +11,8 @@ const { useTabsStore } = await import('@/stores/tabs')
 const { useUiStore } = await import('@/stores/ui')
 
 /** One entry as the backend sends it. */
-function entry(name: string, kind: 'folder' | 'file' = 'file', root = '/data') {
-  return { name, path: `${root}/${name}`, kind }
+function entry(name: string, entryType: 'folder' | 'file' = 'file', root = '/data') {
+  return { name, path: `${root}/${name}`, entryType }
 }
 
 describe('the helpers of the files panel', () => {
@@ -25,7 +25,7 @@ describe('the helpers of the files panel', () => {
 
   it('builds a node from one entry', () => {
     const folder = nodeOfEntry(entry('reports', 'folder'), 0)
-    expect(folder).toMatchObject({ name: 'reports', kind: 'folder', depth: 0, loaded: false })
+    expect(folder).toMatchObject({ name: 'reports', entryType: 'folder', depth: 0, loaded: false })
     expect(folder.children).toEqual([])
 
     // A file holds no children at all.

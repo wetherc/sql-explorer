@@ -10,7 +10,7 @@ pub mod sqlite;
 use crate::db::sink::{BufferSink, RowSink, RunSummary};
 use crate::db::{
     AppColumn, Constraint, ConstraintType, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, Message, ObjectType, PartitionList, PlanKind, QueryParams, QueryResponse,
+    IndexInfo, Message, ObjectType, PartitionList, PlanMode, QueryParams, QueryResponse,
     RelationType, Routine, RoutineType, ScheduledEvent, Schema, SchemaSnapshot, SnapshotColumn,
     SnapshotRelation, Table, TableFact, Trigger, TriggerEvent, TriggerTiming,
 };
@@ -249,7 +249,7 @@ pub trait DatabaseDriver: Send + Sync {
         &mut self,
         _query: &str,
         _params: Option<&QueryParams>,
-        _kind: PlanKind,
+        _mode: PlanMode,
         _options: &ExecOptions,
     ) -> Result<QueryResponse> {
         Err(Error::Unsupported(

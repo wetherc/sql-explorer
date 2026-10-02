@@ -10,8 +10,8 @@ const { useFilesStore } = await import('@/stores/files')
 const { useTabsStore } = await import('@/stores/tabs')
 
 /** One entry as the backend sends it. */
-function entry(name: string, kind: 'folder' | 'file' = 'file', root = '/data') {
-  return { name, path: `${root}/${name}`, kind }
+function entry(name: string, entryType: 'folder' | 'file' = 'file', root = '/data') {
+  return { name, path: `${root}/${name}`, entryType }
 }
 
 /** Mounts the panel with one folder already open. */

@@ -356,7 +356,7 @@ describe('api', () => {
       connectionId: 'c1',
       requestId: 'r1',
       query: 'SELECT 1',
-      kind: 'actual',
+      mode: 'actual',
       options: { maxRows: 10, timeoutSecs: 5 },
     })
     expect(invoke).toHaveBeenCalledWith('explain_query', {
@@ -364,7 +364,7 @@ describe('api', () => {
         connectionId: 'c1',
         requestId: 'r1',
         query: 'SELECT 1',
-        kind: 'actual',
+        mode: 'actual',
         options: { maxRows: 10, timeoutSecs: 5 },
       },
     })
@@ -373,10 +373,10 @@ describe('api', () => {
       connectionId: 'c1',
       requestId: 'r1',
       query: 'SELECT 1',
-      kind: 'estimated',
+      mode: 'estimated',
     })
     expect(invoke).toHaveBeenCalledWith('explain_query', {
-      request: { connectionId: 'c1', requestId: 'r1', query: 'SELECT 1', kind: 'estimated' },
+      request: { connectionId: 'c1', requestId: 'r1', query: 'SELECT 1', mode: 'estimated' },
     })
 
     await api.queryParameters('SELECT :id', Dialect.MsSql)
@@ -457,8 +457,8 @@ describe('api', () => {
       database: 'db',
       schemaName: 'dbo',
       tableName: 't',
-      kind: 'table' as const,
-      scriptKind: 'insert' as const,
+      target: 'table' as const,
+      statement: 'insert' as const,
     }
     await api.scriptObject(request)
     expect(invoke).toHaveBeenCalledWith('script_object', { request })

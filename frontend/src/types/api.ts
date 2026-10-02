@@ -126,7 +126,7 @@ export interface ConnectionInfo {
  * refuse a write, `intent` asks for a readable replica, and `none` hides the
  * switch.
  */
-export type ReadOnlyKind = 'session' | 'intent' | 'none'
+export type ReadOnlyMode = 'session' | 'intent' | 'none'
 
 export interface EngineInfo {
   dbType: DbType
@@ -141,7 +141,7 @@ export interface EngineInfo {
   usesAws: boolean
   supportsSchemas: boolean
   supportsIntegratedSecurity: boolean
-  readOnly: ReadOnlyKind
+  readOnly: ReadOnlyMode
 }
 
 export interface ColumnInfo {
@@ -196,7 +196,7 @@ export interface QueryResponse {
 export interface FolderEntry {
   name: string
   path: string
-  kind: 'folder' | 'file'
+  entryType: 'folder' | 'file'
 }
 
 /** What the interface says about one command of the menu of the system. */
@@ -437,22 +437,22 @@ export interface ParamValue {
 }
 
 /** Which plan of a statement the user asked for. */
-export const PlanKind = {
+export const PlanMode = {
   /** The plan the engine builds without running the statement. */
   Estimated: 'estimated',
   /** The plan the engine reports after it ran the statement. */
   Actual: 'actual',
 } as const
-export type PlanKind = (typeof PlanKind)[keyof typeof PlanKind]
+export type PlanMode = (typeof PlanMode)[keyof typeof PlanMode]
 
 /** The statement that the explorer builds for one object. */
-export const ScriptKind = {
+export const ScriptStatement = {
   Create: 'create',
   Select: 'select',
   Insert: 'insert',
   Update: 'update',
 } as const
-export type ScriptKind = (typeof ScriptKind)[keyof typeof ScriptKind]
+export type ScriptStatement = (typeof ScriptStatement)[keyof typeof ScriptStatement]
 
 export interface ColumnRef {
   name: string

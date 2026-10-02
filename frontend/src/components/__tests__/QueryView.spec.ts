@@ -618,7 +618,7 @@ describe('QueryView', () => {
     await settle()
 
     expect(apiStub.explainQuery).toHaveBeenCalledWith(
-      expect.objectContaining({ query: 'SELECT 1', kind: 'estimated' }),
+      expect.objectContaining({ query: 'SELECT 1', mode: 'estimated' }),
     )
   })
 
@@ -635,7 +635,7 @@ describe('QueryView', () => {
     const confirm = document.querySelector('[data-test="confirm-accept"]') as HTMLElement
     confirm.click()
     await settle()
-    expect(apiStub.explainQuery).toHaveBeenCalledWith(expect.objectContaining({ kind: 'actual' }))
+    expect(apiStub.explainQuery).toHaveBeenCalledWith(expect.objectContaining({ mode: 'actual' }))
   })
 
   it('closes the plan question without a run', async () => {

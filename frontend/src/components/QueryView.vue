@@ -85,7 +85,7 @@
           />
         </template>
         <v-list density="compact">
-          <v-list-item data-test="plan-estimated" @click="readPlan(PlanKind.Estimated)">
+          <v-list-item data-test="plan-estimated" @click="readPlan(PlanMode.Estimated)">
             <v-list-item-title>Estimated plan</v-list-item-title>
             <v-list-item-subtitle>The statement does not run.</v-list-item-subtitle>
           </v-list-item>
@@ -508,7 +508,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { useTabsStore } from '@/stores/tabs'
 import { useUiStore } from '@/stores/ui'
 import { alignParams, needsAValue, paramChipLabel, paramProblem, paramsForRun } from '@/lib/params'
-import { Dialect, ParamKind, PlanKind, type ParamValue, type ResultSet } from '@/types/api'
+import { Dialect, ParamKind, PlanMode, type ParamValue, type ResultSet } from '@/types/api'
 import type { ExportAllFormat, ExportFormat } from './ResultsGrid.vue'
 import type { ResultPane } from '@/stores/query'
 import type { QueryTab } from '@/stores/tabs'
@@ -909,7 +909,7 @@ function runAll(): void {
 }
 
 /** Reads the plan of the statement under the cursor. */
-function readPlan(kind: PlanKind): void {
+function readPlan(mode: PlanMode): void {
   const connectionId = props.tab.connectionId
   if (!connectionId) {
     ui.warn('Choose a connection before you read a plan.')
@@ -917,7 +917,7 @@ function readPlan(kind: PlanKind): void {
   }
   const text = editorRef.value?.currentStatement() ?? props.tab.query
   void withParams(text, (values) => {
-    void queries.explain(props.tab.id, connectionId, text, kind, values)
+    void queries.explain(props.tab.id, connectionId, text, mode, values)
   })
 }
 
@@ -927,7 +927,7 @@ function askForActualPlan(): void {
 
 function confirmActualPlan(): void {
   askingPlan.value = false
-  readPlan(PlanKind.Actual)
+  readPlan(PlanMode.Actual)
 }
 
 function formatStatement(): void {

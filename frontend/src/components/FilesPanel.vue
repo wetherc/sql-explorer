@@ -29,7 +29,7 @@
           :style="{ paddingLeft: rowIndent(row.depth) }"
           role="treeitem"
           :aria-level="row.depth + 1"
-          :aria-expanded="row.kind === 'folder' ? files.openPaths.has(row.path) : undefined"
+          :aria-expanded="row.entryType === 'folder' ? files.openPaths.has(row.path) : undefined"
           :tabindex="row.path === tabStop ? 0 : -1"
           :aria-keyshortcuts="row.depth === 0 ? 'Delete' : undefined"
           data-test="file-row"
@@ -38,7 +38,7 @@
           @keydown="onKeydown($event, row, index)"
         >
           <v-icon
-            v-if="row.kind === 'folder'"
+            v-if="row.entryType === 'folder'"
             size="x-small"
             class="chevron"
             aria-hidden="true"
@@ -57,7 +57,7 @@
             data-test="file-loading"
           />
           <v-icon v-else size="small" class="mr-2 file-icon" aria-hidden="true">
-            {{ row.kind === 'folder' ? 'mdi-folder-outline' : 'mdi-file-document-outline' }}
+            {{ row.entryType === 'folder' ? 'mdi-folder-outline' : 'mdi-file-document-outline' }}
           </v-icon>
 
           <span class="file-label">{{ row.name }}</span>
@@ -117,7 +117,7 @@ function rowIndent(depth: number): string {
 
 /** A folder opens and closes. A file opens in a tab. */
 function activate(row: FileNode): void {
-  if (row.kind !== 'folder') {
+  if (row.entryType !== 'folder') {
     void files.openFile(row.path)
     return
   }
@@ -179,7 +179,7 @@ function parentOf(index: number): FileNode | undefined {
  * out of it, and Delete takes a root out of the panel.
  */
 function onKeydown(event: KeyboardEvent, row: FileNode, index: number): void {
-  const open = row.kind === 'folder' && files.openPaths.has(row.path)
+  const open = row.entryType === 'folder' && files.openPaths.has(row.path)
   switch (event.key) {
     case 'ArrowDown':
       focusRow(files.rows[index + 1]?.path)
@@ -194,7 +194,7 @@ function onKeydown(event: KeyboardEvent, row: FileNode, index: number): void {
       focusRow(files.rows[files.rows.length - 1]?.path)
       break
     case 'ArrowRight':
-      if (row.kind === 'folder' && !open) {
+      if (row.entryType === 'folder' && !open) {
         void files.expand(row.path)
       } else if (open) {
         focusRow(files.rows[index + 1]?.path)

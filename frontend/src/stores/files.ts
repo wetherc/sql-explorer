@@ -10,7 +10,7 @@ export interface FileNode {
   /** The path of the entry, which is also its key in the tree. */
   path: string
   name: string
-  kind: 'folder' | 'file'
+  entryType: 'folder' | 'file'
   /** The depth of the node, so the tree can indent its rows. */
   depth: number
   /** Missing on a file, which never holds children. */
@@ -24,9 +24,9 @@ export function nodeOfEntry(entry: FolderEntry, depth: number): FileNode {
   return {
     path: entry.path,
     name: entry.name,
-    kind: entry.kind,
+    entryType: entry.entryType,
     depth,
-    children: entry.kind === 'folder' ? [] : undefined,
+    children: entry.entryType === 'folder' ? [] : undefined,
     loading: false,
     loaded: false,
   }
@@ -60,7 +60,7 @@ export function visibleRows(nodes: FileNode[], openPaths: Set<string>): FileNode
   const rows: FileNode[] = []
   for (const node of nodes) {
     rows.push(node)
-    if (node.kind === 'folder' && openPaths.has(node.path) && node.children) {
+    if (node.entryType === 'folder' && openPaths.has(node.path) && node.children) {
       rows.push(...visibleRows(node.children, openPaths))
     }
   }
@@ -130,7 +130,7 @@ export const useFilesStore = defineStore('files', () => {
       {
         path,
         name: baseName(path),
-        kind: 'folder',
+        entryType: 'folder',
         depth: 0,
         children: [],
         loading: false,
@@ -200,7 +200,7 @@ export const useFilesStore = defineStore('files', () => {
       }
     }
     for (const child of children) {
-      if (child.kind === 'folder' && openPaths.value.has(child.path)) {
+      if (child.entryType === 'folder' && openPaths.value.has(child.path)) {
         await readFolder(child)
       }
     }
@@ -209,7 +209,7 @@ export const useFilesStore = defineStore('files', () => {
   /** Opens one folder and reads its entries. */
   async function expand(path: string): Promise<void> {
     const node = findNode(roots.value, path)
-    if (!node || node.kind !== 'folder') {
+    if (!node || node.entryType !== 'folder') {
       return
     }
     openPaths.value = new Set(openPaths.value).add(path)
@@ -228,7 +228,7 @@ export const useFilesStore = defineStore('files', () => {
    */
   async function refresh(path: string): Promise<void> {
     const node = findNode(roots.value, path)
-    if (!node || node.kind !== 'folder') {
+    if (!node || node.entryType !== 'folder') {
       return
     }
     await readFolder(node)

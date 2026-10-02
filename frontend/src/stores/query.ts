@@ -9,7 +9,7 @@ import { useUiStore } from './ui'
 import { toErrorPayload } from '@/lib/errors'
 import { scanCost } from '@/lib/format'
 import { ResultTable, type ResultStreamHandlers } from '@/lib/results'
-import { PlanKind } from '@/types/api'
+import { PlanMode } from '@/types/api'
 import type { ErrorPayload, ExecOptions, Message, QueryStats } from '@/types/api'
 
 /** One gigabyte, as a storage unit counts it. */
@@ -384,7 +384,7 @@ export const useQueryStore = defineStore('query', () => {
     tabId: string,
     connectionId: string,
     query: string,
-    kind: PlanKind,
+    mode: PlanMode,
     queryParams?: Record<string, unknown>,
   ): Promise<boolean> {
     const text = query.trim()
@@ -399,7 +399,7 @@ export const useQueryStore = defineStore('query', () => {
           connectionId,
           requestId,
           query: text,
-          kind,
+          mode,
           tabId,
           queryParams,
           options,
@@ -414,7 +414,7 @@ export const useQueryStore = defineStore('query', () => {
           stats: response.stats ?? null,
         })
       },
-      kind === PlanKind.Actual ? 'Actual plan' : 'Estimated plan',
+      mode === PlanMode.Actual ? 'Actual plan' : 'Estimated plan',
     )
   }
 

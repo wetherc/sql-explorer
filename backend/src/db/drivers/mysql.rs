@@ -10,7 +10,7 @@ use crate::db::drivers::{
 use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
-    IndexInfo, Message, MessageLevel, ObjectType, PlanKind, QueryParams, QueryResponse,
+    IndexInfo, Message, MessageLevel, ObjectType, PlanMode, QueryParams, QueryResponse,
     RelationType, Routine, ScheduledEvent, Schema, SchemaSnapshot, SnapshotColumn, Table,
     TableFact, Trigger,
 };
@@ -612,10 +612,10 @@ impl DatabaseDriver for MysqlDriver {
         &mut self,
         query: &str,
         params: Option<&QueryParams>,
-        kind: PlanKind,
+        mode: PlanMode,
         options: &ExecOptions,
     ) -> Result<QueryResponse> {
-        let statement = prefixed_plan(query, Dialect::MySql, plan_prefix(kind))?;
+        let statement = prefixed_plan(query, Dialect::MySql, plan_prefix(mode))?;
         self.execute_query(&statement, params, options).await
     }
 
@@ -943,10 +943,10 @@ impl CancelHandle for MysqlCancel {
 /// The keyword that asks MySQL or MariaDB for a plan. `EXPLAIN ANALYZE` runs
 /// the statement, and it needs MySQL 8.0.18 or MariaDB 10.1 or a later
 /// version.
-pub fn plan_prefix(kind: PlanKind) -> &'static str {
-    match kind {
-        PlanKind::Estimated => "EXPLAIN",
-        PlanKind::Actual => "EXPLAIN ANALYZE",
+pub fn plan_prefix(mode: PlanMode) -> &'static str {
+    match mode {
+        PlanMode::Estimated => "EXPLAIN",
+        PlanMode::Actual => "EXPLAIN ANALYZE",
     }
 }
 
@@ -1421,8 +1421,8 @@ mod tests {
 
     #[test]
     fn the_analysed_plan_runs_the_statement() {
-        assert_eq!(plan_prefix(PlanKind::Estimated), "EXPLAIN");
-        assert_eq!(plan_prefix(PlanKind::Actual), "EXPLAIN ANALYZE");
+        assert_eq!(plan_prefix(PlanMode::Estimated), "EXPLAIN");
+        assert_eq!(plan_prefix(PlanMode::Actual), "EXPLAIN ANALYZE");
     }
 
     #[test]

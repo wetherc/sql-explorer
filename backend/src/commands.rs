@@ -7,13 +7,13 @@ use crate::db::drivers::{
 };
 use crate::db::{
     self, drivers::DatabaseDriver, AppColumn, Constraint, Database, ExecOptions, IndexInfo,
-    ObjectType, PartitionList, PlanKind, QueryParams, QueryResponse, RelationType, Routine,
+    ObjectType, PartitionList, PlanMode, QueryParams, QueryResponse, RelationType, Routine,
     ScheduledEvent, Schema, SchemaSnapshot, Table, TableDetails, Trigger,
 };
 use crate::error::{Error, Result};
 use crate::files;
 use crate::history::{HistoryEntry, SavedQuery};
-use crate::script::{self, ScriptKind};
+use crate::script::{self, ScriptStatement};
 use crate::secrets;
 use crate::session::{Session, DEFAULT_SESSION};
 use crate::sql::ParamValues;
@@ -779,7 +779,7 @@ pub struct PlanRequest {
     pub connection_id: String,
     pub request_id: String,
     pub query: String,
-    pub kind: PlanKind,
+    pub mode: PlanMode,
     /// The tab that asks for the plan. A request without a tab runs on the
     /// default session.
     #[serde(default)]
@@ -801,7 +801,7 @@ pub async fn explain_query<R: Runtime>(
         connection_id,
         request_id,
         query,
-        kind,
+        mode,
         tab_id,
         query_params,
         options,
@@ -828,7 +828,7 @@ pub async fn explain_query<R: Runtime>(
     let outcome = match driver_for_request(&state, &request_id, &session, &token).await {
         Ok(mut guard) => {
             run_bounded(
-                guard.explain(&query, bound.as_ref(), kind, &options),
+                guard.explain(&query, bound.as_ref(), mode, &options),
                 &token,
                 options.timeout_secs,
                 stop_grace(&session),
@@ -1311,8 +1311,8 @@ pub async fn script_object<R: Runtime>(
         schema_name,
         table_name,
         parent_name,
-        kind,
-        script_kind,
+        target,
+        statement,
     } = request;
 
     let open = ensure_healthy(&app, &state, &connection_id).await?;
@@ -1324,7 +1324,7 @@ pub async fn script_object<R: Runtime>(
     let session = background_session(&state, &connection_id, &open).await?;
     let read = CatalogRead::new(&state, &connection_id, session, CATALOG_LIMIT);
     let mut guard = read.lock().await?;
-    let relation = match kind {
+    let relation = match target {
         ScriptTarget::Relation(relation) => relation,
         ScriptTarget::Object(object_type) => {
             let place = ObjectPlace {
@@ -1334,12 +1334,7 @@ pub async fn script_object<R: Runtime>(
                 name: &table_name,
             };
             return read
-                .run(object_script(
-                    guard.as_mut(),
-                    place,
-                    object_type,
-                    script_kind,
-                ))
+                .run(object_script(guard.as_mut(), place, object_type, statement))
                 .await;
         }
     };
@@ -1352,8 +1347,8 @@ pub async fn script_object<R: Runtime>(
                     &table_name,
                 )
                 .await?;
-            let from_engine = match script_kind {
-                ScriptKind::Create => match guard.create_query(
+            let from_engine = match statement {
+                ScriptStatement::Create => match guard.create_query(
                     database.as_deref(),
                     schema_name.as_deref(),
                     &table_name,
@@ -1374,7 +1369,7 @@ pub async fn script_object<R: Runtime>(
         .await?;
 
     drop(guard);
-    script_text(dialect, &name, script_kind, &columns, from_engine)
+    script_text(dialect, &name, statement, &columns, from_engine)
 }
 
 /// What the user interface asks for when it wants the text of one object.
@@ -1391,9 +1386,9 @@ pub struct ScriptRequest {
     #[serde(default)]
     pub parent_name: Option<String>,
     /// The type of the object, which decides where the CREATE text lives.
-    pub kind: ScriptTarget,
+    pub target: ScriptTarget,
     /// The statement the user asked for.
-    pub script_kind: ScriptKind,
+    pub statement: ScriptStatement,
 }
 
 /// The type of the object of a script. The interface sends one word. The
@@ -1423,9 +1418,9 @@ async fn object_script(
     driver: &mut dyn DatabaseDriver,
     place: ObjectPlace<'_>,
     object_type: ObjectType,
-    statement: ScriptKind,
+    statement: ScriptStatement,
 ) -> Result<String> {
-    if statement != ScriptKind::Create {
+    if statement != ScriptStatement::Create {
         return Err(Error::Configuration(
             "A trigger or an event gives a CREATE statement alone.".to_string(),
         ));
@@ -1451,20 +1446,20 @@ async fn object_script(
     text_of_column(&response, query.column).ok_or_else(no_text)
 }
 
-/// Selects the statement for the kind that the user asked for. The text of
+/// Selects the statement that the user asked for. The text of
 /// the engine wins for the CREATE form, and a draft serves when there is no
 /// such text.
 fn script_text(
     dialect: crate::sql::Dialect,
     name: &str,
-    kind: ScriptKind,
+    statement: ScriptStatement,
     columns: &[AppColumn],
     from_engine: Option<String>,
 ) -> Result<String> {
-    if kind == ScriptKind::Select {
+    if statement == ScriptStatement::Select {
         return Ok(script::select_statement(dialect, name, columns));
     }
-    if let (ScriptKind::Create, Some(text)) = (kind, from_engine) {
+    if let (ScriptStatement::Create, Some(text)) = (statement, from_engine) {
         return Ok(text);
     }
     if columns.is_empty() {
@@ -1474,11 +1469,13 @@ fn script_text(
             "The object reports no column, so the statement cannot be built.".to_string(),
         ));
     }
-    Ok(match kind {
-        ScriptKind::Insert => script::insert_statement(dialect, name, columns),
-        ScriptKind::Update => script::update_statement(dialect, name, columns),
+    Ok(match statement {
+        ScriptStatement::Insert => script::insert_statement(dialect, name, columns),
+        ScriptStatement::Update => script::update_statement(dialect, name, columns),
         // The select form left this function above.
-        ScriptKind::Create | ScriptKind::Select => script::create_draft(dialect, name, columns),
+        ScriptStatement::Create | ScriptStatement::Select => {
+            script::create_draft(dialect, name, columns)
+        }
     })
 }
 
@@ -2785,7 +2782,7 @@ mod tests {
         let text = script_text(
             Dialect::Sqlite,
             "\"t\"",
-            ScriptKind::Create,
+            ScriptStatement::Create,
             &columns(),
             Some("CREATE TABLE t (id integer)".to_string()),
         )
@@ -2798,7 +2795,7 @@ mod tests {
         let text = script_text(
             Dialect::Sqlite,
             "\"t\"",
-            ScriptKind::Create,
+            ScriptStatement::Create,
             &columns(),
             None,
         )
@@ -2807,13 +2804,14 @@ mod tests {
     }
 
     #[test]
-    fn each_kind_builds_its_own_statement() {
-        let select = script_text(Dialect::Sqlite, "\"t\"", ScriptKind::Select, &[], None).unwrap();
+    fn each_statement_builds_its_own_text() {
+        let select =
+            script_text(Dialect::Sqlite, "\"t\"", ScriptStatement::Select, &[], None).unwrap();
         assert_eq!(select, "SELECT *\nFROM \"t\";");
         let insert = script_text(
             Dialect::Sqlite,
             "\"t\"",
-            ScriptKind::Insert,
+            ScriptStatement::Insert,
             &columns(),
             None,
         )
@@ -2822,7 +2820,7 @@ mod tests {
         let update = script_text(
             Dialect::Sqlite,
             "\"t\"",
-            ScriptKind::Update,
+            ScriptStatement::Update,
             &columns(),
             None,
         )
@@ -2832,7 +2830,7 @@ mod tests {
 
     #[test]
     fn an_object_without_columns_gives_no_statement() {
-        let error = script_text(Dialect::Sqlite, "\"t\"", ScriptKind::Insert, &[], None)
+        let error = script_text(Dialect::Sqlite, "\"t\"", ScriptStatement::Insert, &[], None)
             .expect_err("a statement cannot be built");
         assert!(error.to_string().contains("reports no column"));
     }
@@ -2845,19 +2843,19 @@ mod tests {
                 "database": null,
                 "schemaName": null,
                 "tableName": "x",
-                "kind": word,
-                "scriptKind": "create",
+                "target": word,
+                "statement": "create",
             }))
         };
         let view = read("view").unwrap();
-        assert_eq!(view.kind, ScriptTarget::Relation(RelationType::View));
+        assert_eq!(view.target, ScriptTarget::Relation(RelationType::View));
         assert_eq!(view.parent_name, None);
         assert_eq!(
-            read("trigger").unwrap().kind,
+            read("trigger").unwrap().target,
             ScriptTarget::Object(ObjectType::Trigger)
         );
         assert_eq!(
-            read("event").unwrap().kind,
+            read("event").unwrap().target,
             ScriptTarget::Object(ObjectType::Event)
         );
         assert!(read("cursor").is_err());
@@ -2885,7 +2883,7 @@ mod tests {
             driver.as_mut(),
             place("audit"),
             ObjectType::Trigger,
-            ScriptKind::Create,
+            ScriptStatement::Create,
         )
         .await
         .unwrap();
@@ -2898,7 +2896,7 @@ mod tests {
             driver.as_mut(),
             place("audit"),
             ObjectType::Trigger,
-            ScriptKind::Select,
+            ScriptStatement::Select,
         )
         .await
         .unwrap_err();
@@ -2913,7 +2911,7 @@ mod tests {
                 driver.as_mut(),
                 place(name),
                 object_type,
-                ScriptKind::Create,
+                ScriptStatement::Create,
             )
             .await
             .unwrap_err();

@@ -12,7 +12,7 @@ use crate::db::drivers::{
 use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, ConstraintType, CreateQuery, Database, DriverCapabilities,
-    ExecOptions, IndexInfo, Message, ObjectType, PlanKind, QueryParams, QueryResponse,
+    ExecOptions, IndexInfo, Message, ObjectType, PlanMode, QueryParams, QueryResponse,
     RelationType, Schema, Table, TableFact, Trigger,
 };
 use crate::error::{Error, Result};
@@ -293,12 +293,12 @@ impl DatabaseDriver for SqliteDriver {
         &mut self,
         query: &str,
         params: Option<&QueryParams>,
-        kind: PlanKind,
+        mode: PlanMode,
         options: &ExecOptions,
     ) -> Result<QueryResponse> {
         let statement = prefixed_plan(query, Dialect::Sqlite, "EXPLAIN QUERY PLAN")?;
         let mut response = self.execute_query(&statement, params, options).await?;
-        if kind.runs_the_statement() {
+        if mode.runs_the_statement() {
             response.messages.push(Message::info(
                 "SQLite reports one plan, so this is the plan it builds before the run.",
             ));
@@ -1139,7 +1139,7 @@ mod tests {
             .explain(
                 "SELECT * FROM person WHERE id = 1;",
                 None,
-                PlanKind::Estimated,
+                PlanMode::Estimated,
                 &ExecOptions::default(),
             )
             .await
@@ -1158,7 +1158,7 @@ mod tests {
             .explain(
                 "SELECT * FROM person",
                 None,
-                PlanKind::Actual,
+                PlanMode::Actual,
                 &ExecOptions::default(),
             )
             .await
@@ -1180,7 +1180,7 @@ mod tests {
             .explain(
                 "SELECT 1; SELECT 2",
                 None,
-                PlanKind::Estimated,
+                PlanMode::Estimated,
                 &ExecOptions::default(),
             )
             .await

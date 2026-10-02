@@ -569,7 +569,7 @@ mod tests {
             .explain(
                 "SELECT 1",
                 None,
-                crate::db::PlanKind::Estimated,
+                crate::db::PlanMode::Estimated,
                 &ExecOptions::default(),
             )
             .await
