@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { computed, isReactive, isShallow, nextTick, reactive } from 'vue'
 import { makeApiStub, connectionFixture, infoFixture } from './helpers'
+import { Dialect } from '@/types/api'
 
 const apiStub = makeApiStub()
 vi.mock('@/lib/api', () => ({ api: apiStub, CONNECTION_STATUS_EVENT: 'connection-status' }))
@@ -308,6 +309,31 @@ describe('explorer store', () => {
     const database = node({ kind: 'database', database: 'Sales', label: 'Sales' })
     await explorer.expand(database)
     expect(apiStub.listSchemas).toHaveBeenCalledWith('c1', 'Sales')
+    expect(database.children?.[0]?.kind).toBe('schema')
+  })
+
+  it('puts folders below a SQLite database that has the schema main alone', async () => {
+    apiStub.listActiveConnections.mockResolvedValue([
+      { ...infoFixture('c1', true), dialect: Dialect.Sqlite },
+    ])
+    await useConnectionsStore().load()
+    const explorer = useExplorerStore()
+    apiStub.listSchemas.mockResolvedValue([{ name: 'main' }])
+    const database = node({ kind: 'database', database: 'main', label: 'main' })
+    await explorer.expand(database)
+    expect(database.children?.[0]?.label).toBe('Tables')
+
+    apiStub.listSchemas.mockResolvedValue([{ name: 'main' }, { name: 'temp' }])
+    const attached = node({ kind: 'database', database: 'other', label: 'other' })
+    await explorer.expand(attached)
+    expect(attached.children?.map((child) => child.kind)).toEqual(['schema', 'schema'])
+  })
+
+  it('keeps a schema main of an engine other than SQLite', async () => {
+    apiStub.listSchemas.mockResolvedValue([{ name: 'main' }])
+    const explorer = await readyStore(true)
+    const database = node({ kind: 'database', database: 'Sales', label: 'Sales' })
+    await explorer.expand(database)
     expect(database.children?.[0]?.kind).toBe('schema')
   })
 

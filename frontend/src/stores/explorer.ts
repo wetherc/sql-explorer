@@ -6,6 +6,7 @@ import { useSettingsStore } from './settings'
 import { useUiStore } from './ui'
 import { emptySchemaIndex, type SchemaIndex } from '@/lib/sql'
 import {
+  Dialect,
   TableKind,
   type ColumnRef,
   type SchemaSnapshot,
@@ -794,6 +795,12 @@ export const useExplorerStore = defineStore('explorer', () => {
     if (node.kind === 'database' && supportsSchemas) {
       const database = node.database ?? node.label
       const schemas = await api.listSchemas(node.connectionId, database)
+      // A SQLite file with no temporary and no attached database has the
+      // schema main alone. The tree then puts the folders below the
+      // database, and a read without a schema reads main.
+      if (info?.dialect === Dialect.Sqlite && schemas.length === 1 && schemas[0]?.name === 'main') {
+        return schemaFolders(node, info.capabilities)
+      }
       return schemas.map((schema) => ({
         key: `${node.connectionId}/${database}/${schema.name}`,
         label: schema.name,
