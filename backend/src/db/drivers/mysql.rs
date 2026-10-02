@@ -260,7 +260,8 @@ pub fn bind_params(params: Option<&QueryParams>) -> Result<Option<Vec<MysqlValue
 /// it. Its stop runs `KILL QUERY` from a second connection, which ends the
 /// statement with a fault of the server and leaves the session unfit for the
 /// next statement, so the drain covers the whole rest of a large result.
-/// `docs/LIMITATIONS.md` records the cost of that walk.
+/// The drain reads each remaining row from the network, so a stop of a
+/// large result costs the time to receive it.
 ///
 /// The flag `stopped` carries a stop of the sink back to the caller, and a
 /// run that arrives with the flag set drains its sets without a feed.

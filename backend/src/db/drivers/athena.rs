@@ -973,7 +973,6 @@ fn names_an_expired_token(text: &str) -> bool {
         || lower.contains("security token included in the request is expired")
 }
 
-/// Doubles the wait between two checks, up to two seconds.
 /// The keyword that asks Athena for a plan. The analysed form runs the
 /// statement, so it scans data and it costs money.
 pub fn plan_prefix(kind: PlanKind) -> &'static str {
@@ -983,6 +982,7 @@ pub fn plan_prefix(kind: PlanKind) -> &'static str {
     }
 }
 
+/// Doubles the wait between two checks, up to two seconds.
 pub fn next_wait(current: Duration) -> Duration {
     std::cmp::min(current * 2, Duration::from_secs(2))
 }
