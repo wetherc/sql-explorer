@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { computed, markRaw, ref, shallowRef, watch, type ComputedRef } from 'vue'
+import { computed, markRaw, ref, shallowReactive, shallowRef, watch, type ComputedRef } from 'vue'
 import { api } from '@/lib/api'
 import { useConnectionsStore } from './connections'
 import { useSettingsStore } from './settings'
@@ -260,8 +260,21 @@ export const useExplorerStore = defineStore('explorer', () => {
   const settings = useSettingsStore()
   const ui = useUiStore()
 
-  /** The roots of the tree, one for each open connection. */
-  const roots = ref<ExplorerNode[]>([])
+  /**
+   * The roots of the tree, one for each open connection.
+   *
+   * A schema can have tens of thousands of relations, so the tree is not
+   * deep reactive. The list of roots sits in a shallow reference, and each
+   * node that can expand is a shallow reactive object. A read writes a new
+   * list into `children`, and the view sees that write. A leaf never
+   * changes, so it is marked raw. The store changes the list through
+   * addRoot, removeRoot and clear, because these keep `nodeIndex` in step.
+   */
+  const roots = shallowRef<ExplorerNode[]>([])
+  /** Each node of the tree, by its key, so a look-up walks no tree. */
+  const nodeIndex = new Map<string, ExplorerNode>()
+  /** The nodes whose read runs, so the reading flag walks no tree. */
+  const loadingNodes = new Set<ExplorerNode>()
   const filter = ref('')
   const loading = ref(false)
   /**
@@ -338,21 +351,54 @@ export const useExplorerStore = defineStore('explorer', () => {
     return `${connectionId}/${database}`
   }
 
+  /** The reads of a snapshot that run, by the key of the snapshot. */
+  const pendingSnapshots = new Map<string, Promise<SchemaSnapshot | null>>()
+
   /**
    * Reads the schema of one database and keeps it. A read that is already
    * held is not made again, so a change of the current database costs one
-   * read for each database and no more.
+   * read for each database and no more. A second caller during a read gets
+   * the promise of that read, so one database costs one call to the backend.
+   * A forced read starts a new call, and the answer of the older call then
+   * does not go into the store.
    */
-  async function readSnapshot(
+  function readSnapshot(
     connectionId: string,
     database: string,
     options: { maxColumns: number; ownConnection: boolean },
     force = false,
   ): Promise<SchemaSnapshot | null> {
     const key = snapshotKey(connectionId, database)
-    if (!force && snapshots.value[key]) {
-      return snapshots.value[key]
+    const held = snapshots.value[key]
+    if (!force && held) {
+      return Promise.resolve(held)
     }
+    const pending = pendingSnapshots.get(key)
+    if (!force && pending) {
+      return pending
+    }
+    const isLast = () => pendingSnapshots.get(key) === read
+    const read = fetchSnapshot(connectionId, database, options, isLast).finally(() => {
+      if (isLast()) {
+        pendingSnapshots.delete(key)
+      }
+    })
+    pendingSnapshots.set(key, read)
+    return read
+  }
+
+  /**
+   * Asks the backend for the schema of one database. The answer goes into
+   * the store only while `isLast` holds, because a forced read can start
+   * after this one.
+   */
+  async function fetchSnapshot(
+    connectionId: string,
+    database: string,
+    options: { maxColumns: number; ownConnection: boolean },
+    isLast: () => boolean,
+  ): Promise<SchemaSnapshot | null> {
+    const key = snapshotKey(connectionId, database)
     const stamp = forgetStamp(connectionId)
     try {
       const snapshot = await api.schemaSnapshot({
@@ -366,6 +412,9 @@ export const useExplorerStore = defineStore('explorer', () => {
         // editor stay a list this store can read. An answer for a connection
         // that closed during the read is left out too.
         return null
+      }
+      if (!isLast()) {
+        return snapshot
       }
       snapshots.value = { ...snapshots.value, [key]: markRaw(snapshot) }
       if (!snapshot.complete) {
@@ -387,6 +436,11 @@ export const useExplorerStore = defineStore('explorer', () => {
   function forgetSnapshots(connectionId: string): void {
     forgetCounts.set(connectionId, (forgetCounts.get(connectionId) ?? 0) + 1)
     schemaIndexes.delete(connectionId)
+    for (const key of [...pendingSnapshots.keys()]) {
+      if (key.startsWith(`${connectionId}/`)) {
+        pendingSnapshots.delete(key)
+      }
+    }
     const kept: Record<string, SchemaSnapshot> = {}
     for (const [key, snapshot] of Object.entries(snapshots.value)) {
       if (!key.startsWith(`${connectionId}/`)) {
@@ -539,41 +593,76 @@ export const useExplorerStore = defineStore('explorer', () => {
     }
   }
 
+  /** Gives a new node the reactivity that the tree needs. */
+  function adopt(node: ExplorerNode): ExplorerNode {
+    return isExpandable(node) ? shallowReactive(node) : markRaw(node)
+  }
+
+  /** True when the node is part of the tree, and not a copy or a node that went. */
+  function inTree(node: ExplorerNode): boolean {
+    return nodeIndex.get(node.key) === node
+  }
+
+  function indexNodes(nodes: ExplorerNode[]): void {
+    walk(nodes, (node) => nodeIndex.set(node.key, node))
+  }
+
+  function unindexNodes(nodes: ExplorerNode[]): void {
+    walk(nodes, (node) => {
+      if (inTree(node)) {
+        nodeIndex.delete(node.key)
+      }
+    })
+  }
+
+  /** Writes the children of a node, and keeps the index in step. */
+  function setChildren(node: ExplorerNode, children: ExplorerNode[]): void {
+    const indexed = inTree(node)
+    if (indexed) {
+      unindexNodes(node.children ?? [])
+    }
+    node.children = children
+    if (indexed) {
+      indexNodes(children)
+    }
+  }
+
   /** Adds a root for a connection that has just opened. */
   function addRoot(connectionId: string): ExplorerNode {
     const existing = roots.value.find((node) => node.key === connectionId)
     if (existing) {
       return existing
     }
-    const node = rootFor(connectionId)
+    const node = adopt(rootFor(connectionId))
     roots.value = [...roots.value, node]
+    indexNodes([node])
     return node
   }
 
   function removeRoot(connectionId: string): void {
+    unindexNodes(roots.value.filter((node) => node.key === connectionId))
     roots.value = roots.value.filter((node) => node.key !== connectionId)
     forgetSnapshots(connectionId)
+    forgetRelations({ connectionId })
   }
 
   function clear(): void {
     roots.value = []
+    nodeIndex.clear()
+    loadingNodes.clear()
+    relationReads.clear()
     filter.value = ''
     // The watch of the field runs later, and the tree is empty now.
     applyFilter('')
     snapshots.value = {}
+    pendingSnapshots.clear()
     clearCount += 1
     schemaIndexes.clear()
   }
 
   /** Finds the node with the given key in the tree itself. */
   function nodeByKey(key: string): ExplorerNode | null {
-    let found: ExplorerNode | null = null
-    walk(roots.value, (candidate) => {
-      if (candidate.key === key) {
-        found = candidate
-      }
-    })
-    return found
+    return nodeIndex.get(key) ?? null
   }
 
   /**
@@ -609,7 +698,8 @@ export const useExplorerStore = defineStore('explorer', () => {
       return
     }
     node.loaded = false
-    node.children = []
+    setChildren(node, [])
+    forgetRelations(node)
     // The user asks for the objects of the server again, so the schema that
     // the editor offers is read again too. A database that is shut gets its
     // schema when the user next opens it.
@@ -644,13 +734,14 @@ export const useExplorerStore = defineStore('explorer', () => {
     loadGeneration.set(node.key, generation)
     const isLast = () => loadGeneration.get(node.key) === generation
     node.loading = true
+    loadingNodes.add(node)
     loading.value = true
     try {
-      const children = await childrenOf(node)
+      const children = (await childrenOf(node)).map(adopt)
       if (!isLast()) {
         return []
       }
-      node.children = children
+      setChildren(node, children)
       node.loaded = true
       if (node.kind === 'database') {
         // The user has shown interest in this database, so the whole schema
@@ -662,23 +753,18 @@ export const useExplorerStore = defineStore('explorer', () => {
     } catch (error) {
       if (isLast()) {
         ui.reportError(error)
-        node.children = []
+        setChildren(node, [])
         node.loaded = false
       }
       return []
     } finally {
       if (isLast()) {
         node.loading = false
+        loadingNodes.delete(node)
       }
-      loading.value = roots.value.some((root) => hasLoadingNode(root))
+      // A node that left the tree during its read does not count.
+      loading.value = [...loadingNodes].some(inTree)
     }
-  }
-
-  function hasLoadingNode(node: ExplorerNode): boolean {
-    if (node.loading) {
-      return true
-    }
-    return (node.children ?? []).some(hasLoadingNode)
   }
 
   /** Asks the backend for the level below the given node. */
@@ -767,6 +853,65 @@ export const useExplorerStore = defineStore('explorer', () => {
     return folders
   }
 
+  /**
+   * The reads of the relations of one schema, by the place they read. The
+   * Tables folder and the Views folder show two parts of one list, so the
+   * two folders share one call to the backend. An entry goes away when both
+   * folders have read it, when its read fails, and when the user refreshes
+   * or closes its place.
+   */
+  const relationReads = new Map<
+    string,
+    {
+      connectionId: string
+      database: string
+      schema: string | null
+      list: Promise<TableRef[]>
+      readers: Set<FolderKind>
+    }
+  >()
+
+  /** Reads the relations of one schema for one of its two folders. */
+  function relationsOf(node: ExplorerNode, database: string, schema: string | null) {
+    const key = JSON.stringify([node.connectionId, database, schema])
+    let read = relationReads.get(key)
+    if (!read) {
+      const list = api.listTables(node.connectionId, database, schema)
+      const entry = {
+        connectionId: node.connectionId,
+        database,
+        schema,
+        list,
+        readers: new Set<FolderKind>(),
+      }
+      list.catch(() => {
+        if (relationReads.get(key) === entry) {
+          relationReads.delete(key)
+        }
+      })
+      relationReads.set(key, entry)
+      read = entry
+    }
+    read.readers.add(node.folder!)
+    if (read.readers.size === 2) {
+      relationReads.delete(key)
+    }
+    return read.list
+  }
+
+  /** Drops the shared reads of relations at the place of a node and below it. */
+  function forgetRelations(place: { connectionId: string; database?: string; schema?: string }) {
+    for (const [key, read] of relationReads) {
+      if (
+        read.connectionId === place.connectionId &&
+        (place.database === undefined || read.database === place.database) &&
+        (place.schema === undefined || read.schema === place.schema)
+      ) {
+        relationReads.delete(key)
+      }
+    }
+  }
+
   /** Reads the list that one folder holds. */
   async function folderChildren(node: ExplorerNode): Promise<ExplorerNode[]> {
     const connectionId = node.connectionId
@@ -778,7 +923,7 @@ export const useExplorerStore = defineStore('explorer', () => {
       case 'tables':
       case 'views': {
         const wanted = node.folder === 'views' ? TableKind.View : TableKind.Table
-        const tables = await api.listTables(connectionId, database, schema)
+        const tables = await relationsOf(node, database, schema)
         return tables
           .filter((entry) => entry.kind === wanted)
           .map((entry) => tableNode(entry, connectionId, database, node.schema))

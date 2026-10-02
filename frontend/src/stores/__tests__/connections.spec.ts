@@ -14,6 +14,7 @@ const {
   validateConnection,
 } = await import('@/stores/connections')
 const { useUiStore } = await import('@/stores/ui')
+const { useExplorerStore } = await import('@/stores/explorer')
 const { AwsCredentialSource, ConnectionHealth, DbType, MssqlAuth } = await import('@/types/api')
 
 describe('newConnection', () => {
@@ -81,6 +82,39 @@ describe('validateConnection', () => {
     expect(validateConnection(connectionFixture({ port: 0 }))).toHaveLength(1)
     expect(validateConnection(connectionFixture({ port: 70000 }))).toHaveLength(1)
     expect(validateConnection(connectionFixture({ port: 1.5 }))).toHaveLength(1)
+  })
+
+  it('needs a whole number in each number box', () => {
+    const empty = (key: 'connectTimeoutSecs' | 'queryTimeoutSecs' | 'maxRows' | 'maxSessions') => {
+      const connection = connectionFixture()
+      ;(connection.options as unknown as Record<string, unknown>)[key] = ''
+      return validateConnection(connection)
+    }
+    expect(empty('connectTimeoutSecs')).toEqual([
+      'The connect timeout must be a whole number of 0 or more.',
+    ])
+    expect(empty('queryTimeoutSecs')).toEqual([
+      'The statement timeout must be a whole number of 0 or more.',
+    ])
+    expect(empty('maxRows')).toEqual(['The row limit must be a whole number of 0 or more.'])
+    expect(empty('maxSessions')).toEqual(['The max sessions must be a whole number of 1 or more.'])
+    const connection = connectionFixture()
+    connection.options.maxRows = -1
+    connection.options.queryTimeoutSecs = 2.5
+    expect(validateConnection(connection)).toHaveLength(2)
+  })
+
+  it('accepts 0 in a timeout and needs one session or more', () => {
+    const connection = connectionFixture()
+    connection.options.connectTimeoutSecs = 0
+    connection.options.queryTimeoutSecs = 0
+    connection.options.maxRows = 0
+    connection.options.maxSessions = 1
+    expect(validateConnection(connection)).toEqual([])
+    connection.options.maxSessions = 0
+    expect(validateConnection(connection)).toEqual([
+      'The max sessions must be a whole number of 1 or more.',
+    ])
   })
 
   it('needs no host when a connection string is given', () => {
@@ -384,6 +418,19 @@ describe('connections store', () => {
     expect(apiStub.testConnection).not.toHaveBeenCalled()
   })
 
+  it('sends no empty number box to the backend', async () => {
+    const connections = useConnectionsStore()
+    const connection = connectionFixture()
+    ;(connection.options as unknown as Record<string, unknown>).maxRows = ''
+    expect(await connections.test(connection)).toBe(false)
+    expect(await connections.save(connection)).toBe(false)
+    expect(apiStub.testConnection).not.toHaveBeenCalled()
+    expect(apiStub.saveConnection).not.toHaveBeenCalled()
+    expect(useUiStore().notices[0]?.message).toBe(
+      'The row limit must be a whole number of 0 or more.',
+    )
+  })
+
   it('reports a failed test', async () => {
     apiStub.testConnection.mockRejectedValue({ kind: 'connection', message: 'no', detail: null })
     const connections = useConnectionsStore()
@@ -413,6 +460,25 @@ describe('connections store', () => {
     expect(connections.isActive('c1')).toBe(false)
     expect(connections.selectedId).toBeNull()
     expect(useUiStore().notices[0]?.message).toBe('the socket closed')
+  })
+
+  it('takes the tree of a dropped connection away', () => {
+    const connections = useConnectionsStore()
+    const explorer = useExplorerStore()
+    explorer.addRoot('c1')
+    explorer.addRoot('c2')
+    connections.applyStatus({
+      connectionId: 'c1',
+      health: ConnectionHealth.Reconnecting,
+      message: null,
+    })
+    expect(explorer.roots).toHaveLength(2)
+    connections.applyStatus({
+      connectionId: 'c1',
+      health: ConnectionHealth.Disconnected,
+      message: null,
+    })
+    expect(explorer.roots.map((root) => root.key)).toEqual(['c2'])
   })
 
   it('raises no note when a closed connection reports no reason', () => {

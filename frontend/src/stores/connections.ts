@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { api } from '@/lib/api'
+import { useExplorerStore } from './explorer'
 import { useUiStore } from './ui'
 import {
   AwsCredentialSource,
@@ -61,6 +62,21 @@ export function validateConnection(connection: SavedConnection): string[] {
   if (!connection.name.trim()) {
     problems.push('The connection needs a name.')
   }
+  // A number box that the user empties gives a text, and the backend
+  // refuses a text where it reads a whole number.
+  const { connectTimeoutSecs, queryTimeoutSecs, maxRows, maxSessions } = connection.options
+  if (!isCount(connectTimeoutSecs)) {
+    problems.push('The connect timeout must be a whole number of 0 or more.')
+  }
+  if (!isCount(queryTimeoutSecs)) {
+    problems.push('The statement timeout must be a whole number of 0 or more.')
+  }
+  if (!isCount(maxRows)) {
+    problems.push('The row limit must be a whole number of 0 or more.')
+  }
+  if (!isCount(maxSessions) || maxSessions < 1) {
+    problems.push('The max sessions must be a whole number of 1 or more.')
+  }
   switch (connection.dbType) {
     case DbType.Sqlite:
       if (!connection.options.filePath?.trim()) {
@@ -99,6 +115,11 @@ export function validateConnection(connection: SavedConnection): string[] {
       }
   }
   return problems
+}
+
+/** True for a whole number of 0 or more. */
+function isCount(value: unknown): value is number {
+  return Number.isInteger(value) && (value as number) >= 0
 }
 
 /** Builds the text the connection list shows below the name. */
@@ -332,6 +353,9 @@ export const useConnectionsStore = defineStore('connections', () => {
       if (selectedId.value === event.connectionId) {
         selectedId.value = firstActiveId()
       }
+      // The tree of a dropped connection names the objects of a session that
+      // is gone, so its root goes. A connect after the drop reads it again.
+      useExplorerStore().removeRoot(event.connectionId)
       if (event.message) {
         ui.warn(event.message)
       }

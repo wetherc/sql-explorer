@@ -88,12 +88,61 @@ export function isPlainIdentifier(name: string): boolean {
 }
 
 /**
+ * The reserved words that most engines refuse as a name without quotes. The
+ * list is short and covers the words that a table or a column often has,
+ * such as `order` or `group`. A word that an engine accepts gets quotes all
+ * the same, and a quoted name works on every engine.
+ */
+const SHARED_RESERVED = (
+  'ALL ALTER AND ANY AS ASC BETWEEN BY CASE CAST CHECK COLUMN CONSTRAINT ' +
+  'CREATE CROSS CURRENT_DATE CURRENT_TIME CURRENT_TIMESTAMP CURRENT_USER ' +
+  'DEFAULT DELETE DESC DISTINCT DROP ELSE END EXCEPT EXISTS FALSE FOR ' +
+  'FOREIGN FROM FULL GRANT GROUP HAVING IN INNER INSERT INTERSECT INTO IS ' +
+  'JOIN LEFT LIKE NOT NULL ON OR ORDER OUTER PRIMARY REFERENCES RIGHT SELECT ' +
+  'SET TABLE THEN TO TRUE UNION UNIQUE UPDATE USING VALUES WHEN WHERE WITH'
+).split(' ')
+
+/** The reserved words of one engine that the shared list does not have. */
+const DIALECT_RESERVED: Record<Dialect, string> = {
+  [Dialect.MsSql]:
+    'BACKUP BEGIN CLOSE COMMIT DATABASE DECLARE EXEC EXECUTE FETCH FILE ' +
+    'FUNCTION IDENTITY INDEX KEY OPEN PERCENT PLAN PROC PROCEDURE PUBLIC ' +
+    'ROLLBACK RULE SCHEMA TOP TRAN TRANSACTION USER VIEW',
+  [Dialect.MySql]:
+    'CHANGE DATABASE DESCRIBE DIV GROUPS INDEX INTERVAL KEY KEYS LIMIT LOCK ' +
+    'MOD OVER PROCEDURE RANGE RANK READ REPLACE ROW_NUMBER SCHEMA SHOW ' +
+    'TRIGGER WINDOW WRITE',
+  [Dialect.Postgres]:
+    'ANALYSE ANALYZE ARRAY BOTH COLLATE CURRENT_ROLE DO FETCH LATERAL ' +
+    'LEADING LIMIT LOCALTIME LOCALTIMESTAMP OFFSET ONLY RETURNING ' +
+    'SESSION_USER SOME TRAILING USER WINDOW',
+  [Dialect.Sqlite]: 'AUTOINCREMENT ESCAPE GLOB INDEX ISNULL LIMIT NOTNULL OFFSET',
+  [Dialect.Athena]:
+    'CUBE DEALLOCATE DESCRIBE ESCAPE EXECUTE EXTRACT GROUPING LOCALTIME ' +
+    'LOCALTIMESTAMP NATURAL PREPARE RECURSIVE ROLLUP TRIM UNNEST',
+}
+
+/** The reserved words of each engine, in capital letters. */
+const RESERVED = {} as Record<Dialect, ReadonlySet<string>>
+for (const [dialect, words] of Object.entries(DIALECT_RESERVED) as [Dialect, string][]) {
+  RESERVED[dialect] = new Set([...SHARED_RESERVED, ...words.split(' ')])
+}
+
+/** True when the engine refuses the word as a name without quotes. */
+export function isReservedWord(name: string, dialect: Dialect): boolean {
+  return RESERVED[dialect].has(name.toUpperCase())
+}
+
+/**
  * Quotes a name only when it needs quotes. PostgreSQL folds a name without
  * quotes to lower case, so a name with a capital letter needs quotes there.
+ * A reserved word of the engine, such as `order`, needs quotes too.
  */
 export function quoteIfNeeded(name: string, dialect: Dialect): string {
   const folds = dialect === Dialect.Postgres && name !== name.toLowerCase()
-  return isPlainIdentifier(name) && !folds ? name : quoteIdentifier(name, dialect)
+  return isPlainIdentifier(name) && !folds && !isReservedWord(name, dialect)
+    ? name
+    : quoteIdentifier(name, dialect)
 }
 
 /**

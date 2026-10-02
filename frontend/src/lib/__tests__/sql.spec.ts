@@ -9,6 +9,7 @@ import {
   quoteIdentifier,
   qualifierBefore,
   quoteIfNeeded,
+  isReservedWord,
   statementAt,
   statementBounds,
   statementAround,
@@ -83,6 +84,30 @@ describe('quoteIfNeeded', () => {
     expect(quoteIfNeeded('Orders', Dialect.Postgres)).toBe('"Orders"')
     expect(quoteIfNeeded('orders', Dialect.Postgres)).toBe('orders')
     expect(quoteIfNeeded('Orders', Dialect.MsSql)).toBe('Orders')
+  })
+
+  it('quotes a reserved word on every engine', () => {
+    expect(quoteIfNeeded('order', Dialect.MsSql)).toBe('[order]')
+    expect(quoteIfNeeded('Group', Dialect.MySql)).toBe('`Group`')
+    expect(quoteIfNeeded('select', Dialect.Postgres)).toBe('"select"')
+    expect(quoteIfNeeded('table', Dialect.Sqlite)).toBe('"table"')
+    expect(quoteIfNeeded('from', Dialect.Athena)).toBe('"from"')
+  })
+
+  it('quotes the reserved words of one engine only on that engine', () => {
+    expect(quoteIfNeeded('user', Dialect.MsSql)).toBe('[user]')
+    expect(quoteIfNeeded('user', Dialect.Postgres)).toBe('"user"')
+    expect(quoteIfNeeded('user', Dialect.MySql)).toBe('user')
+    expect(quoteIfNeeded('limit', Dialect.MySql)).toBe('`limit`')
+    expect(quoteIfNeeded('limit', Dialect.MsSql)).toBe('limit')
+    expect(quoteIfNeeded('unnest', Dialect.Athena)).toBe('"unnest"')
+    expect(quoteIfNeeded('glob', Dialect.Sqlite)).toBe('"glob"')
+    expect(quoteIfNeeded('orders', Dialect.Postgres)).toBe('orders')
+  })
+
+  it('tells a reserved word apart from a plain name', () => {
+    expect(isReservedWord('Order', Dialect.MsSql)).toBe(true)
+    expect(isReservedWord('orders', Dialect.MsSql)).toBe(false)
   })
 })
 
@@ -519,6 +544,17 @@ describe('completionsFor with a dialect that quotes differently', () => {
     expect(completionsFor('my c', index, Dialect.MySql)[0]?.insertText).toBe('`my column`')
     expect(completionsFor('my s', index, Dialect.Postgres)[0]?.insertText).toBe('"my schema"')
     expect(completionsFor('my d', index, Dialect.Sqlite)[0]?.insertText).toBe('"my db"')
+  })
+
+  it('quotes a table whose name is a reserved word', () => {
+    const index: SchemaIndex = {
+      ...emptySchemaIndex(),
+      tables: [{ name: 'user', qualifier: 'dbo' }],
+    }
+    const table = (dialect: Dialect) =>
+      completionsFor('use', index, dialect).find((item) => item.kind === 'table')?.insertText
+    expect(table(Dialect.MsSql)).toBe('[user]')
+    expect(table(Dialect.Postgres)).toBe('"user"')
   })
 })
 

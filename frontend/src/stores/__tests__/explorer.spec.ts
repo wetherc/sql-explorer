@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
+import { computed, isReactive, isShallow, nextTick, reactive } from 'vue'
 import { makeApiStub, connectionFixture, infoFixture } from './helpers'
 
 const apiStub = makeApiStub()
@@ -357,6 +358,113 @@ describe('explorer store', () => {
     expect(views.children?.[0]?.kind).toBe('view')
   })
 
+  it('shares one read of the relations between the two folders of a schema', async () => {
+    apiStub.listTables.mockResolvedValue([
+      { name: 'orders', kind: TableKind.Table },
+      { name: 'big_orders', kind: TableKind.View },
+    ])
+    const explorer = await readyStore()
+    const schema = node({ kind: 'schema', database: 'Sales', schema: 'dbo' })
+    await explorer.expand(folderNode('Tables', 'tables', schema))
+    const views = folderNode('Views', 'views', schema)
+    await explorer.expand(views)
+    expect(apiStub.listTables).toHaveBeenCalledTimes(1)
+    expect(views.children?.map((child) => child.label)).toEqual(['big_orders'])
+
+    // Both folders have read the list, so the next read asks the backend.
+    await explorer.expand(folderNode('Tables', 'tables', schema))
+    expect(apiStub.listTables).toHaveBeenCalledTimes(2)
+  })
+
+  it('drops a shared read of relations on a refresh, a close and a failure', async () => {
+    apiStub.listTables.mockResolvedValue([])
+    const explorer = await readyStore()
+    const place = (connectionId: string, database: string, schema?: string) =>
+      node({
+        kind: 'schema',
+        key: `${connectionId}/${database}/${schema}`,
+        connectionId,
+        database,
+        schema,
+      })
+    const places = [
+      place('c1', 'Sales', 'dbo'),
+      place('c1', 'Sales', 'stage'),
+      place('c1', 'Other', 'dbo'),
+      place('c2', 'Sales', 'dbo'),
+    ]
+    // The Tables folder of each place reads, and each read stays for Views.
+    for (const schema of places) {
+      await explorer.expand(folderNode('Tables', 'tables', schema))
+    }
+    expect(apiStub.listTables).toHaveBeenCalledTimes(4)
+
+    // A refresh of one schema drops the read of that schema alone.
+    await explorer.refresh(places[0]!)
+    for (const schema of places) {
+      await explorer.expand(folderNode('Views', 'views', schema))
+    }
+    expect(apiStub.listTables).toHaveBeenCalledTimes(5)
+
+    for (const schema of places) {
+      await explorer.expand(folderNode('Tables', 'tables', { ...schema, key: `${schema.key}!` }))
+    }
+    expect(apiStub.listTables).toHaveBeenCalledTimes(8)
+
+    // A close drops every read of the connection, and the read of the other
+    // connection stays shared.
+    explorer.removeRoot('c1')
+    for (const schema of places) {
+      await explorer.expand(folderNode('Views', 'views', { ...schema, key: `${schema.key}?` }))
+    }
+    expect(apiStub.listTables).toHaveBeenCalledTimes(11)
+
+    // clear drops every read.
+    explorer.clear()
+    for (const schema of places.slice(1, 3)) {
+      await explorer.expand(folderNode('Tables', 'tables', { ...schema, key: `${schema.key}+` }))
+    }
+    expect(apiStub.listTables).toHaveBeenCalledTimes(13)
+
+    // A read that fails is not shared, so the other folder asks again.
+    apiStub.listTables.mockRejectedValueOnce({ kind: 'query', message: 'gone', detail: null })
+    const fresh = place('c1', 'Fresh', 'dbo')
+    await explorer.expand(folderNode('Tables', 'tables', fresh))
+    await explorer.expand(folderNode('Views', 'views', fresh))
+    expect(apiStub.listTables).toHaveBeenCalledTimes(15)
+  })
+
+  it('keeps the shared read that took the place of a read that failed', async () => {
+    const explorer = await readyStore()
+    let fail: (reason: unknown) => void = () => {}
+    apiStub.listTables.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          fail = reject
+        }),
+    )
+    apiStub.listTables.mockResolvedValue([])
+    const schema = node({ kind: 'schema', database: 'Sales', schema: 'dbo' })
+    const first = explorer.expand(folderNode('Tables', 'tables', schema))
+    await explorer.refresh(schema)
+    await explorer.expand(folderNode('Views', 'views', schema))
+    fail({ kind: 'query', message: 'gone', detail: null })
+    await first
+    await explorer.expand(folderNode('Tables', 'tables', { ...schema, key: 'other' }))
+    expect(apiStub.listTables).toHaveBeenCalledTimes(2)
+  })
+
+  it('drops the shared reads of a whole connection on a refresh of its root', async () => {
+    apiStub.listTables.mockResolvedValue([])
+    apiStub.listDatabases.mockResolvedValue([])
+    const explorer = await readyStore()
+    const schema = node({ kind: 'schema', database: 'Sales', schema: 'dbo' })
+    await explorer.expand(folderNode('Tables', 'tables', schema))
+    await explorer.refresh(explorer.addRoot('c1'))
+    await explorer.expand(folderNode('Views', 'views', schema))
+    expect(apiStub.listTables).toHaveBeenCalledTimes(2)
+  })
+
   it('uses an empty database name and no schema when the node carries none', async () => {
     apiStub.listTables.mockResolvedValue([])
     const explorer = await readyStore()
@@ -552,6 +660,71 @@ describe('explorer store', () => {
     // A call that asks for a fresh read makes one.
     await explorer.readSnapshot('c1', 'Sales', options, true)
     expect(apiStub.schemaSnapshot).toHaveBeenCalledTimes(2)
+  })
+
+  it('makes one call for two reads of one database that run at the same time', async () => {
+    const explorer = await readyStore()
+    const answers: ((value: unknown) => void)[] = []
+    apiStub.schemaSnapshot.mockImplementation(() => new Promise((resolve) => answers.push(resolve)))
+    const options = { maxColumns: 100, ownConnection: true }
+
+    const first = explorer.readSnapshot('c1', 'Sales', options)
+    const second = explorer.readSnapshot('c1', 'Sales', options)
+    expect(apiStub.schemaSnapshot).toHaveBeenCalledTimes(1)
+    answers[0]!(snapshotFixture())
+    expect(await second).toEqual(snapshotFixture())
+    expect(await first).toEqual(snapshotFixture())
+
+    // The read is over, so the next read gives the kept snapshot.
+    await explorer.readSnapshot('c1', 'Sales', options)
+    expect(apiStub.schemaSnapshot).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the answer of a forced read over the answer of an older read', async () => {
+    const explorer = await readyStore()
+    const answers: ((value: unknown) => void)[] = []
+    apiStub.schemaSnapshot.mockImplementation(() => new Promise((resolve) => answers.push(resolve)))
+    const options = { maxColumns: 100, ownConnection: true }
+
+    const older = explorer.readSnapshot('c1', 'Sales', options)
+    const forced = explorer.readSnapshot('c1', 'Sales', options, true)
+    expect(apiStub.schemaSnapshot).toHaveBeenCalledTimes(2)
+    // A third caller joins the forced read.
+    const joined = explorer.readSnapshot('c1', 'Sales', options)
+    expect(apiStub.schemaSnapshot).toHaveBeenCalledTimes(2)
+
+    answers[1]!({ ...snapshotFixture(), columnCount: 9 })
+    await forced
+    expect((await joined)?.columnCount).toBe(9)
+    answers[0]!(snapshotFixture())
+    expect((await older)?.columnCount).toBe(2)
+    expect(explorer.snapshots['c1/Sales']?.columnCount).toBe(9)
+  })
+
+  it('starts a new read after the snapshots of the connection are dropped', async () => {
+    const explorer = await readyStore()
+    const answers: ((value: unknown) => void)[] = []
+    apiStub.schemaSnapshot.mockImplementation(() => new Promise((resolve) => answers.push(resolve)))
+    const options = { maxColumns: 100, ownConnection: true }
+
+    const before = explorer.readSnapshot('c1', 'Sales', options)
+    const other = explorer.readSnapshot('c2', 'Sales', options)
+    explorer.forgetSnapshots('c1')
+    const after = explorer.readSnapshot('c1', 'Sales', options)
+    expect(apiStub.schemaSnapshot).toHaveBeenCalledTimes(3)
+    // The read of another connection goes on.
+    void explorer.readSnapshot('c2', 'Sales', options)
+    expect(apiStub.schemaSnapshot).toHaveBeenCalledTimes(3)
+    explorer.clear()
+    const cleared = explorer.readSnapshot('c2', 'Sales', options)
+    expect(apiStub.schemaSnapshot).toHaveBeenCalledTimes(4)
+    for (const answer of answers) {
+      answer(snapshotFixture())
+    }
+    expect(await before).toBe(null)
+    expect(await after).toBe(null)
+    expect(await other).toBe(null)
+    expect(await cleared).toEqual(snapshotFixture())
   })
 
   it('reads the schema again when the user refreshes the tree', async () => {
@@ -932,10 +1105,111 @@ describe('explorer store', () => {
     const root = explorer.addRoot('c1')
     // A second connection is still reading its own branch.
     const other = explorer.addRoot('c2')
-    other.children = [node({ key: 'busy', loading: true, children: undefined })]
+    let answer: (value: unknown) => void = () => {}
+    apiStub.listDatabases.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          answer = resolve
+        }),
+    )
+    const busy = explorer.expand(other)
     apiStub.listDatabases.mockResolvedValue([])
     await explorer.expand(root)
     expect(explorer.loading).toBe(true)
+    answer([])
+    await busy
+    expect(explorer.loading).toBe(false)
+  })
+
+  it('drops the reading flag of a branch that left the tree', async () => {
+    const explorer = await readyStore()
+    const root = explorer.addRoot('c1')
+    const other = explorer.addRoot('c2')
+    apiStub.listDatabases.mockImplementationOnce(() => new Promise(() => {}))
+    void explorer.expand(other)
+    explorer.removeRoot('c2')
+    apiStub.listDatabases.mockResolvedValue([])
+    await explorer.expand(root)
+    expect(explorer.loading).toBe(false)
+  })
+
+  it('keeps a shallow tree that the view still follows', async () => {
+    apiStub.listDatabases.mockResolvedValue([{ name: 'Sales' }, { name: 'Other' }])
+    apiStub.listSchemas.mockResolvedValue([{ name: 'dbo' }])
+    const explorer = await readyStore()
+    // The computed value stands for the view, which reads the same fields.
+    const seen = computed(() => {
+      const labels: string[] = []
+      walk(explorer.visibleNodes, (entry) => {
+        labels.push(`${entry.label}${entry.loading ? '…' : ''}${entry.loaded ? '+' : ''}`)
+      })
+      return labels
+    })
+    const root = explorer.addRoot('c1')
+    expect(seen.value).toEqual(['Server'])
+
+    // An expand of the root and of a database below it.
+    await explorer.expand(root)
+    expect(seen.value).toEqual(['Server+', 'Sales', 'Other'])
+    const sales = root.children![0]!
+    await explorer.expand({ ...sales })
+    expect(seen.value).toEqual(['Server+', 'Sales+', 'dbo', 'Other'])
+    expect(isReactive(sales) && isShallow(sales)).toBe(true)
+
+    // A refresh with a new answer.
+    apiStub.listDatabases.mockResolvedValue([{ name: 'Archive' }])
+    await explorer.refresh(root)
+    expect(seen.value).toEqual(['Server+', 'Archive'])
+
+    // A filter, and then a close of the connection.
+    explorer.filter = 'arch'
+    await afterTheFilterPause()
+    expect(seen.value).toEqual(['Server+', 'Archive'])
+    explorer.filter = 'nothing'
+    await afterTheFilterPause()
+    expect(seen.value).toEqual([])
+    explorer.filter = ''
+    await nextTick()
+    explorer.removeRoot('c1')
+    expect(seen.value).toEqual([])
+  })
+
+  it('keeps a leaf of the tree out of the reactivity', async () => {
+    apiStub.listColumns.mockResolvedValue([
+      { name: 'id', dataType: 'int', nullable: false, isPrimaryKey: true },
+    ])
+    const explorer = await readyStore()
+    const columns = folderNode(
+      'Columns',
+      'columns',
+      node({ key: 'c1/t', kind: 'table', table: 't' }),
+    )
+    await explorer.expand(columns)
+    const leaf = columns.children![0]!
+    expect(reactive(leaf)).toBe(leaf)
+  })
+
+  it('reads a root again after a copy with the key of a child took its place', async () => {
+    apiStub.listDatabases.mockResolvedValue([{ name: 'Sales' }])
+    const explorer = await readyStore()
+    const root = explorer.addRoot('c1')
+    await explorer.expand(root)
+    // The copy has the key of the database, but the index names the node.
+    root.children = [{ ...root.children![0]! }]
+    await explorer.refresh(root)
+    const fresh = root.children![0]!
+    apiStub.listSchemas.mockResolvedValue([{ name: 'dbo' }])
+    await explorer.expand({ ...fresh })
+    expect(fresh.children?.map((child) => child.label)).toEqual(['dbo'])
+  })
+
+  it('reads a root again whose children are gone', async () => {
+    apiStub.listDatabases.mockResolvedValue([{ name: 'Sales' }])
+    const explorer = await readyStore()
+    const root = explorer.addRoot('c1')
+    root.children = undefined
+    await explorer.refresh(root)
+    expect(explorer.roots[0]?.children?.map((child) => child.label)).toEqual(['Sales'])
   })
 
   it('shows only the nodes that match the filter', async () => {
