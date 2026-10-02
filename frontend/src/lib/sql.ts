@@ -301,8 +301,6 @@ interface SplitRules {
   triggerBodies: boolean
   /** The `BEGIN ATOMIC ... END` body of a routine holds semicolons. */
   atomicBodies: boolean
-  /** Two dashes start a comment only when a blank or a control character follows. */
-  spacedDashComments: boolean
 }
 
 /**
@@ -323,22 +321,7 @@ function splitRules(dialect?: Dialect): SplitRules {
     delimiterCommand: dialect === Dialect.MySql,
     triggerBodies: dialect === Dialect.Sqlite,
     atomicBodies: dialect === Dialect.Postgres,
-    spacedDashComments: dialect === Dialect.MySql,
   }
-}
-
-/**
- * True when two dashes at the given position start a comment that runs to
- * the end of the line. MySQL reads them so only when a blank, a control
- * character or the end of the text follows them, so `5--1` is a subtraction
- * there.
- */
-function dashCommentAt(script: string, index: number, rules: SplitRules): boolean {
-  if (!script.startsWith('--', index)) {
-    return false
-  }
-  // The end of the script gives an empty text, which the pattern accepts.
-  return !rules.spacedDashComments || /^[\s\p{Cc}]?$/u.test(script.charAt(index + 2))
 }
 
 /** A bare word that starts at the `lastIndex` of the pattern. */
@@ -370,6 +353,25 @@ class BodyWords {
     }
     this.previous = word
   }
+}
+
+/**
+ * True when two dashes at the given position start a comment that runs to
+ * the end of the line. MySQL reads them so only when a blank, a control
+ * character or the end of the text follows them, so `5--1` is a subtraction
+ * there. Every other dialect reads two dashes as a comment at once. The rule
+ * follows the scanner of the backend.
+ */
+export function opensDashComment(
+  chars: ArrayLike<string>,
+  index: number,
+  dialect?: Dialect,
+): boolean {
+  if (chars[index] !== '-' || chars[index + 1] !== '-') {
+    return false
+  }
+  const after = chars[index + 2]
+  return dialect !== Dialect.MySql || after === undefined || /[\p{White_Space}\p{Cc}]/u.test(after)
 }
 
 /** True when the character can stand inside a bare name. */
@@ -563,7 +565,7 @@ function statementSpans(script: string, dialect?: Dialect, whole = false): State
         continue
       }
     }
-    if (dashCommentAt(script, index, rules)) {
+    if (opensDashComment(script, index, dialect)) {
       index = endOfLine(script, index)
       continue
     }
@@ -727,7 +729,7 @@ function tokenize(statement: string, dialect: Dialect): Token[] {
     const character = chars[index] as string
     const next = chars[index + 1]
 
-    if (character === '-' && next === '-') {
+    if (opensDashComment(chars, index, dialect)) {
       while (index < chars.length && chars[index] !== '\n') {
         index += 1
       }

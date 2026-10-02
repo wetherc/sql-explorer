@@ -6,6 +6,7 @@ import {
   formatSql,
   formatterDialect,
   isPlainIdentifier,
+  opensDashComment,
   quoteIdentifier,
   qualifierBefore,
   quoteIfNeeded,
@@ -108,6 +109,29 @@ describe('quoteIfNeeded', () => {
   it('tells a reserved word apart from a plain name', () => {
     expect(isReservedWord('Order', Dialect.MsSql)).toBe(true)
     expect(isReservedWord('orders', Dialect.MsSql)).toBe(false)
+  })
+})
+
+describe('opensDashComment', () => {
+  it('reads two dashes as a comment in every dialect but MySQL', () => {
+    expect(opensDashComment('5--1', 1)).toBe(true)
+    expect(opensDashComment('5--1', 1, Dialect.Postgres)).toBe(true)
+    expect(opensDashComment('5--1', 1, Dialect.MsSql)).toBe(true)
+  })
+
+  it('reads two dashes as a MySQL comment only before a blank or the end', () => {
+    expect(opensDashComment('5--1', 1, Dialect.MySql)).toBe(false)
+    expect(opensDashComment('-- a', 0, Dialect.MySql)).toBe(true)
+    expect(opensDashComment('--\ta', 0, Dialect.MySql)).toBe(true)
+    expect(opensDashComment('--\na', 0, Dialect.MySql)).toBe(true)
+    expect(opensDashComment('--\u0001', 0, Dialect.MySql)).toBe(true)
+    expect(opensDashComment('--', 0, Dialect.MySql)).toBe(true)
+  })
+
+  it('reads no comment where two dashes do not stand', () => {
+    expect(opensDashComment('5-1', 1)).toBe(false)
+    expect(opensDashComment('5+-1', 1)).toBe(false)
+    expect(opensDashComment([...'a--b'], 1, Dialect.Postgres)).toBe(true)
   })
 })
 
@@ -624,6 +648,14 @@ describe('tableAliases', () => {
       Dialect.Postgres,
     )
     expect([...aliases.keys()]).toEqual(['orders', 'o'])
+  })
+
+  it('reads two dashes in MySQL as a subtraction when no blank follows them', () => {
+    const script = 'SELECT 1--1 FROM orders o'
+    expect([...tableAliases(script, Dialect.MySql).keys()]).toEqual(['orders', 'o'])
+    expect(tableAliases(script, Dialect.Postgres).size).toBe(0)
+    const commented = tableAliases('-- FROM nothing\nSELECT 1 FROM orders o', Dialect.MySql)
+    expect([...commented.keys()]).toEqual(['orders', 'o'])
   })
 
   it('leaves out a clause that names no relation', () => {
