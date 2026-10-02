@@ -95,6 +95,22 @@ describe('ConnectionManager', () => {
     expect(wrapper.emitted('connected')?.[0]).toEqual(['c1'])
   })
 
+  it('reads the objects again when a dropped connection opens', async () => {
+    apiStub.connect.mockResolvedValue(infoFixture())
+    apiStub.listDatabases.mockResolvedValue([{ name: 'Fresh' }])
+    const wrapper = await mountManager()
+    const stale = useExplorerStore().addRoot('c1')
+    stale.loaded = true
+    stale.children = []
+
+    await wrapper.find('[data-test="toggle-connection"]').trigger('click')
+    await settle()
+
+    const roots = useExplorerStore().roots
+    expect(roots).toHaveLength(1)
+    expect(roots[0]?.children?.map((node) => node.label)).toEqual(['Fresh'])
+  })
+
   it('adds no root when the connection cannot open', async () => {
     apiStub.connect.mockRejectedValue({ kind: 'connection', message: 'refused', detail: null })
     const wrapper = await mountManager()

@@ -298,6 +298,10 @@ async function toggle(connection: SavedConnection): Promise<void> {
   }
   const opened = await connections.connect(connection)
   if (opened) {
+    // A connection that the backend dropped keeps its root, with the objects
+    // and the schema of the last session. The record can point at another
+    // server since then, so the old root goes and a new one is read.
+    explorer.removeRoot(connection.id)
     const root = explorer.addRoot(connection.id)
     await explorer.expand(root)
     emit('connected', connection.id)
