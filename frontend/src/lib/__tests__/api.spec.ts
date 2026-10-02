@@ -87,10 +87,16 @@ describe('api', () => {
       request: { connectionId: 'c1', database: 'db', schemaName: 'dbo' },
     })
 
+    await api.listEvents('c1', 'db', null)
+    expect(invoke).toHaveBeenCalledWith('list_events', {
+      request: { connectionId: 'c1', database: 'db', schemaName: null },
+    })
+
     for (const [method, command] of [
       ['listIndexes', 'list_indexes'],
       ['listConstraints', 'list_constraints'],
       ['listPartitions', 'list_partitions'],
+      ['listTriggers', 'list_triggers'],
     ] as const) {
       await api[method]('c1', 'db', 'dbo', 't')
       expect(invoke).toHaveBeenCalledWith(command, {

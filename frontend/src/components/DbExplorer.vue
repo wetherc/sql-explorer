@@ -70,6 +70,13 @@
           />
         </template>
         <v-list-item
+          v-if="isTriggerOrEvent(menuNode)"
+          prepend-icon="mdi-script-text-outline"
+          title="Script as CREATE"
+          data-test="menu-script-create"
+          @click="scriptHere(menuNode, 'create')"
+        />
+        <v-list-item
           v-if="isRelation(menuNode) && menuNode.kind !== TableKind.Synonym"
           prepend-icon="mdi-information-outline"
           title="Properties"
@@ -135,7 +142,7 @@ import PanelHeader from './PanelHeader.vue'
 import TableProperties from './TableProperties.vue'
 import { api } from '@/lib/api'
 import { stoppedStatementsMessage } from '@/lib/format'
-import { isExpandable, isRelation, type ExplorerNode } from '@/stores/explorer'
+import { isExpandable, isRelation, isTriggerOrEvent, type ExplorerNode } from '@/stores/explorer'
 import { TableKind, type ScriptKind } from '@/types/api'
 import { useConnectionsStore } from '@/stores/connections'
 import { useExplorerStore } from '@/stores/explorer'
@@ -306,15 +313,21 @@ function scriptFormsFor(node: ExplorerNode): { kind: ScriptKind; title: string }
 /**
  * Puts the statement of one object in a new tab. The tab is never run,
  * because an INSERT or an UPDATE would change data.
+ *
+ * A node below a relation keeps the name of the relation in `table`. A
+ * trigger therefore sends its own name from its label, and the name of its
+ * relation as the parent.
  */
 async function scriptHere(node: ExplorerNode, scriptKind: ScriptKind): Promise<void> {
+  const own = isTriggerOrEvent(node)
   try {
     const statement = await api.scriptObject({
       connectionId: node.connectionId,
       database: node.database ?? null,
       schemaName: node.schema ?? null,
-      tableName: node.table ?? node.label,
-      kind: node.kind as TableKind,
+      tableName: own ? node.label : (node.table ?? node.label),
+      parentName: own ? (node.table ?? null) : null,
+      kind: own ? node.kind : (node.kind as TableKind),
       scriptKind,
     })
     tabs.add({

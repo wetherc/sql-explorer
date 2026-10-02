@@ -32,7 +32,8 @@ holds no password.
 The tree holds the databases, the schemas, the tables, the views and the
 columns of each connection. A key column carries its own icon, and each column
 shows its type. The menu of an object builds a preview statement and the CREATE,
-SELECT, INSERT and UPDATE statements of that object.
+SELECT, INSERT and UPDATE statements of that object. A trigger and an event
+give their CREATE text from the catalog of the engine.
 
 ![The properties of a table](docs/screenshots/properties.png)
 
@@ -197,6 +198,10 @@ The filter keeps 6 of the 18 rows of the result.
   and the partitions of a schema or a relation. PostgreSQL also gets folders for
   the materialized views and the foreign tables, and a partitioned table has its
   own icon. MS SQL Server also gets a folder for the synonyms.
+- A Triggers folder below a table shows when each trigger runs, the changes
+  that fire it, and whether it is disabled. MS SQL Server, PostgreSQL and SQLite
+  also show the triggers of a view. MySQL and MariaDB get an Events folder with
+  the schedule of each event.
 - A filter box keeps the path down to each match.
 - The context menu builds a preview statement in the backend, so every name is
   quoted for the engine. It also builds the statements of an object: a CREATE

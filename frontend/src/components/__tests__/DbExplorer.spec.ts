@@ -228,6 +228,7 @@ describe('DbExplorer', () => {
       database: 'Sales',
       schemaName: 'dbo',
       tableName: 'orders',
+      parentName: null,
       kind: 'view',
       scriptKind: 'select',
     })
@@ -270,6 +271,7 @@ describe('DbExplorer', () => {
       database: null,
       schemaName: null,
       tableName: 'orders',
+      parentName: null,
       kind: 'table',
       scriptKind: 'create',
     })
@@ -315,6 +317,61 @@ describe('DbExplorer', () => {
     await settle()
     expect(apiStub.scriptObject).toHaveBeenCalledWith(
       expect.objectContaining({ tableName: 'r', kind: 'synonym', scriptKind: 'create' }),
+    )
+  })
+
+  it('offers the CREATE statement alone for a trigger and an event', async () => {
+    apiStub.scriptObject.mockResolvedValue('CREATE TRIGGER audit AFTER INSERT ON orders;')
+    const wrapper = await mountExplorer()
+    const explorer = useExplorerStore()
+    explorer.addRoot('c1')
+    await wrapper.vm.$nextTick()
+
+    const openFor = async (objectType: string, table?: string) => {
+      await wrapper.findComponent({ name: 'ExplorerTree' }).vm.$emit('context', {
+        event: new MouseEvent('contextmenu'),
+        node: {
+          key: objectType,
+          label: 'audit',
+          kind: objectType,
+          icon: 'mdi-lightning-bolt',
+          loading: false,
+          loaded: true,
+          connectionId: 'c1',
+          database: 'shop',
+          table,
+        },
+      })
+      await settle()
+      return ['create', 'select', 'insert', 'update'].filter((form) =>
+        menuItem(`menu-script-${form}`),
+      )
+    }
+
+    expect(await openFor('trigger', 'orders')).toEqual(['create'])
+    expect(menuItem('menu-preview')).toBeNull()
+    expect(menuItem('menu-properties')).toBeNull()
+    expect(menuItem('menu-copy-name')).toBeNull()
+    menuItem('menu-script-create')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+    // A trigger sends its own name, and the name of its table as the parent.
+    expect(apiStub.scriptObject).toHaveBeenLastCalledWith({
+      connectionId: 'c1',
+      database: 'shop',
+      schemaName: null,
+      tableName: 'audit',
+      parentName: 'orders',
+      kind: 'trigger',
+      scriptKind: 'create',
+    })
+    const tabs = useTabsStore().tabs
+    expect(tabs[tabs.length - 1]?.title).toBe('audit (create)')
+
+    expect(await openFor('event')).toEqual(['create'])
+    menuItem('menu-script-create')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+    expect(apiStub.scriptObject).toHaveBeenLastCalledWith(
+      expect.objectContaining({ tableName: 'audit', parentName: null, kind: 'event' }),
     )
   })
 

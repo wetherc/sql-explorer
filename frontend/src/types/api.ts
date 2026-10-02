@@ -110,6 +110,9 @@ export interface DriverCapabilities {
   supportsMaterializedViews: boolean
   supportsForeignTables: boolean
   supportsSynonyms: boolean
+  supportsTriggers: boolean
+  supportsViewTriggers: boolean
+  supportsEvents: boolean
 }
 
 export interface ConnectionInfo {
@@ -325,6 +328,47 @@ export interface ConstraintRef {
   columns: string[]
   detail: string | null
 }
+
+/** The time at which a trigger runs, against the change that fires it. */
+export const TriggerTiming = {
+  Before: 'before',
+  After: 'after',
+  InsteadOf: 'insteadOf',
+} as const
+export type TriggerTiming = (typeof TriggerTiming)[keyof typeof TriggerTiming]
+
+/** A change that fires a trigger. */
+export const TriggerEvent = {
+  Insert: 'insert',
+  Update: 'update',
+  Delete: 'delete',
+  Truncate: 'truncate',
+} as const
+export type TriggerEvent = (typeof TriggerEvent)[keyof typeof TriggerEvent]
+
+export interface TriggerRef {
+  name: string
+  timing: TriggerTiming
+  /** The changes that fire the trigger, in the order insert, update, delete and truncate. */
+  events: TriggerEvent[]
+  /** False when the engine keeps the trigger but does not run it. */
+  enabled: boolean
+}
+
+/** One scheduled event of a MySQL or MariaDB database. */
+export interface EventRef {
+  name: string
+  enabled: boolean
+  /** The schedule in the words of the engine, such as `EVERY 1 DAY`. */
+  schedule?: string
+}
+
+/** The types of object, other than a relation, that the explorer can script. */
+export const ObjectType = {
+  Trigger: 'trigger',
+  Event: 'event',
+} as const
+export type ObjectType = (typeof ObjectType)[keyof typeof ObjectType]
 
 export interface PartitionRef {
   values: string

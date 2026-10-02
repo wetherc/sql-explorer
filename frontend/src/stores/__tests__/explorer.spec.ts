@@ -11,15 +11,18 @@ const {
   FILTER_DELAY_MS,
   columnNode,
   constraintHint,
+  eventHint,
   indexColumns,
   filterNodes,
   folderNode,
   iconFor,
   isExpandable,
   isRelation,
+  isTriggerOrEvent,
   leafNode,
   relationFolderKinds,
   tableNode,
+  triggerHint,
   useExplorerStore,
   walk,
   withUniqueKeys,
@@ -67,6 +70,8 @@ describe('iconFor', () => {
     expect(iconFor('partitionedTable')).toBe('mdi-table-split-cell')
     expect(iconFor('foreignTable')).toBe('mdi-table-network')
     expect(iconFor('synonym')).toBe('mdi-link-variant')
+    expect(iconFor('trigger')).toBe('mdi-lightning-bolt')
+    expect(iconFor('event')).toBe('mdi-calendar-clock')
   })
 })
 
@@ -80,6 +85,46 @@ describe('isExpandable', () => {
     // A synonym names another object, and the tree reads nothing below it.
     expect(isExpandable(node({ kind: 'synonym' }))).toBe(false)
     expect(isExpandable(node({ kind: 'materializedView' }))).toBe(true)
+    expect(isExpandable(node({ kind: 'trigger' }))).toBe(false)
+    expect(isExpandable(node({ kind: 'event' }))).toBe(false)
+  })
+})
+
+describe('isTriggerOrEvent', () => {
+  it('holds for a trigger and an event alone', () => {
+    expect(isTriggerOrEvent(node({ kind: 'trigger' }))).toBe(true)
+    expect(isTriggerOrEvent(node({ kind: 'event' }))).toBe(true)
+    expect(isTriggerOrEvent(node({ kind: 'table' }))).toBe(false)
+    expect(isTriggerOrEvent(node({ kind: 'routine' }))).toBe(false)
+  })
+})
+
+describe('triggerHint and eventHint', () => {
+  it('names the timing and the events of a trigger, and marks a disabled one', () => {
+    const trigger: Parameters<typeof triggerHint>[0] = {
+      name: 't',
+      timing: 'after',
+      events: ['insert', 'update'],
+      enabled: true,
+    }
+    expect(triggerHint(trigger)).toBe('AFTER INSERT, UPDATE')
+    expect(triggerHint({ ...trigger, timing: 'before', events: ['truncate'] })).toBe(
+      'BEFORE TRUNCATE',
+    )
+    expect(
+      triggerHint({ ...trigger, timing: 'insteadOf', events: ['delete'], enabled: false }),
+    ).toBe('INSTEAD OF DELETE \u00b7 disabled')
+    // A trigger whose events the engine did not report names its timing alone.
+    expect(triggerHint({ ...trigger, events: [] })).toBe('AFTER')
+  })
+
+  it('names the schedule of an event, and marks a disabled one', () => {
+    expect(eventHint({ name: 'e', enabled: true, schedule: 'EVERY 1 DAY' })).toBe('EVERY 1 DAY')
+    expect(eventHint({ name: 'e', enabled: false, schedule: 'AT 2026-01-01' })).toBe(
+      'AT 2026-01-01 \u00b7 disabled',
+    )
+    expect(eventHint({ name: 'e', enabled: false })).toBe('disabled')
+    expect(eventHint({ name: 'e', enabled: true })).toBeUndefined()
   })
 })
 
@@ -737,6 +782,104 @@ describe('explorer store', () => {
       'indexes',
       'constraints',
       'partitions',
+    ])
+  })
+
+  /** Loads a store whose engine has triggers, and events when asked. */
+  async function storeWithTriggers(supportsViewTriggers: boolean, supportsEvents = false) {
+    apiStub.listActiveConnections.mockResolvedValue([
+      {
+        ...infoFixture('c1'),
+        capabilities: {
+          ...infoFixture('c1').capabilities,
+          supportsPartitions: true,
+          supportsMaterializedViews: true,
+          supportsForeignTables: true,
+          supportsTriggers: true,
+          supportsViewTriggers,
+          supportsEvents,
+        },
+      },
+    ])
+    const connections = useConnectionsStore()
+    await connections.load()
+    return useExplorerStore()
+  }
+
+  it('puts a folder of triggers below each relation that can have them', async () => {
+    const explorer = await storeWithTriggers(true)
+    const foldersOf = async (relationType: ExplorerNode['kind']) => {
+      const relation = node({
+        kind: relationType,
+        database: 'Sales',
+        schema: 'dbo',
+        table: 'r',
+        key: relationType,
+      })
+      await explorer.expand(relation)
+      return relation.children?.map((child) => child.folder)
+    }
+    expect(await foldersOf('table')).toEqual([
+      'columns',
+      'indexes',
+      'constraints',
+      'triggers',
+      'partitions',
+    ])
+    expect(await foldersOf('foreignTable')).toEqual(['columns', 'constraints', 'triggers'])
+    expect(await foldersOf('view')).toEqual(['columns', 'triggers'])
+    expect(await foldersOf('materializedView')).toEqual(['columns', 'indexes'])
+  })
+
+  it('leaves the folder of triggers out of a view on an engine without view triggers', async () => {
+    const explorer = await storeWithTriggers(false)
+    const view = node({ kind: 'view', database: 'shop', table: 'v' })
+    await explorer.expand(view)
+    expect(view.children?.map((child) => child.folder)).toEqual(['columns'])
+  })
+
+  it('puts the folder of events after the routines', async () => {
+    const explorer = await storeWithTriggers(false, true)
+    const database = node({ kind: 'schema', database: 'shop', schema: 'dbo' })
+    await explorer.expand(database)
+    expect(database.children?.map((child) => child.label).slice(-3)).toEqual([
+      'Procedures',
+      'Functions',
+      'Events',
+    ])
+  })
+
+  it('names the timing and the events of each trigger and dims a disabled one', async () => {
+    apiStub.listTriggers.mockResolvedValue([
+      { name: 'audit', timing: 'after', events: ['insert', 'update'], enabled: true },
+      { name: 'old', timing: 'insteadOf', events: ['delete'], enabled: false },
+    ])
+    apiStub.listEvents.mockResolvedValue([
+      { name: 'nightly', enabled: true, schedule: 'EVERY 1 DAY' },
+      { name: 'paused', enabled: false },
+    ])
+    const explorer = await readyStore()
+    const table = node({ kind: 'table', database: 'Sales', schema: 'dbo', table: 'orders' })
+    const triggers = folderNode('Triggers', 'triggers', table)
+    await explorer.expand(triggers)
+    expect(apiStub.listTriggers).toHaveBeenCalledWith('c1', 'Sales', 'dbo', 'orders')
+    expect(
+      triggers.children?.map((child) => [child.label, child.kind, child.hint, child.dimmed]),
+    ).toEqual([
+      ['audit', 'trigger', 'AFTER INSERT, UPDATE', false],
+      ['old', 'trigger', 'INSTEAD OF DELETE \u00b7 disabled', true],
+    ])
+    expect(triggers.children?.[0]?.table).toBe('orders')
+
+    const schema = node({ kind: 'schema', database: 'Sales', schema: 'dbo' })
+    const events = folderNode('Events', 'events', schema)
+    await explorer.expand(events)
+    expect(apiStub.listEvents).toHaveBeenCalledWith('c1', 'Sales', 'dbo')
+    expect(
+      events.children?.map((child) => [child.label, child.kind, child.hint, child.dimmed]),
+    ).toEqual([
+      ['nightly', 'event', 'EVERY 1 DAY', false],
+      ['paused', 'event', 'disabled', true],
     ])
   })
 

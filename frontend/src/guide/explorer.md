@@ -4,8 +4,8 @@ The explorer shows the objects of each open connection: the databases, the
 schemas, the tables, the views and the columns. A key column carries an icon
 of its own, and each column shows its type.
 
-Folders hold the tables, the views, the routines, the indexes, the constraints
-and the partitions of a schema or a relation.
+Folders hold the tables, the views, the routines, the events, the indexes, the
+constraints, the triggers and the partitions of a schema or a relation.
 
 ## Folders of a schema
 
@@ -21,6 +21,28 @@ A schema shows these folders, in this order:
 5. **Synonyms**, on MS SQL Server only. A synonym does not open. The tree
    shows the name of the object that it points at beside the synonym.
 6. **Procedures** and **Functions**, on the engines that have routines.
+   SQLite has no stored routines, so it shows neither folder.
+7. **Events**, on MySQL and MariaDB only. Each event shows its schedule, such
+   as `EVERY 1 DAY` or `AT 2026-01-01 00:00:00`.
+
+## Triggers
+
+A table has a **Triggers** folder on MS SQL Server, PostgreSQL, MySQL,
+MariaDB and SQLite. A view has one too on MS SQL Server, PostgreSQL and
+SQLite, because a trigger on a view can run in place of the change. On
+PostgreSQL, a foreign table also has a **Triggers** folder.
+
+Each trigger shows when it runs and the changes that fire it, such as
+`AFTER INSERT, UPDATE` or `INSTEAD OF DELETE`. A PostgreSQL trigger can also
+fire on `TRUNCATE`. A trigger or an event that the engine keeps but does not
+run shows in a paler text, and its hint ends with `disabled`. A trigger of
+MySQL, MariaDB and SQLite is always enabled.
+
+The list leaves out the triggers that the engine makes for its own use. On
+PostgreSQL, these are the triggers of a foreign key. On MS SQL Server, a
+trigger of the database, which fires on a change to the schema, does not
+show below a table. On SQLite, the folder of a table also shows a temporary
+trigger on that table.
 
 An index shows its key columns in key order. On MS SQL Server, the `INCLUDE`
 columns of an index follow the key, as in `a, b include (c)`.
@@ -53,8 +75,9 @@ carries the quotes of its engine:
 - A `CREATE` draft of a table. The draft holds no index, no default and no
   constraint.
 
-A materialized view and a synonym get their `CREATE` text and a `SELECT`
-alone, and a synonym has no **Properties** item. A foreign table gets a
+A trigger and an event get their `CREATE` text alone, which the engine
+reads from its catalog. A materialized view and a synonym get their `CREATE`
+text and a `SELECT` alone, and a synonym has no **Properties** item. A foreign table gets a
 `SELECT`, an `INSERT` and an `UPDATE`, because a `CREATE` draft of its columns
 makes a plain table.
 

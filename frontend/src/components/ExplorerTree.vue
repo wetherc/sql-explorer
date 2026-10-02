@@ -26,7 +26,7 @@
           v-if="row.kind === 'node'"
           :ref="(element) => keepRow(row.key, element)"
           class="tree-row"
-          :class="{ selected: selectedKey === row.key }"
+          :class="{ selected: selectedKey === row.key, dimmed: row.node.dimmed }"
           :style="{ paddingLeft: rowIndent(row.depth) }"
           role="treeitem"
           :aria-level="row.depth + 1"
@@ -562,6 +562,13 @@ defineExpose({ focusRow })
 
 .tree-row.selected {
   background: rgba(var(--v-theme-primary), 0.16);
+}
+
+/* An object that the engine keeps but does not run, such as a disabled
+   trigger, shows in a paler text. */
+.tree-row.dimmed .node-label,
+.tree-row.dimmed .node-icon {
+  opacity: 0.55;
 }
 
 .chevron,

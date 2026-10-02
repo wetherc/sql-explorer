@@ -108,6 +108,16 @@ describe('ExplorerTree', () => {
     expect(wrapper.find('.node-hint').text()).toBe('int not null')
   })
 
+  it('dims an object that the engine does not run', () => {
+    const wrapper = mountTree([
+      node({ key: 'on', kind: 'trigger', label: 'audit', children: undefined }),
+      node({ key: 'off', kind: 'trigger', label: 'old', children: undefined, dimmed: true }),
+    ])
+    const rows = wrapper.findAll('[data-test="tree-row"]')
+    expect(rows[0]?.classes()).not.toContain('dimmed')
+    expect(rows[1]?.classes()).toContain('dimmed')
+  })
+
   it('shows the whole name of a long row, which the panel scrolls to', () => {
     const wrapper = mountTree([node({ label: 'a_very_long_table_name_indeed' })])
     const label = wrapper.find('.node-label')

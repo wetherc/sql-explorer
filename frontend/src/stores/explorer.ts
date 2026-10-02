@@ -7,13 +7,17 @@ import { useUiStore } from './ui'
 import { emptySchemaIndex, type SchemaIndex } from '@/lib/sql'
 import {
   Dialect,
+  ObjectType,
   TableKind,
+  TriggerTiming,
   type ColumnRef,
   type SchemaSnapshot,
   type ConstraintRef,
   type IndexRef,
   type DriverCapabilities,
+  type EventRef,
   type TableRef,
+  type TriggerRef,
 } from '@/types/api'
 
 /** The pause between the last keystroke in the filter and the match. */
@@ -30,6 +34,7 @@ export type NodeKind =
   | 'index'
   | 'constraint'
   | 'partition'
+  | ObjectType
 
 /** What a folder node holds, which decides the call that fills it. */
 export type FolderKind =
@@ -44,9 +49,20 @@ export type FolderKind =
   | 'indexes'
   | 'constraints'
   | 'partitions'
+  | 'triggers'
+  | 'events'
 
 /** The kinds that hold no children of their own. */
-const LEAF_KINDS: NodeKind[] = ['column', 'routine', 'index', 'constraint', 'partition', 'synonym']
+const LEAF_KINDS: NodeKind[] = [
+  'column',
+  'routine',
+  'index',
+  'constraint',
+  'partition',
+  'synonym',
+  ObjectType.Trigger,
+  ObjectType.Event,
+]
 
 /** The kinds of the relations, which are the kinds of nodes that `TableKind` names. */
 const RELATION_KINDS: readonly string[] = Object.values(TableKind)
@@ -100,6 +116,8 @@ export interface ExplorerNode {
   table?: string
   /** Set on a folder node, and it names the list the folder holds. */
   folder?: FolderKind
+  /** True for an object that the engine keeps but does not run, such as a disabled trigger. */
+  dimmed?: boolean
 }
 
 /** Selects the icon of a node. */
@@ -132,6 +150,10 @@ export function iconFor(kind: NodeKind, isKey = false): string {
       return 'mdi-key-chain'
     case 'partition':
       return 'mdi-file-tree-outline'
+    case 'trigger':
+      return 'mdi-lightning-bolt'
+    case 'event':
+      return 'mdi-calendar-clock'
     default:
       return isKey ? 'mdi-key-variant' : 'mdi-table-column'
   }
@@ -145,6 +167,11 @@ export function isExpandable(node: ExplorerNode): boolean {
 /** True when the node is a relation, such as a table, a view or a synonym. */
 export function isRelation(node: ExplorerNode): node is ExplorerNode & { kind: TableKind } {
   return RELATION_KINDS.includes(node.kind)
+}
+
+/** True when the node is a trigger or an event, which gives a CREATE script alone. */
+export function isTriggerOrEvent(node: ExplorerNode): node is ExplorerNode & { kind: ObjectType } {
+  return node.kind === ObjectType.Trigger || node.kind === ObjectType.Event
 }
 
 /** Builds the node of one relation. */
@@ -272,6 +299,29 @@ export function constraintHint(constraint: ConstraintRef): string {
     parts.push(constraint.detail)
   }
   return parts.join(' · ')
+}
+
+/** The words of SQL for the time at which a trigger runs. */
+const TIMING_WORDS: Record<TriggerTiming, string> = {
+  [TriggerTiming.Before]: 'BEFORE',
+  [TriggerTiming.After]: 'AFTER',
+  [TriggerTiming.InsteadOf]: 'INSTEAD OF',
+}
+
+/** Names the time and the events of one trigger, such as `AFTER INSERT, UPDATE`. */
+export function triggerHint(trigger: TriggerRef): string {
+  const words = [TIMING_WORDS[trigger.timing]]
+  if (trigger.events.length > 0) {
+    words.push(trigger.events.map((event) => event.toUpperCase()).join(', '))
+  }
+  const hint = words.join(' ')
+  return trigger.enabled ? hint : `${hint} · disabled`
+}
+
+/** Names the schedule of one event, and marks an event that does not run. */
+export function eventHint(event: EventRef): string | undefined {
+  const parts = [event.schedule, event.enabled ? '' : 'disabled'].filter(Boolean)
+  return parts.length > 0 ? parts.join(' · ') : undefined
 }
 
 /** Names the key columns of an index, and then its `INCLUDE` columns. */
@@ -897,6 +947,9 @@ export const useExplorerStore = defineStore('explorer', () => {
       folders.push(folderNode('Procedures', 'procedures', node))
       folders.push(folderNode('Functions', 'functions', node))
     }
+    if (capabilities?.supportsEvents) {
+      folders.push(folderNode('Events', 'events', node))
+    }
     return folders
   }
 
@@ -904,7 +957,9 @@ export const useExplorerStore = defineStore('explorer', () => {
    * The folders below a relation. A view holds columns alone, because an
    * index and a constraint belong to a table. A materialized view keeps its
    * rows, so it can have indexes. A foreign table keeps its rows on another
-   * server, so it has constraints but no index and no partition.
+   * server, so it has constraints but no index and no partition. A table
+   * and a foreign table can have triggers. A view can have them on an
+   * engine whose triggers run in place of a change to the view.
    */
   function relationFolders(
     node: ExplorerNode,
@@ -917,6 +972,13 @@ export const useExplorerStore = defineStore('explorer', () => {
     }
     if (capabilities?.supportsConstraints && (isTable || node.kind === 'foreignTable')) {
       folders.push(folderNode('Keys', 'constraints', node))
+    }
+    const viewTriggers = node.kind === 'view' && capabilities?.supportsViewTriggers
+    if (
+      capabilities?.supportsTriggers &&
+      (isTable || node.kind === 'foreignTable' || viewTriggers)
+    ) {
+      folders.push(folderNode('Triggers', 'triggers', node))
     }
     if (capabilities?.supportsPartitions && isTable) {
       folders.push(folderNode('Partitions', 'partitions', node))
@@ -1040,6 +1102,20 @@ export const useExplorerStore = defineStore('explorer', () => {
         return constraints.map((constraint) =>
           leafNode(constraint.name, 'constraint', node, constraintHint(constraint)),
         )
+      }
+      case 'triggers': {
+        const triggers = await api.listTriggers(connectionId, database, schema, table)
+        return triggers.map((trigger) => ({
+          ...leafNode(trigger.name, 'trigger', node, triggerHint(trigger)),
+          dimmed: !trigger.enabled,
+        }))
+      }
+      case 'events': {
+        const events = await api.listEvents(connectionId, database, schema)
+        return events.map((event) => ({
+          ...leafNode(event.name, 'event', node, eventHint(event)),
+          dimmed: !event.enabled,
+        }))
       }
       case 'partitions': {
         const list = await api.listPartitions(connectionId, database, schema, table)

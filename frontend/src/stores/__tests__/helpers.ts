@@ -24,6 +24,8 @@ export function makeApiStub() {
     listIndexes: vi.fn(),
     listConstraints: vi.fn(),
     listPartitions: vi.fn(),
+    listTriggers: vi.fn(),
+    listEvents: vi.fn(),
     schemaSnapshot: vi.fn(),
     tableDetails: vi.fn(),
     scriptObject: vi.fn(),
@@ -93,6 +95,9 @@ export function infoFixture(connectionId = 'c1', supportsSchemas = true) {
       supportsMaterializedViews: false,
       supportsForeignTables: false,
       supportsSynonyms: false,
+      supportsTriggers: false,
+      supportsViewTriggers: false,
+      supportsEvents: false,
     },
     dialect: Dialect.MsSql,
   }

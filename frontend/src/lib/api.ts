@@ -9,11 +9,13 @@ import type {
   ConnectionStatusEvent,
   DatabaseRef,
   EngineInfo,
+  EventRef,
   ExecOptions,
   ExportRequest,
   ExportSummary,
   FolderEntry,
   MenuCommandState,
+  ObjectType,
   OpenedFile,
   SaveFileRequest,
   SaveStatementRequest,
@@ -31,6 +33,7 @@ import type {
   TableDetails,
   TableKind,
   TableRef,
+  TriggerRef,
 } from '@/types/api'
 
 /** The name of the event that reports a change of connection state. */
@@ -207,6 +210,23 @@ export const api = {
     return call('list_constraints', { connectionId, database, schemaName, tableName })
   },
 
+  listTriggers(
+    connectionId: string,
+    database: string,
+    schemaName: string | null,
+    tableName: string,
+  ): Promise<TriggerRef[]> {
+    return call('list_triggers', { connectionId, database, schemaName, tableName })
+  },
+
+  listEvents(
+    connectionId: string,
+    database: string,
+    schemaName: string | null,
+  ): Promise<EventRef[]> {
+    return call('list_events', { connectionId, database, schemaName })
+  },
+
   listPartitions(
     connectionId: string,
     database: string,
@@ -250,8 +270,11 @@ export const api = {
     connectionId: string
     database: string | null
     schemaName: string | null
+    /** The name of the object, which for a trigger is the name of the trigger. */
     tableName: string
-    kind: TableKind
+    /** The relation of a trigger. */
+    parentName?: string | null
+    kind: TableKind | ObjectType
     scriptKind: ScriptKind
   }): Promise<string> {
     return call('script_object', request)
