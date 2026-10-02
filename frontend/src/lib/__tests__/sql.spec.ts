@@ -78,6 +78,12 @@ describe('quoteIfNeeded', () => {
     expect(quoteIfNeeded('orders', Dialect.MsSql)).toBe('orders')
     expect(quoteIfNeeded('order items', Dialect.MsSql)).toBe('[order items]')
   })
+
+  it('quotes a PostgreSQL name that is not all lower case', () => {
+    expect(quoteIfNeeded('Orders', Dialect.Postgres)).toBe('"Orders"')
+    expect(quoteIfNeeded('orders', Dialect.Postgres)).toBe('orders')
+    expect(quoteIfNeeded('Orders', Dialect.MsSql)).toBe('Orders')
+  })
 })
 
 describe('statementBounds', () => {

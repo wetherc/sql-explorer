@@ -87,9 +87,13 @@ export function isPlainIdentifier(name: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)
 }
 
-/** Quotes a name only when it needs quotes. */
+/**
+ * Quotes a name only when it needs quotes. PostgreSQL folds a name without
+ * quotes to lower case, so a name with a capital letter needs quotes there.
+ */
 export function quoteIfNeeded(name: string, dialect: Dialect): string {
-  return isPlainIdentifier(name) ? name : quoteIdentifier(name, dialect)
+  const folds = dialect === Dialect.Postgres && name !== name.toLowerCase()
+  return isPlainIdentifier(name) && !folds ? name : quoteIdentifier(name, dialect)
 }
 
 /**
