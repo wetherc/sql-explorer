@@ -7,7 +7,7 @@
 
 use crate::db::drivers::{
     add_constraint_column, add_included_column, add_index_column, add_snapshot_column,
-    bytes_to_json, constraint_kind, f32_to_json, f64_to_json, number_out_of_range, number_value,
+    constraint_kind, f32_to_json, f64_to_json, number_out_of_range, number_value,
     parameter_type_refused, routine_kind, rows_affected_message, rows_returned_message,
     single_statement, size_text, table_kind, CancelHandle, DatabaseDriver, NumberValue,
 };
@@ -1335,22 +1335,12 @@ pub fn numeric_to_string(value: Numeric) -> String {
 /// Converts one row into an array of JSON values.
 pub fn row_to_json(row: &Row) -> Vec<JsonValue> {
     row.cells()
-        .map(|(column, data)| cell_to_json(column.column_type(), data))
+        .map(|(_, data)| column_data_to_json(data))
         .collect()
 }
 
-/// Reads one cell from the data that it holds. The data gives the JSON
-/// value, so a read needs no target type that can fail to match. The type
-/// of the column decides the result only for a user-defined type, whose
-/// data has the form of a binary value.
-fn cell_to_json(column_type: ColumnType, data: &ColumnData<'static>) -> JsonValue {
-    match column_type {
-        ColumnType::Udt => udt_to_json(data),
-        _ => column_data_to_json(data),
-    }
-}
-
-/// Turns the data of one cell into JSON.
+/// Turns the data of one cell into JSON. The data gives the JSON value, so a
+/// read needs no target type that can fail to match.
 fn column_data_to_json(data: &ColumnData<'static>) -> JsonValue {
     match data {
         ColumnData::U8(value) => value.map_or(JsonValue::Null, Into::into),
@@ -1366,9 +1356,9 @@ fn column_data_to_json(data: &ColumnData<'static>) -> JsonValue {
         ColumnData::Guid(value) => value.map_or(JsonValue::Null, |value| {
             JsonValue::String(value.to_string())
         }),
-        ColumnData::Binary(value) => value
-            .as_ref()
-            .map_or(JsonValue::Null, |bytes| bytes_to_json(bytes)),
+        ColumnData::Binary(value) => value.as_ref().map_or(JsonValue::Null, |bytes| {
+            JsonValue::String(bytes_to_hex(bytes))
+        }),
         // The copy of `tiberius` reads a money value as a decimal, so each of
         // its 19 digits stays.
         ColumnData::Numeric(value) => value.map_or(JsonValue::Null, |value| {
@@ -1480,21 +1470,17 @@ fn text_or_null(text: Option<String>) -> JsonValue {
     text.map_or(JsonValue::Null, JsonValue::String)
 }
 
-/// Writes the value of a user-defined type, such as `geography`, as the
-/// hexadecimal text that SQL Server Management Studio shows, such as
-/// `0xE6100000`. The driver cannot decode the format of each type.
-fn udt_to_json(data: &ColumnData<'static>) -> JsonValue {
-    match data {
-        ColumnData::Binary(Some(bytes)) => {
-            let mut text = String::with_capacity(2 + bytes.len() * 2);
-            text.push_str("0x");
-            for byte in bytes.iter() {
-                text.push_str(&format!("{byte:02X}"));
-            }
-            JsonValue::String(text)
-        }
-        _ => column_data_to_json(data),
+/// Writes bytes as the hexadecimal text that SQL Server Management Studio
+/// shows, such as `0xE6100000`. The server sends `binary`, `varbinary`,
+/// `image`, `rowversion` and each user-defined type, such as `geography`, as
+/// bytes. The driver cannot decode the format of each user-defined type.
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    let mut text = String::with_capacity(2 + bytes.len() * 2);
+    text.push_str("0x");
+    for byte in bytes {
+        text.push_str(&format!("{byte:02X}"));
     }
+    text
 }
 
 #[cfg(test)]
@@ -2190,6 +2176,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_rowversion_and_a_chunked_varbinary_show_their_bytes_in_hexadecimal() {
+        // A `COLMETADATA` token for a `rowversion` column `r` and a
+        // `varbinary(max)` column `v`. The user type 80 marks a `rowversion`
+        // column, whose data is a `binary(8)` value.
+        let mut answer = vec![0x81];
+        answer.extend_from_slice(&2u16.to_le_bytes());
+        answer.extend_from_slice(&80u32.to_le_bytes());
+        answer.extend_from_slice(&0u16.to_le_bytes());
+        answer.push(0xAD);
+        answer.extend_from_slice(&8u16.to_le_bytes());
+        answer.push(1);
+        answer.extend_from_slice(&('r' as u16).to_le_bytes());
+        answer.extend_from_slice(&0u32.to_le_bytes());
+        answer.extend_from_slice(&0u16.to_le_bytes());
+        answer.push(0xA5);
+        answer.extend_from_slice(&u16::MAX.to_le_bytes());
+        answer.push(1);
+        answer.extend_from_slice(&('v' as u16).to_le_bytes());
+        // The `varbinary(max)` value comes in two chunks.
+        answer.push(0xD1);
+        answer.extend_from_slice(&8u16.to_le_bytes());
+        answer.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0x07, 0xD1]);
+        answer.extend_from_slice(&3u64.to_le_bytes());
+        answer.extend_from_slice(&1u32.to_le_bytes());
+        answer.push(0xAB);
+        answer.extend_from_slice(&2u32.to_le_bytes());
+        answer.extend_from_slice(&[0xCD, 0xEF]);
+        answer.extend_from_slice(&0u32.to_le_bytes());
+        answer.extend_from_slice(&done_token(DONE_COUNT, 1));
+
+        let response = run_against_answer(
+            "INSERT INTO t(v) OUTPUT inserted.r, inserted.v VALUES (0xABCDEF)",
+            answer,
+            10,
+        )
+        .await;
+
+        assert_eq!(
+            response.results[0].rows,
+            vec![vec![
+                JsonValue::from("0x00000000000007D1"),
+                JsonValue::from("0xABCDEF")
+            ]]
+        );
+    }
+
+    #[tokio::test]
     async fn a_block_shows_its_counts_and_its_rows() {
         // The server sends a `DONEINPROC` token for each statement of a
         // request that runs through `sp_executesql`.
@@ -2431,8 +2464,14 @@ mod tests {
             JsonValue::String("00000000-0000-0000-0000-000000000000".into())
         );
         assert_eq!(
-            column_data_to_json(&ColumnData::Binary(Some(Cow::from(vec![1u8])))),
-            bytes_to_json(&[1])
+            column_data_to_json(&ColumnData::Binary(Some(Cow::from(vec![0x0Au8, 0x1B])))),
+            JsonValue::String("0x0A1B".into())
+        );
+        // An empty value shows only the prefix, as SQL Server Management
+        // Studio shows it.
+        assert_eq!(
+            column_data_to_json(&ColumnData::Binary(Some(Cow::from(Vec::<u8>::new())))),
+            JsonValue::String("0x".into())
         );
         assert_eq!(
             column_data_to_json(&ColumnData::Numeric(Some(Numeric::new_with_scale(125, 2)))),
