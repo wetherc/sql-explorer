@@ -1089,6 +1089,10 @@ pub fn plan_prefix(kind: PlanKind) -> &'static str {
 /// keeps no text for a table, so a table gives no statement and the command
 /// layer builds a draft instead.
 ///
+/// `pg_get_viewdef` gives the query of the view alone, so the statement adds
+/// the CREATE clause and the name. A materialized view gets the clause of
+/// its own kind, because `CREATE VIEW` makes a plain view.
+///
 /// The name goes into the statement as a literal that `regclass` reads. A
 /// name of another database cannot be read this way, so the name holds the
 /// schema and the table alone.
@@ -1099,7 +1103,10 @@ fn create_query_text(schema: Option<&str>, table: &str, kind: TableKind) -> Opti
     let name = Dialect::Postgres.qualified_name(None, schema, table);
     Some(CreateQuery::new(
         format!(
-            "SELECT pg_get_viewdef({}::regclass, true);",
+            "SELECT 'CREATE ' || CASE c.relkind WHEN 'm' THEN 'MATERIALIZED VIEW ' \
+             ELSE 'OR REPLACE VIEW ' END || c.oid::regclass::text || E' AS\\n' || \
+             pg_catalog.pg_get_viewdef(c.oid, true) \
+             FROM pg_catalog.pg_class AS c WHERE c.oid = {}::regclass;",
             Dialect::Postgres.quote_literal(&name)
         ),
         0,
@@ -3681,7 +3688,11 @@ mod tests {
         let view = create_query_text(Some("public"), "v", TableKind::View).unwrap();
         assert_eq!(
             view.sql,
-            "SELECT pg_get_viewdef('\"public\".\"v\"'::regclass, true);"
+            "SELECT 'CREATE ' || CASE c.relkind WHEN 'm' THEN 'MATERIALIZED VIEW ' \
+             ELSE 'OR REPLACE VIEW ' END || c.oid::regclass::text || E' AS\\n' || \
+             pg_catalog.pg_get_viewdef(c.oid, true) \
+             FROM pg_catalog.pg_class AS c \
+             WHERE c.oid = '\"public\".\"v\"'::regclass;"
         );
         assert_eq!(view.column, 0);
         assert!(create_query_text(Some("public"), "t", TableKind::Table).is_none());
