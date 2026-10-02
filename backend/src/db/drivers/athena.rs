@@ -19,6 +19,7 @@ use crate::sql::{split_statements, Dialect};
 use crate::storage::{AwsCredentialSource, SavedConnection};
 use async_trait::async_trait;
 use aws_credential_types::Credentials;
+use aws_sdk_athena::operation::start_query_execution::builders::StartQueryExecutionFluentBuilder;
 use aws_sdk_athena::types::{
     QueryExecutionContext, QueryExecutionState, QueryExecutionStatistics, ResultConfiguration,
     ResultReuseByAgeConfiguration, ResultReuseConfiguration, Row as AthenaRow,
@@ -26,7 +27,7 @@ use aws_sdk_athena::types::{
 use aws_sdk_athena::Client;
 use serde_json::Value as JsonValue;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 pub struct AthenaDriver {
@@ -41,13 +42,135 @@ pub struct AthenaDriver {
     result_reuse: bool,
     /// The age in minutes up to which a result may be reused.
     result_reuse_max_age_minutes: u32,
-    /// The identifier of the statement that runs, so that a request to
-    /// stop it can reach the service.
-    running: Arc<Mutex<Option<String>>>,
+    /// The run that a request to stop can reach.
+    running: Running,
     /// True while the metadata API of Athena still answers. A catalog can
     /// hold a record that the API cannot write as JSON, and the driver then
     /// reads the catalog with statements for the rest of the session.
     metadata_api_works: Arc<AtomicBool>,
+}
+
+/// The state of the run that a request to stop reads and writes.
+#[derive(Default)]
+struct RunState {
+    /// The number of the run. Each run gets a new number, so that the start
+    /// of a statement from a run that has ended cannot change a later run.
+    run: u64,
+    /// True from the start of a run until its end.
+    active: bool,
+    /// The identifier of the statement while the service runs it. It is
+    /// absent before the service gives it and while the pages are read.
+    execution_id: Option<String>,
+    /// True when the user asked to stop the run.
+    stop_requested: bool,
+}
+
+type Running = Arc<Mutex<RunState>>;
+
+/// Locks the state of the run, also after a panic of a thread that kept
+/// the lock.
+fn run_state(running: &Running) -> MutexGuard<'_, RunState> {
+    running.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Marks the end of a run when it is dropped, also when the caller drops the
+/// run before it ends.
+struct RunGuard {
+    running: Running,
+    run: u64,
+}
+
+impl RunGuard {
+    fn begin(running: &Running) -> Self {
+        let mut state = run_state(running);
+        state.run += 1;
+        state.active = true;
+        state.execution_id = None;
+        state.stop_requested = false;
+        RunGuard {
+            running: running.clone(),
+            run: state.run,
+        }
+    }
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        let mut state = run_state(&self.running);
+        if state.run == self.run {
+            state.active = false;
+            state.execution_id = None;
+        }
+    }
+}
+
+/// Records the identifier that the service gave to a statement of the run.
+/// Returns false when the statement must stop at once, because the user
+/// asked to stop the run or the caller dropped the run.
+fn record_execution(running: &Running, run: u64, execution_id: &str) -> bool {
+    let mut state = run_state(running);
+    if state.run != run || !state.active || state.stop_requested {
+        return false;
+    }
+    state.execution_id = Some(execution_id.to_string());
+    true
+}
+
+/// Asks the service to stop a statement.
+async fn stop_execution(client: &Client, execution_id: &str) -> Result<()> {
+    client
+        .stop_query_execution()
+        .query_execution_id(execution_id)
+        .send()
+        .await
+        .map_err(|error| describe(error, "The statement could not be stopped"))?;
+    Ok(())
+}
+
+/// Starts a statement in a task of its own, and gives its identifier.
+///
+/// A stop that comes before the service gives the identifier has no
+/// statement to name, so it only sets a flag. The task reads the flag when
+/// the identifier arrives and then stops the statement, which otherwise
+/// runs on and scans data. The task finishes also when the caller drops the
+/// run, and it stops the statement of a dropped run in the same way.
+async fn start_statement(
+    start: StartQueryExecutionFluentBuilder,
+    client: Client,
+    running: Running,
+    run: u64,
+) -> Result<String> {
+    let task = tokio::spawn(async move {
+        let started = start
+            .send()
+            .await
+            .map_err(|error| describe(error, "The statement could not be started"))?;
+        let execution_id = started.query_execution_id().unwrap_or_default().to_string();
+        if record_execution(&running, run, &execution_id) {
+            return Ok(execution_id);
+        }
+        if let Err(error) = stop_execution(&client, &execution_id).await {
+            log::warn!("The statement that started after a stop could not be stopped: {error}");
+        }
+        Err(Error::Cancelled)
+    });
+    task.await
+        .unwrap_or_else(|error| Err(Error::Athena(error.to_string())))
+}
+
+/// Waits for the work until the deadline. Without a deadline the work has
+/// no limit.
+async fn before_deadline<T>(
+    deadline: Option<Instant>,
+    timeout_secs: u64,
+    work: impl std::future::Future<Output = T>,
+) -> Result<T> {
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), work)
+            .await
+            .map_err(|_| Error::Timeout(timeout_secs)),
+        None => Ok(work.await),
+    }
 }
 
 /// Writes a value as a literal of SQL, for a name that reaches a statement.
@@ -248,7 +371,7 @@ impl AthenaDriver {
                 .map(str::to_string),
             result_reuse: connection.options.athena_result_reuse,
             result_reuse_max_age_minutes: connection.options.athena_result_reuse_max_age_minutes,
-            running: Arc::new(Mutex::new(None)),
+            running: Running::default(),
             metadata_api_works: Arc::new(AtomicBool::new(true)),
         };
 
@@ -265,11 +388,16 @@ impl AthenaDriver {
         statement: &str,
         options: &ExecOptions,
     ) -> Result<(Option<ResultSet>, QueryStats)> {
-        let (execution_id, stats) = self.start_and_wait(statement, options).await?;
+        let guard = RunGuard::begin(&self.running);
+        let deadline = deadline_of(options.timeout_secs);
+        let (execution_id, stats) = self
+            .start_and_wait(statement, options, guard.run, deadline)
+            .await?;
         let mut sink = BufferSink::new(options.max_rows);
         self.stream_results(
             &execution_id,
             options,
+            deadline,
             statement_repeats_names(statement),
             &mut sink,
             &mut None,
@@ -279,12 +407,19 @@ impl AthenaDriver {
         Ok((set, stats))
     }
 
-    /// Starts one statement and waits for it to reach a final state.
+    /// Starts one statement of the run and waits for it to reach a final
+    /// state. A stop that came before the start ends the run here, so the
+    /// next statement of a script does not start.
     async fn start_and_wait(
         &self,
         statement: &str,
         options: &ExecOptions,
+        run: u64,
+        deadline: Option<Instant>,
     ) -> Result<(String, QueryStats)> {
+        if self.stop_requested() {
+            return Err(Error::Cancelled);
+        }
         let mut start = self
             .client
             .start_query_execution()
@@ -313,15 +448,13 @@ impl AthenaDriver {
             );
         }
 
-        let started = start
-            .send()
-            .await
-            .map_err(|error| describe(error, "The statement could not be started"))?;
-        let execution_id = started.query_execution_id().unwrap_or_default().to_string();
-        self.set_running(Some(execution_id.clone()));
+        let execution_id =
+            start_statement(start, self.client.clone(), self.running.clone(), run).await?;
 
-        let outcome = self.wait_for(&execution_id, options).await;
-        self.set_running(None);
+        let outcome = self.wait_for(&execution_id, options, deadline).await;
+        // The statement has ended in the service, so a stop while the pages
+        // are read only sets the flag.
+        run_state(&self.running).execution_id = None;
         let stats = outcome?;
         Ok((execution_id, stats))
     }
@@ -329,8 +462,12 @@ impl AthenaDriver {
     /// Waits until the statement reaches a final state. The wait grows
     /// step by step, so that a short statement answers quickly and a long
     /// statement does not flood the service with requests.
-    async fn wait_for(&self, execution_id: &str, options: &ExecOptions) -> Result<QueryStats> {
-        let deadline = deadline_of(options.timeout_secs);
+    async fn wait_for(
+        &self,
+        execution_id: &str,
+        options: &ExecOptions,
+        deadline: Option<Instant>,
+    ) -> Result<QueryStats> {
         let mut wait = Duration::from_millis(200);
 
         loop {
@@ -377,7 +514,9 @@ impl AthenaDriver {
     /// Reads the pages of the result and feeds each row to the sink, up to
     /// the row limit. The first row is dropped when the statement repeats
     /// the column names there. A stop of the sink or the row limit ends the
-    /// read without a fetch of the pages that remain.
+    /// read without a fetch of the pages that remain. A stop of the user ends
+    /// the read before the next page. The read of each page obeys the time
+    /// that remains of the limit of the statement.
     ///
     /// Returns true when the sink stopped the run.
     ///
@@ -388,6 +527,7 @@ impl AthenaDriver {
         &self,
         execution_id: &str,
         options: &ExecOptions,
+        deadline: Option<Instant>,
         expect_header: bool,
         sink: &mut dyn RowSink,
         rows_affected: &mut Option<u64>,
@@ -398,14 +538,18 @@ impl AthenaDriver {
         let mut count = 0usize;
 
         loop {
-            let page = self
+            if self.stop_requested() {
+                return Err(Error::Cancelled);
+            }
+            let request = self
                 .client
                 .get_query_results()
                 .query_execution_id(execution_id)
                 .set_next_token(token.clone())
                 .max_results(1000)
-                .send()
-                .await
+                .send();
+            let page = before_deadline(deadline, options.timeout_secs, request)
+                .await?
                 .map_err(|error| describe(error, "The result could not be read"))?;
 
             let has_columns = page
@@ -481,19 +625,11 @@ impl AthenaDriver {
 
     /// Asks the service to stop a statement.
     async fn stop(&self, execution_id: &str) -> Result<()> {
-        self.client
-            .stop_query_execution()
-            .query_execution_id(execution_id)
-            .send()
-            .await
-            .map_err(|error| describe(error, "The statement could not be stopped"))?;
-        Ok(())
+        stop_execution(&self.client, execution_id).await
     }
 
-    fn set_running(&self, value: Option<String>) {
-        if let Ok(mut guard) = self.running.lock() {
-            *guard = value;
-        }
+    fn stop_requested(&self) -> bool {
+        run_state(&self.running).stop_requested
     }
 
     /// Runs a statement that reads the catalog and gives back its rows.
@@ -698,15 +834,20 @@ impl DatabaseDriver for AthenaDriver {
         }
 
         let started = Instant::now();
+        let guard = RunGuard::begin(&self.running);
         let mut total = QueryStats::default();
         let mut rows_affected: Option<u64> = None;
         for statement in split_statements(query, Dialect::Athena) {
-            let (execution_id, stats) = self.start_and_wait(&statement, options).await?;
+            let deadline = deadline_of(options.timeout_secs);
+            let (execution_id, stats) = self
+                .start_and_wait(&statement, options, guard.run, deadline)
+                .await?;
             total.add(&stats);
             let stopped = self
                 .stream_results(
                     &execution_id,
                     options,
+                    deadline,
                     statement_repeats_names(&statement),
                     sink,
                     &mut rows_affected,
@@ -915,25 +1056,29 @@ impl DatabaseDriver for AthenaDriver {
 /// Asks the service to stop the statement that runs.
 struct AthenaCancel {
     client: Client,
-    running: Arc<Mutex<Option<String>>>,
+    running: Running,
 }
 
 #[async_trait]
 impl CancelHandle for AthenaCancel {
+    /// Marks the run as stopped, and asks the service to stop the statement
+    /// when the service runs one. Before the service gives the identifier,
+    /// the start of the statement reads the mark and stops the statement.
+    /// While the pages are read, the read of the pages reads the mark and
+    /// ends.
     async fn cancel(&self) -> Result<()> {
-        let execution_id = self
-            .running
-            .lock()
-            .ok()
-            .and_then(|guard| guard.clone())
-            .ok_or_else(|| Error::Athena("No statement is running.".to_string()))?;
-        self.client
-            .stop_query_execution()
-            .query_execution_id(&execution_id)
-            .send()
-            .await
-            .map_err(|error| describe(error, "The statement could not be stopped"))?;
-        Ok(())
+        let execution_id = {
+            let mut state = run_state(&self.running);
+            if !state.active {
+                return Err(Error::Athena("No statement is running.".to_string()));
+            }
+            state.stop_requested = true;
+            state.execution_id.clone()
+        };
+        match execution_id {
+            Some(execution_id) => stop_execution(&self.client, &execution_id).await,
+            None => Ok(()),
+        }
     }
 }
 
@@ -1113,7 +1258,7 @@ mod tests {
             output_location: None,
             result_reuse: false,
             result_reuse_max_age_minutes: 60,
-            running: Arc::new(Mutex::new(None)),
+            running: Running::default(),
             metadata_api_works: Arc::new(AtomicBool::new(true)),
         };
         assert!(!driver.needs_ping());
@@ -1455,6 +1600,425 @@ mod tests {
         assert!(!answer_is_unreadable(&Error::Athena(
             "The database does not exist.".to_string()
         )));
+    }
+
+    /// Gives the status and the JSON body of the reply of the fake service.
+    /// The arguments are the operation, as the `X-Amz-Target` header names
+    /// it, and the JSON body of the request.
+    type Answer = Arc<
+        dyn Fn(
+                String,
+                String,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = (u16, String)> + Send>>
+            + Send
+            + Sync,
+    >;
+
+    /// A fake Athena service on a local port. It keeps the operation and the
+    /// body of each request it receives.
+    struct FakeAthena {
+        port: u16,
+        calls: Arc<Mutex<Vec<(String, String)>>>,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    impl FakeAthena {
+        async fn start(answer: Answer) -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let kept = calls.clone();
+            let server = tokio::spawn(async move {
+                while let Ok((socket, _)) = listener.accept().await {
+                    tokio::spawn(serve_fake(socket, answer.clone(), kept.clone()));
+                }
+            });
+            FakeAthena {
+                port,
+                calls,
+                server,
+            }
+        }
+
+        fn operations(&self) -> Vec<String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(operation, _)| operation.clone())
+                .collect()
+        }
+
+        fn body_of(&self, operation: &str) -> String {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(name, _)| name == operation)
+                .map(|(_, body)| body.clone())
+                .unwrap_or_default()
+        }
+
+        /// Waits until the service has received a request of the operation.
+        async fn wait_for_call(&self, operation: &str) {
+            while !self.operations().iter().any(|name| name == operation) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+
+        fn driver(&self) -> AthenaDriver {
+            let config = aws_sdk_athena::Config::builder()
+                .behavior_version(aws_sdk_athena::config::BehaviorVersion::latest())
+                .region(aws_sdk_athena::config::Region::new("us-east-1"))
+                .credentials_provider(Credentials::new("AKID", "secret", None, None, "test"))
+                .endpoint_url(format!("http://127.0.0.1:{}", self.port))
+                .retry_config(aws_sdk_athena::config::retry::RetryConfig::disabled())
+                .build();
+            AthenaDriver {
+                client: Client::from_conf(config),
+                catalog: DEFAULT_CATALOG.to_string(),
+                database: None,
+                workgroup: None,
+                output_location: None,
+                result_reuse: false,
+                result_reuse_max_age_minutes: 60,
+                running: Running::default(),
+                metadata_api_works: Arc::new(AtomicBool::new(true)),
+            }
+        }
+    }
+
+    impl Drop for FakeAthena {
+        fn drop(&mut self) {
+            self.server.abort();
+        }
+    }
+
+    /// Answers the requests of one connection, one after the other.
+    async fn serve_fake(
+        socket: tokio::net::TcpStream,
+        answer: Answer,
+        calls: Arc<Mutex<Vec<(String, String)>>>,
+    ) {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+        let mut reader = tokio::io::BufReader::new(socket);
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                return;
+            }
+            let mut operation = String::new();
+            let mut length = 0usize;
+            loop {
+                line.clear();
+                reader.read_line(&mut line).await.unwrap();
+                let header = line.trim_end();
+                if header.is_empty() {
+                    break;
+                }
+                let (name, value) = header.split_once(':').unwrap();
+                match name.to_ascii_lowercase().as_str() {
+                    "x-amz-target" => {
+                        operation = value.trim().rsplit('.').next().unwrap().to_string();
+                    }
+                    "content-length" => length = value.trim().parse().unwrap(),
+                    _ => {}
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).await.unwrap();
+            let body = String::from_utf8(body).unwrap();
+            calls
+                .lock()
+                .unwrap()
+                .push((operation.clone(), body.clone()));
+            let (status, reply) = answer(operation, body).await;
+            let response = format!(
+                "HTTP/1.1 {status} Answer\r\ncontent-type: application/x-amz-json-1.1\r\n\
+                 content-length: {}\r\n\r\n{reply}",
+                reply.len()
+            );
+            if reader
+                .get_mut()
+                .write_all(response.as_bytes())
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
+
+    const STARTED: &str = r#"{"QueryExecutionId":"q1"}"#;
+    const SUCCEEDED: &str =
+        r#"{"QueryExecution":{"QueryExecutionId":"q1","Status":{"State":"SUCCEEDED"}}}"#;
+
+    /// One page of a result with the column `a`. The first page repeats the
+    /// name of the column, as the service does for a `SELECT`.
+    fn page(first: bool, next_token: Option<&str>) -> String {
+        let header = if first {
+            r#"{"Data":[{"VarCharValue":"a"}]},"#
+        } else {
+            ""
+        };
+        let token = next_token
+            .map(|token| format!(r#","NextToken":"{token}""#))
+            .unwrap_or_default();
+        format!(
+            r#"{{"ResultSet":{{"ResultSetMetadata":{{"ColumnInfo":[{{"Name":"a","Type":"integer"}}]}},"Rows":[{header}{{"Data":[{{"VarCharValue":"1"}}]}}]}}{token}}}"#
+        )
+    }
+
+    const LIMITS: ExecOptions = ExecOptions {
+        max_rows: 100,
+        timeout_secs: 30,
+        one_statement: false,
+    };
+
+    /// Makes an answer from a function that gives the reply at once.
+    fn at_once(reply: impl Fn(&str) -> (u16, String) + Send + Sync + 'static) -> Answer {
+        Arc::new(move |operation, _| {
+            let answer = reply(&operation);
+            Box::pin(async move { answer })
+        })
+    }
+
+    #[tokio::test]
+    async fn a_stop_with_no_run_reports_that_nothing_runs() {
+        let fake = FakeAthena::start(at_once(|_| (200, "{}".to_string()))).await;
+        let driver = fake.driver();
+        let error = driver.cancel_handle().unwrap().cancel().await.unwrap_err();
+        assert_eq!(error.to_string(), "No statement is running.");
+        assert!(fake.operations().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_run_reads_every_page_of_the_result() {
+        let fake = FakeAthena::start(Arc::new(|operation, body: String| {
+            Box::pin(async move {
+                match operation.as_str() {
+                    "StartQueryExecution" => (200, STARTED.to_string()),
+                    "GetQueryExecution" => (200, SUCCEEDED.to_string()),
+                    _ if body.contains("NextToken") => (200, page(false, None)),
+                    _ => (200, page(true, Some("t2"))),
+                }
+            })
+        }))
+        .await;
+        let mut driver = fake.driver();
+        let mut sink = BufferSink::new(100);
+        driver
+            .execute_stream("SELECT 1", None, &LIMITS, &mut sink)
+            .await
+            .unwrap();
+        let set = sink.into_response(RunSummary::default()).results.pop();
+        assert_eq!(set.unwrap().rows.len(), 2);
+        // The run has ended, so a stop finds nothing to stop.
+        assert!(driver.cancel_handle().unwrap().cancel().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_stop_before_the_start_answers_stops_the_statement_when_it_arrives() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let opened = gate.clone();
+        let fake = FakeAthena::start(Arc::new(move |operation, _| {
+            let opened = opened.clone();
+            Box::pin(async move {
+                if operation == "StartQueryExecution" {
+                    opened.notified().await;
+                    return (200, STARTED.to_string());
+                }
+                (200, "{}".to_string())
+            })
+        }))
+        .await;
+        let mut driver = fake.driver();
+        let cancel = driver.cancel_handle().unwrap();
+        let mut sink = BufferSink::new(100);
+        let (outcome, stopped) = tokio::join!(
+            driver.execute_stream("SELECT 1", None, &LIMITS, &mut sink),
+            async {
+                fake.wait_for_call("StartQueryExecution").await;
+                let stopped = cancel.cancel().await;
+                gate.notify_one();
+                stopped
+            }
+        );
+        stopped.unwrap();
+        assert!(matches!(outcome, Err(Error::Cancelled)));
+        assert_eq!(
+            fake.operations(),
+            vec!["StartQueryExecution", "StopQueryExecution"]
+        );
+        assert!(fake.body_of("StopQueryExecution").contains("q1"));
+    }
+
+    #[tokio::test]
+    async fn a_dropped_run_stops_the_statement_that_starts_after_it() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let opened = gate.clone();
+        let fake = FakeAthena::start(Arc::new(move |operation, _| {
+            let opened = opened.clone();
+            Box::pin(async move {
+                if operation == "StartQueryExecution" {
+                    opened.notified().await;
+                    return (200, STARTED.to_string());
+                }
+                // A refusal of the stop is only logged.
+                (
+                    400,
+                    r#"{"__type":"InvalidRequestException","Message":"no"}"#.to_string(),
+                )
+            })
+        }))
+        .await;
+        let mut driver = fake.driver();
+        let mut sink = BufferSink::new(100);
+        let run = driver.execute_stream("SELECT 1", None, &LIMITS, &mut sink);
+        assert!(tokio::time::timeout(Duration::from_millis(200), run)
+            .await
+            .is_err());
+        gate.notify_one();
+        fake.wait_for_call("StopQueryExecution").await;
+        assert!(fake.body_of("StopQueryExecution").contains("q1"));
+    }
+
+    #[tokio::test]
+    async fn a_stop_while_the_statement_runs_reaches_the_service() {
+        let stopped = Arc::new(AtomicBool::new(false));
+        let seen = stopped.clone();
+        let fake = FakeAthena::start(at_once(move |operation| match operation {
+            "StartQueryExecution" => (200, STARTED.to_string()),
+            "StopQueryExecution" => {
+                seen.store(true, Ordering::SeqCst);
+                (200, "{}".to_string())
+            }
+            _ => {
+                let state = if seen.load(Ordering::SeqCst) {
+                    "CANCELLED"
+                } else {
+                    "RUNNING"
+                };
+                (
+                    200,
+                    format!(r#"{{"QueryExecution":{{"Status":{{"State":"{state}"}}}}}}"#),
+                )
+            }
+        }))
+        .await;
+        let mut driver = fake.driver();
+        let cancel = driver.cancel_handle().unwrap();
+        let mut sink = BufferSink::new(100);
+        let (outcome, result) = tokio::join!(
+            driver.execute_stream("SELECT 1", None, &LIMITS, &mut sink),
+            async {
+                fake.wait_for_call("GetQueryExecution").await;
+                cancel.cancel().await
+            }
+        );
+        result.unwrap();
+        assert!(matches!(outcome, Err(Error::Cancelled)));
+        assert!(stopped.load(Ordering::SeqCst));
+    }
+
+    /// A service whose first page of the result waits for the gate.
+    async fn fake_with_a_slow_page(
+        gate: Arc<tokio::sync::Notify>,
+        next_token: Option<&'static str>,
+    ) -> FakeAthena {
+        FakeAthena::start(Arc::new(move |operation, _| {
+            let gate = gate.clone();
+            Box::pin(async move {
+                match operation.as_str() {
+                    "StartQueryExecution" => (200, STARTED.to_string()),
+                    "GetQueryExecution" => (200, SUCCEEDED.to_string()),
+                    "GetQueryResults" => {
+                        gate.notified().await;
+                        (200, page(true, next_token))
+                    }
+                    _ => (200, "{}".to_string()),
+                }
+            })
+        }))
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_stop_while_the_pages_are_read_ends_the_run_cleanly() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let fake = fake_with_a_slow_page(gate.clone(), Some("t2")).await;
+        let mut driver = fake.driver();
+        let cancel = driver.cancel_handle().unwrap();
+        let mut sink = BufferSink::new(100);
+        let (outcome, stopped) = tokio::join!(
+            driver.execute_stream("SELECT 1", None, &LIMITS, &mut sink),
+            async {
+                fake.wait_for_call("GetQueryResults").await;
+                let stopped = cancel.cancel().await;
+                gate.notify_one();
+                stopped
+            }
+        );
+        // The statement has ended in the service, so the stop sends nothing
+        // and the read ends before the next page.
+        stopped.unwrap();
+        assert!(matches!(outcome, Err(Error::Cancelled)));
+        assert_eq!(
+            fake.operations(),
+            vec![
+                "StartQueryExecution",
+                "GetQueryExecution",
+                "GetQueryResults"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stop_during_the_last_page_keeps_the_next_statement_from_starting() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let fake = fake_with_a_slow_page(gate.clone(), None).await;
+        let mut driver = fake.driver();
+        let cancel = driver.cancel_handle().unwrap();
+        let mut sink = BufferSink::new(100);
+        let (outcome, stopped) = tokio::join!(
+            driver.execute_stream("SELECT 1; SELECT 2", None, &LIMITS, &mut sink),
+            async {
+                fake.wait_for_call("GetQueryResults").await;
+                let stopped = cancel.cancel().await;
+                gate.notify_one();
+                stopped
+            }
+        );
+        stopped.unwrap();
+        assert!(matches!(outcome, Err(Error::Cancelled)));
+        assert_eq!(
+            fake.operations()
+                .iter()
+                .filter(|name| *name == "StartQueryExecution")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn the_read_of_the_pages_obeys_the_time_limit_of_the_statement() {
+        // The gate never opens, so the page never arrives.
+        let fake = fake_with_a_slow_page(Arc::new(tokio::sync::Notify::new()), None).await;
+        let mut driver = fake.driver();
+        let mut sink = BufferSink::new(100);
+        let outcome = driver
+            .execute_stream(
+                "SELECT 1",
+                None,
+                &ExecOptions {
+                    timeout_secs: 1,
+                    ..LIMITS
+                },
+                &mut sink,
+            )
+            .await;
+        assert!(matches!(outcome, Err(Error::Timeout(1))));
     }
 
     #[test]
