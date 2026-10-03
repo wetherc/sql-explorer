@@ -7,6 +7,24 @@
     <meta name="theme-color" content="#14171c" media="(prefers-color-scheme: dark)">
     <meta name="theme-color" content="#e7ebf0" media="(prefers-color-scheme: light)">
     {% seo %}
+    {%- if page.url == "/" %}
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": {{ site.title | jsonify }},
+        "description": {{ page.description | jsonify }},
+        "url": {{ "/" | absolute_url | jsonify }},
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "macOS, Windows, Linux",
+        "downloadUrl": "https://github.com/wetherc/sql-explorer/releases",
+        "screenshot": {{ "/screenshots/overview.png" | absolute_url | jsonify }},
+        "license": "https://opensource.org/licenses/MIT",
+        "author": { "@type": "Person", "name": {{ site.author | jsonify }} },
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+      }
+    </script>
+    {%- endif %}
     <link rel="icon" type="image/png" href="{{ "/favicon.png" | relative_url }}">
     <link rel="apple-touch-icon" href="{{ "/assets/icon.png" | relative_url }}">
     <link rel="stylesheet" href="{{ "/assets/css/site.css" | relative_url }}">
@@ -31,8 +49,8 @@
     <section class="hero">
       <div class="wrap">
         <img class="hero__icon" src="{{ "/assets/icon.png" | relative_url }}" alt="" width="96" height="96">
-        <h1>{{ site.title }}</h1>
-        <p class="hero__tagline">An open source SQL client for macOS, Windows and Linux.</p>
+        <h1>{{ site.title }}<span class="hero__subtitle">An open source SQL client and SSMS alternative</span></h1>
+        <p class="hero__tagline">For macOS, Windows and Linux.</p>
         <ul class="engines" aria-label="Supported engines">
           <li>MS SQL Server</li>
           <li>AWS Athena</li>

@@ -147,6 +147,15 @@ a:focus-visible,
   letter-spacing: -0.02em;
 }
 
+/* The second line of the heading. It puts the search words in the h1. */
+.hero__subtitle {
+  display: block;
+  margin-top: 0.75rem;
+  font-size: clamp(1.25rem, 2.5vw, 1.5rem);
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
 .hero__tagline {
   margin: 0 auto;
   max-width: 36rem;

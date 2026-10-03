@@ -1,5 +1,5 @@
 ---
-title: An SSMS alternative for Mac
+title: SSMS alternative for Mac, Windows and Linux
 description: "SQL Explorer is an open source SQL client for macOS, Windows and Linux that connects to MS SQL Server, AWS Athena, PostgreSQL, MySQL, MariaDB and SQLite."
 ---
 
@@ -18,7 +18,7 @@ It connects to:
 - MySQL and MariaDB
 - SQLite
 
-![The object tree, the editor and a query result](screenshots/overview.png)
+![The object tree, the editor and a query result](screenshots/overview.webp){: width="1440" height="880" decoding="async"}
 
 ## Browse a server's objects
 
@@ -27,7 +27,7 @@ columns. An object's context menu scripts its CREATE, SELECT, INSERT and
 UPDATE statements, and the Properties dialog shows a table's columns, indexes
 and constraints.
 
-![A table's context menu in the tree](screenshots/explorer-menu.png)
+![A table's context menu in the tree](screenshots/explorer-menu.webp){: width="1440" height="880" loading="lazy" decoding="async"}
 
 ## Write and run queries
 
@@ -36,7 +36,7 @@ alias. Every tab gets its own server session, so two tabs can run queries at
 the same time. When a query uses a named parameter such as `:country`, the
 editor asks for its value before the query runs.
 
-![Completion after an alias](screenshots/completion.png)
+![Completion after an alias](screenshots/completion.webp){: width="1440" height="880" loading="lazy" decoding="async"}
 
 ## Read and export results
 
@@ -44,13 +44,13 @@ The result grid draws only the rows on screen, so large results stay fast. You
 can sort and filter the rows and see how many you have selected. Export them to
 CSV, JSON, Markdown, INSERT statements or Excel, or copy them to the clipboard.
 
-![A result with a filter, a sort and a selection](screenshots/grid.png)
+![A result with a filter, a sort and a selection](screenshots/grid.webp){: width="1440" height="880" loading="lazy" decoding="async"}
 
 ## Read a statement's plan
 
 A plan tab shows a statement's estimated or actual execution plan.
 
-![A statement's execution plan](screenshots/plan.png)
+![A statement's execution plan](screenshots/plan.webp){: width="1440" height="880" loading="lazy" decoding="async"}
 
 ## Query AWS Athena
 
@@ -58,7 +58,7 @@ The status bar shows how much data each statement scanned, what that scan
 cost, and what the session has cost so far. A connection can also reuse an
 earlier result up to an age you choose, and a reused result scans no data.
 
-![An Athena query and the data it scanned](screenshots/athena.png)
+![An Athena query and the data it scanned](screenshots/athena.webp){: width="1440" height="880" loading="lazy" decoding="async"}
 
 ## Run it on Linux
 
@@ -67,9 +67,9 @@ Passwords go to your desktop's Secret Service, such as GNOME Keyring or
 KWallet. The screenshot below has five sample servers open at once:
 PostgreSQL, MS SQL Server, MySQL, MariaDB and SQLite.
 
-![Five open connections on Linux, with a MySQL result](screenshots/linux/overview.png)
+![Five open connections on Linux, with a MySQL result](screenshots/linux/overview.webp){: width="1442" height="925" loading="lazy" decoding="async"}
 
-![A filtered SQLite result in the light theme](screenshots/linux/sqlite.png)
+![A filtered SQLite result in the light theme](screenshots/linux/sqlite.webp){: width="1442" height="925" loading="lazy" decoding="async"}
 
 ## Keep your secrets safe
 
