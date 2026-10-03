@@ -115,7 +115,11 @@ On PostgreSQL, the `CREATE` text of a view, a materialized view and a trigger na
 its schema, so the text runs under any search path. The `CREATE` statement of a
 materialized view without data ends with `WITH NO DATA`, so the text makes an
 empty view. After this statement, the text has a `CREATE INDEX` statement for
-each index of the view, in the order of the index names. A materialized view and a synonym get their `CREATE`
+each index of the view, in the order of the index names. The text of a PostgreSQL
+trigger that is disabled, a replica trigger or an always trigger has a second
+line. This line is an `ALTER TABLE` statement with `DISABLE TRIGGER`,
+`ENABLE REPLICA TRIGGER` or `ENABLE ALWAYS TRIGGER`. A trigger that you make
+again from the text thus gets the same state. A materialized view and a synonym get their `CREATE`
 text and a `SELECT` alone, and a synonym has no **Properties** item. A foreign table gets a
 `SELECT`, an `INSERT` and an `UPDATE`, because a `CREATE` draft of its columns
 makes a plain table.

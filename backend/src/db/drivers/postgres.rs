@@ -1583,6 +1583,14 @@ fn trigger_of(name: String, bits: i16, enabled: i8) -> Trigger {
 /// the trigger by the relation and the name. PostgreSQL has no scheduled
 /// events. The text is read under [`QUALIFIED_NAMES`], and the form that is
 /// not pretty always names the relation with its schema.
+///
+/// `pg_get_triggerdef` does not write the `tgenabled` letter, and `CREATE
+/// TRIGGER` always makes a trigger with the letter `O`. Thus the text of a
+/// trigger with the letter `D`, `R` or `A` gets a second statement on a line
+/// of its own. This `ALTER TABLE` statement disables the trigger, or enables
+/// it as a replica trigger or as an always trigger. A view cannot have
+/// these letters, because `ALTER TABLE` does not change the triggers of a
+/// view.
 fn object_query_text(
     schema: Option<&str>,
     table: &str,
@@ -1595,7 +1603,12 @@ fn object_query_text(
     let relation = Dialect::Postgres.qualified_name(None, schema, table);
     Some(CreateQuery::new(
         format!(
-            "SELECT {QUALIFIED_NAMES}pg_catalog.pg_get_triggerdef(t.oid, false) || ';' END \
+            "SELECT {QUALIFIED_NAMES}pg_catalog.pg_get_triggerdef(t.oid, false) || ';' || \
+             CASE t.tgenabled WHEN 'O' THEN '' ELSE \
+             E'\\nALTER TABLE ' || t.tgrelid::pg_catalog.regclass::text || \
+             CASE t.tgenabled WHEN 'D' THEN ' DISABLE' \
+             WHEN 'R' THEN ' ENABLE REPLICA' ELSE ' ENABLE ALWAYS' END || \
+             ' TRIGGER ' || pg_catalog.quote_ident(t.tgname) || ';' END END \
              FROM pg_catalog.pg_trigger AS t \
              WHERE t.tgrelid = {}::regclass AND t.tgname = {};",
             Dialect::Postgres.quote_literal(&relation),
@@ -5399,12 +5412,33 @@ mod tests {
         assert_eq!(
             trigger.sql,
             "SELECT CASE WHEN pg_catalog.set_config('search_path', 'pg_catalog', true) \
-             IS NOT NULL THEN pg_catalog.pg_get_triggerdef(t.oid, false) || ';' END \
+             IS NOT NULL THEN pg_catalog.pg_get_triggerdef(t.oid, false) || ';' || \
+             CASE t.tgenabled WHEN 'O' THEN '' ELSE \
+             E'\\nALTER TABLE ' || t.tgrelid::pg_catalog.regclass::text || \
+             CASE t.tgenabled WHEN 'D' THEN ' DISABLE' \
+             WHEN 'R' THEN ' ENABLE REPLICA' ELSE ' ENABLE ALWAYS' END || \
+             ' TRIGGER ' || pg_catalog.quote_ident(t.tgname) || ';' END END \
              FROM pg_catalog.pg_trigger AS t \
              WHERE t.tgrelid = '\"public\".\"orders\"'::regclass AND t.tgname = 'it''s';"
         );
         assert_eq!(trigger.column, 0);
         assert!(object_query_text(Some("public"), "orders", "e", ObjectType::Event).is_none());
+    }
+
+    #[test]
+    fn the_create_statement_of_a_trigger_adds_the_statement_of_its_state() {
+        let sql = object_query_text(Some("app"), "orders", "t", ObjectType::Trigger)
+            .unwrap()
+            .sql;
+        assert!(sql.contains("CASE t.tgenabled WHEN 'O' THEN '' ELSE"));
+        assert!(sql.contains("WHEN 'D' THEN ' DISABLE'"));
+        assert!(sql.contains("WHEN 'R' THEN ' ENABLE REPLICA'"));
+        assert!(sql.contains("ELSE ' ENABLE ALWAYS' END"));
+        // The statement of the state follows the CREATE statement on a line
+        // of its own, and each statement ends with one semicolon.
+        assert!(sql.contains("|| ';' || CASE"));
+        assert!(sql.contains("E'\\nALTER TABLE ' || t.tgrelid::pg_catalog.regclass::text"));
+        assert!(sql.contains("|| pg_catalog.quote_ident(t.tgname) || ';' END END"));
     }
 
     #[test]

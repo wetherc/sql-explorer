@@ -455,3 +455,50 @@ async fn live_a_replica_trigger_is_not_enabled_and_an_always_trigger_is_enabled(
     };
     live::with_cleanup(body, scratch.remove()).await;
 }
+
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL server"]
+async fn live_the_create_text_makes_a_trigger_with_the_same_state_again() {
+    let Some((scratch, mut driver, _)) = Scratch::open("pg_state").await else {
+        return;
+    };
+    let body = async move {
+        let driver = driver.as_mut();
+        live::run(
+            driver,
+            "ALTER TABLE app.orders ENABLE REPLICA TRIGGER b_after_delete; \
+             ALTER TABLE app.orders ENABLE ALWAYS TRIGGER c_truncate",
+        )
+        .await;
+        for (name, letter, statement) in [
+            ("a_before_write", "O", None),
+            ("b_after_delete", "R", Some("ENABLE REPLICA TRIGGER")),
+            ("c_truncate", "A", Some("ENABLE ALWAYS TRIGGER")),
+            ("d_disabled", "D", Some("DISABLE TRIGGER")),
+        ] {
+            let text = trigger_text(driver, "orders", name).await;
+            assert!(text.starts_with("CREATE TRIGGER "), "{text}");
+            assert!(!text.contains(";;"), "{text}");
+            match statement {
+                Some(statement) => assert!(
+                    text.ends_with(&format!(";\nALTER TABLE app.orders {statement} {name};")),
+                    "{text}"
+                ),
+                None => assert!(!text.contains("ALTER TABLE"), "{text}"),
+            }
+            live::run(driver, &format!("DROP TRIGGER {name} ON app.orders")).await;
+            live::run(driver, &text).await;
+            let state = live::run(
+                driver,
+                &format!(
+                    "SELECT tgenabled::text FROM pg_catalog.pg_trigger \
+                     WHERE tgrelid = 'app.orders'::regclass AND tgname = '{name}'"
+                ),
+            )
+            .await;
+            assert_eq!(live::cell(&state, 0, 0).as_deref(), Some(letter), "{name}");
+            assert_eq!(trigger_text(driver, "orders", name).await, text);
+        }
+    };
+    live::with_cleanup(body, scratch.remove()).await;
+}
