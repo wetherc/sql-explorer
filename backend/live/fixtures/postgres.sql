@@ -27,6 +27,9 @@ INSERT INTO app.orders VALUES
 CREATE VIEW app.big_orders AS SELECT id, total FROM app.orders WHERE total > 100;
 CREATE MATERIALIZED VIEW app.order_totals AS
     SELECT mood, sum(total) AS total FROM app.orders GROUP BY mood;
+CREATE MATERIALIZED VIEW app.pending_totals AS
+    SELECT mood, count(*) AS orders FROM app.orders GROUP BY mood
+    WITH NO DATA;
 
 CREATE TABLE app.events (id integer, at date) PARTITION BY RANGE (at);
 CREATE TABLE app.events_2025 PARTITION OF app.events

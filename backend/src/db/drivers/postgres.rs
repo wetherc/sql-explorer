@@ -1461,7 +1461,10 @@ pub fn plan_prefix(mode: PlanMode) -> &'static str {
 ///
 /// `pg_get_viewdef` gives the query of the view alone, so the statement adds
 /// the CREATE clause and the name. A materialized view gets the clause of
-/// its own relation type, because `CREATE VIEW` makes a plain view.
+/// its own relation type, because `CREATE VIEW` makes a plain view. A
+/// materialized view that has no rows yet (`relispopulated` is false) ends
+/// with `WITH NO DATA`. Without it, the text runs the query of the view and
+/// fills the view. A plain view is always marked as populated.
 ///
 /// The name goes into the statement as a literal that `regclass` reads. A
 /// name of another database cannot be read this way, so the name contains
@@ -1481,7 +1484,8 @@ fn create_query_text(
             "SELECT {QUALIFIED_NAMES}'CREATE ' || CASE c.relkind \
              WHEN 'm' THEN 'MATERIALIZED VIEW ' ELSE 'OR REPLACE VIEW ' END || \
              pg_catalog.quote_ident(n.nspname) || '.' || pg_catalog.quote_ident(c.relname) || \
-             E' AS\\n' || pg_catalog.pg_get_viewdef(c.oid, true) END \
+             E' AS\\n' || pg_catalog.rtrim(pg_catalog.pg_get_viewdef(c.oid, true), ';') || \
+             CASE WHEN c.relispopulated THEN ';' ELSE E'\\nWITH NO DATA;' END END \
              FROM pg_catalog.pg_class AS c \
              JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace \
              WHERE c.oid = {}::regclass;",
@@ -5800,7 +5804,8 @@ mod tests {
              IS NOT NULL THEN 'CREATE ' || CASE c.relkind \
              WHEN 'm' THEN 'MATERIALIZED VIEW ' ELSE 'OR REPLACE VIEW ' END || \
              pg_catalog.quote_ident(n.nspname) || '.' || pg_catalog.quote_ident(c.relname) || \
-             E' AS\\n' || pg_catalog.pg_get_viewdef(c.oid, true) END \
+             E' AS\\n' || pg_catalog.rtrim(pg_catalog.pg_get_viewdef(c.oid, true), ';') || \
+             CASE WHEN c.relispopulated THEN ';' ELSE E'\\nWITH NO DATA;' END END \
              FROM pg_catalog.pg_class AS c \
              JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace \
              WHERE c.oid = '\"public\".\"v\"'::regclass;"

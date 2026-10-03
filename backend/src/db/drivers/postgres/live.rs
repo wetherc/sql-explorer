@@ -183,6 +183,7 @@ async fn live_the_tree_and_the_snapshot_name_each_type_of_relation() {
             [
                 Table::new("host_file", RelationType::ForeignTable),
                 Table::new("order_totals", RelationType::MaterializedView),
+                Table::new("pending_totals", RelationType::MaterializedView),
                 Table::new("events", RelationType::PartitionedTable),
                 Table::table("lines"),
                 Table::table("orders"),
@@ -325,12 +326,29 @@ async fn live_the_create_text_runs_again_after_a_drop() {
                 RelationType::MaterializedView,
                 "MATERIALIZED VIEW",
             ),
+            (
+                "pending_totals",
+                RelationType::MaterializedView,
+                "MATERIALIZED VIEW",
+            ),
         ] {
             let text = view_text(driver, name, relation).await;
+            assert_eq!(text.ends_with("\nWITH NO DATA;"), name == "pending_totals");
+            assert!(text.ends_with(';') && !text.ends_with(";;"), "{text}");
             live::run(driver, &format!("DROP {word} app.{name}")).await;
             live::run(driver, &text).await;
             assert_eq!(view_text(driver, name, relation).await, text);
         }
+        // The text of a materialized view without rows makes a view without
+        // rows again.
+        let populated = live::run(
+            driver,
+            "SELECT relname, relispopulated FROM pg_catalog.pg_class \
+             WHERE relname IN ('order_totals', 'pending_totals') ORDER BY relname",
+        )
+        .await;
+        assert_eq!(live::cell(&populated, 0, 1).as_deref(), Some("t"));
+        assert_eq!(live::cell(&populated, 1, 1).as_deref(), Some("f"));
     };
     live::with_cleanup(body, scratch.remove()).await;
 }
