@@ -1,15 +1,15 @@
 ---
-title: Where to start
-description: Open a connection, write a statement and run it.
+title: Getting started
+description: Open a connection, then write a statement and run it.
 order: 1
 permalink: /guide/
 ---
 
-# Where to start
+# Getting started
 
-Open a connection in the connections panel. The explorer then shows the
-objects of that connection.
+Open a connection in the connections panel, and the explorer lists that
+connection's objects.
 
-Open a tab, choose the connection at the top of the tab, and write a
-statement. The **Run** button runs the statement under the cursor. **Run
-all** runs the whole script.
+Then open a tab, pick the connection at the top of the tab, and write a
+statement. **Run** runs the statement under the cursor, and **Run all** runs the
+whole script.

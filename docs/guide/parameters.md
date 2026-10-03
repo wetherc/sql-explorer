@@ -1,55 +1,55 @@
 ---
 title: Parameters
-description: Use named parameters such as :country and give their values when a statement runs.
+description: Use named parameters such as :country in a statement, and give their values when it runs.
 order: 6
 ---
 
 # Parameters
 
-Write `:name` in a statement to make a parameter:
+Write `:name` in a statement to create a parameter:
 
 ```sql
 SELECT * FROM orders WHERE customer_id = :id AND city = :city
 ```
 
-Each name takes a colour of its own in the editor. A name starts with a
-letter or a low line, so the `:30` of `10:30` holds no name. Two colons
-together stay the cast of PostgreSQL and hold no name. A colon inside the
-brackets of a PostgreSQL array, as in `a[lo:hi]`, marks a slice and holds no
-name, but the editor still gives `:hi` the colour of a name.
+The editor gives each parameter name its own colour. A name starts with a letter
+or an underscore, so the `:30` in `10:30` isn't a parameter, and PostgreSQL's
+`::` cast isn't one either. A colon inside a PostgreSQL array's brackets, as in
+`a[lo:hi]`, marks a slice rather than a parameter, although the editor still
+colours `:hi` as a name.
 
-The bar above the editor names each parameter that the statement holds and the
-value it carries. A value that is still missing reads as `unset`. A click on a
-name opens the dialog of the values, and so does the **Parameters** button.
+The bar above the editor lists each of the statement's parameters with its
+current value, and a missing value reads `unset`. Click a name, or click
+**Parameters**, to open the values dialog.
 
-## The forms of a value
+## Value forms
 
-Each value holds the form that you chose, so a value stays text when it looks
-like a number. An identifier such as `007` therefore keeps its zeros.
+Each value keeps the form that you choose, so a value stays text even when it
+looks like a number, and an identifier such as `007` keeps its leading zeros.
 
-| Form          | What it sends                                    |
-| ------------- | ------------------------------------------------ |
-| Text          | The text as you wrote it                         |
-| Number        | A number. A text that is not a number is refused |
-| True or false | One of the two words                             |
-| Empty value   | The empty value of the engine                    |
+| Form          | What it sends                                 |
+| ------------- | --------------------------------------------- |
+| Text          | The text exactly as you typed it              |
+| Number        | A number. Text that isn't a number is refused |
+| True or false | One of the two words                          |
+| Empty value   | The engine's empty value                      |
 
-A run with a value that is still missing opens the dialog first. The values
-stay with the tab, so a second run needs no dialog, and they come back after a
-restart.
+If a value is missing when you run the statement, the dialog opens first. The
+values stay with the tab, so the next run doesn't ask again, and they come back
+after a restart.
 
-## What each engine does with a value
+## Engine differences
 
-Every engine but Athena binds the values, so a value never becomes part of the
-text of the statement. Athena gives no way to bind a value, so its values go
-into the text as literals, and a text value keeps its quotes doubled.
+Every engine except Athena binds the values, so a value never becomes part of
+the statement's text. Athena has no way to bind a value, so its values go into
+the text as literals, with the quotes inside a text value doubled.
 
-On MS SQL Server a statement with a parameter travels inside `sp_executesql`.
-A `USE` or a `SET` inside such a batch holds for that batch alone. A script
-that carries a parameter is also sent whole and not one statement at a time,
-because the numbers of the placeholders belong to the whole text.
+On MS SQL Server, a statement with a parameter runs inside `sp_executesql`, so a
+`USE` or a `SET` inside that batch applies to that batch alone. A script with a
+parameter is also sent whole rather than one statement at a time, because the
+placeholder numbers belong to the whole text.
 
-On PostgreSQL a statement with a parameter must stand alone. The server
-refuses a script of two statements when one of them holds a parameter. MySQL
-and SQLite run such a script one statement at a time, and each statement
+On PostgreSQL, a statement with a parameter has to stand alone, because the
+server refuses a script of two statements when either one contains a parameter.
+MySQL and SQLite run such a script one statement at a time, and each statement
 gets the values of its own parameters.

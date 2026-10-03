@@ -1,29 +1,29 @@
 ---
-title: The keyboard
-description: Keyboard shortcuts for the editor, the tabs and the panels.
+title: Keyboard shortcuts
+description: Keyboard shortcuts for the editor, the tabs, the panels, the object explorer and the results grid.
 order: 9
 ---
 
-# The keyboard
+# Keyboard shortcuts
 
-One registry holds every command of the application. The command palette
-lists them all, with the keys that reach them:
+Every command in the application comes from one registry, and the command
+palette lists them all with their keys:
 
-- `Ctrl` or `Cmd` with `Shift` and `P` opens the palette.
-- `F1` opens the list of the keys.
+- `Ctrl`/`Cmd` + `Shift` + `P` opens the palette.
+- `F1` opens the list of shortcuts.
 
-The list of the keys names every command that carries one, so it stays right
-as the application grows. The guide names no key that the list does not
-already hold.
+The shortcut list names every command that has a key, so it stays up to date as
+commands are added, and this guide names no key that the list doesn't already
+show.
 
-## The keys of the work
+## Editor, tabs and panels
 
-| Keys                             | What they do                       |
+| Keys                             | Action                             |
 | -------------------------------- | ---------------------------------- |
 | `Ctrl`/`Cmd` + `Enter`           | Run the statement under the cursor |
 | `Ctrl`/`Cmd` + `Shift` + `Enter` | Run the whole script               |
-| `Ctrl`/`Cmd` + `S`               | Write the query to a file          |
-| `Shift` + `Alt` + `F`            | Lay out the statement              |
+| `Ctrl`/`Cmd` + `S`               | Save the query to a file           |
+| `Shift` + `Alt` + `F`            | Format the statement               |
 | `Ctrl`/`Cmd` + `T` or `N`        | Open a query in a new tab          |
 | `Ctrl`/`Cmd` + `O`               | Open a query from a file           |
 | `Ctrl`/`Cmd` + `Shift` + `O`     | Open a folder of queries           |
@@ -33,24 +33,22 @@ already hold.
 | `Ctrl`/`Cmd` + `J`               | Show or hide the results panel     |
 | `Ctrl`/`Cmd` + `,`               | Open the settings                  |
 
-## In the explorer
+## Object explorer
 
-The arrow keys walk the tree. The right arrow opens a branch and the left
-arrow closes it. The Home key and the End key reach the first row and the last
-row. A letter jumps to the next row that starts with it.
+The arrow keys move through the tree, with the right arrow expanding a branch
+and the left arrow collapsing it. `Home` and `End` jump to the first and last
+rows, and typing a letter jumps to the next row that starts with it.
 
-## In the results grid
+## Results grid
 
-The arrow keys move between the cells, and `Page Up` and `Page Down` move by
-a page of rows. `Home` and `End` reach the ends of a row, and with `Ctrl` or
-`Cmd` they reach the ends of the grid. `Enter` opens the whole value of the
-cell. `Space` takes the row, and with `Ctrl` or `Cmd` it adds the row to the
-rows already taken.
+The arrow keys move between cells, and `Page Up` and `Page Down` move a page of
+rows at a time. `Home` and `End` go to the ends of a row, or to the ends of the
+grid with `Ctrl`/`Cmd`. `Enter` opens the cell's whole value. `Space` selects
+the row, and `Ctrl`/`Cmd` + `Space` adds the row to the selection.
 
-`Ctrl` or `Cmd` with `A` takes every row that the filter shows. `Ctrl` or
-`Cmd` with `C` copies the rows that are taken. With no row taken, it copies
-the value of the cell. Text that you mark with the pointer is copied as it
-is.
+`Ctrl`/`Cmd` + `A` selects every row that the filter shows, and `Ctrl`/`Cmd` +
+`C` copies the selected rows, or the current cell's value when no row is
+selected. Text that you highlight with the pointer copies as it is.
 
-The menu key and `Shift` with `F10` open the menu of the cell. When the menu
+The menu key and `Shift` + `F10` open the cell's context menu, and when the menu
 closes, the focus goes back to the cell.

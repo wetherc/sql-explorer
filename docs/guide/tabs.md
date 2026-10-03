@@ -1,65 +1,61 @@
 ---
 title: Tabs and saved statements
-description: Work in several editor tabs, each with its own server session, and save statements for later.
+description: Work in several editor tabs, each with its own server session, and save statements to files or the library.
 order: 4
 ---
 
 # Tabs and saved statements
 
-The **+** button of the tab row opens a tab, and so do `Ctrl` or `Cmd` with
-`T` or with `N`. Each tab holds its own statement, its own connection and its
-own values of the parameters.
+To open a tab, click **+** in the tab row or press `Ctrl`/`Cmd` + `T` or
+`Ctrl`/`Cmd` + `N`. Each tab keeps its own statement, connection and parameter
+values.
 
-The **File** menu of the operating system holds the four commands of a file:
-a new query, a query from a file, a folder of queries, and the write of the
-query that stands open. Each entry names its key. macOS draws that menu in
-the bar at the top of the screen, and Windows and Linux draw it in the
-window.
+Your operating system's **File** menu has four file commands: new query, open a
+query from a file, open a folder of queries, and save the current query. Each
+entry shows its shortcut. On macOS the menu sits in the bar at the top of the
+screen, and on Windows and Linux it sits in the window.
 
-A double click on the name of a tab changes that name. The Enter key keeps the
-new name and the Escape key throws it away.
+Double-click a tab's name to rename it. Press `Enter` to keep the new name or
+`Escape` to discard it.
 
-A tab that holds changes carries a mark. Closing such a tab asks first,
-because the text of the statement goes with it. A tab whose text comes back
-to the saved text loses the mark, as after an undo of each change. A tab
-that had the mark at the last restart keeps it until the next save.
+A tab with unsaved changes shows a mark, and closing it asks you first, because
+the unsaved text goes with the tab. If you undo every change so the text matches
+the saved text again, the mark goes away. A tab that had the mark at the last
+restart keeps it until the next save.
 
-The open tabs come back after a restart, with their names, their statements
-and their values.
+Open tabs come back after a restart, with their names, statements and values.
 
-## The history
+## History
 
-Each statement that runs goes into the history panel, with its connection and
-the time of its run. A click on an entry opens that statement in a new tab, on
-the connection of the entry when that connection is open.
+Every statement that runs goes into the history panel, with its connection and
+the time it ran. Click an entry to open its statement in a new tab, on the
+entry's connection if that connection is open.
 
-The history keeps the last 500 statements. It also keeps at most about 4
-million characters of statement text and error text. When a new entry passes
-that amount, the history drops the oldest entries. The newest entry always
-stays, also when its text alone is larger.
+The history keeps the last 500 statements, up to about 4 million characters of
+statement and error text in total. When a new entry goes over that amount, the
+history drops the oldest entries, although it always keeps the newest entry,
+even when that entry's text alone is larger.
 
-## The file of a tab
+## Files
 
-The **Save** button writes the statement of the tab to a file, and so do
-`Ctrl` or `Cmd` with `S`. A tab that came from a file goes back to the same
-file. A tab without a file opens the save dialog of the operating system,
-which starts in the first folder of the files panel. The tab then takes the
-name of that file and keeps it.
+Click **Save** or press `Ctrl`/`Cmd` + `S` to write the tab's statement to a
+file. A tab that came from a file saves back to the same file. Saving a tab that
+has no file opens your operating system's save dialog, which starts in the files
+panel's first folder, and the tab then takes the file's name and keeps it.
 
-A file that you open or save through a dialog gives the application access
-to that file alone. Its folder does not join the files panel. To see the
-files beside it, open the folder from the **File** menu. The panel does not
-show hidden entries, and the application does not read or write them inside
-an open folder.
+Opening or saving a file through a dialog gives the application access to that
+file only, so its folder doesn't join the files panel. To see the files beside
+it, open the folder from the **File** menu. The panel doesn't show hidden
+entries, and the application neither reads nor writes them inside an open
+folder.
 
-The files panel holds no watch on the disk. A file that another program
-writes keeps its old text in the tab, and a save from the tab writes the
-whole file over it.
+The files panel doesn't watch the disk. If another program writes a file, the
+tab keeps its old text, and saving from the tab overwrites the whole file.
 
 ## Saved statements
 
-The button beside **Save** keeps the statement of the tab in the library,
-under a name and a folder that you give. The library stands in the history
-panel, and a click opens the statement in a new tab.
+The button beside **Save** keeps the tab's statement in the library, under a
+name and folder that you choose. The library sits in the history panel, and
+clicking an entry opens its statement in a new tab.
 
-The history and the library both persist.
+Both the history and the library persist across restarts.

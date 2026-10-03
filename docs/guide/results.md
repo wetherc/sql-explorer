@@ -1,35 +1,34 @@
 ---
 title: The results grid
-description: Sort, filter and select the rows of a result.
+description: Sort, filter and select a result's rows, keep a result beside the next one, and read the status bar.
 order: 7
 ---
 
 # The results grid
 
-The grid draws only the rows that stand in view, so a large result stays
-quick. It sorts, it filters, it marks a value that is absent, and it opens a
-wide value in a box of its own.
+The grid draws only the rows on screen, so a large result stays fast. You can
+sort and filter the rows, the grid marks missing values, and a wide value opens
+in its own box.
 
-Each statement of a script that returns rows opens a tab of its own beside the
-**Messages** tab.
+Each statement in a script that returns rows gets its own tab beside the
+**Messages** tab. Each column header shows the column's type. On PostgreSQL, a
+column of a custom array type shows the type's internal name, such as `_mytype`.
 
-## Keeping a result
+## Pinned results
 
-The pin beside the tabs keeps a result. A result that is kept holds its rows
-and the time of its run against the next statement, so two results stand
-beside each other.
+Click the pin beside the tabs to keep a result. The next statement then leaves
+the pinned result's rows and run time in place, so you can compare two results
+side by side.
 
-## The panel itself
+## Panel layout
 
-The buttons beside the tabs move the panel. One puts the panel away and leaves
-a bar below the editor, and `Ctrl` or `Cmd` with `J` does the same. The other
-moves the panel between a place below the editor and a place beside it. A run
+The buttons beside the tabs move the results panel. One hides the panel and
+leaves a bar below the editor, which `Ctrl`/`Cmd` + `J` also does. The other
+moves the panel between below the editor and beside it. Running a statement
 brings the panel back.
 
-## The status bar
+## Status bar
 
-The status bar reports the rows and the time of the last run. While a
-statement runs, the time that has passed stands in the same place, so the bar
-shows how long the statement has taken so far. For Athena the bar also
-reports the data that the statement scanned, with the cost at the rate that
-the settings hold.
+The status bar shows the last run's row count and time. While a statement runs,
+the same spot shows the time so far. For Athena, the bar also shows how much
+data the statement scanned and what that cost at the rate in your settings.

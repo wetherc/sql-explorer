@@ -1,49 +1,48 @@
 ---
 title: Run and stop
-description: Run a statement or a whole script, and stop a statement that takes too long.
+description: Run a statement or a whole script, read its messages and plan, and stop a statement that takes too long.
 order: 5
 ---
 
 # Run and stop
 
-Choose a connection at the top of the tab, then write a statement.
+Pick a connection at the top of the tab, then write a statement.
 
-- `Ctrl` or `Cmd` with `Enter` runs the statement under the cursor.
-- The same keys with `Shift` run the whole script.
-- A selection runs in place of the statement under the cursor.
+- `Ctrl`/`Cmd` + `Enter` runs the statement under the cursor.
+- `Ctrl`/`Cmd` + `Shift` + `Enter` runs the whole script.
+- If you select text, the selection runs instead of the statement under the
+  cursor.
 
-A script runs statement by statement. The splitter respects quotes, comments,
-dollar tags and the `DELIMITER` command of MySQL. Each statement commits on its
-own, unless the script opens a transaction. The first error ends the script,
-and the statements after it do not run.
+A script runs one statement at a time. The splitter understands quotes,
+comments, dollar tags and MySQL's `DELIMITER` command. Each statement commits on
+its own unless the script opens a transaction, and the first error ends the
+script, so the statements after it don't run.
 
-On MS SQL Server the unit is the batch. A line that holds only `GO` ends a
-batch, and the server gets each batch whole. The statement under the cursor
-is the whole batch that holds the cursor, with its semicolons.
+On MS SQL Server the unit is the batch rather than the statement. A line that
+contains only `GO` ends a batch, and the server receives each batch whole, so
+"the statement under the cursor" means the whole batch around the cursor,
+semicolons and all.
 
-The **Format** button lays the statement out with the rules of its dialect.
+**Format** lays the statement out by its dialect's rules.
 
-## While a statement runs
+## Stopping a statement
 
-The **Stop** button stands beside **Run** while a statement runs. The time
-limit of the connection also stops a statement that runs too long.
+While a statement runs, a **Stop** button appears beside **Run**. The
+connection's time limit also stops a statement that runs too long.
 
-A change of the connection of the tab stops the statement, and so does a
-close of the tab. The application asks before each one.
+Changing the tab's connection or closing the tab also stops the statement, and
+the application asks you before either one. On some engines a stop opens a new
+session, which discards the old session's temporary tables and `SET` options.
 
-A stop opens a new session on some engines, so the temporary tables and the
-`SET` options of the old session go with it.
+## Messages
 
-## The messages
-
-The **Messages** tab holds what the server sent, with the severity, the code,
-the line and the procedure of each message. A failure of a statement appears
-there as well as in the corner.
+The **Messages** tab lists what the server sent, with each message's severity,
+code, line and procedure. A failed statement's error appears there as well as in
+the corner.
 
 ## Plans
 
-The **Plan** button reads the plan of one statement. The estimated plan needs
-no run. The actual plan runs the statement, so the application asks first: a
-statement that writes rows writes them, and a statement on Athena scans data.
-
-The plan of a script covers the statement under the cursor alone.
+**Plan** reads one statement's plan. An estimated plan doesn't run the
+statement. An actual plan does, so the application asks first, because a
+statement that writes rows will write them and a statement on Athena will scan
+data. In a script, the plan covers only the statement under the cursor.

@@ -6,94 +6,91 @@ order: 2
 
 # Connections
 
-Open the connections panel from the rail. The **New connection** button opens
-the form. The form shows the fields that the engine you chose uses, and hides
-the rest.
-
-The application connects to five engines: MS SQL Server, AWS Athena,
-PostgreSQL, MySQL and MariaDB, and SQLite.
+SQL Explorer connects to MS SQL Server, AWS Athena, PostgreSQL, MySQL and
+MariaDB, and SQLite. To add a connection, open the connections panel from the
+rail and click **New connection**. The form shows only the fields that your
+chosen engine uses.
 
 ## Before you save
 
-The **Test** button opens the connection, confirms that it answers, and closes
-it again. Use it before you save a record that you are not sure of.
+Click **Test** before you save a record you're unsure of. It opens the
+connection, checks that the server answers, and closes it again.
 
-A password goes into the keychain of the operating system. The settings file
-holds no password. Leave the password box empty when you edit a record, and
-the stored password stays as it is. When the keychain is not reachable, for
-example on Linux with no secret service, the form says so. A password then
-stays in memory until the application closes.
+Passwords go into your operating system's keychain, and the settings file never
+contains one. When you edit a record, leave the password box empty to keep the
+stored password. If the keychain isn't reachable (on Linux without a Secret
+Service, for example), the form tells you, and the password stays in memory only
+until the application closes.
 
-The advanced part of the form accepts a connection string, for an option that
-the form does not show. The string replaces the host, the port and the
-database. The user, the password and the connection time limit of the form
-apply when the string does not give them. On PostgreSQL and MySQL, the
-transport mode of the form also applies when the string names no mode. The
-settings file keeps the string as plain text, so the application does not save
-a string that holds a password. Type the password in the Password box.
+For an option that the form doesn't show, enter a **Connection string** in the
+form's **Advanced** section. The string replaces the host, the port and the
+database. The form's user, password and connection time limit still apply when
+the string doesn't give them, and on PostgreSQL and MySQL the form's transport
+mode also applies when the string names no mode. The settings file keeps the
+string as plain text, so the application refuses to save a string that contains
+a password. Type the password in the **Password** box instead.
 
 ## Transport
 
-A connection encrypts its traffic in one of four ways:
+A connection encrypts its traffic in one of four modes:
 
-- Verify the certificate. This is the default. Use it outside a trusted
-  network.
-- Encrypt, and accept any certificate.
-- Encrypt when the server offers encryption.
-- No encryption. The credentials and the results then cross the network in
-  clear text.
+- **Verify the certificate**, the default. Use it outside a trusted network.
+- **Encrypt, accept any certificate**.
+- **Encrypt when the server offers it**.
+- **No encryption**, which sends the credentials and the results across the
+  network in clear text.
 
-A check of the certificate trusts the authorities that the operating system
-trusts, such as the roots in the macOS keychain. The Certificate authority
-file adds one more authority. The application reads the roots of the system
-when it starts, so a root that you add later is used after a restart.
+Certificate checks trust the same authorities as your operating system, such as
+the roots in the macOS keychain, and the **Certificate authority file** adds one
+more. The application reads the system's roots when it starts, so a root that
+you add later takes effect after a restart.
 
 ## Read-only sessions
 
-The read-only switch in the advanced part of the form does a different thing
+The read-only switch in the form's **Advanced** section does something different
 on each engine:
 
-- PostgreSQL and MySQL: the server refuses a write in the session. A `SET`
-  statement in the session can turn this off again.
-- SQLite: the file opens read-only.
-- MS SQL Server: the login asks for a readable secondary of an availability
-  group. A primary or a standalone server still accepts writes. Give the user
-  a login without write permissions to stop writes on such a server.
-- AWS Athena: the form does not show the switch.
+- **PostgreSQL and MySQL**: the server refuses writes in the session, although a
+  `SET` statement in the session can turn this off again.
+- **SQLite**: the file opens read-only.
+- **MS SQL Server**: the login asks for a readable secondary of an availability
+  group. A primary or a standalone server still accepts writes, so to stop
+  writes there, give the user a login without write permissions.
+- **AWS Athena**: the form doesn't show the switch.
 
 ## MS SQL Server
 
-A named instance finds its port through the SQL Browser service. Give the name
-of the instance in the advanced part of the form.
+A named instance finds its port through the SQL Browser service. Enter the
+instance name in **Named instance**, in the form's **Advanced** section.
 
-Four methods authenticate against the server:
+You can authenticate in four ways:
 
-- A SQL login, with a user and a password.
-- The account of the user. Windows uses SSPI. macOS and Linux use the Kerberos
-  ticket of the user, so run `kinit` first and name the server by its full host
-  name.
-- Microsoft Entra ID through the Azure CLI. Run `az login` first. This method
-  reads a fresh token for each connection.
-- Microsoft Entra ID with an access token that you paste. Such a token is
-  valid for about one hour, and the application cannot get another one for it.
-  The form asks for a new token once the server refuses the old one.
+- **A SQL login**, with a user and a password.
+- **Your own account.** Windows uses SSPI. On macOS and Linux the connection
+  uses your Kerberos ticket, so run `kinit` first and name the server by its
+  full host name.
+- **Microsoft Entra ID through the Azure CLI.** Run `az login` first. Each
+  connection reads a fresh token.
+- **Microsoft Entra ID with an access token** that you paste. A token is valid
+  for about one hour, and the application can't renew it, so the form asks for a
+  new token once the server refuses the old one.
 
-The account of the user and the Azure CLI need no secret. When you save a
-connection with one of these methods, the application removes the password
-or the token that the keychain holds for it.
+Your own account and the Azure CLI need no secret. When you save a connection
+with either method, the application removes any password or token that the
+keychain kept for it.
 
 ## AWS Athena
 
-An Athena connection needs a region. It can also reuse the result of an
-earlier run, up to an age that you give. A reused result costs nothing,
-because the engine scans no data for it.
+An Athena connection needs a region. It can also reuse an earlier run's result,
+up to an age that you choose. A reused result costs nothing, because Athena
+scans no data for it.
 
 ## Sessions
 
-Each tab holds one server session, so the statements of two tabs run at the
-same time. The temporary tables, the `SET` options and the transactions of a
-tab stay with the session of that tab. The session limit in the options of the
-connection bounds the sessions of one server, and it starts at six.
+Each tab has its own server session, so statements in two tabs run at the same
+time. A tab's temporary tables, `SET` options and transactions stay with that
+tab's session. The connection's **Max sessions** option caps the number of
+sessions on one server, and it defaults to six.
 
-A connection that stops answering is opened again. The colour beside each
-connection reports its state.
+When a connection stops answering, the application opens it again. The colour
+beside each connection shows its state.
