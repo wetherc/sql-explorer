@@ -876,16 +876,8 @@ impl DatabaseDriver for MysqlDriver {
         _schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<Trigger>> {
-        let rows: Vec<(String, String, String)> = self
-            .conn()?
-            .exec(
-                "SELECT TRIGGER_NAME, ACTION_TIMING, EVENT_MANIPULATION \
-                 FROM information_schema.TRIGGERS \
-                 WHERE EVENT_OBJECT_SCHEMA = ? AND EVENT_OBJECT_TABLE = ? \
-                 ORDER BY TRIGGER_NAME",
-                (database, table),
-            )
-            .await?;
+        let rows: Vec<(String, String, String)> =
+            self.conn()?.exec(TRIGGERS_QUERY, (database, table)).await?;
         Ok(rows
             .into_iter()
             .map(|(name, timing, event)| trigger_of(name, &timing, &event))
@@ -972,6 +964,11 @@ fn create_query_text(
 /// `SHOW CREATE EVENT` gives it in its fourth one. A body of more than one
 /// statement goes between `DELIMITER $$` and `DELIMITER ;`, so the splitter
 /// of the app sends the text to the server whole.
+///
+/// `SHOW CREATE TRIGGER` gives no `FOLLOWS` or `PRECEDES` clause on MySQL
+/// 8.4 or on MariaDB 11.4. A trigger made again from its text goes last
+/// among the triggers with its timing and its event, so the firing order
+/// can change.
 fn object_query_text(database: Option<&str>, name: &str, object_type: ObjectType) -> CreateQuery {
     let name = Dialect::MySql.qualified_name(database, None, name);
     let query = match object_type {
@@ -980,6 +977,16 @@ fn object_query_text(database: Option<&str>, name: &str, object_type: ObjectType
     };
     query.with_delimiter("$$")
 }
+
+/// Lists the triggers of one table in the order that they fire. The
+/// triggers with the same timing and the same event fire in the order of
+/// `ACTION_ORDER`, which `FOLLOWS` and `PRECEDES` set. `FIELD` puts `BEFORE`
+/// in front of `AFTER`, and the events in the order insert, update, delete.
+const TRIGGERS_QUERY: &str = "SELECT TRIGGER_NAME, ACTION_TIMING, EVENT_MANIPULATION \
+     FROM information_schema.TRIGGERS \
+     WHERE EVENT_OBJECT_SCHEMA = ? AND EVENT_OBJECT_TABLE = ? \
+     ORDER BY FIELD(ACTION_TIMING, 'BEFORE', 'AFTER'), \
+              FIELD(EVENT_MANIPULATION, 'INSERT', 'UPDATE', 'DELETE'), ACTION_ORDER";
 
 /// Builds the record of one trigger from the words of `TRIGGERS`.
 fn trigger_of(name: String, timing: &str, event: &str) -> Trigger {
@@ -1466,6 +1473,15 @@ mod tests {
         let after = trigger_of("log".into(), "AFTER", "INSERT");
         assert_eq!(after.timing, crate::db::TriggerTiming::After);
         assert!(trigger_of("x".into(), "AFTER", "OTHER").events.is_empty());
+    }
+
+    #[test]
+    fn the_triggers_of_a_table_come_in_the_order_that_they_fire() {
+        assert!(TRIGGERS_QUERY.contains("WHERE EVENT_OBJECT_SCHEMA = ? AND EVENT_OBJECT_TABLE = ?"));
+        assert!(TRIGGERS_QUERY.ends_with(
+            "ORDER BY FIELD(ACTION_TIMING, 'BEFORE', 'AFTER'), \
+             FIELD(EVENT_MANIPULATION, 'INSERT', 'UPDATE', 'DELETE'), ACTION_ORDER"
+        ));
     }
 
     #[test]

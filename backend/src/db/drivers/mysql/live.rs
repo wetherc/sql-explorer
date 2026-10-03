@@ -84,10 +84,12 @@ async fn triggers_and_events(variable: &str, tag: &str) {
                 .await
                 .unwrap(),
             [
-                trigger("au_orders", After, Update),
-                trigger("bd_orders", Before, Delete),
+                trigger("bi_stamp", Before, Insert),
                 trigger("bi_orders", Before, Insert),
+                trigger("bi_check", Before, Insert),
                 trigger("bu_orders", Before, Update),
+                trigger("bd_orders", Before, Delete),
+                trigger("au_orders", After, Update),
             ]
         );
         assert_eq!(
@@ -139,6 +141,17 @@ async fn scripts_round_trip(variable: &str, tag: &str) {
                 text
             );
         }
+
+        // The CREATE text has no FOLLOWS clause, so bi_orders, made again
+        // from its text, fires last of the BEFORE INSERT triggers.
+        let names: Vec<String> = driver
+            .list_triggers(&database, None, "orders")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|trigger| trigger.name)
+            .collect();
+        assert_eq!(names[..3], ["bi_stamp", "bi_check", "bi_orders"]);
 
         let read = |driver: &mut dyn DatabaseDriver| {
             driver.create_query(Some(&database), None, "big_orders", RelationType::View)

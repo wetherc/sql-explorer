@@ -6,6 +6,12 @@ CREATE VIEW big_orders AS SELECT id, total FROM orders WHERE total > 100;
 
 CREATE TRIGGER bi_orders BEFORE INSERT ON orders
     FOR EACH ROW SET NEW.note = COALESCE(NEW.note, 'x');
+-- FOLLOWS and PRECEDES give a firing order that differs from the order of
+-- the names: bi_stamp, bi_orders, bi_check.
+CREATE TRIGGER bi_check BEFORE INSERT ON orders
+    FOR EACH ROW FOLLOWS bi_orders SET NEW.total = COALESCE(NEW.total, 0);
+CREATE TRIGGER bi_stamp BEFORE INSERT ON orders
+    FOR EACH ROW PRECEDES bi_orders SET @inserted = NEW.id;
 CREATE TRIGGER au_orders AFTER UPDATE ON orders
     FOR EACH ROW SET @changed = NEW.id;
 CREATE TRIGGER bd_orders BEFORE DELETE ON orders

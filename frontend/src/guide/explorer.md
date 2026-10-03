@@ -36,7 +36,10 @@ Each trigger shows when it runs and the changes that fire it, such as
 `AFTER INSERT, UPDATE` or `INSTEAD OF DELETE`. A PostgreSQL trigger can also
 fire on `TRUNCATE`. A trigger or an event that the engine keeps but does not
 run shows in a paler text, and its hint ends with `disabled`. A trigger of
-MySQL, MariaDB and SQLite is always enabled.
+MySQL, MariaDB and SQLite is always enabled. On MySQL and MariaDB, the
+triggers show in the order that they fire: `BEFORE` before `AFTER`, then
+`INSERT`, `UPDATE` and `DELETE`. Triggers with the same timing and event show
+in the order that `FOLLOWS` and `PRECEDES` set.
 
 The list leaves out the triggers that the engine makes for its own use. On
 PostgreSQL, these are the triggers of a foreign key. On MS SQL Server, a
@@ -78,8 +81,10 @@ carries the quotes of its engine:
 A trigger and an event get their `CREATE` text alone, which the engine
 reads from its catalog. On MySQL and MariaDB, a body of more than one
 statement comes between `DELIMITER $$` and `DELIMITER ;`. The editor then
-runs the text as one statement. On PostgreSQL, the `CREATE` text of a view,
-a materialized view and a trigger names each object of a user schema with
+runs the text as one statement. The MySQL and MariaDB text of a trigger has
+no `FOLLOWS` or `PRECEDES` clause. A trigger that you make again from its
+text fires after the other triggers with the same timing and event.
+On PostgreSQL, the `CREATE` text of a view, a materialized view and a trigger names each object of a user schema with
 its schema, so the text runs under any search path. A materialized view and a synonym get their `CREATE`
 text and a `SELECT` alone, and a synonym has no **Properties** item. A foreign table gets a
 `SELECT`, an `INSERT` and an `UPDATE`, because a `CREATE` draft of its columns
