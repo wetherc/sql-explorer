@@ -65,6 +65,7 @@ fn trigger(name: &str, timing: TriggerTiming, events: &[TriggerEvent], enabled: 
         timing,
         events: events.to_vec(),
         enabled,
+        replica: false,
     }
 }
 

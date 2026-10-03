@@ -100,7 +100,7 @@ describe('isTriggerOrEvent', () => {
 })
 
 describe('triggerHint and eventHint', () => {
-  it('names the timing and the events of a trigger, and marks a disabled one', () => {
+  it('names the timing and the events of a trigger, and marks a disabled or a replica one', () => {
     const trigger: Parameters<typeof triggerHint>[0] = {
       name: 't',
       timing: 'after',
@@ -114,6 +114,10 @@ describe('triggerHint and eventHint', () => {
     expect(
       triggerHint({ ...trigger, timing: 'insteadOf', events: ['delete'], enabled: false }),
     ).toBe('INSTEAD OF DELETE \u00b7 disabled')
+    // A PostgreSQL replica trigger does not run in a normal session.
+    expect(triggerHint({ ...trigger, enabled: false, replica: true })).toBe(
+      'AFTER INSERT, UPDATE \u00b7 replica',
+    )
     // A trigger whose events the engine did not report names its timing alone.
     expect(triggerHint({ ...trigger, events: [] })).toBe('AFTER')
   })

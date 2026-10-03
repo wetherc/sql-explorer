@@ -46,6 +46,7 @@ fn trigger(name: &str, timing: TriggerTiming, event: TriggerEvent) -> Trigger {
         timing,
         events: vec![event],
         enabled: true,
+        replica: false,
     }
 }
 

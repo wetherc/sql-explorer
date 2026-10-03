@@ -597,6 +597,7 @@ pub fn add_trigger_event(
                 timing,
                 events: Vec::new(),
                 enabled,
+                replica: false,
             });
             triggers.last_mut().expect("the record was just added")
         }
@@ -1105,12 +1106,14 @@ mod tests {
                     timing: TriggerTiming::After,
                     events: vec![TriggerEvent::Insert, TriggerEvent::Update],
                     enabled: true,
+                    replica: false,
                 },
                 Trigger {
                     name: "other".into(),
                     timing: TriggerTiming::After,
                     events: Vec::new(),
                     enabled: false,
+                    replica: false,
                 },
             ]
         );

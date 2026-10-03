@@ -995,6 +995,7 @@ fn trigger_of(name: String, timing: &str, event: &str) -> Trigger {
         timing: trigger_timing(timing),
         events: trigger_event(event).into_iter().collect(),
         enabled: true,
+        replica: false,
     }
 }
 

@@ -506,6 +506,7 @@ impl DatabaseDriver for SqliteDriver {
                         timing: head.timing,
                         events: head.event.into_iter().collect(),
                         enabled: true,
+                        replica: false,
                     }
                 })
                 .collect())
@@ -1281,6 +1282,7 @@ mod tests {
             timing,
             events: vec![event],
             enabled: true,
+            replica: false,
         };
 
         // The triggers of the schema come first, and the temporary triggers

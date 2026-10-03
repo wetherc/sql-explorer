@@ -351,8 +351,14 @@ export interface TriggerRef {
   timing: TriggerTiming
   /** The changes that fire the trigger, in the order insert, update, delete and truncate. */
   events: TriggerEvent[]
-  /** False when the engine keeps the trigger but does not run it. */
+  /**
+   * False when the engine keeps the trigger but does not run it. A PostgreSQL
+   * replica trigger is not enabled, because it runs only in a session whose
+   * `session_replication_role` is `replica`.
+   */
   enabled: boolean
+  /** True for a PostgreSQL replica trigger. The backend leaves it out when false. */
+  replica?: boolean
 }
 
 /** One scheduled event of a MySQL or MariaDB database. */

@@ -47,6 +47,7 @@ fn trigger(name: &str, timing: TriggerTiming, events: &[TriggerEvent], enabled: 
         timing,
         events: events.to_vec(),
         enabled,
+        replica: false,
     }
 }
 
@@ -396,6 +397,37 @@ async fn live_the_create_text_names_each_schema_under_any_search_path() {
             view_text(other, "big_orders", RelationType::View).await,
             view
         );
+    };
+    live::with_cleanup(body, scratch.remove()).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL server"]
+async fn live_a_replica_trigger_is_not_enabled_and_an_always_trigger_is_enabled() {
+    use TriggerEvent::{Delete, Truncate};
+    use TriggerTiming::After;
+    let Some((scratch, mut driver, _)) = Scratch::open("pg_replica").await else {
+        return;
+    };
+    let database = scratch.name.clone();
+    let body = async move {
+        let driver = driver.as_mut();
+        let replica = "ALTER TABLE app.orders ENABLE REPLICA TRIGGER b_after_delete";
+        live::run(driver, replica).await;
+        let always = "ALTER TABLE app.orders ENABLE ALWAYS TRIGGER c_truncate";
+        live::run(driver, always).await;
+        let triggers = driver
+            .list_triggers(&database, Some("app"), "orders")
+            .await
+            .unwrap();
+        assert_eq!(
+            triggers[1],
+            Trigger {
+                replica: true,
+                ..trigger("b_after_delete", After, &[Delete], false)
+            }
+        );
+        assert_eq!(triggers[2], trigger("c_truncate", After, &[Truncate], true));
     };
     live::with_cleanup(body, scratch.remove()).await;
 }

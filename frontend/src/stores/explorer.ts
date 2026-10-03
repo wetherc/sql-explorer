@@ -316,14 +316,21 @@ const TIMING_WORDS: Record<TriggerTiming, string> = {
   [TriggerTiming.InsteadOf]: 'INSTEAD OF',
 }
 
-/** Names the time and the events of one trigger, such as `AFTER INSERT, UPDATE`. */
+/**
+ * Names the time and the events of one trigger, such as `AFTER INSERT, UPDATE`.
+ * A trigger that does not run ends with `replica` when it runs on a replica
+ * alone, and with `disabled` otherwise.
+ */
 export function triggerHint(trigger: TriggerRef): string {
   const words = [TIMING_WORDS[trigger.timing]]
   if (trigger.events.length > 0) {
     words.push(trigger.events.map((event) => event.toUpperCase()).join(', '))
   }
   const hint = words.join(' ')
-  return trigger.enabled ? hint : `${hint} · disabled`
+  if (trigger.enabled) {
+    return hint
+  }
+  return `${hint} · ${trigger.replica ? 'replica' : 'disabled'}`
 }
 
 /** Names the schedule of one event, and marks an event that does not run. */

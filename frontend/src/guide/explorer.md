@@ -41,6 +41,12 @@ triggers show in the order that they fire: `BEFORE` before `AFTER`, then
 `INSERT`, `UPDATE` and `DELETE`. Triggers with the same timing and event show
 in the order that `FOLLOWS` and `PRECEDES` set.
 
+A PostgreSQL replica trigger also shows in a paler text, and its hint ends
+with `replica`. PostgreSQL runs a replica trigger only in a session whose
+`session_replication_role` is `replica`, so a normal session does not run
+it. A trigger with `ENABLE ALWAYS TRIGGER` runs in all sessions, and it shows
+as enabled.
+
 The list leaves out the triggers that the engine makes for its own use. On
 PostgreSQL, these are the triggers of a foreign key. On MS SQL Server, a
 trigger of the database, which fires on a change to the schema, does not

@@ -393,8 +393,14 @@ pub struct Trigger {
     /// The changes that fire the trigger, in the order insert, update,
     /// delete and truncate.
     pub events: Vec<TriggerEvent>,
-    /// False when the engine keeps the trigger but does not run it.
+    /// False when the engine keeps the trigger but does not run it. A
+    /// PostgreSQL replica trigger is not enabled, because it runs only in a
+    /// session whose `session_replication_role` is `replica`.
     pub enabled: bool,
+    /// True for a PostgreSQL replica trigger. The explorer uses it to show
+    /// a replica trigger apart from a disabled trigger.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replica: bool,
 }
 
 /// One scheduled event of a MySQL or MariaDB database.
@@ -842,6 +848,7 @@ mod tests {
             timing: TriggerTiming::InsteadOf,
             events: vec![TriggerEvent::Insert, TriggerEvent::Truncate],
             enabled: false,
+            replica: false,
         };
         assert_eq!(
             serde_json::to_value(&trigger).unwrap(),
@@ -852,6 +859,20 @@ mod tests {
                 "enabled": false
             })
         );
+        // A replica trigger sends its mark, and a record without the mark
+        // reads as a trigger that is not a replica trigger.
+        let replica = Trigger {
+            replica: true,
+            ..trigger
+        };
+        let json = serde_json::to_value(&replica).unwrap();
+        assert_eq!(json["replica"], true);
+        assert_eq!(serde_json::from_value::<Trigger>(json).unwrap(), replica);
+        let read: Trigger = serde_json::from_value(serde_json::json!({
+            "name": "t", "timing": "after", "events": [], "enabled": true
+        }))
+        .unwrap();
+        assert!(!read.replica);
         let event = ScheduledEvent {
             name: "nightly".into(),
             enabled: true,

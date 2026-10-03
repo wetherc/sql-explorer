@@ -1529,8 +1529,10 @@ const TRIGGER_TYPE_INSTEAD: i16 = 1 << 6;
 
 /// Builds the record of one trigger from its name, its `tgtype` bits and
 /// its `tgenabled` letter. The letter `D` marks a disabled trigger. The
-/// letters `O`, `R` and `A` mark a trigger that runs, each for a different
-/// role of the session.
+/// letter `O` marks a trigger that runs in a normal session, and `A` marks a
+/// trigger that runs in every session. The letter `R` marks a replica
+/// trigger, which runs only when `session_replication_role` is `replica`, so
+/// the record gives it as not enabled.
 fn trigger_of(name: String, bits: i16, enabled: i8) -> Trigger {
     let timing = if bits & TRIGGER_TYPE_INSTEAD != 0 {
         TriggerTiming::InsteadOf
@@ -1553,7 +1555,8 @@ fn trigger_of(name: String, bits: i16, enabled: i8) -> Trigger {
         name,
         timing,
         events,
-        enabled: enabled != b'D' as i8,
+        enabled: enabled == b'O' as i8 || enabled == b'A' as i8,
+        replica: enabled == b'R' as i8,
     }
 }
 
@@ -5339,6 +5342,7 @@ mod tests {
             vec![TriggerEvent::Insert, TriggerEvent::Update]
         );
         assert!(before.enabled);
+        assert!(!before.replica);
         // A statement trigger AFTER DELETE OR TRUNCATE, which is disabled.
         let after = trigger_of("purge".into(), 8 | 32, b'D' as i8);
         assert_eq!(after.timing, TriggerTiming::After);
@@ -5347,12 +5351,20 @@ mod tests {
             vec![TriggerEvent::Delete, TriggerEvent::Truncate]
         );
         assert!(!after.enabled);
-        // An INSTEAD OF trigger of a view, which runs on a replica alone.
-        let instead = trigger_of("write".into(), 1 | 64 | 16, b'R' as i8);
+        assert!(!after.replica);
+        // An INSTEAD OF trigger of a view.
+        let instead = trigger_of("write".into(), 1 | 64 | 16, b'A' as i8);
         assert_eq!(instead.timing, TriggerTiming::InsteadOf);
         assert_eq!(instead.events, vec![TriggerEvent::Update]);
         assert!(instead.enabled);
-        assert!(trigger_of("x".into(), 0, b'A' as i8).enabled);
+        assert!(!instead.replica);
+    }
+
+    #[test]
+    fn a_replica_trigger_is_not_enabled_and_is_marked_as_a_replica_trigger() {
+        let replica = trigger_of("copy".into(), 4, b'R' as i8);
+        assert!(!replica.enabled);
+        assert!(replica.replica);
     }
 
     #[test]
