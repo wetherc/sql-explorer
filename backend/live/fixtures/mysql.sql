@@ -16,3 +16,17 @@ CREATE EVENT ev_daily ON SCHEDULE EVERY 1 DAY
 CREATE EVENT ev_once ON SCHEDULE AT '2030-06-01 12:34:56'
     ON COMPLETION PRESERVE DO SELECT 1;
 CREATE EVENT ev_off ON SCHEDULE EVERY 5 MINUTE DISABLE DO SELECT 1;
+
+-- A body of more than one statement needs another terminator.
+DELIMITER $$
+CREATE TRIGGER bu_orders BEFORE UPDATE ON orders FOR EACH ROW
+BEGIN
+    SET NEW.note = CONCAT(COALESCE(OLD.note, ''), ';');
+    SET @updated = NEW.id;
+END$$
+CREATE EVENT ev_body ON SCHEDULE EVERY 1 HOUR DO
+BEGIN
+    DELETE FROM orders WHERE id < 0;
+    SET @swept = 1;
+END$$
+DELIMITER ;

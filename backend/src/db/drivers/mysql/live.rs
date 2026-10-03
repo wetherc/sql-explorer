@@ -87,11 +87,13 @@ async fn triggers_and_events(variable: &str, tag: &str) {
                 trigger("au_orders", After, Update),
                 trigger("bd_orders", Before, Delete),
                 trigger("bi_orders", Before, Insert),
+                trigger("bu_orders", Before, Update),
             ]
         );
         assert_eq!(
             driver.list_events(&database, None).await.unwrap(),
             [
+                event("ev_body", true, "EVERY 1 HOUR"),
                 event("ev_daily", true, "EVERY 1 DAY"),
                 event("ev_off", false, "EVERY 5 MINUTE"),
                 event("ev_once", true, "AT 2030-06-01 12:34:56"),
@@ -117,13 +119,19 @@ async fn scripts_round_trip(variable: &str, tag: &str) {
     let database = scratch.name.clone();
     let body = async move {
         let driver = driver.as_mut();
-        for (name, object_type, word) in [
-            ("bi_orders", ObjectType::Trigger, "TRIGGER"),
-            ("au_orders", ObjectType::Trigger, "TRIGGER"),
-            ("ev_daily", ObjectType::Event, "EVENT"),
-            ("ev_once", ObjectType::Event, "EVENT"),
+        // A body of more than one statement comes between DELIMITER
+        // commands, and a body of one statement stays bare.
+        for (name, object_type, word, wrapped) in [
+            ("bi_orders", ObjectType::Trigger, "TRIGGER", false),
+            ("au_orders", ObjectType::Trigger, "TRIGGER", false),
+            ("bu_orders", ObjectType::Trigger, "TRIGGER", true),
+            ("ev_daily", ObjectType::Event, "EVENT", false),
+            ("ev_once", ObjectType::Event, "EVENT", false),
+            ("ev_body", ObjectType::Event, "EVENT", true),
         ] {
             let text = object_text(driver, &database, name, object_type).await;
+            assert_eq!(text.starts_with("DELIMITER $$\n"), wrapped, "{text}");
+            assert_eq!(text.ends_with("END$$\nDELIMITER ;"), wrapped, "{text}");
             live::run(driver, &format!("DROP {word} {name}")).await;
             live::run(driver, &text).await;
             assert_eq!(

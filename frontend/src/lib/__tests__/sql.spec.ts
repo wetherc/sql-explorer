@@ -424,6 +424,15 @@ describe('statementAt', () => {
     expect(statementAt(script, script.length, Dialect.MySql)).toBe('SELECT 4')
   })
 
+  it('runs the CREATE text of a MySQL trigger with a body as one statement', () => {
+    const create =
+      'CREATE TRIGGER t BEFORE UPDATE ON o FOR EACH ROW\nBEGIN\n  SET @a = 1;\n  SET @b = 2;\nEND'
+    const script = `DELIMITER $$\n${create}$$\nDELIMITER ;`
+    for (const offset of [0, script.indexOf('@a'), script.indexOf('END')]) {
+      expect(statementAt(script, offset, Dialect.MySql)).toBe(`DELIMITER $$\n${create}$$`)
+    }
+  })
+
   it('finds the statement that holds the position', () => {
     expect(statementAt(script, 0)).toBe('SELECT 1')
     expect(statementAt(script, 12)).toBe('SELECT 2')

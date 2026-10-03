@@ -969,13 +969,16 @@ fn create_query_text(
 
 /// Builds the statement that reads the CREATE text of one trigger or one
 /// event. `SHOW CREATE TRIGGER` gives the text in its third column, and
-/// `SHOW CREATE EVENT` gives it in its fourth one.
+/// `SHOW CREATE EVENT` gives it in its fourth one. A body of more than one
+/// statement goes between `DELIMITER $$` and `DELIMITER ;`, so the splitter
+/// of the app sends the text to the server whole.
 fn object_query_text(database: Option<&str>, name: &str, object_type: ObjectType) -> CreateQuery {
     let name = Dialect::MySql.qualified_name(database, None, name);
-    match object_type {
+    let query = match object_type {
         ObjectType::Trigger => CreateQuery::new(format!("SHOW CREATE TRIGGER {name};"), 2),
         ObjectType::Event => CreateQuery::new(format!("SHOW CREATE EVENT {name};"), 3),
-    }
+    };
+    query.with_delimiter("$$")
 }
 
 /// Builds the record of one trigger from the words of `TRIGGERS`.
@@ -1449,6 +1452,8 @@ mod tests {
         let event = object_query_text(None, "nightly", ObjectType::Event);
         assert_eq!(event.sql, "SHOW CREATE EVENT `nightly`;");
         assert_eq!(event.column, 3);
+        assert_eq!(trigger.delimiter, Some("$$"));
+        assert_eq!(event.delimiter, Some("$$"));
     }
 
     #[test]

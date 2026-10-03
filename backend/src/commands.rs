@@ -6,9 +6,9 @@ use crate::db::drivers::{
     postgres::PostgresDriver, sqlite::SqliteDriver,
 };
 use crate::db::{
-    self, drivers::DatabaseDriver, AppColumn, Constraint, Database, ExecOptions, IndexInfo,
-    ObjectType, PartitionList, PlanMode, QueryParams, QueryResponse, RelationType, Routine,
-    ScheduledEvent, Schema, SchemaSnapshot, Table, TableDetails, Trigger,
+    self, drivers::DatabaseDriver, AppColumn, Constraint, CreateQuery, Database, ExecOptions,
+    IndexInfo, ObjectType, PartitionList, PlanMode, QueryParams, QueryResponse, RelationType,
+    Routine, ScheduledEvent, Schema, SchemaSnapshot, Table, TableDetails, Trigger,
 };
 use crate::error::{Error, Result};
 use crate::files;
@@ -1358,7 +1358,7 @@ pub async fn script_object<R: Runtime>(
                         let response = guard
                             .execute_query(&query.sql, None, &ExecOptions::default())
                             .await?;
-                        text_of_column(&response, query.column)
+                        create_text_of(&response, &query)
                     }
                     None => None,
                 },
@@ -1443,7 +1443,7 @@ async fn object_script(
     let response = driver
         .execute_query(&query.sql, None, &ExecOptions::default())
         .await?;
-    text_of_column(&response, query.column).ok_or_else(no_text)
+    create_text_of(&response, &query).ok_or_else(no_text)
 }
 
 /// Selects the statement that the user asked for. The text of
@@ -1479,10 +1479,21 @@ fn script_text(
     })
 }
 
+/// Reads the CREATE text from the answer of its query. A query with a
+/// terminator puts a text that the splitter would cut between `DELIMITER`
+/// commands.
+pub(crate) fn create_text_of(response: &QueryResponse, query: &CreateQuery) -> Option<String> {
+    let text = text_of_column(response, query.column)?;
+    Some(match query.delimiter {
+        Some(delimiter) => crate::sql::within_delimiter(&text, delimiter),
+        None => text,
+    })
+}
+
 /// Reads one column of every row as text and joins the lines. Athena gives
 /// the CREATE text one line for each row, and the other engines give it in
 /// one row. An answer that holds no text gives `None`.
-pub(crate) fn text_of_column(response: &QueryResponse, column: usize) -> Option<String> {
+fn text_of_column(response: &QueryResponse, column: usize) -> Option<String> {
     let lines: Vec<String> = response
         .results
         .iter()
@@ -2775,6 +2786,20 @@ mod tests {
         assert_eq!(text_of_column(&blank, 0), None);
         let other_type = response_with(vec![vec![serde_json::json!(7)]]);
         assert_eq!(text_of_column(&other_type, 0), None);
+    }
+
+    #[test]
+    fn a_query_with_a_terminator_keeps_a_body_of_statements_whole() {
+        let body = "CREATE EVENT e ON SCHEDULE EVERY 1 DAY DO BEGIN SELECT 1; SELECT 2; END";
+        let response = response_with(vec![vec![serde_json::json!(body)]]);
+        let bare = CreateQuery::new("SHOW CREATE EVENT e", 0);
+        assert_eq!(create_text_of(&response, &bare).unwrap(), body);
+        let wrapped = bare.with_delimiter("$$");
+        assert_eq!(
+            create_text_of(&response, &wrapped).unwrap(),
+            format!("DELIMITER $$\n{body}$$\nDELIMITER ;")
+        );
+        assert_eq!(create_text_of(&response_with(Vec::new()), &wrapped), None);
     }
 
     #[test]

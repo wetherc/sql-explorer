@@ -76,7 +76,9 @@ carries the quotes of its engine:
   constraint.
 
 A trigger and an event get their `CREATE` text alone, which the engine
-reads from its catalog. A materialized view and a synonym get their `CREATE`
+reads from its catalog. On MySQL and MariaDB, a body of more than one
+statement comes between `DELIMITER $$` and `DELIMITER ;`. The editor then
+runs the text as one statement. A materialized view and a synonym get their `CREATE`
 text and a `SELECT` alone, and a synonym has no **Properties** item. A foreign table gets a
 `SELECT`, an `INSERT` and an `UPDATE`, because a `CREATE` draft of its columns
 makes a plain table.

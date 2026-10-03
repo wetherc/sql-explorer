@@ -501,6 +501,10 @@ pub struct SchemaSnapshot {
 pub struct CreateQuery {
     pub sql: String,
     pub column: usize,
+    /// The MySQL terminator for a text that the statement splitter would
+    /// cut, such as a trigger with a `BEGIN ... END` body. `None` keeps the
+    /// text as the engine gives it.
+    pub delimiter: Option<&'static str>,
 }
 
 impl CreateQuery {
@@ -508,7 +512,14 @@ impl CreateQuery {
         Self {
             sql: sql.into(),
             column,
+            delimiter: None,
         }
+    }
+
+    /// Sets the terminator of the `DELIMITER` commands around the text.
+    pub fn with_delimiter(mut self, delimiter: &'static str) -> Self {
+        self.delimiter = Some(delimiter);
+        self
     }
 }
 

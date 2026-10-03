@@ -496,6 +496,18 @@ fn skip_blanks(chars: &[char], mut index: usize) -> usize {
     index
 }
 
+/// Puts a MySQL statement between two `DELIMITER` commands when the
+/// statement splitter would cut it. A trigger or an event with a
+/// `BEGIN ... END` body has a semicolon after each statement of the body,
+/// and a split there sends a part of the body to the server. A statement
+/// that the splitter keeps whole stays bare.
+pub fn within_delimiter(text: &str, delimiter: &str) -> String {
+    if split_statements(text, Dialect::MySql).len() <= 1 {
+        return text.to_string();
+    }
+    format!("DELIMITER {delimiter}\n{text}{delimiter}\nDELIMITER ;")
+}
+
 /// Splits a script into single statements. The splitter keeps a semicolon
 /// that is inside a string, an identifier or a comment, so a statement that
 /// holds one of these stays whole.
@@ -1552,6 +1564,18 @@ mod tests {
                 "SELECT 3"
             ]
         );
+    }
+
+    #[test]
+    fn a_body_with_semicolons_goes_between_delimiter_commands() {
+        let text =
+            "CREATE TRIGGER t BEFORE INSERT ON o FOR EACH ROW BEGIN SET @a = 1; SET @b = 2; END";
+        let wrapped = within_delimiter(text, "$$");
+        assert_eq!(wrapped, format!("DELIMITER $$\n{text}$$\nDELIMITER ;"));
+        assert_eq!(split_statements(&wrapped, Dialect::MySql), vec![text]);
+        // A text that the splitter keeps whole needs no command.
+        let simple = "CREATE TRIGGER t BEFORE INSERT ON o FOR EACH ROW SET @a = ';'";
+        assert_eq!(within_delimiter(simple, "$$"), simple);
     }
 
     #[test]

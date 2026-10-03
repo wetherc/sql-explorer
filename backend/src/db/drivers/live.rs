@@ -12,7 +12,7 @@
 //! panic of the test body also removes the database, so the tests can run
 //! in parallel and again.
 
-use crate::commands::{open_driver, text_of_column};
+use crate::commands::{create_text_of, open_driver};
 use crate::db::drivers::DatabaseDriver;
 use crate::db::{CreateQuery, ExecOptions, QueryResponse};
 use crate::storage::{ConnectionOptions, DbType, SavedConnection, TlsMode};
@@ -189,7 +189,7 @@ pub fn cell(response: &QueryResponse, row: usize, column: usize) -> Option<Strin
 pub async fn create_text(driver: &mut dyn DatabaseDriver, query: Option<CreateQuery>) -> String {
     let query = query.expect("the engine gives a statement for the CREATE text");
     let response = run(driver, &query.sql).await;
-    text_of_column(&response, query.column)
+    create_text_of(&response, &query)
         .unwrap_or_else(|| panic!("the statement gave no CREATE text: {}", query.sql))
 }
 
