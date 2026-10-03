@@ -1529,11 +1529,18 @@ const QUALIFIED_NAMES: &str =
 
 /// Lists the triggers of one relation. A foreign key makes triggers of its
 /// own, and `tgisinternal` marks these, so they stay out of the list.
+///
+/// A `CREATE CONSTRAINT TRIGGER` statement makes a trigger and a row of
+/// `pg_constraint` with the type `t`. The `tgconstraint` field of the trigger
+/// points at that row. The **Keys** folder shows the row, so the list leaves
+/// out each trigger with a `tgconstraint` value other than 0. Without this
+/// condition, the tree shows the trigger in two folders.
 const TRIGGERS_QUERY: &str = "SELECT t.tgname, t.tgtype, t.tgenabled \
      FROM pg_catalog.pg_trigger AS t \
      JOIN pg_catalog.pg_class AS c ON c.oid = t.tgrelid \
      JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace \
      WHERE n.nspname = $1 AND c.relname = $2 AND NOT t.tgisinternal \
+       AND t.tgconstraint = 0 \
      ORDER BY t.tgname";
 
 /// The bits of `tgtype`, as the header `pg_trigger.h` of the server names
@@ -5399,8 +5406,9 @@ mod tests {
     }
 
     #[test]
-    fn the_list_of_triggers_leaves_out_the_internal_ones() {
+    fn the_list_of_triggers_leaves_out_the_internal_ones_and_the_constraint_triggers() {
         assert!(TRIGGERS_QUERY.contains("NOT t.tgisinternal"));
+        assert!(TRIGGERS_QUERY.contains("AND t.tgconstraint = 0"));
         assert!(TRIGGERS_QUERY.contains("WHERE n.nspname = $1 AND c.relname = $2"));
         assert!(TRIGGERS_QUERY.ends_with("ORDER BY t.tgname"));
     }

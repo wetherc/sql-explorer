@@ -4,7 +4,8 @@
 use crate::db::drivers::live::{self, Server};
 use crate::db::drivers::DatabaseDriver;
 use crate::db::{
-    ExecOptions, ObjectType, RelationType, Table, Trigger, TriggerEvent, TriggerTiming,
+    Constraint, ConstraintType, ExecOptions, ObjectType, RelationType, Table, Trigger,
+    TriggerEvent, TriggerTiming,
 };
 use crate::storage::DbType;
 use std::time::{Duration, Instant};
@@ -246,7 +247,8 @@ async fn live_the_triggers_give_their_timing_their_events_and_their_state() {
     let body = async move {
         let driver = driver.as_mut();
         // The foreign key of `lines` makes internal triggers on both tables,
-        // and the list leaves them out.
+        // and the list leaves them out. The list of `lines` also leaves out
+        // the constraint trigger, which the list of the constraints gives.
         assert_eq!(
             driver
                 .list_triggers(&database, Some("app"), "orders")
@@ -265,6 +267,19 @@ async fn live_the_triggers_give_their_timing_their_events_and_their_state() {
                 .await
                 .unwrap(),
             []
+        );
+        let constraints = driver
+            .list_constraints(&database, Some("app"), "lines")
+            .await
+            .unwrap();
+        assert!(
+            constraints.contains(&Constraint {
+                name: "g_check_line".into(),
+                constraint_type: ConstraintType::Trigger,
+                columns: Vec::new(),
+                detail: Some("TRIGGER DEFERRABLE INITIALLY DEFERRED".into()),
+            }),
+            "{constraints:?}"
         );
         assert_eq!(
             driver
