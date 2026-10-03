@@ -209,8 +209,10 @@ a:focus-visible,
   color: #ffffff;
 }
 
-/* The text of the page. The paragraphs and the lists keep a line length that
-   is easy to read, and the screenshots use the full width of the column. */
+/* The text of the page. The paragraphs, the lists, the code blocks and the
+   tables keep a line length that is easy to read, and the screenshots use
+   the full width of the column. Kramdown wraps each code block in a
+   div.highlighter-rouge, so the rule names that div and not the pre. */
 .content {
   padding-bottom: 4rem;
 }
@@ -221,7 +223,8 @@ a:focus-visible,
 .content > h2,
 .content > h3,
 .content > h4,
-.content > pre {
+.content > .highlighter-rouge,
+.content > table {
   max-width: var(--measure);
   margin-left: auto;
   margin-right: auto;
