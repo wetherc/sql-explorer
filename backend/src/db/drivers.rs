@@ -616,6 +616,7 @@ pub fn add_trigger_event(
                 events: Vec::new(),
                 enabled,
                 replica: false,
+                update_columns: Vec::new(),
             });
             triggers.last_mut().expect("the record was just added")
         }
@@ -1175,6 +1176,7 @@ mod tests {
                     events: vec![TriggerEvent::Insert, TriggerEvent::Update],
                     enabled: true,
                     replica: false,
+                    update_columns: Vec::new(),
                 },
                 Trigger {
                     name: "other".into(),
@@ -1182,6 +1184,7 @@ mod tests {
                     events: Vec::new(),
                     enabled: false,
                     replica: false,
+                    update_columns: Vec::new(),
                 },
             ]
         );

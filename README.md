@@ -199,7 +199,8 @@ The filter keeps 6 of the 18 rows of the result.
   the materialized views and the foreign tables, and a partitioned table has its
   own icon. MS SQL Server also gets a folder for the synonyms.
 - A Triggers folder below a table shows when each trigger runs, the changes
-  that fire it, and whether it is disabled. A PostgreSQL replica trigger shows
+  that fire it (with the columns of an `UPDATE OF` clause on PostgreSQL and
+  SQLite), and whether it is disabled. A PostgreSQL replica trigger shows
   the mark `replica`. MS SQL Server, PostgreSQL and SQLite also show the
   triggers of a view. MySQL and MariaDB get an Events folder with
   the schedule of each event. The MySQL and MariaDB CREATE text of a trigger

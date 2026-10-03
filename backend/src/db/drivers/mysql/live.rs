@@ -47,6 +47,7 @@ fn trigger(name: &str, timing: TriggerTiming, event: TriggerEvent) -> Trigger {
         events: vec![event],
         enabled: true,
         replica: false,
+        update_columns: Vec::new(),
     }
 }
 

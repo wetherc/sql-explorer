@@ -996,6 +996,7 @@ fn trigger_of(name: String, timing: &str, event: &str) -> Trigger {
         events: trigger_event(event).into_iter().collect(),
         enabled: true,
         replica: false,
+        update_columns: Vec::new(),
     }
 }
 

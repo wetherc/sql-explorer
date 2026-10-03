@@ -49,6 +49,7 @@ fn trigger(name: &str, timing: TriggerTiming, events: &[TriggerEvent], enabled: 
         events: events.to_vec(),
         enabled,
         replica: false,
+        update_columns: Vec::new(),
     }
 }
 
@@ -249,13 +250,18 @@ async fn live_the_triggers_give_their_timing_their_events_and_their_state() {
         // The foreign key of `lines` makes internal triggers on both tables,
         // and the list leaves them out. The list of `lines` also leaves out
         // the constraint trigger, which the list of the constraints gives.
+        // The columns of `UPDATE OF note, total` keep the order of the
+        // clause, which is the reverse of the order of the table.
         assert_eq!(
             driver
                 .list_triggers(&database, Some("app"), "orders")
                 .await
                 .unwrap(),
             [
-                trigger("a_before_write", Before, &[Insert, Update], true),
+                Trigger {
+                    update_columns: vec!["note".into(), "total".into()],
+                    ..trigger("a_before_write", Before, &[Insert, Update], true)
+                },
                 trigger("b_after_delete", After, &[Delete], true),
                 trigger("c_truncate", After, &[Truncate], true),
                 trigger("d_disabled", After, &[Insert, Update, Delete], false),

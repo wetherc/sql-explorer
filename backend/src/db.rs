@@ -401,6 +401,12 @@ pub struct Trigger {
     /// a replica trigger apart from a disabled trigger.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replica: bool,
+    /// The columns of an `UPDATE OF` clause, in the order of the clause. An
+    /// update fires the trigger only when it sets one of these columns. The
+    /// list is empty when each update fires the trigger. MySQL, MariaDB and
+    /// MS SQL Server have no such clause, so their lists are always empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub update_columns: Vec<String>,
 }
 
 /// One scheduled event of a MySQL or MariaDB database.
@@ -849,6 +855,7 @@ mod tests {
             events: vec![TriggerEvent::Insert, TriggerEvent::Truncate],
             enabled: false,
             replica: false,
+            update_columns: Vec::new(),
         };
         assert_eq!(
             serde_json::to_value(&trigger).unwrap(),
@@ -863,7 +870,7 @@ mod tests {
         // reads as a trigger that is not a replica trigger.
         let replica = Trigger {
             replica: true,
-            ..trigger
+            ..trigger.clone()
         };
         let json = serde_json::to_value(&replica).unwrap();
         assert_eq!(json["replica"], true);
@@ -873,6 +880,16 @@ mod tests {
         }))
         .unwrap();
         assert!(!read.replica);
+        // The columns of an `UPDATE OF` clause go out in their order, and a
+        // record without them reads as a trigger that any update fires.
+        let columns = Trigger {
+            update_columns: vec!["total".into(), "id".into()],
+            ..trigger
+        };
+        let json = serde_json::to_value(&columns).unwrap();
+        assert_eq!(json["updateColumns"], serde_json::json!(["total", "id"]));
+        assert_eq!(serde_json::from_value::<Trigger>(json).unwrap(), columns);
+        assert!(read.update_columns.is_empty());
         let event = ScheduledEvent {
             name: "nightly".into(),
             enabled: true,

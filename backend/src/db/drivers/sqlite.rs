@@ -507,6 +507,7 @@ impl DatabaseDriver for SqliteDriver {
                         events: head.event.into_iter().collect(),
                         enabled: true,
                         replica: false,
+                        update_columns: head.update_columns,
                     }
                 })
                 .collect())
@@ -1283,6 +1284,7 @@ mod tests {
             events: vec![event],
             enabled: true,
             replica: false,
+            update_columns: Vec::new(),
         };
 
         // The triggers of the schema come first, and the temporary triggers
@@ -1291,7 +1293,10 @@ mod tests {
             driver.list_triggers("db", None, "orders").await.unwrap(),
             vec![
                 trigger("audit", TriggerTiming::After, TriggerEvent::Insert),
-                trigger("stamp", TriggerTiming::Before, TriggerEvent::Update),
+                Trigger {
+                    update_columns: vec!["total".into()],
+                    ..trigger("stamp", TriggerTiming::Before, TriggerEvent::Update)
+                },
                 trigger("bare", TriggerTiming::After, TriggerEvent::Update),
                 trigger("watch", TriggerTiming::Before, TriggerEvent::Delete),
             ]

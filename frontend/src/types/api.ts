@@ -359,6 +359,11 @@ export interface TriggerRef {
   enabled: boolean
   /** True for a PostgreSQL replica trigger. The backend leaves it out when false. */
   replica?: boolean
+  /**
+   * The columns of an `UPDATE OF` clause, in the order of the clause. The
+   * backend leaves it out when each update fires the trigger.
+   */
+  updateColumns?: string[]
 }
 
 /** One scheduled event of a MySQL or MariaDB database. */

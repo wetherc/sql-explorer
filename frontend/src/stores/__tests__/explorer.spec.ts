@@ -122,6 +122,26 @@ describe('triggerHint and eventHint', () => {
     expect(triggerHint({ ...trigger, events: [] })).toBe('AFTER')
   })
 
+  it('names the columns of an update, and puts that update after the other events', () => {
+    const trigger: Parameters<typeof triggerHint>[0] = {
+      name: 't',
+      timing: 'before',
+      events: ['update'],
+      enabled: true,
+      updateColumns: ['note', 'total'],
+    }
+    expect(triggerHint(trigger)).toBe('BEFORE UPDATE OF note, total')
+    expect(triggerHint({ ...trigger, events: ['insert', 'update', 'delete'] })).toBe(
+      'BEFORE INSERT, DELETE, UPDATE OF note, total',
+    )
+    // An empty list names the update alone.
+    expect(triggerHint({ ...trigger, events: ['insert', 'update'], updateColumns: [] })).toBe(
+      'BEFORE INSERT, UPDATE',
+    )
+    // A list without an update event adds no words.
+    expect(triggerHint({ ...trigger, events: ['insert'] })).toBe('BEFORE INSERT')
+  })
+
   it('names the schedule of an event, and marks a disabled one', () => {
     expect(eventHint({ name: 'e', enabled: true, schedule: 'EVERY 1 DAY' })).toBe('EVERY 1 DAY')
     expect(eventHint({ name: 'e', enabled: false, schedule: 'AT 2026-01-01' })).toBe(

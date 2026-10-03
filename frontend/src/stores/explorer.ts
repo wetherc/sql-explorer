@@ -9,6 +9,7 @@ import {
   Dialect,
   ObjectType,
   RelationType,
+  TriggerEvent,
   TriggerTiming,
   type ColumnRef,
   type SchemaSnapshot,
@@ -318,13 +319,22 @@ const TIMING_WORDS: Record<TriggerTiming, string> = {
 
 /**
  * Names the time and the events of one trigger, such as `AFTER INSERT, UPDATE`.
- * A trigger that does not run ends with `replica` when it runs on a replica
- * alone, and with `disabled` otherwise.
+ * An update with a column list goes last, as in `BEFORE INSERT, UPDATE OF a, b`,
+ * because each name after `OF` is a column. A trigger that does not run ends
+ * with `replica` when it runs on a replica alone, and with `disabled` otherwise.
  */
 export function triggerHint(trigger: TriggerRef): string {
   const words = [TIMING_WORDS[trigger.timing]]
-  if (trigger.events.length > 0) {
-    words.push(trigger.events.map((event) => event.toUpperCase()).join(', '))
+  const columns = trigger.updateColumns ?? []
+  const listed = columns.length > 0 && trigger.events.includes(TriggerEvent.Update)
+  const events = trigger.events
+    .filter((event) => !listed || event !== TriggerEvent.Update)
+    .map((event) => event.toUpperCase())
+  if (listed) {
+    events.push(`UPDATE OF ${columns.join(', ')}`)
+  }
+  if (events.length > 0) {
+    words.push(events.join(', '))
   }
   const hint = words.join(' ')
   if (trigger.enabled) {

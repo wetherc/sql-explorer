@@ -2,7 +2,8 @@
 //!
 //! SQLite keeps no column for the time or the event of a trigger. The
 //! catalog keeps the text of the statement alone, so the driver reads these
-//! facts from the words before the body of the trigger.
+//! facts from the words before the body of the trigger. The column list
+//! of an `UPDATE OF` clause also comes from these words.
 
 use crate::db::{TriggerEvent, TriggerTiming};
 
@@ -13,6 +14,8 @@ pub struct TriggerHead {
     /// The change that fires the trigger. A head that this reader cannot
     /// read gives `None`.
     pub event: Option<TriggerEvent>,
+    /// The columns of an `UPDATE OF` clause, in the order of the clause.
+    pub update_columns: Vec<String>,
     /// The schema that the `ON` clause names before the table, if any.
     pub target_schema: Option<String>,
 }
@@ -112,6 +115,7 @@ pub fn trigger_head(sql: &str) -> TriggerHead {
     let mut head = TriggerHead {
         timing: TriggerTiming::Before,
         event: None,
+        update_columns: Vec::new(),
         target_schema: None,
     };
 
@@ -144,6 +148,17 @@ pub fn trigger_head(sql: &str) -> TriggerHead {
     .find(|(name, _)| word(at, name))
     .map(|(_, event)| event);
 
+    // The column list of an update ends at the `ON` clause. A comma between
+    // two names is a mark, and a quoted comma is a name.
+    if head.event == Some(TriggerEvent::Update) && word(at + 1, "OF") {
+        head.update_columns = tokens[at + 2..]
+            .iter()
+            .take_while(|token| !token.is("ON"))
+            .filter(|token| !token.is(","))
+            .map(|token| token.text.clone())
+            .collect();
+    }
+
     // The `ON` clause follows the event and the column list of an update.
     if let Some(on) = (at..tokens.len()).find(|&index| word(index, "ON")) {
         if word(on + 2, ".") {
@@ -161,6 +176,7 @@ mod tests {
         TriggerHead {
             timing,
             event: Some(event),
+            update_columns: Vec::new(),
             target_schema: schema.map(str::to_string),
         }
     }
@@ -196,7 +212,39 @@ mod tests {
                 "CREATE TEMP TRIGGER IF NOT EXISTS \"main\".\"t\" AFTER UPDATE OF a, [b] \
                  ON \"main\".orders FOR EACH ROW BEGIN SELECT 1; END"
             ),
-            head(TriggerTiming::After, TriggerEvent::Update, Some("main"))
+            TriggerHead {
+                update_columns: vec!["a".into(), "b".into()],
+                ..head(TriggerTiming::After, TriggerEvent::Update, Some("main"))
+            }
+        );
+    }
+
+    #[test]
+    fn the_columns_of_an_update_keep_their_order_and_their_quoted_names() {
+        // A comment sits in the list, and the quoted names contain a comma, a
+        // keyword and a doubled quote mark.
+        assert_eq!(
+            trigger_head(
+                "CREATE TRIGGER t UPDATE OF zeta, /* ON x */ \",\", \"on\", `a``b` -- , c\n\
+                 ON orders BEGIN SELECT 1; END"
+            ),
+            TriggerHead {
+                update_columns: vec!["zeta".into(), ",".into(), "on".into(), "a`b".into()],
+                ..head(TriggerTiming::Before, TriggerEvent::Update, None)
+            }
+        );
+    }
+
+    #[test]
+    fn an_update_without_a_column_list_gives_no_columns() {
+        assert_eq!(
+            trigger_head("CREATE TRIGGER t AFTER UPDATE ON orders BEGIN SELECT 1; END"),
+            head(TriggerTiming::After, TriggerEvent::Update, None)
+        );
+        // A text that ends after the word OF gives an empty list.
+        assert_eq!(
+            trigger_head("CREATE TRIGGER t UPDATE OF"),
+            head(TriggerTiming::Before, TriggerEvent::Update, None)
         );
     }
 
@@ -222,6 +270,7 @@ mod tests {
         let empty = TriggerHead {
             timing: TriggerTiming::Before,
             event: None,
+            update_columns: Vec::new(),
             target_schema: None,
         };
         assert_eq!(trigger_head("CREATE TABLE t (a)"), empty);

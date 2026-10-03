@@ -762,7 +762,7 @@ impl DatabaseDriver for PostgresDriver {
             .await?;
         Ok(rows
             .iter()
-            .map(|row| trigger_of(row.get(0), row.get(1), row.get(2)))
+            .map(|row| trigger_of(row.get(0), row.get(1), row.get(2), row.get(3)))
             .collect())
     }
 
@@ -1535,7 +1535,15 @@ const QUALIFIED_NAMES: &str =
 /// points at that row. The **Keys** folder shows the row, so the list leaves
 /// out each trigger with a `tgconstraint` value other than 0. Without this
 /// condition, the tree shows the trigger in two folders.
-const TRIGGERS_QUERY: &str = "SELECT t.tgname, t.tgtype, t.tgenabled \
+///
+/// The `tgattr` field keeps the column numbers of an `UPDATE OF` clause in
+/// the order of the clause. The subquery gives their names in that order.
+const TRIGGERS_QUERY: &str = "SELECT t.tgname, t.tgtype, t.tgenabled, \
+            ARRAY(SELECT a.attname::text \
+                  FROM unnest(t.tgattr) WITH ORDINALITY AS k(attnum, ord) \
+                  JOIN pg_catalog.pg_attribute AS a \
+                         ON a.attrelid = t.tgrelid AND a.attnum = k.attnum \
+                  ORDER BY k.ord) \
      FROM pg_catalog.pg_trigger AS t \
      JOIN pg_catalog.pg_class AS c ON c.oid = t.tgrelid \
      JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace \
@@ -1552,13 +1560,13 @@ const TRIGGER_TYPE_UPDATE: i16 = 1 << 4;
 const TRIGGER_TYPE_TRUNCATE: i16 = 1 << 5;
 const TRIGGER_TYPE_INSTEAD: i16 = 1 << 6;
 
-/// Builds the record of one trigger from its name, its `tgtype` bits and
-/// its `tgenabled` letter. The letter `D` marks a disabled trigger. The
-/// letter `O` marks a trigger that runs in a normal session, and `A` marks a
-/// trigger that runs in every session. The letter `R` marks a replica
+/// Builds the record of one trigger from its name, its `tgtype` bits, its
+/// `tgenabled` letter and the columns of its `UPDATE OF` clause. The letter
+/// `D` marks a disabled trigger. The letter `O` marks a trigger that runs in
+/// a normal session, and `A` marks a trigger that runs in every session. The letter `R` marks a replica
 /// trigger, which runs only when `session_replication_role` is `replica`, so
 /// the record gives it as not enabled.
-fn trigger_of(name: String, bits: i16, enabled: i8) -> Trigger {
+fn trigger_of(name: String, bits: i16, enabled: i8, update_columns: Vec<String>) -> Trigger {
     let timing = if bits & TRIGGER_TYPE_INSTEAD != 0 {
         TriggerTiming::InsteadOf
     } else if bits & TRIGGER_TYPE_BEFORE != 0 {
@@ -1582,6 +1590,7 @@ fn trigger_of(name: String, bits: i16, enabled: i8) -> Trigger {
         events,
         enabled: enabled == b'O' as i8 || enabled == b'A' as i8,
         replica: enabled == b'R' as i8,
+        update_columns,
     }
 }
 
@@ -5371,8 +5380,13 @@ mod tests {
 
     #[test]
     fn the_bits_of_a_trigger_name_its_time_and_its_events() {
-        // A row trigger BEFORE INSERT OR UPDATE.
-        let before = trigger_of("audit".into(), 1 | 2 | 4 | 16, b'O' as i8);
+        // A row trigger BEFORE INSERT OR UPDATE OF total, id.
+        let before = trigger_of(
+            "audit".into(),
+            1 | 2 | 4 | 16,
+            b'O' as i8,
+            vec!["total".into(), "id".into()],
+        );
         assert_eq!(before.name, "audit");
         assert_eq!(before.timing, TriggerTiming::Before);
         assert_eq!(
@@ -5381,8 +5395,9 @@ mod tests {
         );
         assert!(before.enabled);
         assert!(!before.replica);
+        assert_eq!(before.update_columns, ["total", "id"]);
         // A statement trigger AFTER DELETE OR TRUNCATE, which is disabled.
-        let after = trigger_of("purge".into(), 8 | 32, b'D' as i8);
+        let after = trigger_of("purge".into(), 8 | 32, b'D' as i8, Vec::new());
         assert_eq!(after.timing, TriggerTiming::After);
         assert_eq!(
             after.events,
@@ -5391,7 +5406,7 @@ mod tests {
         assert!(!after.enabled);
         assert!(!after.replica);
         // An INSTEAD OF trigger of a view.
-        let instead = trigger_of("write".into(), 1 | 64 | 16, b'A' as i8);
+        let instead = trigger_of("write".into(), 1 | 64 | 16, b'A' as i8, Vec::new());
         assert_eq!(instead.timing, TriggerTiming::InsteadOf);
         assert_eq!(instead.events, vec![TriggerEvent::Update]);
         assert!(instead.enabled);
@@ -5400,7 +5415,7 @@ mod tests {
 
     #[test]
     fn a_replica_trigger_is_not_enabled_and_is_marked_as_a_replica_trigger() {
-        let replica = trigger_of("copy".into(), 4, b'R' as i8);
+        let replica = trigger_of("copy".into(), 4, b'R' as i8, Vec::new());
         assert!(!replica.enabled);
         assert!(replica.replica);
     }
@@ -5409,6 +5424,8 @@ mod tests {
     fn the_list_of_triggers_leaves_out_the_internal_ones_and_the_constraint_triggers() {
         assert!(TRIGGERS_QUERY.contains("NOT t.tgisinternal"));
         assert!(TRIGGERS_QUERY.contains("AND t.tgconstraint = 0"));
+        assert!(TRIGGERS_QUERY.contains("unnest(t.tgattr) WITH ORDINALITY"));
+        assert!(TRIGGERS_QUERY.contains("ORDER BY k.ord)"));
         assert!(TRIGGERS_QUERY.contains("WHERE n.nspname = $1 AND c.relname = $2"));
         assert!(TRIGGERS_QUERY.ends_with("ORDER BY t.tgname"));
     }

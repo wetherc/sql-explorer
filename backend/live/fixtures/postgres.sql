@@ -47,7 +47,7 @@ CREATE FUNCTION app.pass() RETURNS trigger LANGUAGE plpgsql
 CREATE FUNCTION app.nothing() RETURNS trigger LANGUAGE plpgsql
     AS $$BEGIN RETURN NULL; END$$;
 
-CREATE TRIGGER a_before_write BEFORE INSERT OR UPDATE OF total ON app.orders
+CREATE TRIGGER a_before_write BEFORE INSERT OR UPDATE OF note, total ON app.orders
     FOR EACH ROW EXECUTE FUNCTION app.pass();
 CREATE TRIGGER b_after_delete AFTER DELETE ON app.orders
     FOR EACH ROW EXECUTE FUNCTION app.pass();
