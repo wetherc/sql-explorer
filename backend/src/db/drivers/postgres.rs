@@ -1464,7 +1464,9 @@ pub fn plan_prefix(mode: PlanMode) -> &'static str {
 /// its own relation type, because `CREATE VIEW` makes a plain view. A
 /// materialized view that has no rows yet (`relispopulated` is false) ends
 /// with `WITH NO DATA`. Without it, the text runs the query of the view and
-/// fills the view. A plain view is always marked as populated.
+/// fills the view. A plain view is always marked as populated. The
+/// statements of [`INDEX_STATEMENTS`] come after the CREATE statement, in
+/// the same row and column.
 ///
 /// The name goes into the statement as a literal that `regclass` reads. A
 /// name of another database cannot be read this way, so the name contains
@@ -1485,7 +1487,8 @@ fn create_query_text(
              WHEN 'm' THEN 'MATERIALIZED VIEW ' ELSE 'OR REPLACE VIEW ' END || \
              pg_catalog.quote_ident(n.nspname) || '.' || pg_catalog.quote_ident(c.relname) || \
              E' AS\\n' || pg_catalog.rtrim(pg_catalog.pg_get_viewdef(c.oid, true), ';') || \
-             CASE WHEN c.relispopulated THEN ';' ELSE E'\\nWITH NO DATA;' END END \
+             CASE WHEN c.relispopulated THEN ';' ELSE E'\\nWITH NO DATA;' END || \
+             {INDEX_STATEMENTS} END \
              FROM pg_catalog.pg_class AS c \
              JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace \
              WHERE c.oid = {}::regclass;",
@@ -1494,6 +1497,21 @@ fn create_query_text(
         0,
     ))
 }
+
+/// The CREATE INDEX statement of each index of the relation `c`, in the order
+/// of the index names. Each statement ends with `;` and starts after a blank
+/// line. A relation without an index gives an empty text.
+///
+/// The text of a materialized view without these statements makes the view
+/// again without its indexes. `REFRESH MATERIALIZED VIEW CONCURRENTLY` then
+/// fails, because it needs a unique index. A plain view has no index, so its
+/// text does not change. The statements run in the `THEN` branch of
+/// [`QUALIFIED_NAMES`], so each one names the view with its schema.
+const INDEX_STATEMENTS: &str = "COALESCE((SELECT pg_catalog.string_agg(E'\\n\\n' || \
+     pg_catalog.pg_get_indexdef(i.indexrelid) || ';', '' ORDER BY x.relname) \
+     FROM pg_catalog.pg_index AS i \
+     JOIN pg_catalog.pg_class AS x ON x.oid = i.indexrelid \
+     WHERE i.indrelid = c.oid), '')";
 
 /// The start of a `CASE` expression that sets the search path to
 /// `pg_catalog` alone before its `THEN` branch runs. `pg_get_viewdef` and
@@ -5817,7 +5835,12 @@ mod tests {
              WHEN 'm' THEN 'MATERIALIZED VIEW ' ELSE 'OR REPLACE VIEW ' END || \
              pg_catalog.quote_ident(n.nspname) || '.' || pg_catalog.quote_ident(c.relname) || \
              E' AS\\n' || pg_catalog.rtrim(pg_catalog.pg_get_viewdef(c.oid, true), ';') || \
-             CASE WHEN c.relispopulated THEN ';' ELSE E'\\nWITH NO DATA;' END END \
+             CASE WHEN c.relispopulated THEN ';' ELSE E'\\nWITH NO DATA;' END || \
+             COALESCE((SELECT pg_catalog.string_agg(E'\\n\\n' || \
+             pg_catalog.pg_get_indexdef(i.indexrelid) || ';', '' ORDER BY x.relname) \
+             FROM pg_catalog.pg_index AS i \
+             JOIN pg_catalog.pg_class AS x ON x.oid = i.indexrelid \
+             WHERE i.indrelid = c.oid), '') END \
              FROM pg_catalog.pg_class AS c \
              JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace \
              WHERE c.oid = '\"public\".\"v\"'::regclass;"

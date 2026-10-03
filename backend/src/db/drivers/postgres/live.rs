@@ -336,6 +336,14 @@ async fn live_the_create_text_runs_again_after_a_drop() {
             let text = view_text(driver, name, relation).await;
             assert_eq!(text.ends_with("\nWITH NO DATA;"), name == "pending_totals");
             assert!(text.ends_with(';') && !text.ends_with(";;"), "{text}");
+            assert_eq!(
+                text.ends_with(
+                    ";\n\nCREATE UNIQUE INDEX order_totals_mood \
+                     ON app.order_totals USING btree (mood);"
+                ),
+                name == "order_totals",
+                "{text}"
+            );
             live::run(driver, &format!("DROP {word} app.{name}")).await;
             live::run(driver, &text).await;
             assert_eq!(view_text(driver, name, relation).await, text);
@@ -350,6 +358,22 @@ async fn live_the_create_text_runs_again_after_a_drop() {
         .await;
         assert_eq!(live::cell(&populated, 0, 1).as_deref(), Some("t"));
         assert_eq!(live::cell(&populated, 1, 1).as_deref(), Some("f"));
+        // The text of a materialized view makes its unique index again, so
+        // a concurrent refresh of the view runs.
+        let index = live::run(
+            driver,
+            "SELECT i.indisunique FROM pg_catalog.pg_index AS i \
+             JOIN pg_catalog.pg_class AS x ON x.oid = i.indexrelid \
+             WHERE x.relname = 'order_totals_mood' \
+             AND i.indrelid = 'app.order_totals'::regclass",
+        )
+        .await;
+        assert_eq!(live::cell(&index, 0, 0).as_deref(), Some("t"));
+        live::run(
+            driver,
+            "REFRESH MATERIALIZED VIEW CONCURRENTLY app.order_totals",
+        )
+        .await;
     };
     live::with_cleanup(body, scratch.remove()).await;
 }

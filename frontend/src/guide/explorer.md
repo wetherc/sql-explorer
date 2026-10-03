@@ -110,7 +110,10 @@ runs the text as one statement. The MySQL and MariaDB text of a trigger does
 not keep its place in the firing order. Refer to **Trigger order in a MySQL
 CREATE text** in the Triggers section.
 On PostgreSQL, the `CREATE` text of a view, a materialized view and a trigger names each object of a user schema with
-its schema, so the text runs under any search path. A materialized view and a synonym get their `CREATE`
+its schema, so the text runs under any search path. The `CREATE` statement of a
+materialized view without data ends with `WITH NO DATA`, so the text makes an
+empty view. After this statement, the text has a `CREATE INDEX` statement for
+each index of the view, in the order of the index names. A materialized view and a synonym get their `CREATE`
 text and a `SELECT` alone, and a synonym has no **Properties** item. A foreign table gets a
 `SELECT`, an `INSERT` and an `UPDATE`, because a `CREATE` draft of its columns
 makes a plain table.
