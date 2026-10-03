@@ -334,3 +334,50 @@ async fn live_the_create_text_runs_again_after_a_drop() {
     };
     live::with_cleanup(body, scratch.remove()).await;
 }
+
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL server"]
+async fn live_the_create_text_names_each_schema_under_any_search_path() {
+    let Some((scratch, mut driver, server)) = Scratch::open("pg_path").await else {
+        return;
+    };
+    let database = scratch.name.clone();
+    let body = async move {
+        let driver = driver.as_mut();
+        live::run(driver, "SET search_path TO app").await;
+        let trigger = trigger_text(driver, "orders", "a_before_write").await;
+        let view = view_text(driver, "big_orders", RelationType::View).await;
+        let matview = view_text(driver, "order_totals", RelationType::MaterializedView).await;
+        assert!(trigger.contains(" ON app.orders "), "{trigger}");
+        assert!(trigger.contains("EXECUTE FUNCTION app.pass()"), "{trigger}");
+        assert!(
+            view.starts_with("CREATE OR REPLACE VIEW app.big_orders AS"),
+            "{view}"
+        );
+        assert!(view.contains("FROM app.orders"), "{view}");
+        assert!(matview.starts_with("CREATE MATERIALIZED VIEW app.order_totals AS"));
+        assert!(matview.contains("FROM app.orders"), "{matview}");
+        // The read sets the search path for its own statement alone.
+        let path = live::run(driver, "SHOW search_path").await;
+        assert_eq!(live::cell(&path, 0, 0).as_deref(), Some("app"));
+
+        // A session with the default search path runs each text again.
+        let mut other = server.open(DbType::Postgres, Some(&database)).await;
+        let other = other.as_mut();
+        live::run(other, "DROP TRIGGER a_before_write ON app.orders").await;
+        live::run(other, &trigger).await;
+        live::run(other, "DROP VIEW app.big_orders").await;
+        live::run(other, &view).await;
+        live::run(other, "DROP MATERIALIZED VIEW app.order_totals").await;
+        live::run(other, &matview).await;
+        assert_eq!(
+            trigger_text(other, "orders", "a_before_write").await,
+            trigger
+        );
+        assert_eq!(
+            view_text(other, "big_orders", RelationType::View).await,
+            view
+        );
+    };
+    live::with_cleanup(body, scratch.remove()).await;
+}

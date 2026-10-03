@@ -1464,8 +1464,9 @@ pub fn plan_prefix(mode: PlanMode) -> &'static str {
 /// its own relation type, because `CREATE VIEW` makes a plain view.
 ///
 /// The name goes into the statement as a literal that `regclass` reads. A
-/// name of another database cannot be read this way, so the name holds the
-/// schema and the table alone.
+/// name of another database cannot be read this way, so the name contains
+/// the schema and the table alone. The CREATE clause names the view with its
+/// schema, and the body of the view is read under [`QUALIFIED_NAMES`].
 fn create_query_text(
     schema: Option<&str>,
     table: &str,
@@ -1477,15 +1478,32 @@ fn create_query_text(
     let name = Dialect::Postgres.qualified_name(None, schema, table);
     Some(CreateQuery::new(
         format!(
-            "SELECT 'CREATE ' || CASE c.relkind WHEN 'm' THEN 'MATERIALIZED VIEW ' \
-             ELSE 'OR REPLACE VIEW ' END || c.oid::regclass::text || E' AS\\n' || \
-             pg_catalog.pg_get_viewdef(c.oid, true) \
-             FROM pg_catalog.pg_class AS c WHERE c.oid = {}::regclass;",
+            "SELECT {QUALIFIED_NAMES}'CREATE ' || CASE c.relkind \
+             WHEN 'm' THEN 'MATERIALIZED VIEW ' ELSE 'OR REPLACE VIEW ' END || \
+             pg_catalog.quote_ident(n.nspname) || '.' || pg_catalog.quote_ident(c.relname) || \
+             E' AS\\n' || pg_catalog.pg_get_viewdef(c.oid, true) END \
+             FROM pg_catalog.pg_class AS c \
+             JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace \
+             WHERE c.oid = {}::regclass;",
             Dialect::Postgres.quote_literal(&name)
         ),
         0,
     ))
 }
+
+/// The start of a `CASE` expression that sets the search path to
+/// `pg_catalog` alone before its `THEN` branch runs. `pg_get_viewdef` and
+/// `pg_get_triggerdef` leave out the schema of a name that the search path
+/// of the session finds. A text read under the search path `app` then names
+/// `orders` where it means `app.orders`, and fails in a session with another
+/// search path. With `pg_catalog` alone, every name of a user schema gets
+/// its schema.
+///
+/// The third argument `true` limits the change to the transaction of the
+/// statement, so the search path of the session comes back after it. A
+/// `CASE` runs its condition before its branch.
+const QUALIFIED_NAMES: &str =
+    "CASE WHEN pg_catalog.set_config('search_path', 'pg_catalog', true) IS NOT NULL THEN ";
 
 /// Lists the triggers of one relation. A foreign key makes triggers of its
 /// own, and `tgisinternal` marks these, so they stay out of the list.
@@ -1538,7 +1556,8 @@ fn trigger_of(name: String, bits: i16, enabled: i8) -> Trigger {
 /// Builds the statement that reads the CREATE text of one trigger. A
 /// trigger name is unique within its relation alone, so the statement finds
 /// the trigger by the relation and the name. PostgreSQL has no scheduled
-/// events.
+/// events. The text is read under [`QUALIFIED_NAMES`], and the form that is
+/// not pretty always names the relation with its schema.
 fn object_query_text(
     schema: Option<&str>,
     table: &str,
@@ -1551,7 +1570,7 @@ fn object_query_text(
     let relation = Dialect::Postgres.qualified_name(None, schema, table);
     Some(CreateQuery::new(
         format!(
-            "SELECT pg_catalog.pg_get_triggerdef(t.oid, true) || ';' \
+            "SELECT {QUALIFIED_NAMES}pg_catalog.pg_get_triggerdef(t.oid, false) || ';' END \
              FROM pg_catalog.pg_trigger AS t \
              WHERE t.tgrelid = {}::regclass AND t.tgname = {};",
             Dialect::Postgres.quote_literal(&relation),
@@ -5345,7 +5364,8 @@ mod tests {
             object_query_text(Some("public"), "orders", "it's", ObjectType::Trigger).unwrap();
         assert_eq!(
             trigger.sql,
-            "SELECT pg_catalog.pg_get_triggerdef(t.oid, true) || ';' \
+            "SELECT CASE WHEN pg_catalog.set_config('search_path', 'pg_catalog', true) \
+             IS NOT NULL THEN pg_catalog.pg_get_triggerdef(t.oid, false) || ';' END \
              FROM pg_catalog.pg_trigger AS t \
              WHERE t.tgrelid = '\"public\".\"orders\"'::regclass AND t.tgname = 'it''s';"
         );
@@ -5776,10 +5796,13 @@ mod tests {
         let view = create_query_text(Some("public"), "v", RelationType::View).unwrap();
         assert_eq!(
             view.sql,
-            "SELECT 'CREATE ' || CASE c.relkind WHEN 'm' THEN 'MATERIALIZED VIEW ' \
-             ELSE 'OR REPLACE VIEW ' END || c.oid::regclass::text || E' AS\\n' || \
-             pg_catalog.pg_get_viewdef(c.oid, true) \
+            "SELECT CASE WHEN pg_catalog.set_config('search_path', 'pg_catalog', true) \
+             IS NOT NULL THEN 'CREATE ' || CASE c.relkind \
+             WHEN 'm' THEN 'MATERIALIZED VIEW ' ELSE 'OR REPLACE VIEW ' END || \
+             pg_catalog.quote_ident(n.nspname) || '.' || pg_catalog.quote_ident(c.relname) || \
+             E' AS\\n' || pg_catalog.pg_get_viewdef(c.oid, true) END \
              FROM pg_catalog.pg_class AS c \
+             JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace \
              WHERE c.oid = '\"public\".\"v\"'::regclass;"
         );
         assert_eq!(view.column, 0);
