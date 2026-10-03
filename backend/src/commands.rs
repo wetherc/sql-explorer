@@ -1484,9 +1484,10 @@ fn script_text(
 /// commands.
 pub(crate) fn create_text_of(response: &QueryResponse, query: &CreateQuery) -> Option<String> {
     let text = text_of_column(response, query.column)?;
-    Some(match query.delimiter {
-        Some(delimiter) => crate::sql::within_delimiter(&text, delimiter),
-        None => text,
+    Some(if query.delimited {
+        crate::sql::within_delimiter(&text)
+    } else {
+        text
     })
 }
 
@@ -2794,7 +2795,7 @@ mod tests {
         let response = response_with(vec![vec![serde_json::json!(body)]]);
         let bare = CreateQuery::new("SHOW CREATE EVENT e", 0);
         assert_eq!(create_text_of(&response, &bare).unwrap(), body);
-        let wrapped = bare.with_delimiter("$$");
+        let wrapped = bare.with_delimiter();
         assert_eq!(
             create_text_of(&response, &wrapped).unwrap(),
             format!("DELIMITER $$\n{body}$$\nDELIMITER ;")

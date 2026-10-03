@@ -962,8 +962,8 @@ fn create_query_text(
 /// Builds the statement that reads the CREATE text of one trigger or one
 /// event. `SHOW CREATE TRIGGER` gives the text in its third column, and
 /// `SHOW CREATE EVENT` gives it in its fourth one. A body of more than one
-/// statement goes between `DELIMITER $$` and `DELIMITER ;`, so the splitter
-/// of the app sends the text to the server whole.
+/// statement goes between `DELIMITER` commands, so the splitter of the app
+/// sends the text to the server whole.
 ///
 /// `SHOW CREATE TRIGGER` gives no `FOLLOWS` or `PRECEDES` clause on MySQL
 /// 8.4 or on MariaDB 11.4. A trigger made again from its text goes last
@@ -975,7 +975,7 @@ fn object_query_text(database: Option<&str>, name: &str, object_type: ObjectType
         ObjectType::Trigger => CreateQuery::new(format!("SHOW CREATE TRIGGER {name};"), 2),
         ObjectType::Event => CreateQuery::new(format!("SHOW CREATE EVENT {name};"), 3),
     };
-    query.with_delimiter("$$")
+    query.with_delimiter()
 }
 
 /// Lists the triggers of one table in the order that they fire. The
@@ -1460,8 +1460,8 @@ mod tests {
         let event = object_query_text(None, "nightly", ObjectType::Event);
         assert_eq!(event.sql, "SHOW CREATE EVENT `nightly`;");
         assert_eq!(event.column, 3);
-        assert_eq!(trigger.delimiter, Some("$$"));
-        assert_eq!(event.delimiter, Some("$$"));
+        assert!(trigger.delimited);
+        assert!(event.delimited);
     }
 
     #[test]

@@ -433,6 +433,18 @@ describe('statementAt', () => {
     }
   })
 
+  it('runs a MySQL body that contains $$ under each terminator of the backend', () => {
+    const create =
+      "CREATE EVENT e ON SCHEDULE EVERY 1 DAY DO\nBEGIN\n  SET @a$$ = '$$';\n  SET @b = 2;\nEND"
+    for (const delimiter of ['$$$', '//', ';;', '$$$$', '////']) {
+      const script = `DELIMITER ${delimiter}\n${create}${delimiter}\nDELIMITER ;`
+      expect(statementBounds(script, Dialect.MySql)).toHaveLength(1)
+      expect(statementAt(script, script.indexOf('@b'), Dialect.MySql)).toBe(
+        `DELIMITER ${delimiter}\n${create}${delimiter}`,
+      )
+    }
+  })
+
   it('finds the statement that holds the position', () => {
     expect(statementAt(script, 0)).toBe('SELECT 1')
     expect(statementAt(script, 12)).toBe('SELECT 2')

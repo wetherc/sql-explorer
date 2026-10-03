@@ -98,6 +98,7 @@ async fn triggers_and_events(variable: &str, tag: &str) {
             [
                 event("ev_body", true, "EVERY 1 HOUR"),
                 event("ev_daily", true, "EVERY 1 DAY"),
+                event("ev_mark", true, "EVERY 1 WEEK"),
                 event("ev_off", false, "EVERY 5 MINUTE"),
                 event("ev_once", true, "AT 2030-06-01 12:34:56"),
             ]
@@ -123,18 +124,28 @@ async fn scripts_round_trip(variable: &str, tag: &str) {
     let body = async move {
         let driver = driver.as_mut();
         // A body of more than one statement comes between DELIMITER
-        // commands, and a body of one statement stays bare.
-        for (name, object_type, word, wrapped) in [
-            ("bi_orders", ObjectType::Trigger, "TRIGGER", false),
-            ("au_orders", ObjectType::Trigger, "TRIGGER", false),
-            ("bu_orders", ObjectType::Trigger, "TRIGGER", true),
-            ("ev_daily", ObjectType::Event, "EVENT", false),
-            ("ev_once", ObjectType::Event, "EVENT", false),
-            ("ev_body", ObjectType::Event, "EVENT", true),
+        // commands, and a body of one statement stays bare. The body of
+        // ev_mark contains $$, so its terminator is $$$.
+        for (name, object_type, word, delimiter) in [
+            ("bi_orders", ObjectType::Trigger, "TRIGGER", None),
+            ("au_orders", ObjectType::Trigger, "TRIGGER", None),
+            ("bu_orders", ObjectType::Trigger, "TRIGGER", Some("$$")),
+            ("ev_daily", ObjectType::Event, "EVENT", None),
+            ("ev_once", ObjectType::Event, "EVENT", None),
+            ("ev_body", ObjectType::Event, "EVENT", Some("$$")),
+            ("ev_mark", ObjectType::Event, "EVENT", Some("$$$")),
         ] {
             let text = object_text(driver, &database, name, object_type).await;
-            assert_eq!(text.starts_with("DELIMITER $$\n"), wrapped, "{text}");
-            assert_eq!(text.ends_with("END$$\nDELIMITER ;"), wrapped, "{text}");
+            assert_eq!(
+                text.starts_with("DELIMITER "),
+                delimiter.is_some(),
+                "{text}"
+            );
+            if let Some(delimiter) = delimiter {
+                let start = format!("DELIMITER {delimiter}\n");
+                let end = format!("END{delimiter}\nDELIMITER ;");
+                assert!(text.starts_with(&start) && text.ends_with(&end), "{text}");
+            }
             live::run(driver, &format!("DROP {word} {name}")).await;
             live::run(driver, &text).await;
             assert_eq!(

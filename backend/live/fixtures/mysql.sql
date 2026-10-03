@@ -36,3 +36,12 @@ BEGIN
     SET @swept = 1;
 END$$
 DELIMITER ;
+
+-- A body that contains $$ needs a terminator other than $$.
+DELIMITER //
+CREATE EVENT ev_mark ON SCHEDULE EVERY 1 WEEK DO
+BEGIN
+    SET @mark = '$$';
+    SET @mark$$ = 1;
+END//
+DELIMITER ;

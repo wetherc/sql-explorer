@@ -105,10 +105,12 @@ carries the quotes of its engine:
 
 A trigger and an event get their `CREATE` text alone, which the engine
 reads from its catalog. On MySQL and MariaDB, a body of more than one
-statement comes between `DELIMITER $$` and `DELIMITER ;`. The editor then
-runs the text as one statement. The MySQL and MariaDB text of a trigger does
-not keep its place in the firing order. Refer to **Trigger order in a MySQL
-CREATE text** in the Triggers section.
+statement comes between `DELIMITER $$` and `DELIMITER ;`. If the body
+contains `$$`, the terminator is a different one that the body does not
+contain, such as `$$$` or `//`. The editor then runs the text as one
+statement. The MySQL and MariaDB text of a trigger does not keep its place in
+the firing order. Refer to **Trigger order in a MySQL CREATE text** in the
+Triggers section.
 On PostgreSQL, the `CREATE` text of a view, a materialized view and a trigger names each object of a user schema with
 its schema, so the text runs under any search path. The `CREATE` statement of a
 materialized view without data ends with `WITH NO DATA`, so the text makes an

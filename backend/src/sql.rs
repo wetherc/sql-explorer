@@ -501,11 +501,36 @@ fn skip_blanks(chars: &[char], mut index: usize) -> usize {
 /// `BEGIN ... END` body has a semicolon after each statement of the body,
 /// and a split there sends a part of the body to the server. A statement
 /// that the splitter keeps whole stays bare.
-pub fn within_delimiter(text: &str, delimiter: &str) -> String {
+pub fn within_delimiter(text: &str) -> String {
     if split_statements(text, Dialect::MySql).len() <= 1 {
         return text.to_string();
     }
+    let delimiter = free_delimiter(text);
     format!("DELIMITER {delimiter}\n{text}{delimiter}\nDELIMITER ;")
+}
+
+/// The terminators that `within_delimiter` tries first, in order.
+const DELIMITERS: [&str; 4] = ["$$", "$$$", "//", ";;"];
+
+/// Finds a terminator that occurs first at the end of the text. A body can
+/// contain `$$` in a string, in a comment or in a name such as `@a$$b`. A
+/// name ends the statement at its `$$`. The search ignores quotes and
+/// comments, so the text also runs in the `mysql` client and in other
+/// tools with a different splitter. A terminator that starts inside the
+/// last characters of the text also ends the text early, as `$$` after
+/// `END l$`. A run of one character that is longer than the text cannot
+/// occur in the text. The text cannot end with both `$` and `/`, so a run
+/// of one of the two characters always fits.
+fn free_delimiter(text: &str) -> String {
+    let free = |delimiter: &String| {
+        format!("{text}{delimiter}").find(delimiter.as_str()) == Some(text.len())
+    };
+    DELIMITERS
+        .into_iter()
+        .map(String::from)
+        .chain((4..).flat_map(|length| ["$".repeat(length), "/".repeat(length)]))
+        .find(free)
+        .expect("a long run of one character is free")
 }
 
 /// Splits a script into single statements. The splitter keeps a semicolon
@@ -1570,12 +1595,50 @@ mod tests {
     fn a_body_with_semicolons_goes_between_delimiter_commands() {
         let text =
             "CREATE TRIGGER t BEFORE INSERT ON o FOR EACH ROW BEGIN SET @a = 1; SET @b = 2; END";
-        let wrapped = within_delimiter(text, "$$");
+        let wrapped = within_delimiter(text);
         assert_eq!(wrapped, format!("DELIMITER $$\n{text}$$\nDELIMITER ;"));
         assert_eq!(split_statements(&wrapped, Dialect::MySql), vec![text]);
         // A text that the splitter keeps whole needs no command.
         let simple = "CREATE TRIGGER t BEFORE INSERT ON o FOR EACH ROW SET @a = ';'";
-        assert_eq!(within_delimiter(simple, "$$"), simple);
+        assert_eq!(within_delimiter(simple), simple);
+    }
+
+    #[test]
+    fn a_body_that_contains_the_terminator_gets_another_one() {
+        let body = |inner: &str| {
+            format!("CREATE EVENT e ON SCHEDULE EVERY 1 DAY DO BEGIN {inner}; SELECT 2; END")
+        };
+        for (inner, delimiter) in [
+            ("SELECT '$$'", "$$$"),
+            ("SELECT 1 /* $$ */", "$$$"),
+            ("SET @a$$b = 1", "$$$"),
+            ("SELECT '$$$'", "//"),
+            ("SELECT '$$$', '//'", ";;"),
+            ("SELECT '$$$', '//', ';;'", "$$$$"),
+            ("SELECT '$$$$$', '//', ';;'", "////"),
+        ] {
+            let text = body(inner);
+            let wrapped = within_delimiter(&text);
+            assert_eq!(
+                wrapped,
+                format!("DELIMITER {delimiter}\n{text}{delimiter}\nDELIMITER ;")
+            );
+            assert_eq!(split_statements(&wrapped, Dialect::MySql), vec![text]);
+        }
+    }
+
+    #[test]
+    fn a_body_that_ends_with_a_part_of_the_terminator_gets_another_one() {
+        // A label can end with a dollar sign, and `$$` after it would end
+        // the text one character early.
+        let text = "CREATE EVENT e ON SCHEDULE EVERY 1 DAY DO l$: BEGIN SELECT 1; SELECT 2; END l$";
+        let wrapped = within_delimiter(text);
+        assert_eq!(wrapped, format!("DELIMITER //\n{text}//\nDELIMITER ;"));
+        assert_eq!(split_statements(&wrapped, Dialect::MySql), vec![text]);
+        // No run of dollar signs fits after a final dollar sign, so a run of
+        // slashes follows.
+        let text = "CREATE EVENT e ON SCHEDULE EVERY 1 DAY DO l$: BEGIN SELECT '//', ';;'; END l$";
+        assert_eq!(free_delimiter(text), "////");
     }
 
     #[test]
