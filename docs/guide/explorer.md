@@ -38,7 +38,11 @@ foreign tables a **Triggers** folder.
 
 Each trigger shows when it runs and which changes fire it, such as
 `AFTER INSERT, UPDATE` or `INSTEAD OF DELETE`. A PostgreSQL trigger can also
-fire on `TRUNCATE`.
+fire on `TRUNCATE`. On PostgreSQL and SQLite, an update trigger limited to
+certain columns lists them, as in `BEFORE UPDATE OF note, total`. When the
+trigger has other events too, the update and its columns come last, as in
+`BEFORE INSERT, DELETE, UPDATE OF note, total`, so the next event's name
+doesn't read as a column.
 
 A trigger or event that the engine keeps but doesn't run appears in paler text,
 with a hint that ends in `disabled`. MySQL, MariaDB and SQLite triggers are

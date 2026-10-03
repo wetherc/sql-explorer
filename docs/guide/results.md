@@ -13,6 +13,8 @@ in its own box.
 Each statement in a script that returns rows gets its own tab beside the
 **Messages** tab. Each column header shows the column's type. On PostgreSQL, a
 column of a custom array type shows the type's internal name, such as `_mytype`.
+A statement that writes, such as `INSERT ... RETURNING`, isn't prepared first,
+so its columns of a custom type show the type's numeric OID instead of a name.
 
 ## Pinned results
 
