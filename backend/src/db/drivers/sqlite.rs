@@ -823,16 +823,34 @@ fn object_query_text(schema: &str, name: &str, object_type: ObjectType) -> Optio
         return None;
     }
     let name = Dialect::Sqlite.quote_literal(name);
-    let select = |master: &str| {
+    let rows = |master: &str| {
+        format!("{master} WHERE type = 'trigger' AND name = {name} AND sql IS NOT NULL")
+    };
+    let temporary = temporary_text(&rows("temp.sqlite_master"));
+    let sql = if schema.eq_ignore_ascii_case("temp") {
+        temporary
+    } else {
         format!(
-            "SELECT sql FROM {master} WHERE type = 'trigger' AND name = {name} AND sql IS NOT NULL"
+            "SELECT sql FROM {} UNION ALL {temporary}",
+            rows(&master_of(schema))
         )
     };
-    let mut sql = select(&master_of(schema));
-    if !schema.eq_ignore_ascii_case("temp") {
-        sql = format!("{sql} UNION ALL {}", select("temp.sqlite_master"));
-    }
     Some(CreateQuery::new(format!("{sql} LIMIT 1;"), 0))
+}
+
+/// Builds the select that reads the `sql` column of the rows of `source` as
+/// the text of temporary triggers. The catalog of `temp` keeps a temporary
+/// trigger as `CREATE TRIGGER ...` without the word `TEMP`. That text makes
+/// a permanent trigger, and it fails for a trigger on a table of another
+/// schema. The select puts `TEMP` after `CREATE`. A text with a word such as
+/// `TEMP` between `CREATE` and `TRIGGER` stays as it is.
+fn temporary_text(source: &str) -> String {
+    format!(
+        "SELECT CASE WHEN upper(substr(sql, 1, 6)) = 'CREATE' \
+         AND upper(substr(rest, 1, 7)) = 'TRIGGER' THEN 'CREATE TEMP ' || rest ELSE sql END \
+         AS sql FROM (SELECT sql, ltrim(substr(sql, 7), char(32, 9, 10, 12, 13)) AS rest \
+         FROM {source})"
+    )
 }
 
 /// One step of a run, sent from the blocking closure to the async side.
@@ -1298,7 +1316,10 @@ mod tests {
         // from the catalog of temp.
         for (name, start) in [
             ("audit", "CREATE TRIGGER audit"),
-            ("watch", "CREATE TRIGGER watch BEFORE DELETE ON main.orders"),
+            (
+                "watch",
+                "CREATE TEMP TRIGGER watch BEFORE DELETE ON main.orders",
+            ),
         ] {
             let query = driver
                 .object_create_query(None, None, Some("orders"), name, ObjectType::Trigger)
@@ -1329,14 +1350,134 @@ mod tests {
     #[test]
     fn the_create_statement_of_a_trigger_also_reads_the_temporary_catalog() {
         let query = object_query_text("main", "it's", ObjectType::Trigger).unwrap();
+        let temporary = temporary_text(
+            "temp.sqlite_master WHERE type = 'trigger' AND name = 'it''s' AND sql IS NOT NULL",
+        );
         assert_eq!(
             query.sql,
-            "SELECT sql FROM \"main\".sqlite_master WHERE type = 'trigger' AND name = 'it''s' \
-             AND sql IS NOT NULL UNION ALL SELECT sql FROM temp.sqlite_master \
-             WHERE type = 'trigger' AND name = 'it''s' AND sql IS NOT NULL LIMIT 1;"
+            format!(
+                "SELECT sql FROM \"main\".sqlite_master WHERE type = 'trigger' \
+                 AND name = 'it''s' AND sql IS NOT NULL UNION ALL {temporary} LIMIT 1;"
+            )
         );
         let temp = object_query_text("temp", "t", ObjectType::Trigger).unwrap();
         assert!(!temp.sql.contains("UNION ALL"));
+        assert!(temp.sql.starts_with("SELECT CASE"), "{}", temp.sql);
+    }
+
+    #[tokio::test]
+    async fn the_temporary_text_puts_temp_after_create_once() {
+        let mut driver = open_memory().await;
+        let texts = [
+            ("CREATE TRIGGER a AFTER", "CREATE TEMP TRIGGER a AFTER"),
+            ("create \n\t trigger b", "CREATE TEMP trigger b"),
+            ("CREATE TEMP TRIGGER c", "CREATE TEMP TRIGGER c"),
+            ("Create Temporary Trigger d", "Create Temporary Trigger d"),
+            ("CREATE TABLE e (x)", "CREATE TABLE e (x)"),
+            ("SELECT 'CREATE TRIGGER'", "SELECT 'CREATE TRIGGER'"),
+        ];
+        for (text, expected) in texts {
+            let source = format!("(SELECT {} AS sql)", Dialect::Sqlite.quote_literal(text));
+            let response = driver
+                .execute_query(&temporary_text(&source), None, &ExecOptions::default())
+                .await
+                .unwrap();
+            assert_eq!(
+                response.results[0].rows[0][0],
+                serde_json::json!(expected),
+                "{text}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_create_text_of_a_temporary_trigger_makes_a_temporary_trigger_again() {
+        let directory = tempfile::tempdir().unwrap();
+        let other_path = directory.path().join("other.db");
+        let mut driver = open_memory().await;
+        driver
+            .execute_query(
+                &format!(
+                    "CREATE TABLE orders (id INTEGER); \
+                     ATTACH DATABASE {} AS aux; \
+                     CREATE TABLE aux.items (id INTEGER); \
+                     CREATE TEMP TRIGGER watch BEFORE DELETE ON orders BEGIN SELECT 1; END; \
+                     CREATE TEMPORARY TRIGGER guard AFTER INSERT ON aux.items \
+                     BEGIN SELECT 2; END;",
+                    Dialect::Sqlite.quote_literal(&other_path.to_string_lossy())
+                ),
+                None,
+                &ExecOptions::default(),
+            )
+            .await
+            .unwrap();
+        let catalog = "SELECT sql FROM temp.sqlite_master WHERE type = 'trigger' \
+                       AND name = 'watch' UNION ALL SELECT sql FROM temp.sqlite_master \
+                       WHERE type = 'trigger' AND name = 'guard'";
+        let before = driver
+            .execute_query(catalog, None, &ExecOptions::default())
+            .await
+            .unwrap();
+
+        for (schema, table, name, start) in [
+            (
+                None,
+                "orders",
+                "watch",
+                "CREATE TEMP TRIGGER watch BEFORE DELETE ON orders",
+            ),
+            (
+                Some("aux"),
+                "items",
+                "guard",
+                "CREATE TEMP TRIGGER guard AFTER INSERT ON aux.items",
+            ),
+            (
+                Some("temp"),
+                "orders",
+                "watch",
+                "CREATE TEMP TRIGGER watch BEFORE DELETE ON orders",
+            ),
+        ] {
+            let query = driver
+                .object_create_query(None, schema, Some(table), name, ObjectType::Trigger)
+                .unwrap();
+            let response = driver
+                .execute_query(&query.sql, None, &ExecOptions::default())
+                .await
+                .unwrap();
+            let text = response.results[0].rows[0][0].as_str().unwrap().to_string();
+            assert!(text.starts_with(start), "{text}");
+
+            // The text runs again after a drop and makes a temporary trigger.
+            driver
+                .execute_query(
+                    &format!("DROP TRIGGER temp.{name}; {text}"),
+                    None,
+                    &ExecOptions::default(),
+                )
+                .await
+                .unwrap();
+        }
+        let after = driver
+            .execute_query(catalog, None, &ExecOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(after.results[0].rows, before.results[0].rows);
+        assert_eq!(after.results[0].rows.len(), 2);
+        let permanent = driver
+            .execute_query(
+                "SELECT count(*) FROM main.sqlite_master WHERE type = 'trigger' \
+                 UNION ALL SELECT count(*) FROM aux.sqlite_master WHERE type = 'trigger'",
+                None,
+                &ExecOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            permanent.results[0].rows,
+            vec![vec![serde_json::json!(0)], vec![serde_json::json!(0)]]
+        );
     }
 
     #[tokio::test]
