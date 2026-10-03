@@ -130,3 +130,7 @@ When you open a database in the tree, the application reads every relation
 of that database in the background. The completion then knows a name that
 the tree has not opened. The **Columns the editor learns** setting sets how
 much of a large schema the read keeps.
+
+On MS SQL Server, the read also includes the synonyms. A synonym gets the
+columns of its target when the target is a table or a view in the same
+database. The completion offers the name alone for any other synonym.

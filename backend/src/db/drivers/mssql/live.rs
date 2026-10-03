@@ -158,6 +158,17 @@ async fn live_a_synonym_lists_its_target_and_its_create_text_runs_again() {
         }
         let count = live::run(driver, "SELECT COUNT(*) FROM dbo.RemoteSyn").await;
         assert_eq!(live::cell(&count, 0, 0).as_deref(), Some("2"));
+
+        // A target in another database gives the snapshot the name of the
+        // synonym and no column.
+        let snapshot = driver.schema_snapshot(&database, 10_000).await.unwrap();
+        let remote = snapshot
+            .relations
+            .iter()
+            .find(|relation| relation.name == "RemoteSyn")
+            .expect("the synonym is in the snapshot");
+        assert_eq!(remote.relation_type, RelationType::Synonym);
+        assert!(remote.columns.is_empty());
     };
     live::with_cleanup(body, scratch.remove()).await;
 }
@@ -240,12 +251,50 @@ async fn live_the_triggers_of_a_relation_leave_out_a_trigger_of_the_database() {
         let query = read(driver);
         assert_eq!(live::create_text(driver, query).await, text);
 
+        // A target with no schema resolves through the default schema of the
+        // user, and a target that does not exist gives no column.
+        live::run(
+            driver,
+            "CREATE SYNONYM dbo.LinesSyn FOR Lines;\n\
+             CREATE SYNONYM dbo.GoneSyn FOR dbo.Gone;",
+        )
+        .await;
         let snapshot = driver.schema_snapshot(&database, 10_000).await.unwrap();
         assert!(snapshot.complete);
         assert!(snapshot
             .relations
             .iter()
             .any(|relation| relation.name == "Orders" && relation.columns.len() == 6));
+        let synonym = |schema: &str, name: &str| {
+            snapshot
+                .relations
+                .iter()
+                .find(|relation| {
+                    relation.schema.as_deref() == Some(schema) && relation.name == name
+                })
+                .unwrap_or_else(|| panic!("{schema}.{name} is not in the snapshot"))
+        };
+        let orders = synonym("dbo", "OrdersSyn");
+        assert_eq!(orders.relation_type, RelationType::Synonym);
+        let names: Vec<&str> = orders.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["id", "total", "b", "vb", "rv", "img"]);
+        assert_eq!(orders.columns[1].data_type, "money");
+        let people = synonym("hr", "PeopleSyn");
+        let names: Vec<&str> = people.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["id", "name"]);
+        assert_eq!(synonym("dbo", "LinesSyn").columns.len(), 2);
+        assert!(synonym("dbo", "GoneSyn").columns.is_empty());
+        // Each relation has one record, so the rows of a synonym arrive
+        // together.
+        let mut keys: Vec<_> = snapshot
+            .relations
+            .iter()
+            .map(|relation| (relation.schema.clone(), relation.name.clone()))
+            .collect();
+        let count = keys.len();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(keys.len(), count);
     };
     live::with_cleanup(body, scratch.remove()).await;
 }

@@ -444,28 +444,46 @@ pub fn add_snapshot_column(
     relation_type: RelationType,
     column: SnapshotColumn,
 ) -> bool {
+    if !add_snapshot_relation(snapshot, max_columns, schema, relation, relation_type) {
+        return false;
+    }
+    snapshot
+        .relations
+        .last_mut()
+        .expect("the record was just found or added")
+        .columns
+        .push(column);
+    snapshot.column_count += 1;
+    true
+}
+
+/// Starts the record of a relation in a snapshot when the relation is new,
+/// and adds no column. A relation with no known column, such as a synonym
+/// that points out of the database, uses this function. The bound applies
+/// as in [`add_snapshot_column`].
+pub fn add_snapshot_relation(
+    snapshot: &mut SchemaSnapshot,
+    max_columns: usize,
+    schema: Option<String>,
+    relation: String,
+    relation_type: RelationType,
+) -> bool {
     if snapshot.column_count >= max_columns {
         snapshot.complete = false;
         return false;
     }
-    let last = snapshot.relations.last_mut();
-    let entry = match last {
-        Some(entry) if entry.name == relation && entry.schema == schema => entry,
-        _ => {
-            snapshot.relations.push(SnapshotRelation {
-                name: relation,
-                schema,
-                relation_type,
-                columns: Vec::new(),
-            });
-            snapshot
-                .relations
-                .last_mut()
-                .expect("the record was just added")
-        }
-    };
-    entry.columns.push(column);
-    snapshot.column_count += 1;
+    let known = matches!(
+        snapshot.relations.last(),
+        Some(entry) if entry.name == relation && entry.schema == schema
+    );
+    if !known {
+        snapshot.relations.push(SnapshotRelation {
+            name: relation,
+            schema,
+            relation_type,
+            columns: Vec::new(),
+        });
+    }
     true
 }
 
@@ -778,6 +796,56 @@ mod tests {
         assert_eq!(snapshot.relations[1].relation_type, RelationType::View);
         assert_eq!(snapshot.column_count, 3);
         assert!(snapshot.complete);
+    }
+
+    #[test]
+    fn a_relation_with_no_column_gets_a_record_of_its_own() {
+        let mut snapshot = SchemaSnapshot {
+            complete: true,
+            ..SchemaSnapshot::default()
+        };
+        let column = SnapshotColumn {
+            name: "id".into(),
+            data_type: "int".into(),
+        };
+        assert!(add_snapshot_column(
+            &mut snapshot,
+            1,
+            Some("dbo".into()),
+            "orders".into(),
+            RelationType::Table,
+            column,
+        ));
+        assert!(add_snapshot_relation(
+            &mut snapshot,
+            2,
+            Some("dbo".into()),
+            "far".into(),
+            RelationType::Synonym,
+        ));
+        // A second row of the same relation adds no second record.
+        assert!(add_snapshot_relation(
+            &mut snapshot,
+            2,
+            Some("dbo".into()),
+            "far".into(),
+            RelationType::Synonym,
+        ));
+        assert_eq!(snapshot.relations.len(), 2);
+        assert_eq!(snapshot.relations[1].relation_type, RelationType::Synonym);
+        assert!(snapshot.relations[1].columns.is_empty());
+        assert_eq!(snapshot.column_count, 1);
+
+        // At the bound, a relation with no column also stops the read.
+        assert!(!add_snapshot_relation(
+            &mut snapshot,
+            1,
+            None,
+            "late".into(),
+            RelationType::Synonym,
+        ));
+        assert!(!snapshot.complete);
+        assert_eq!(snapshot.relations.len(), 2);
     }
 
     #[test]

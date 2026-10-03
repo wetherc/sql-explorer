@@ -7,10 +7,10 @@
 
 use crate::db::drivers::{
     add_constraint_column, add_included_column, add_index_column, add_snapshot_column,
-    add_trigger_event, constraint_type, f32_to_json, f64_to_json, number_out_of_range,
-    number_value, parameter_type_refused, relation_type, routine_type, rows_affected_message,
-    rows_returned_message, single_statement, size_text, trigger_event, CancelHandle,
-    DatabaseDriver, NumberValue,
+    add_snapshot_relation, add_trigger_event, constraint_type, f32_to_json, f64_to_json,
+    number_out_of_range, number_value, parameter_type_refused, relation_type, routine_type,
+    rows_affected_message, rows_returned_message, single_statement, size_text, trigger_event,
+    CancelHandle, DatabaseDriver, NumberValue,
 };
 use crate::db::sink::{BufferSink, RowSink, RunSummary, SinkControl};
 use crate::db::{
@@ -1054,7 +1054,7 @@ impl DatabaseDriver for MssqlDriver {
         max_columns: usize,
     ) -> Result<SchemaSnapshot> {
         let query = snapshot_query(&Dialect::MsSql.quote_identifier(database));
-        let mut stream = self.client.query(query, &[]).await?;
+        let mut stream = self.client.query(query, &[&database]).await?;
         let mut snapshot = SchemaSnapshot {
             database: database.to_string(),
             complete: true,
@@ -1062,17 +1062,26 @@ impl DatabaseDriver for MssqlDriver {
         };
         while let Some(item) = stream.try_next().await? {
             let QueryItem::Row(row) = item else { continue };
-            let kept = add_snapshot_column(
-                &mut snapshot,
-                max_columns,
-                row.try_get::<&str, _>(0)?.map(str::to_string),
-                row.try_get::<&str, _>(1)?.unwrap_or_default().to_string(),
-                relation_type(row.try_get::<&str, _>(2)?.unwrap_or_default()),
-                SnapshotColumn {
-                    name: row.try_get::<&str, _>(3)?.unwrap_or_default().to_string(),
-                    data_type: row.try_get::<&str, _>(4)?.unwrap_or_default().to_string(),
-                },
-            );
+            let schema = row.try_get::<&str, _>(0)?.map(str::to_string);
+            let relation = row.try_get::<&str, _>(1)?.unwrap_or_default().to_string();
+            let relation_type = relation_type_of(row.try_get::<&str, _>(2)?.unwrap_or_default());
+            let kept = match snapshot_column(row.try_get(3)?, row.try_get(4)?) {
+                Some(column) => add_snapshot_column(
+                    &mut snapshot,
+                    max_columns,
+                    schema,
+                    relation,
+                    relation_type,
+                    column,
+                ),
+                None => add_snapshot_relation(
+                    &mut snapshot,
+                    max_columns,
+                    schema,
+                    relation,
+                    relation_type,
+                ),
+            };
             if !kept {
                 break;
             }
@@ -1227,26 +1236,67 @@ fn tables_query(catalog: &str) -> String {
     )
 }
 
-/// Turns one row of [`tables_query`] into its entry. The word of the type is
-/// `BASE TABLE`, `VIEW` or `SYNONYM`.
-fn relation_of(name: &str, word: &str, target: Option<&str>) -> Table {
+/// Reads the word of the type of a relation in [`tables_query`] and
+/// [`snapshot_query`]. The word is `BASE TABLE`, `VIEW` or `SYNONYM`.
+fn relation_type_of(word: &str) -> RelationType {
     if word.eq_ignore_ascii_case("SYNONYM") {
-        Table::synonym(name, target.unwrap_or_default())
+        RelationType::Synonym
     } else {
-        Table::new(name, relation_type(word))
+        relation_type(word)
     }
 }
 
-/// Reads every relation and every column of one database in one statement.
-/// The rows arrive in the order of the relation, which the fold needs.
+/// Turns one row of [`tables_query`] into its entry.
+fn relation_of(name: &str, word: &str, target: Option<&str>) -> Table {
+    match relation_type_of(word) {
+        RelationType::Synonym => Table::synonym(name, target.unwrap_or_default()),
+        relation_type => Table::new(name, relation_type),
+    }
+}
+
+/// Reads every relation, every synonym and every column of one database in
+/// one statement. `@P1` is the name of the database. The rows arrive in the
+/// order of the relation, which the fold needs.
+///
+/// A synonym gets the columns of its target when the target is a table or a
+/// view of the same database. `OBJECT_ID` finds the target through a name in
+/// three parts, so the result does not depend on the database of the
+/// connection. A target with no schema gets the empty part of `[db]..[t]`,
+/// which gives the default schema of the user. A synonym with a target on
+/// another server, in another database, or of another type gets one row with
+/// no column, so its name stays in the snapshot.
 fn snapshot_query(catalog: &str) -> String {
     format!(
-        "SELECT c.TABLE_SCHEMA, c.TABLE_NAME, t.TABLE_TYPE, c.COLUMN_NAME, c.DATA_TYPE \
+        "SELECT c.TABLE_SCHEMA, c.TABLE_NAME, t.TABLE_TYPE, c.COLUMN_NAME, c.DATA_TYPE, \
+         c.ORDINAL_POSITION \
          FROM {catalog}.INFORMATION_SCHEMA.COLUMNS AS c \
          JOIN {catalog}.INFORMATION_SCHEMA.TABLES AS t \
            ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME \
-         ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION"
+         UNION ALL SELECT s.name, sy.name, N'SYNONYM', bc.COLUMN_NAME, bc.DATA_TYPE, \
+         bc.ORDINAL_POSITION \
+         FROM {catalog}.sys.synonyms AS sy \
+         JOIN {catalog}.sys.schemas AS s ON s.schema_id = sy.schema_id \
+         OUTER APPLY (SELECT OBJECT_ID(QUOTENAME(@P1) + N'.' \
+             + ISNULL(QUOTENAME(PARSENAME(sy.base_object_name, 2)), N'') + N'.' \
+             + QUOTENAME(PARSENAME(sy.base_object_name, 1))) AS id \
+           WHERE PARSENAME(sy.base_object_name, 4) IS NULL \
+           AND ISNULL(PARSENAME(sy.base_object_name, 3), @P1) = @P1) AS b \
+         LEFT JOIN ({catalog}.INFORMATION_SCHEMA.COLUMNS AS bc \
+           JOIN {catalog}.INFORMATION_SCHEMA.TABLES AS bt \
+             ON bt.TABLE_SCHEMA = bc.TABLE_SCHEMA AND bt.TABLE_NAME = bc.TABLE_NAME) \
+           ON bc.TABLE_SCHEMA = OBJECT_SCHEMA_NAME(b.id, DB_ID(@P1)) \
+           AND bc.TABLE_NAME = OBJECT_NAME(b.id, DB_ID(@P1)) \
+         ORDER BY 1, 2, 6"
     )
+}
+
+/// Reads the column of one row of [`snapshot_query`]. A synonym with no
+/// known column gives a row with no column name, and so no column.
+fn snapshot_column(name: Option<&str>, data_type: Option<&str>) -> Option<SnapshotColumn> {
+    name.map(|name| SnapshotColumn {
+        name: name.to_string(),
+        data_type: data_type.unwrap_or_default().to_string(),
+    })
 }
 
 /// Reads the procedures and the functions of one schema. The name of the
@@ -2955,7 +3005,47 @@ mod tests {
         let text = snapshot_query("[Sales]");
         assert!(text.contains("FROM [Sales].INFORMATION_SCHEMA.COLUMNS AS c"));
         assert!(text.contains("JOIN [Sales].INFORMATION_SCHEMA.TABLES AS t"));
-        assert!(text.contains("ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION"));
+        assert!(text.ends_with("ORDER BY 1, 2, 6"));
+    }
+
+    #[test]
+    fn the_snapshot_statement_gives_a_synonym_the_columns_of_its_target() {
+        let text = snapshot_query("[Sales]");
+        assert!(text.contains("UNION ALL SELECT s.name, sy.name, N'SYNONYM', bc.COLUMN_NAME"));
+        assert!(text.contains("FROM [Sales].sys.synonyms AS sy"));
+        // The target resolves in the database of the snapshot, and an
+        // absent schema stays empty.
+        assert!(text.contains("OBJECT_ID(QUOTENAME(@P1) + N'.'"));
+        assert!(text.contains("ISNULL(QUOTENAME(PARSENAME(sy.base_object_name, 2)), N'')"));
+        // A target on another server or in another database gets no column.
+        assert!(text.contains("WHERE PARSENAME(sy.base_object_name, 4) IS NULL"));
+        assert!(text.contains("AND ISNULL(PARSENAME(sy.base_object_name, 3), @P1) = @P1"));
+        // Only a table or a view gives columns, and a synonym with none
+        // keeps its row.
+        assert!(text.contains("LEFT JOIN ([Sales].INFORMATION_SCHEMA.COLUMNS AS bc"));
+        assert!(text.contains("JOIN [Sales].INFORMATION_SCHEMA.TABLES AS bt"));
+        assert!(text.contains("ON bc.TABLE_SCHEMA = OBJECT_SCHEMA_NAME(b.id, DB_ID(@P1))"));
+        assert!(text.contains("AND bc.TABLE_NAME = OBJECT_NAME(b.id, DB_ID(@P1))"));
+    }
+
+    #[test]
+    fn a_snapshot_row_with_no_column_name_gives_no_column() {
+        assert_eq!(snapshot_column(None, None), None);
+        assert_eq!(
+            snapshot_column(Some("id"), Some("int")),
+            Some(SnapshotColumn {
+                name: "id".into(),
+                data_type: "int".into(),
+            })
+        );
+        assert_eq!(snapshot_column(Some("id"), None).unwrap().data_type, "");
+    }
+
+    #[test]
+    fn the_word_of_a_synonym_names_its_relation_type() {
+        assert_eq!(relation_type_of("SYNONYM"), RelationType::Synonym);
+        assert_eq!(relation_type_of("VIEW"), RelationType::View);
+        assert_eq!(relation_type_of("BASE TABLE"), RelationType::Table);
     }
 
     #[test]
