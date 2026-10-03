@@ -202,7 +202,10 @@ The filter keeps 6 of the 18 rows of the result.
   that fire it, and whether it is disabled. A PostgreSQL replica trigger shows
   the mark `replica`. MS SQL Server, PostgreSQL and SQLite also show the
   triggers of a view. MySQL and MariaDB get an Events folder with
-  the schedule of each event.
+  the schedule of each event. The MySQL and MariaDB CREATE text of a trigger
+  has no `FOLLOWS` or `PRECEDES` clause, so a trigger made again from its text
+  fires after the other triggers with the same timing and event. The guide
+  tells how to keep the order.
 - A filter box keeps the path down to each match.
 - The context menu builds a preview statement in the backend, so every name is
   quoted for the engine. It also builds the statements of an object: a CREATE

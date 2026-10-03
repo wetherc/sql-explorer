@@ -41,6 +41,25 @@ triggers show in the order that they fire: `BEFORE` before `AFTER`, then
 `INSERT`, `UPDATE` and `DELETE`. Triggers with the same timing and event show
 in the order that `FOLLOWS` and `PRECEDES` set.
 
+### Trigger order in a MySQL CREATE text
+
+The `CREATE` text of a MySQL or MariaDB trigger does not keep the place of
+the trigger in the firing order. The server gives the text without a
+`FOLLOWS` or `PRECEDES` clause. This limit applies only to a table with two
+or more triggers that have the same timing and event.
+
+If you drop one of these triggers and run its text, the trigger fires after
+the other triggers of its group. When the triggers change or read the same
+values, a change to the data can then give a different result. The server
+gives no error or warning.
+
+To keep the order of one trigger, edit its text before you run it. After
+`FOR EACH ROW`, add `FOLLOWS` and the name of the trigger above it in the
+list with the same timing and event. For the first trigger of the group, add
+`PRECEDES` and the name of the trigger below it. To make all the triggers of
+a table again, run their texts in the order of the list. Each trigger then
+goes after the triggers before it, and the order stays the same.
+
 A PostgreSQL replica trigger also shows in a paler text, and its hint ends
 with `replica`. PostgreSQL runs a replica trigger only in a session whose
 `session_replication_role` is `replica`, so a normal session does not run
@@ -87,9 +106,9 @@ carries the quotes of its engine:
 A trigger and an event get their `CREATE` text alone, which the engine
 reads from its catalog. On MySQL and MariaDB, a body of more than one
 statement comes between `DELIMITER $$` and `DELIMITER ;`. The editor then
-runs the text as one statement. The MySQL and MariaDB text of a trigger has
-no `FOLLOWS` or `PRECEDES` clause. A trigger that you make again from its
-text fires after the other triggers with the same timing and event.
+runs the text as one statement. The MySQL and MariaDB text of a trigger does
+not keep its place in the firing order. Refer to **Trigger order in a MySQL
+CREATE text** in the Triggers section.
 On PostgreSQL, the `CREATE` text of a view, a materialized view and a trigger names each object of a user schema with
 its schema, so the text runs under any search path. A materialized view and a synonym get their `CREATE`
 text and a `SELECT` alone, and a synonym has no **Properties** item. A foreign table gets a
