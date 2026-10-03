@@ -139,7 +139,7 @@ describe('QueryView', () => {
 
     const select = wrapper.findComponent({ name: 'VSelect' })
     expect(select.props('items')).toEqual([
-      { title: 'Connection that is gone (not open)', value: 'gone' },
+      { title: 'Deleted connection (not open)', value: 'gone' },
     ])
   })
 
@@ -351,7 +351,7 @@ describe('QueryView', () => {
     field.dispatchEvent(new Event('input'))
     await settle()
 
-    expect(document.body.textContent).toContain('Write a number.')
+    expect(document.body.textContent).toContain('Enter a number.')
     const confirm = document.querySelector('[data-test="parameters-confirm"]') as HTMLElement
     expect(confirm.hasAttribute('disabled')).toBe(true)
 
@@ -359,7 +359,7 @@ describe('QueryView', () => {
     field.value = '12'
     field.dispatchEvent(new Event('input'))
     await settle()
-    expect(document.body.textContent).not.toContain('Write a number.')
+    expect(document.body.textContent).not.toContain('Enter a number.')
     ;(document.querySelector('[data-test="parameters-confirm"]') as HTMLElement).click()
     await settle()
 
@@ -541,7 +541,7 @@ describe('QueryView', () => {
     await settle()
 
     expect(document.querySelector('[data-test="parameters-help"]')?.textContent).toContain(
-      'to make a parameter',
+      'by writing',
     )
   })
 
@@ -564,7 +564,7 @@ describe('QueryView', () => {
     const wrapper = await mountView()
     await wrapper.find('[data-test="parameters-button"]').trigger('click')
     await settle()
-    expect(useUiStore().notices[0]?.message).toBe('This statement holds no parameter.')
+    expect(useUiStore().notices[0]?.message).toBe('This statement has no parameters.')
   })
 
   it('reports a failure to read the names of the parameters', async () => {
@@ -685,7 +685,7 @@ describe('QueryView', () => {
     await settle()
     expect(apiStub.explainQuery).not.toHaveBeenCalled()
     const notices = useUiStore().notices
-    expect(notices[notices.length - 1]?.message).toBe('Choose a connection before you read a plan.')
+    expect(notices[notices.length - 1]?.message).toBe('Choose a connection to see the plan.')
   })
 
   it('sends the whole script when Run all is pressed', async () => {

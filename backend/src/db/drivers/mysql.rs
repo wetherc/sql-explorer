@@ -213,8 +213,8 @@ pub fn describe_connect_error(error: mysql_async::Error) -> Error {
     if let mysql_async::Error::Driver(mysql_async::DriverError::UnknownAuthPlugin { name }) = &error
     {
         return Error::Connection(format!(
-            "The server asked for the '{name}' authentication plugin, which this client does not \
-             have. Change the user on the server to 'caching_sha2_password' or to \
+            "The server requested the '{name}' authentication plugin, which this client doesn't \
+             support. Switch the user on the server to 'caching_sha2_password' or \
              'mysql_native_password'."
         ));
     }
@@ -479,7 +479,7 @@ async fn report_warnings(conn: &mut Conn, sink: &mut dyn RowSink) {
             }
         }
         Err(error) => sink.message(Message::warning(format!(
-            "The warnings of the statement could not be read: {error}"
+            "Couldn't read the statement's warnings: {error}"
         ))),
     }
 }
@@ -729,7 +729,7 @@ impl DatabaseDriver for MysqlDriver {
             facts.push(TableFact::new("Collation", collation));
         }
         if let Some(changed) = changed {
-            facts.push(TableFact::new("Last change", changed));
+            facts.push(TableFact::new("Last modified", changed));
         }
         Ok(facts)
     }

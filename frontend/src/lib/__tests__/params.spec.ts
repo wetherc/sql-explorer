@@ -68,13 +68,13 @@ describe('booleanOfText', () => {
 describe('paramProblem', () => {
   it('names a text that the number form refuses', () => {
     expect(paramProblem({ name: 'a', valueType: ParamType.Number, text: 'two' })).toBe(
-      'Write a number.',
+      'Enter a number.',
     )
   })
 
   it('names a text that the true or false form refuses', () => {
     expect(paramProblem({ name: 'a', valueType: ParamType.Boolean, text: 'maybe' })).toBe(
-      'Write true or false.',
+      'Enter true or false.',
     )
     expect(paramProblem({ name: 'a', valueType: ParamType.Boolean, text: ' Yes ' })).toBeNull()
     expect(paramProblem({ name: 'a', valueType: ParamType.Boolean, text: '  ' })).toBeNull()

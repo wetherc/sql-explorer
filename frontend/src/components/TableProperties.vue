@@ -31,7 +31,7 @@
               </tr>
               <tr v-if="details.facts.length === 0">
                 <td class="text-medium-emphasis" data-test="no-facts">
-                  This engine reports no facts for a relation.
+                  This engine doesn't report any properties.
                 </td>
               </tr>
             </tbody>
@@ -43,7 +43,7 @@
               <tr>
                 <th>Name</th>
                 <th>Type</th>
-                <th>Empty values</th>
+                <th>Nullable</th>
                 <th>Key</th>
               </tr>
             </thead>
@@ -66,9 +66,7 @@
                 <td class="text-medium-emphasis">{{ indexRule(index) }}</td>
               </tr>
               <tr v-if="details.indexes.length === 0">
-                <td class="text-medium-emphasis" data-test="no-indexes">
-                  This relation holds no index.
-                </td>
+                <td class="text-medium-emphasis" data-test="no-indexes">No indexes.</td>
               </tr>
             </tbody>
           </v-table>
@@ -85,9 +83,7 @@
                 <td class="text-medium-emphasis">{{ constraintHint(constraint) }}</td>
               </tr>
               <tr v-if="details.constraints.length === 0">
-                <td class="text-medium-emphasis" data-test="no-constraints">
-                  This relation holds no key.
-                </td>
+                <td class="text-medium-emphasis" data-test="no-constraints">No keys.</td>
               </tr>
             </tbody>
           </v-table>

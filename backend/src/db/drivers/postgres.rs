@@ -836,8 +836,8 @@ fn copies_through_the_client(statement: &str) -> bool {
 fn refuse_client_copy(statement: &str) -> Result<()> {
     if copies_through_the_client(statement) {
         return Err(Error::Unsupported(
-            "This client does not support COPY with STDIN or STDOUT. Use COPY with a \
-             file on the server, or use \\copy in psql."
+            "This client doesn't support COPY FROM STDIN or COPY TO STDOUT. Use COPY with a \
+             server-side file, or use \\copy in psql."
                 .to_string(),
         ));
     }
@@ -3326,7 +3326,7 @@ mod tests {
         assert!(response
             .messages
             .iter()
-            .any(|message| message.text.contains("The row limit stopped the read")));
+            .any(|message| message.text.contains("Stopped at the row limit")));
         assert_eq!(rows_affected, Some(5));
 
         task.await.unwrap();

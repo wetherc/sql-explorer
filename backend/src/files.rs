@@ -38,7 +38,7 @@ fn resolved(path: &Path) -> Result<PathBuf> {
     std::fs::canonicalize(path).map_err(|error| {
         Error::Io(std::io::Error::new(
             error.kind(),
-            format!("The path could not be read: {}", path.display()),
+            format!("Couldn't read the path {}", path.display()),
         ))
     })
 }
@@ -46,7 +46,7 @@ fn resolved(path: &Path) -> Result<PathBuf> {
 /// The words that name a path outside every folder the user accepted.
 fn outside_the_roots(path: &Path) -> Error {
     Error::Configuration(format!(
-        "The path '{}' lies outside every folder that you opened.",
+        "The path '{}' isn't inside any folder you've opened.",
         path.display()
     ))
 }
@@ -159,7 +159,7 @@ pub fn read_text(path: &Path) -> Result<String> {
     let size = std::fs::metadata(path)?.len();
     if size > MAX_FILE_BYTES {
         return Err(Error::Configuration(format!(
-            "The file is larger than the editor accepts. The limit is {} MB.",
+            "The file is too large to open in the editor. The limit is {} MB.",
             MAX_FILE_BYTES / (1024 * 1024)
         )));
     }
@@ -313,7 +313,7 @@ mod tests {
 
         let error = path_inside_roots(&outside, &roots).err().unwrap();
         assert_eq!(error.category(), crate::error::ErrorCategory::Configuration);
-        assert!(error.to_string().contains("outside every folder"));
+        assert!(error.to_string().contains("isn't inside any folder"));
 
         // A path that no file holds is refused as well.
         assert!(path_inside_roots(&root.join("gone.sql"), &roots).is_err());
@@ -391,7 +391,7 @@ mod tests {
 
         assert!(path_accepted(&file, &[], &grants).is_ok());
         let error = path_accepted(&beside, &[], &grants).err().unwrap();
-        assert!(error.to_string().contains("outside every folder"));
+        assert!(error.to_string().contains("isn't inside any folder"));
         // A root still admits the paths under it.
         assert!(path_accepted(&beside, std::slice::from_ref(&folder), &grants).is_ok());
     }
@@ -463,7 +463,9 @@ mod tests {
         std::fs::write(&large, vec![b'-'; (MAX_FILE_BYTES + 1) as usize]).unwrap();
         let error = read_text(&large).err().unwrap();
         assert_eq!(error.category(), crate::error::ErrorCategory::Configuration);
-        assert!(error.to_string().contains("larger than the editor accepts"));
+        assert!(error
+            .to_string()
+            .contains("too large to open in the editor"));
 
         assert!(read_text(&root.join("gone.sql")).is_err());
     }

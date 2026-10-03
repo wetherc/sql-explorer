@@ -18,7 +18,7 @@ export function toErrorPayload(error: unknown): ErrorPayload {
   }
   return {
     category: ErrorCategory.Internal,
-    message: 'The operation failed for a reason the application could not read.',
+    message: "The operation failed, and the app couldn't read the error.",
     detail: safeJson(error),
   }
 }
@@ -83,17 +83,17 @@ export function errorIcon(category: ErrorCategory): string {
 export function errorAdvice(payload: ErrorPayload): string {
   switch (payload.category) {
     case ErrorCategory.NotConnected:
-      return 'Open the connection again from the connection list.'
+      return 'Reconnect from the Connections list.'
     case ErrorCategory.Connection:
-      return 'Check the host, the port and the transport setting of the connection.'
+      return "Check the connection's host, port, and transport settings."
     case ErrorCategory.Timeout:
-      return 'Raise the time limit in the connection options, or make the statement smaller.'
+      return 'Increase the timeout in the connection options, or try a smaller statement.'
     case ErrorCategory.Configuration:
-      return 'Correct the connection details and try again.'
+      return 'Fix the connection details and try again.'
     case ErrorCategory.Authentication:
-      return 'Check the authentication method of the connection and the credentials it needs.'
+      return "Check the connection's authentication method and credentials."
     case ErrorCategory.Secret:
-      return 'The keychain of the system refused the password. Type it again and save.'
+      return 'The system keychain rejected the password. Enter it again and save.'
     default:
       return ''
   }

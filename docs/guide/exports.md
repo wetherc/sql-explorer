@@ -9,18 +9,18 @@ order: 8
 You can export a result to a CSV, JSON, Markdown, INSERT or Excel file, or copy
 it to the clipboard. The grid's menu offers two types of export:
 
-- **Export the rows** writes the rows that the grid has, passing them through
+- **Export rows** writes the rows that the grid has, passing them through
   the interface. If you select rows first, it writes only those rows.
-- **Write every row** runs the statement again in the backend and writes each
+- **Export all rows** runs the statement again in the backend and writes each
   row to the file as it arrives, so the rows never reach the interface. These
   entries appear only when the row limit stopped the read, and they offer CSV,
   JSON and Excel files.
 
-**Write every row** runs the statement that produced the result, on that run's
+**Export all rows** runs the statement that produced the result, on that run's
 connection. A pinned result from an older run therefore writes its own rows,
 even after you change the tab's text or connection.
 
-Because it runs the statement again, **Write every row** accepts only statements
+Because it runs the statement again, **Export all rows** accepts only statements
 that read. The backend refuses a statement that contains a word such as
 `INSERT`, `UPDATE`, `DELETE`, `INTO` or `EXEC` outside a string or a comment,
 although it accepts a `FOR UPDATE` clause on PostgreSQL and MySQL.
@@ -55,7 +55,7 @@ The settings have two separate limits by design:
 | Setting          | What it limits                           | Default   |
 | ---------------- | ---------------------------------------- | --------- |
 | Row limit        | The rows that the grid keeps             | 10,000    |
-| Export row limit | The rows that **Write every row** writes | 1,000,000 |
+| Export row limit | The rows that **Export all rows** writes | 1,000,000 |
 
 The grid limit keeps the interface fast, because every row in the grid lives in
 the interface's memory. Each connection also has a **Row limit** in its form's

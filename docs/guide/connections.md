@@ -34,9 +34,9 @@ a password. Type the password in the **Password** box instead.
 
 A connection encrypts its traffic in one of four modes:
 
-- **Verify the certificate**, the default. Use it outside a trusted network.
+- **Verify certificate**, the default. Use it outside a trusted network.
 - **Encrypt, accept any certificate**.
-- **Encrypt when the server offers it**.
+- **Encrypt if the server supports it**.
 - **No encryption**, which sends the credentials and the results across the
   network in clear text.
 
@@ -65,17 +65,17 @@ instance name in **Named instance**, in the form's **Advanced** section.
 
 You can authenticate in four ways:
 
-- **A SQL login**, with a user and a password.
-- **Your own account.** Windows uses SSPI. On macOS and Linux the connection
+- **SQL login**, with a user and a password.
+- **Windows Authentication**, with your own account. Windows uses SSPI. On macOS and Linux the connection
   uses your Kerberos ticket, so run `kinit` first and name the server by its
   full host name.
-- **Microsoft Entra ID through the Azure CLI.** Run `az login` first. Each
+- **Microsoft Entra ID (Azure CLI)**. Run `az login` first. Each
   connection reads a fresh token.
-- **Microsoft Entra ID with an access token** that you paste. A token is valid
+- **Microsoft Entra ID (access token)**, with a token that you paste. A token is valid
   for about one hour, and the application can't renew it, so the form asks for a
   new token once the server refuses the old one.
 
-Your own account and the Azure CLI need no secret. When you save a connection
+Windows Authentication and the Azure CLI need no secret. When you save a connection
 with either method, the application removes any password or token that the
 keychain kept for it.
 

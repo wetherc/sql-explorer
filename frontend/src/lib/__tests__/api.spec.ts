@@ -269,7 +269,7 @@ describe('api', () => {
 
     await expect(
       api.executeQuery({ connectionId: 'c1', requestId: 'r1', query: 'SELECT 1' }, handlers()),
-    ).rejects.toThrow(/frame of the unknown type 99/)
+    ).rejects.toThrow(/frame of unknown type 99/)
   })
 
   it('waits for the frames that arrive after the backend answers', async () => {
@@ -312,7 +312,7 @@ describe('api', () => {
         { connectionId: 'c1', requestId: 'r1', query: 'SELECT 1' },
         handlers(),
       )
-      const outcome = expect(run).rejects.toThrow('The last rows of the run did not arrive.')
+      const outcome = expect(run).rejects.toThrow('The last rows of the result never arrived.')
       await vi.advanceTimersByTimeAsync(LAST_FRAME_WAIT_MS)
       await outcome
     } finally {

@@ -124,7 +124,7 @@ export const useUiStore = defineStore('ui', () => {
   function reportError(error: unknown, options: { kept?: boolean } = {}): ErrorPayload {
     const payload = toErrorPayload(error)
     if (isCancellation(payload)) {
-      info('The statement was stopped.')
+      info('Statement stopped.')
       return payload
     }
     const advice = errorAdvice(payload)

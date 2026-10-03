@@ -258,6 +258,8 @@ export function summariseQuery(query: string, limit = 90): string {
  * uses it, so the user reads the same words wherever the close begins.
  */
 export function stoppedStatementsMessage(count: number): string {
-  const head = count === 1 ? 'One statement is' : `${count} statements are`
-  return `${head} running on this connection. Closing it stops them, and their rows are lost.`
+  if (count === 1) {
+    return 'One statement is running on this connection. Disconnecting stops it, and its rows are lost.'
+  }
+  return `${count} statements are running on this connection. Disconnecting stops them, and their rows are lost.`
 }

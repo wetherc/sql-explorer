@@ -176,7 +176,7 @@ describe('query store', () => {
     const queries = useQueryStore()
     expect(await queries.execute('t1', 'c1', '   ')).toBe(false)
     expect(apiStub.executeQuery).not.toHaveBeenCalled()
-    expect(useUiStore().notices[0]?.message).toBe('There is no statement to run.')
+    expect(useUiStore().notices[0]?.message).toBe('There is nothing to run.')
   })
 
   it('sends the row limit of the connection when it is the smaller one', async () => {
@@ -370,7 +370,7 @@ describe('query store', () => {
     const queries = useQueryStore()
     await queries.execute('t1', 'lost', 'SELECT 1')
     expect(record).toHaveBeenCalledWith(
-      expect.objectContaining({ connectionName: 'Connection that is gone' }),
+      expect.objectContaining({ connectionName: 'Deleted connection' }),
     )
   })
 
@@ -621,7 +621,7 @@ describe('query store', () => {
     await queries.execute('t1', 'c1', 'SELECT 1')
 
     const notice = useUiStore().notices.find((item) => item.level === 'warning')
-    expect(notice?.message).toContain('warning limit of 1 GB')
+    expect(notice?.message).toContain('than the 1 GB warning limit')
     expect(notice?.detail).toContain('$0.01')
   })
 

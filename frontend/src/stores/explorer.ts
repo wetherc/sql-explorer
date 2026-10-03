@@ -557,8 +557,8 @@ export const useExplorerStore = defineStore('explorer', () => {
       snapshots.value = { ...snapshots.value, [key]: markRaw(snapshot) }
       if (!snapshot.complete) {
         ui.warn(
-          `The schema of ${database} is larger than the limit of ${options.maxColumns} columns, ` +
-            'so the editor offers a part of it. Raise the limit in the settings.',
+          `The schema of ${database} has more than ${options.maxColumns} columns, ` +
+            'so autocomplete covers only part of it. Raise the limit in Settings.',
         )
       }
       return snapshot

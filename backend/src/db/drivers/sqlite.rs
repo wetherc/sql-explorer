@@ -93,7 +93,7 @@ impl SqliteDriver {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| {
-                Error::Configuration("A SQLite connection needs the path of a file.".to_string())
+                Error::Configuration("A SQLite connection needs a database file path.".to_string())
             })?
             .to_string();
 
@@ -127,9 +127,11 @@ impl SqliteDriver {
     {
         let connection = self.connection.clone();
         tokio::task::spawn_blocking(move || {
-            let guard = connection
-                .lock()
-                .map_err(|_| Error::Connection("The SQLite connection is not usable.".into()))?;
+            let guard = connection.lock().map_err(|_| {
+                Error::Connection(
+                    "The SQLite connection can't be used. Reconnect and try again.".into(),
+                )
+            })?;
             work(&guard)
         })
         .await
@@ -228,9 +230,11 @@ impl DatabaseDriver for SqliteDriver {
         let connection = self.connection.clone();
         let flag = stop.clone();
         let reader = tokio::task::spawn_blocking(move || {
-            let guard = connection
-                .lock()
-                .map_err(|_| Error::Connection("The SQLite connection is not usable.".into()))?;
+            let guard = connection.lock().map_err(|_| {
+                Error::Connection(
+                    "The SQLite connection can't be used. Reconnect and try again.".into(),
+                )
+            })?;
             let mut rows_affected: Option<u64> = None;
             let mut used = 0;
             for statement in statements {
@@ -300,7 +304,7 @@ impl DatabaseDriver for SqliteDriver {
         let mut response = self.execute_query(&statement, params, options).await?;
         if mode.runs_the_statement() {
             response.messages.push(Message::info(
-                "SQLite reports one plan, so this is the plan it builds before the run.",
+                "SQLite only provides an estimated plan, so this is the plan it builds before running the statement.",
             ));
         }
         Ok(response)
@@ -1183,10 +1187,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(actual
-            .messages
-            .iter()
-            .any(|message| message.text.contains("SQLite reports one plan")));
+        assert!(actual.messages.iter().any(|message| message
+            .text
+            .contains("SQLite only provides an estimated plan")));
     }
 
     #[tokio::test]

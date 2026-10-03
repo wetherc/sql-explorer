@@ -70,13 +70,13 @@ pub struct ErrorPayload {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("No open connection has the identifier '{0}'. Connect first.")]
+    #[error("Connection '{0}' isn't open. Connect to it first.")]
     NotConnected(String),
 
     #[error("{0}")]
     Connection(String),
 
-    #[error("The operation did not finish inside {0} seconds.")]
+    #[error("The operation timed out after {0} seconds.")]
     Timeout(u64),
 
     #[error("The operation was cancelled.")]

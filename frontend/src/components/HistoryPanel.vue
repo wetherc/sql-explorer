@@ -2,7 +2,7 @@
   <div class="history-panel">
     <PanelHeader
       v-model:filter="history.filter"
-      filter-label="Filter the statements"
+      filter-label="Filter statements"
       filter-test-id="history-filter"
     >
       <template #switch>
@@ -12,13 +12,13 @@
         </v-btn-toggle>
       </template>
       <template #actions>
-        <v-tooltip v-if="mode === 'history'" location="bottom" text="Empty the history">
+        <v-tooltip v-if="mode === 'history'" location="bottom" text="Clear history">
           <template #activator="{ props: tip }">
             <v-btn
               v-bind="tip"
               icon="mdi-delete-sweep-outline"
               size="small"
-              aria-label="Empty the history"
+              aria-label="Clear history"
               data-test="clear-history"
               @click="clearing = true"
             />
@@ -62,8 +62,8 @@
         <EmptyState
           v-else
           icon="mdi-history"
-          title="No statement has run yet"
-          hint="Every statement you run appears here, with the time it took."
+          title="No history yet"
+          hint="Statements you run show up here, along with how long they took."
         />
       </template>
 
@@ -88,7 +88,7 @@
                     icon="mdi-delete"
                     size="x-small"
                     color="error"
-                    aria-label="Delete the saved statement"
+                    aria-label="Delete saved statement"
                     data-test="delete-saved"
                     @click.stop="pendingDelete = query"
                   />
@@ -100,17 +100,17 @@
         <EmptyState
           v-else
           icon="mdi-bookmark-outline"
-          title="No statement is saved yet"
-          hint="Save a statement from its tab to open it again later."
+          title="No saved statements"
+          hint="Save a statement from its tab to reopen it later."
         />
       </template>
     </div>
 
     <ConfirmDialog
       :open="clearing"
-      title="Empty the history?"
-      message="Every statement that has run is taken away. Saved statements stay."
-      confirm-text="Empty it"
+      title="Clear history?"
+      message="This removes every statement from the history. Saved statements are kept."
+      confirm-text="Clear"
       danger
       @confirm="confirmClear"
       @cancel="clearing = false"
@@ -119,7 +119,7 @@
     <ConfirmDialog
       :open="pendingDelete !== null"
       title="Delete this saved statement?"
-      :message="`The statement named ${pendingDelete?.name ?? ''} is taken away.`"
+      :message="`This deletes the saved statement ${pendingDelete?.name ?? ''}.`"
       confirm-text="Delete"
       danger
       @confirm="confirmDelete"

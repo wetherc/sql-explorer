@@ -166,7 +166,7 @@ recognises aliases in `FROM`, `JOIN`, `UPDATE` and `INSERT INTO` clauses.
 
 When you expand a database in the tree, the application reads all of that
 database's relations in the background, so completion also knows names that the
-tree hasn't loaded. The **Columns the editor learns** setting controls how much
+tree hasn't loaded. The **Column limit** setting controls how much
 of a large schema this read keeps.
 
 On MS SQL Server, the read includes synonyms. A synonym gets its target's

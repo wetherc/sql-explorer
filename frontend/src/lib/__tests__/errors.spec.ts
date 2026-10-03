@@ -110,10 +110,10 @@ describe('errorAdvice', () => {
   const advise = (category: ErrorCategory) => errorAdvice({ category, message: '', detail: null })
 
   it('gives advice for the categories a user can act on', () => {
-    expect(advise(ErrorCategory.NotConnected)).toContain('Open the connection')
+    expect(advise(ErrorCategory.NotConnected)).toContain('Reconnect')
     expect(advise(ErrorCategory.Connection)).toContain('host')
-    expect(advise(ErrorCategory.Timeout)).toContain('time limit')
-    expect(advise(ErrorCategory.Configuration)).toContain('Correct')
+    expect(advise(ErrorCategory.Timeout)).toContain('timeout')
+    expect(advise(ErrorCategory.Configuration)).toContain('Fix')
     expect(advise(ErrorCategory.Secret)).toContain('keychain')
   })
 

@@ -494,14 +494,14 @@ describe('the reader of the chunks', () => {
   it('refuses a frame and a form that it does not know', () => {
     const first = collect()
     first.stream.feed(new Uint8Array([99]).buffer)
-    expect(first.stream.failure?.message).toMatch(/frame of the unknown type 99/)
+    expect(first.stream.failure?.message).toMatch(/frame of unknown type 99/)
 
     const writer = new Writer()
     writer.u8(FRAME_BEGIN_SET).u32(0).u32(1).text('n').text('int')
     writer.u8(FRAME_CHUNK).u32(0).u32(1).u32(1).u8(9)
     const second = collect()
     second.stream.feed(writer.buffer())
-    expect(second.stream.failure?.message).toMatch(/column of the unknown form 9/)
+    expect(second.stream.failure?.message).toMatch(/column with unknown encoding 9/)
   })
 
   it('keeps a fault that is not an error as words', () => {
@@ -660,7 +660,9 @@ describe('the reader of the chunks', () => {
     stream.feed(writer.buffer())
     const table = sets[0]!
     expect(table.cell(0, 0)).toBe('open')
-    expect(() => table.cell(1, 0)).toThrow(/name the text 5 of a dictionary of 1/)
+    expect(() => table.cell(1, 0)).toThrow(
+      /dictionary entry 5, but the dictionary has only 1 entries/,
+    )
   })
 
   it('gives no value for a column that the chunk does not hold', () => {
@@ -690,7 +692,7 @@ describe('the wait for the end of a run', () => {
       await vi.advanceTimersByTimeAsync(40)
       await settled
       expect(sets).toHaveLength(1)
-      expect(stream.failure?.message).toBe('The last rows of the run did not arrive.')
+      expect(stream.failure?.message).toBe('The last rows of the result never arrived.')
     } finally {
       vi.useRealTimers()
     }

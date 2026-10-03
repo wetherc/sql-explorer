@@ -180,28 +180,28 @@ onMounted(() => {
   // that they reach the command of this application.
   instance.addAction({
     id: 'sql-explorer.run',
-    label: 'Run the statement',
+    label: 'Run statement',
     keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter],
     run: () => emit('run-statement'),
   })
 
   instance.addAction({
     id: 'sql-explorer.runAll',
-    label: 'Run the whole script',
+    label: 'Run script',
     keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter],
     run: () => emit('run-all'),
   })
 
   instance.addAction({
     id: 'sql-explorer.keys',
-    label: 'Show the key list',
+    label: 'Keyboard shortcuts',
     keybindings: [monaco.KeyCode.F1],
     run: () => emit('show-keys'),
   })
 
   instance.addAction({
     id: 'sql-explorer.format',
-    label: 'Format the statement',
+    label: 'Format SQL',
     keybindings: [monaco.KeyMod.Shift | monaco.KeyMod.Alt | monaco.KeyCode.KeyF],
     contextMenuGroupId: 'modification',
     run: () => formatText(),

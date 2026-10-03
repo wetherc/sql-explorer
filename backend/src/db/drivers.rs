@@ -78,7 +78,7 @@ pub trait DatabaseDriver: Send + Sync {
         _sink: &mut dyn RowSink,
     ) -> Result<RunSummary> {
         Err(Error::Unsupported(
-            "This driver does not stream rows.".to_string(),
+            "This driver can't stream rows.".to_string(),
         ))
     }
 
@@ -255,7 +255,7 @@ pub trait DatabaseDriver: Send + Sync {
         _options: &ExecOptions,
     ) -> Result<QueryResponse> {
         Err(Error::Unsupported(
-            "This engine gives no plan of a statement.".to_string(),
+            "This database doesn't support execution plans.".to_string(),
         ))
     }
 
@@ -332,14 +332,14 @@ pub fn number_value(number: &serde_json::Number) -> Option<NumberValue> {
 /// The message a driver gives for a number it cannot bind.
 pub fn number_out_of_range(number: &serde_json::Number) -> Error {
     Error::Configuration(format!(
-        "The parameter {number} is a whole number outside the range this engine accepts."
+        "Parameter value {number} is outside the integer range this database supports."
     ))
 }
 
 /// The message a driver gives for a parameter whose type it cannot bind.
 pub fn parameter_type_refused(value: &JsonValue) -> Error {
     Error::Configuration(format!(
-        "The parameter {value} has a type this driver cannot send."
+        "Parameter value {value} has a type this driver can't send."
     ))
 }
 
@@ -399,7 +399,7 @@ pub fn single_statement(query: &str, dialect: Dialect) -> Result<String> {
     let batches = crate::sql::split_batches(query, dialect);
     if batches.len() > 1 {
         return Err(Error::Configuration(format!(
-            "The text holds {} batches. Select one statement to read its plan.",
+            "The script contains {} batches. Select a single statement to see its plan.",
             batches.len()
         )));
     }
@@ -409,7 +409,7 @@ pub fn single_statement(query: &str, dialect: Dialect) -> Result<String> {
     };
     match statements.len() {
         0 => Err(Error::Configuration(
-            "There is no statement to read a plan for.".to_string(),
+            "There's no statement to show a plan for.".to_string(),
         )),
         1 => Ok(statements[0]
             .trim()
@@ -417,7 +417,7 @@ pub fn single_statement(query: &str, dialect: Dialect) -> Result<String> {
             .trim()
             .to_string()),
         count => Err(Error::Configuration(format!(
-            "The text holds {count} statements. Select one statement to read its plan."
+            "The script contains {count} statements. Select a single statement to see its plan."
         ))),
     }
 }
@@ -676,7 +676,7 @@ pub fn rows_returned_message(count: usize, truncated: bool) -> Message {
     let plural = if count == 1 { "row" } else { "rows" };
     if truncated {
         Message::warning(format!(
-            "{count} {plural} returned. The row limit stopped the read."
+            "{count} {plural} returned. Stopped at the row limit."
         ))
     } else {
         Message::info(format!("{count} {plural} returned."))
@@ -740,7 +740,7 @@ mod tests {
         assert!(many.to_string().contains("2 statements"));
 
         let refused = prefixed_plan("SELECT 1; SELECT 2", Dialect::MsSql, "EXPLAIN").unwrap_err();
-        assert!(refused.to_string().contains("Select one statement"));
+        assert!(refused.to_string().contains("Select a single statement"));
     }
 
     #[test]
@@ -1058,10 +1058,7 @@ mod tests {
         assert_eq!(rows_returned_message(1, false).text, "1 row returned.");
         assert_eq!(rows_returned_message(3, false).level, MessageLevel::Info);
         let stopped = rows_returned_message(2, true);
-        assert_eq!(
-            stopped.text,
-            "2 rows returned. The row limit stopped the read."
-        );
+        assert_eq!(stopped.text, "2 rows returned. Stopped at the row limit.");
         // A read that the limit stopped is a warning, because the answer is
         // not the whole result.
         assert_eq!(stopped.level, MessageLevel::Warning);

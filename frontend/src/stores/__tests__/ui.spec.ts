@@ -86,7 +86,7 @@ describe('ui store', () => {
     expect(ui.notices).toHaveLength(1)
     expect(ui.notices[0]?.level).toBe('error')
     expect(ui.notices[0]?.timeout).toBe(-1)
-    expect(ui.notices[0]?.detail).toContain('Check the host')
+    expect(ui.notices[0]?.detail).toContain("Check the connection's host")
     expect(ui.notices[0]?.detail).toContain('socket closed')
   })
 

@@ -57,7 +57,7 @@ const WORKBOOK_RELATIONSHIPS: &str = concat!(
 /// needs the words of a file and not of a format.
 fn zip_fault(error: zip::result::ZipError) -> crate::error::Error {
     crate::error::Error::Io(std::io::Error::other(format!(
-        "The Excel file could not be written: {error}"
+        "Couldn't write the Excel file: {error}"
     )))
 }
 
@@ -294,7 +294,7 @@ impl<W: Write + Seek> SheetWriter<W> {
     pub fn create(writer: W, sheet: &str, columns: &[String]) -> Result<Self> {
         if columns.len() > MAX_SHEET_COLUMNS {
             return Err(crate::error::Error::Unsupported(format!(
-                "An Excel sheet holds at most {MAX_SHEET_COLUMNS} columns, and the result has {} columns. Export the result as CSV or JSON.",
+                "Excel sheets allow at most {MAX_SHEET_COLUMNS} columns, but this result has {}. Export it as CSV or JSON instead.",
                 columns.len()
             )));
         }

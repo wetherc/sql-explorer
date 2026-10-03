@@ -23,7 +23,7 @@ describe('QueryTabs', () => {
   it('points at the connections when none is open', () => {
     const wrapper = mountWithPlugins(QueryTabs)
     expect(wrapper.text()).toContain('No open tabs')
-    expect(wrapper.text()).toContain('Open a connection first')
+    expect(wrapper.text()).toContain('Connect to a database')
     expect(wrapper.find('[data-test="empty-open-connections"]').exists()).toBe(true)
   })
 
@@ -37,7 +37,7 @@ describe('QueryTabs', () => {
     const wrapper = mountWithPlugins(QueryTabs)
     await useConnectionsStore().load()
     await wrapper.vm.$nextTick()
-    expect(wrapper.text()).toContain('Open a tab to write a statement')
+    expect(wrapper.text()).toContain('Open a new query')
 
     await wrapper.find('[data-test="empty-new-tab"]').trigger('click')
     expect(useTabsStore().tabs).toHaveLength(1)
@@ -310,13 +310,13 @@ describe('QueryTabs asking before it loses work', () => {
     await wrapper.find('[data-test="close-tab"]').trigger('click')
     await settle()
     expect(tabs.tabs).toHaveLength(1)
-    expect(document.body.textContent).toContain('A statement of Report runs')
+    expect(document.body.textContent).toContain('A statement is still running in Report')
     expect(document.body.textContent).not.toContain('are not saved')
 
     tabs.setQuery(tab.id, 'SELECT 2')
     await settle()
-    expect(document.body.textContent).toContain('The changes to Report are not saved')
-    expect(document.body.textContent).toContain('A statement of Report runs')
+    expect(document.body.textContent).toContain('Report has unsaved changes')
+    expect(document.body.textContent).toContain('A statement is still running in Report')
 
     const confirm = document.querySelector('[data-test="confirm-accept"]') as HTMLElement
     confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))

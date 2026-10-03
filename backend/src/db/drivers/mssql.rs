@@ -158,14 +158,16 @@ const AZURE_CLI_PLACES: [&str; 4] = [
 /// Reads the access token out of the JSON that the Azure CLI writes.
 pub fn token_from_cli_output(output: &str) -> Result<String> {
     let value: serde_json::Value = serde_json::from_str(output).map_err(|error| {
-        Error::Authentication(format!("The Azure CLI gave no readable answer: {error}"))
+        Error::Authentication(format!("Couldn't read the Azure CLI output: {error}"))
     })?;
     value
         .get("accessToken")
         .and_then(|token| token.as_str())
         .filter(|token| !token.is_empty())
         .map(str::to_string)
-        .ok_or_else(|| Error::Authentication("The Azure CLI gave no access token.".to_string()))
+        .ok_or_else(|| {
+            Error::Authentication("The Azure CLI didn't return an access token.".to_string())
+        })
 }
 
 /// Reads the moment a JWT access token stops being valid.
@@ -195,14 +197,14 @@ fn token_expiry(token: &str) -> Option<SystemTime> {
 const TOKEN_CLOCK_ALLOWANCE: Duration = Duration::from_secs(60);
 
 /// The words that name an access token which is too old.
-const EXPIRED_TOKEN_MESSAGE: &str = "The access token has expired. Paste a new one, or use the \
-                                     Azure CLI method, which reads a fresh token on each \
+const EXPIRED_TOKEN_MESSAGE: &str = "The access token has expired. Paste a new one, or switch to \
+                                     the Azure CLI method, which gets a fresh token for each \
                                      connection.";
 
 /// The words that report a statement which the row limit ended.
 const ENDED_AT_THE_LIMIT_MESSAGE: &str =
-    "The read reached the row limit, so the statement was ended on the server. Raise the row \
-     limit in the settings to read further.";
+    "Reached the row limit, so the statement was cancelled on the server. To fetch more rows, \
+     raise the row limit in the settings.";
 
 /// The statement that tells whether an attention packet keeps the work of
 /// the session. The packet rolls back the statement that it ends. When the
@@ -258,7 +260,7 @@ async fn azure_cli_token(configured_path: Option<&str>) -> Result<String> {
                 // same answer, so the reason is reported at once.
                 let reason = String::from_utf8_lossy(&output.stderr).trim().to_string();
                 return Err(Error::Authentication(format!(
-                    "The Azure CLI could not give a token. Run `az login` first. {reason}"
+                    "The Azure CLI couldn't get a token. Run `az login` and try again. {reason}"
                 )));
             }
             Err(error) => last = Some(error.to_string()),
@@ -266,7 +268,7 @@ async fn azure_cli_token(configured_path: Option<&str>) -> Result<String> {
     }
 
     Err(Error::Authentication(format!(
-        "The Azure CLI was not found. Give its path in the connection. {}",
+        "Couldn't find the Azure CLI. Enter its path in the connection settings. {}",
         last.unwrap_or_default()
     )))
 }
@@ -288,7 +290,7 @@ async fn auth_method(connection: &SavedConnection) -> Result<AuthMethod> {
             // secret store holds and never reaches the settings file.
             let token = non_empty(connection.password.as_deref()).ok_or_else(|| {
                 Error::Authentication(
-                    "This connection needs an access token. Paste one, or read one from the Azure CLI."
+                    "This connection needs an access token. Paste one, or switch to the Azure CLI method."
                         .to_string(),
                 )
             })?;
@@ -540,8 +542,8 @@ fn describe_login(error: tiberius::error::Error, auth: MssqlAuth) -> Error {
     let text = error.to_string();
     if names_a_ticket_fault(&text) {
         Error::Authentication(format!(
-            "The server refused the account of this user. On macOS and on Linux, run `kinit` to \
-             get a Kerberos ticket, and name the server by its full host name so that the ticket \
+            "The server rejected your Windows credentials. On macOS and Linux, run `kinit` to get a \
+             Kerberos ticket, and use the server's fully qualified host name so the ticket \
              matches. {text}"
         ))
     } else {
@@ -579,7 +581,7 @@ fn names_a_ticket_fault(text: &str) -> bool {
 async fn while_connecting<F: std::future::Future>(limit: Duration, future: F) -> Result<F::Output> {
     tokio::time::timeout(limit, future).await.map_err(|_| {
         Error::Connection(format!(
-            "The server did not finish opening the connection inside {} seconds.",
+            "The server didn't finish opening the connection within {} seconds.",
             limit.as_secs()
         ))
     })
@@ -798,7 +800,7 @@ impl DatabaseDriver for MssqlDriver {
         // a later batch cannot be named.
         if params.is_some() && batches.len() > 1 {
             return Err(Error::Configuration(
-                "A run with parameters takes one batch. Remove the GO separators, or run one \
+                "Parameters only work with a single batch. Remove the GO separators, or run one \
                  batch at a time."
                     .to_string(),
             ));
@@ -892,8 +894,8 @@ impl DatabaseDriver for MssqlDriver {
             // therefore no longer fit for use.
             log::warn!("The plan switch stayed on: {error}");
             return Err(Error::Connection(format!(
-                "The plan switch '{switch}' could not be turned off again, so this connection was \
-                 left in the plan state. Open the connection again. {error}"
+                "Couldn't turn {switch} back off, so this connection still returns plans instead of \
+                 results. Reconnect to fix it. {error}"
             )));
         }
 
@@ -907,7 +909,7 @@ impl DatabaseDriver for MssqlDriver {
         };
         if !found {
             response.messages.push(Message::warning(
-                "The server sent no plan, so these are the sets the statement returned.",
+                "The server didn't return a plan, so these are the result sets the statement returned.",
             ));
         }
         Ok(response)
@@ -1042,7 +1044,7 @@ impl DatabaseDriver for MssqlDriver {
                 ));
             }
             if let Some(changed) = row.try_get::<NaiveDateTime, _>(2)? {
-                facts.push(TableFact::new("Last change", changed.to_string()));
+                facts.push(TableFact::new("Last modified", changed.to_string()));
             }
         }
         Ok(facts)
@@ -1911,7 +1913,7 @@ mod tests {
             .collect();
         assert!(messages
             .iter()
-            .any(|text| text.contains("The row limit stopped the read")));
+            .any(|text| text.contains("Stopped at the row limit")));
         assert!(messages.contains(&ENDED_AT_THE_LIMIT_MESSAGE));
 
         // The session runs a second statement on the same connection.
@@ -2464,7 +2466,7 @@ mod tests {
         assert!(response.results[0].truncated);
         assert_eq!(
             message_texts(&response),
-            ["1 row returned. The row limit stopped the read."]
+            ["1 row returned. Stopped at the row limit."]
         );
         assert_eq!(response.rows_affected, None);
     }
@@ -3649,7 +3651,7 @@ mod tests {
             error.category(),
             crate::error::ErrorCategory::Authentication
         );
-        assert!(error.to_string().contains("was not found"));
+        assert!(error.to_string().contains("Couldn't find the Azure CLI"));
     }
 
     #[test]

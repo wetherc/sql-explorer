@@ -12,7 +12,7 @@ export type ThemeChoice = ThemeName | 'system'
 
 /** The choices the settings offer, in the order the dialog shows them. */
 export const THEME_CHOICES: Array<{ title: string; value: ThemeChoice }> = [
-  { title: 'Follow the system', value: 'system' },
+  { title: 'System', value: 'system' },
   { title: 'Dark', value: 'sqlExplorerDark' },
   { title: 'Light', value: 'sqlExplorerLight' },
 ]

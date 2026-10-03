@@ -13,13 +13,13 @@
         />
       </template>
       <template #actions>
-        <v-tooltip location="bottom" text="Read the connections again">
+        <v-tooltip location="bottom" text="Refresh">
           <template #activator="{ props: tip }">
             <v-btn
               v-bind="tip"
               icon="mdi-refresh"
               size="small"
-              aria-label="Read the connections again"
+              aria-label="Refresh connections"
               data-test="refresh-connections"
               @click="connections.load()"
             />
@@ -68,7 +68,7 @@
                   :color="connections.isActive(connection.id) ? 'error' : 'success'"
                   :loading="connections.connecting[connection.id] === true"
                   size="x-small"
-                  :aria-label="connections.isActive(connection.id) ? 'Close' : 'Open'"
+                  :aria-label="connections.isActive(connection.id) ? 'Disconnect' : 'Connect'"
                   data-test="toggle-connection"
                   @click.stop="toggle(connection)"
                 />
@@ -115,7 +115,7 @@
         v-else
         icon="mdi-lan-pending"
         title="No connections yet"
-        hint="Add a server to see its databases, tables and columns."
+        hint="Add a server to browse its databases, tables, and columns."
       >
         <v-btn
           color="primary"
@@ -148,15 +148,15 @@
       @confirm="confirmDelete(pendingDelete)"
       @cancel="deleting = false"
     >
-      The record for <strong>{{ pendingDelete.name }}</strong> and its password are removed.
+      This removes <strong>{{ pendingDelete.name }}</strong> and its saved password.
     </ConfirmDialog>
 
     <ConfirmDialog
       v-if="pendingDisconnect"
       :open="pendingDisconnect !== null"
-      title="Close this connection?"
+      title="Disconnect?"
       :message="runningMessage(pendingDisconnect.id)"
-      confirm-text="Close it"
+      confirm-text="Disconnect"
       danger
       @confirm="confirmDisconnect(pendingDisconnect)"
       @cancel="pendingDisconnect = null"

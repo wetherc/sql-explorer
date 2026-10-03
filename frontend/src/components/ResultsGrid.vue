@@ -6,7 +6,7 @@
     <PanelHeader
       v-model:filter="search"
       filter-placeholder="Filter rows"
-      filter-label="Filter the rows"
+      filter-label="Filter rows"
       filter-test-id="grid-filter"
     >
       <template #actions>
@@ -27,18 +27,18 @@
               v-bind="menu"
               icon="mdi-content-copy"
               size="small"
-              aria-label="Copy the rows as text"
+              aria-label="Copy rows"
               data-test="grid-copy"
             />
           </template>
           <v-list density="compact">
             <v-list-item
-              title="Copy with the column names"
+              title="Copy with headers"
               data-test="grid-copy-with-names"
               @click="copyAll"
             />
             <v-list-item
-              title="Copy without the column names"
+              title="Copy without headers"
               data-test="grid-copy-without-names"
               @click="copyRowsOnly"
             />
@@ -50,7 +50,7 @@
               v-bind="menu"
               icon="mdi-download"
               size="small"
-              aria-label="Export the rows"
+              aria-label="Export rows"
               data-test="grid-export"
             />
           </template>
@@ -65,20 +65,20 @@
             <template v-if="truncated">
               <v-divider />
               <v-list-item
-                title="Write every row to a CSV file"
-                subtitle="Runs the statement again and writes from the server"
+                title="Export all rows to CSV"
+                subtitle="Re-runs the query and streams rows from the server"
                 data-test="grid-export-all-csv"
                 @click="emit('export-all', 'csv')"
               />
               <v-list-item
-                title="Write every row to a JSON file"
-                subtitle="Runs the statement again and writes from the server"
+                title="Export all rows to JSON"
+                subtitle="Re-runs the query and streams rows from the server"
                 data-test="grid-export-all-json"
                 @click="emit('export-all', 'json')"
               />
               <v-list-item
-                title="Write every row to an Excel file"
-                subtitle="Runs the statement again and writes from the server"
+                title="Export all rows to Excel"
+                subtitle="Re-runs the query and streams rows from the server"
                 data-test="grid-export-all-xlsx"
                 @click="emit('export-all', 'xlsx')"
               />
@@ -86,7 +86,7 @@
             <v-divider v-if="hasSelection" />
             <v-list-item
               v-if="hasSelection"
-              title="Clear the selection"
+              title="Clear selection"
               data-test="grid-clear-selection"
               @click="clearSelection()"
             />
@@ -97,7 +97,7 @@
 
     <div v-if="truncated" class="px-3 py-1">
       <v-alert type="warning" density="compact" variant="tonal" data-test="grid-truncated">
-        The row limit stopped the read at {{ rowTotal.toLocaleString() }} rows.
+        Showing the first {{ rowTotal.toLocaleString() }} rows because of the row limit.
       </v-alert>
     </div>
 
@@ -116,7 +116,7 @@
         <table
           class="grid-table"
           role="grid"
-          aria-label="The rows of the result"
+          aria-label="Result rows"
           :aria-rowcount="sortedOrder.length + 1"
           :aria-colcount="result.columns.length + 1"
           :aria-busy="busy"
@@ -157,7 +157,7 @@
                   class="column-grip"
                   role="separator"
                   aria-orientation="vertical"
-                  :aria-label="`Change the width of the column ${column.name}`"
+                  :aria-label="`Resize column ${column.name}`"
                   tabindex="0"
                   data-test="grid-column-grip"
                   @pointerdown="startResize($event, index)"
@@ -230,24 +230,20 @@
 
     <v-menu v-model="cellMenu.open" :target="[cellMenu.x, cellMenu.y]" data-test="grid-cell-menu">
       <v-list density="compact" min-width="240">
+        <v-list-item title="Copy cell" data-test="grid-menu-copy-cell" @click="copyCellOfMenu" />
+        <v-list-item title="Copy row" data-test="grid-menu-copy-row" @click="copyRowOfMenu" />
         <v-list-item
-          title="Copy this cell"
-          data-test="grid-menu-copy-cell"
-          @click="copyCellOfMenu"
-        />
-        <v-list-item title="Copy this row" data-test="grid-menu-copy-row" @click="copyRowOfMenu" />
-        <v-list-item
-          title="Copy with the column names"
+          title="Copy with headers"
           data-test="grid-menu-copy-with-names"
           @click="copyAll"
         />
         <v-list-item
-          title="Copy without the column names"
+          title="Copy without headers"
           data-test="grid-menu-copy-without-names"
           @click="copyRowsOnly"
         />
         <v-list-item
-          title="Show the whole value"
+          title="View full value"
           data-test="grid-menu-inspect"
           @click="inspectCellOfMenu"
         />
@@ -469,7 +465,7 @@ const filterProgress = ref<number | null>(null)
  * is not a statement that gave no row, so the two states read apart.
  */
 const emptyMessage = computed(() =>
-  rowTotal.value > 0 ? 'No row matches the filter.' : 'This statement returned no rows.',
+  rowTotal.value > 0 ? 'No rows match the filter.' : 'This statement returned no rows.',
 )
 /** The longest a slice of the build holds the main thread. */
 const BUILD_SLICE_MS = 12
@@ -700,7 +696,7 @@ watch([rowTotal, rowTextsVersion], updateOrderLater, { flush: 'sync' })
 const hasSelection = computed(() => selected.value.size > 0)
 
 const exportItems = computed<Array<{ format: ExportFormat; title: string }>>(() => {
-  const scope = hasSelection.value ? 'the selected rows' : 'the rows'
+  const scope = hasSelection.value ? 'selected rows' : 'rows'
   return [
     { format: 'csv', title: `Export ${scope} as CSV` },
     { format: 'json', title: `Export ${scope} as JSON` },

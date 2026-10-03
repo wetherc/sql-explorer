@@ -27,7 +27,7 @@
             ref="titleField"
             v-model="renameText"
             class="tab-title-field"
-            aria-label="The name of the tab"
+            aria-label="Tab name"
             data-test="tab-title-field"
             @click.stop
             @mousedown.stop
@@ -51,13 +51,13 @@
           </v-icon>
         </v-tab>
       </v-tabs>
-      <v-tooltip location="bottom" text="Open a new tab">
+      <v-tooltip location="bottom" text="New tab">
         <template #activator="{ props: tip }">
           <v-btn
             v-bind="tip"
             icon="mdi-plus"
             size="small"
-            aria-label="Open a new tab"
+            aria-label="New tab"
             data-test="new-tab"
             @click="newTab"
           />
@@ -94,7 +94,7 @@
           color="primary"
           variant="flat"
           prepend-icon="mdi-lan-connect"
-          text="Open the connections"
+          text="Show connections"
           data-test="empty-open-connections"
           @click="emit('open-connections')"
         />
@@ -105,7 +105,7 @@
       :open="pendingClose !== null"
       title="Close this tab?"
       :message="closeMessage"
-      confirm-text="Close the tab"
+      confirm-text="Close tab"
       danger
       @confirm="confirmClose"
       @cancel="pendingClose = null"
@@ -169,8 +169,8 @@ const emit = defineEmits<{ (event: 'open-connections'): void }>()
 
 const emptyHint = computed(() =>
   connections.hasActive
-    ? 'Open a tab to write a statement against the connection you selected.'
-    : 'Open a connection first. Its objects then appear in the explorer.',
+    ? 'Open a new query to start writing SQL against the selected connection.'
+    : 'Connect to a database to browse its objects in the explorer.',
 )
 
 function newTab(): void {
@@ -241,10 +241,10 @@ const closeMessage = computed(() => {
   }
   const parts: string[] = []
   if (tab.dirty) {
-    parts.push(`The changes to ${tab.title} are not saved, and closing the tab loses them.`)
+    parts.push(`${tab.title} has unsaved changes that will be lost.`)
   }
   if (isRunning(tab)) {
-    parts.push(`A statement of ${tab.title} runs, and closing the tab stops it.`)
+    parts.push(`A statement is still running in ${tab.title} and will be stopped.`)
   }
   return parts.join(' ')
 })

@@ -77,7 +77,7 @@ impl BufferSink {
     fn open_set(&mut self) -> Result<&mut ResultSet> {
         self.results.last_mut().ok_or_else(|| {
             Error::Anyhow(anyhow::anyhow!(
-                "The driver sent a row before it began a result set."
+                "The driver sent a row before starting a result set."
             ))
         })
     }

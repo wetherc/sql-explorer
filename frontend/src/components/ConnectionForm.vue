@@ -45,7 +45,7 @@
           <v-btn
             icon="mdi-folder-open-outline"
             size="x-small"
-            aria-label="Choose a file"
+            aria-label="Browse for file"
             data-test="choose-file"
             @click="chooseFile"
           />
@@ -79,7 +79,7 @@
           <template #append-inner>
             <v-btn
               :icon="showPassword ? 'mdi-eye-off' : 'mdi-eye'"
-              :aria-label="showPassword ? 'Hide the password' : 'Show the password'"
+              :aria-label="showPassword ? 'Hide password' : 'Show password'"
               :aria-pressed="showPassword"
               size="x-small"
               variant="text"
@@ -104,7 +104,7 @@
         <template #append-inner>
           <v-btn
             :icon="showPassword ? 'mdi-eye-off' : 'mdi-eye'"
-            :aria-label="showPassword ? 'Hide the token' : 'Show the token'"
+            :aria-label="showPassword ? 'Hide token' : 'Show token'"
             :aria-pressed="showPassword"
             size="x-small"
             variant="text"
@@ -117,9 +117,9 @@
       <v-text-field
         v-if="usesAzureCli"
         v-model="draft.options.azureCliPath"
-        label="Path of the Azure CLI"
+        label="Azure CLI path"
         placeholder="az"
-        hint="Give the path when the application cannot find `az` by itself."
+        hint="Only needed if the app can't find `az` on its own."
         persistent-hint
         data-test="azure-cli-path-field"
       />
@@ -195,15 +195,15 @@
         />
         <v-switch
           v-model="draft.options.athenaResultReuse"
-          label="Reuse the result of an earlier run"
-          hint="A reused result scans no data, so it costs nothing."
+          label="Reuse earlier query results"
+          hint="Reused results don't scan any data, so they're free."
           persistent-hint
           data-test="athena-reuse-switch"
         />
         <v-text-field
           v-if="draft.options.athenaResultReuse"
           :model-value="draft.options.athenaResultReuseMaxAgeMinutes"
-          label="Reuse a result up to this age in minutes"
+          label="Maximum result age (minutes)"
           type="number"
           data-test="athena-reuse-age-field"
           @update:model-value="
@@ -231,7 +231,7 @@
                   v-if="draft.options.tlsMode === 'verifyFull'"
                   v-model="draft.options.caCertPath"
                   label="Certificate authority file"
-                  hint="Leave this empty to use the trusted roots of the system."
+                  hint="Leave empty to use the system's trusted roots."
                   persistent-hint
                 />
               </template>
@@ -240,7 +240,7 @@
                 v-if="engine?.supportsIntegratedSecurity"
                 v-model="draft.options.instanceName"
                 label="Named instance"
-                hint="The SQL Browser service resolves the port of a named instance."
+                hint="SQL Browser finds the port for a named instance."
                 persistent-hint
                 data-test="instance-field"
               />
@@ -260,7 +260,7 @@
                   v-model.number="draft.options.maxRows"
                   label="Row limit"
                   type="number"
-                  hint="The Row limit of the settings also holds, and the smaller one wins."
+                  hint="A query stops at this limit or the row limit in Settings, whichever is lower."
                   persistent-hint
                 />
               </div>
@@ -270,7 +270,7 @@
                 label="Max sessions"
                 type="number"
                 min="1"
-                hint="The largest number of tabs that hold a session on this server at one time."
+                hint="How many tabs can have their own session on this server at once."
                 persistent-hint
                 data-test="max-sessions-field"
               />
@@ -287,7 +287,7 @@
               <v-text-field
                 v-model="draft.options.applicationName"
                 label="Application name"
-                hint="The name the server records for this client."
+                hint="The client name the server sees."
                 persistent-hint
               />
 
@@ -295,7 +295,7 @@
                 v-model="draft.options.connectionUrl"
                 label="Connection string"
                 rows="2"
-                hint="When this holds a value, it replaces the host, the port and the database. Type the password in the Password box and not in the string."
+                hint="If set, this overrides the host, port, and database. Enter the password in the Password field, not in the string."
                 persistent-hint
                 data-test="connection-url-field"
               />
@@ -327,8 +327,8 @@
       class="form-problems mx-4 mb-2"
       data-test="keychain-note"
     >
-      The keychain of the system is not reachable. A password or a key that you save here stays
-      until the application closes, and the next start asks for it again.
+      The system keychain isn't available. Passwords and keys you save here last until the app
+      closes, and you'll be asked for them again next time.
     </v-alert>
     <v-alert
       v-if="problems.length > 0"
@@ -396,15 +396,15 @@ const engine = computed(() =>
 )
 
 const tlsItems = [
-  { title: 'Verify the certificate (recommended)', value: TlsMode.VerifyFull },
+  { title: 'Verify certificate (recommended)', value: TlsMode.VerifyFull },
   { title: 'Encrypt, accept any certificate', value: TlsMode.Require },
-  { title: 'Encrypt when the server offers it', value: TlsMode.Prefer },
+  { title: 'Encrypt if the server supports it', value: TlsMode.Prefer },
   { title: 'No encryption', value: TlsMode.Disable },
 ]
 
 const awsSourceItems = [
-  { title: 'A registered AWS profile', value: AwsCredentialSource.Chain },
-  { title: 'Access keys that you paste here', value: AwsCredentialSource.Keys },
+  { title: 'AWS profile', value: AwsCredentialSource.Chain },
+  { title: 'Access keys', value: AwsCredentialSource.Keys },
 ]
 
 const colorItems = [
@@ -417,21 +417,21 @@ const colorItems = [
 const tlsHint = computed(() => {
   switch (draft.value.options.tlsMode) {
     case TlsMode.VerifyFull:
-      return 'The identity of the server is checked. Use this outside a trusted network.'
+      return "Checks the server's identity. Use this outside a trusted network."
     case TlsMode.Require:
-      return 'The traffic is encrypted, but a server that gives a unverified certificate is accepted.'
+      return 'Traffic is encrypted, but unverified certificates are accepted.'
     case TlsMode.Prefer:
-      return 'The connection continues without encryption when the server offers none.'
+      return "Falls back to an unencrypted connection if the server doesn't support encryption."
     default:
-      return 'The credentials and the results cross the network in clear text.'
+      return 'Credentials and results are sent over the network in plain text.'
   }
 })
 
 const authItems = [
   { title: 'SQL login', value: MssqlAuth.SqlLogin },
   { title: 'Windows Authentication', value: MssqlAuth.Integrated },
-  { title: 'Microsoft Entra ID with the Azure CLI', value: MssqlAuth.EntraAzureCli },
-  { title: 'Microsoft Entra ID with an access token', value: MssqlAuth.EntraAccessToken },
+  { title: 'Microsoft Entra ID (Azure CLI)', value: MssqlAuth.EntraAzureCli },
+  { title: 'Microsoft Entra ID (access token)', value: MssqlAuth.EntraAccessToken },
 ]
 
 /** True while the chosen method needs a login and a password. */
@@ -460,30 +460,30 @@ const usesSecretBox = computed(() => needsLogin.value || needsAccessToken.value)
 const authHint = computed(() => {
   switch (draft.value.options.mssqlAuth) {
     case MssqlAuth.Integrated:
-      return "macOS and Linux use the user's Kerberos ticket, so you may need to run `kinit` first."
+      return 'On macOS and Linux this uses your Kerberos ticket, so you may need to run `kinit` first.'
     case MssqlAuth.EntraAzureCli:
-      return 'The application asks the Azure CLI for a token. Run `az login` first.'
+      return 'Gets a token from the Azure CLI. Run `az login` first.'
     case MssqlAuth.EntraAccessToken:
-      return 'Paste a token for https://database.windows.net/. A token lives for about one hour.'
+      return 'Paste a token for https://database.windows.net/. Tokens expire after about an hour.'
     default:
-      return 'A local SQL user login and password.'
+      return 'A SQL Server login and password.'
   }
 })
 
 const tokenHint = computed(() =>
   props.needsNewToken
-    ? 'The stored token is too old. Paste a new token for https://database.windows.net/.'
-    : 'The token is a credential. It goes to the keychain, never to a settings file.',
+    ? 'The saved token has expired. Paste a new token for https://database.windows.net/.'
+    : 'Tokens are saved in the keychain, never in a settings file.',
 )
 
 const passwordHint = computed(() =>
   props.isNew
-    ? "The password is stored in your operating system's keychain."
-    : 'Leave this empty to keep the password that is already stored.',
+    ? 'Your password is saved in the system keychain.'
+    : 'Leave empty to keep the saved password.',
 )
 
 const awsTokenHint = computed(() => {
-  return 'Not required for static IAM keys.'
+  return 'Not needed for long-term IAM keys.'
 })
 
 /** The label and the hint of the read-only switch, or null to hide it. */
@@ -491,16 +491,16 @@ const readOnlySwitch = computed(() => {
   switch (engine.value?.readOnly) {
     case 'session':
       return {
-        label: 'Open a read-only session',
+        label: 'Read-only session',
         hint:
           draft.value.dbType === DbType.Sqlite
-            ? 'The file opens read-only.'
-            : 'The server refuses writes. A SET statement in the session can turn this off.',
+            ? 'Opens the file as read-only.'
+            : 'The server rejects writes. A SET statement in the session can turn this off.',
       }
     case 'intent':
       return {
-        label: 'Ask for a read-only replica',
-        hint: 'The login goes to a readable secondary of an availability group. A primary or a standalone server still accepts writes.',
+        label: 'Read-only replica',
+        hint: 'Connects to a readable secondary in an availability group. A primary or standalone server still accepts writes.',
       }
     default:
       return null
@@ -588,7 +588,7 @@ async function test(): Promise<void> {
 async function saveConnection(): Promise<void> {
   if (props.needsNewToken && needsAccessToken.value && password.value.trim() === '') {
     // The stored token is too old, so an empty box cannot mean "keep it".
-    ui.warn('Paste a new access token, or choose another authentication method.')
+    ui.warn('Paste a new access token or pick a different authentication method.')
     return
   }
   const record = recordToSend()

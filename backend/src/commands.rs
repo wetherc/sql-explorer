@@ -113,9 +113,9 @@ fn refuse_password_in_string(connection: &SavedConnection) -> Result<()> {
     };
     if found {
         return Err(Error::Configuration(
-            "Remove the password from the connection string and type it in the Password box. \
-             The settings file keeps the connection string as plain text, and the keychain \
-             keeps the password."
+            "Remove the password from the connection string and enter it in the Password field. \
+             Connection strings are saved as plain text in the settings file, while passwords \
+             go in the system keychain."
                 .to_string(),
         ));
     }
@@ -144,7 +144,7 @@ pub async fn connect<R: Runtime>(
     let id = connection_id;
     let Some(record) = saved_record(&app, &id)? else {
         return Err(Error::Configuration(format!(
-            "No saved connection carries the identifier '{id}'."
+            "No saved connection has the ID '{id}'."
         )));
     };
     let full = with_secrets(&state, record)?;
@@ -207,7 +207,7 @@ fn with_secrets_for_test<R: Runtime>(
     for (absent, key, name) in held {
         if absent && state.secrets.get(&key)?.is_some() {
             return Err(Error::Configuration(format!(
-                "This record differs from the connection that is saved, so the stored {name} does not belong to it. Type the {name} to test the change."
+                "These settings differ from the saved connection, so the stored {name} can't be used. Enter the {name} to test your changes."
             )));
         }
     }
@@ -224,7 +224,7 @@ pub async fn test_connection<R: Runtime>(
     let full = with_secrets_for_test(&app, &state, connection)?;
     let mut driver = open_driver(&full).await?;
     driver.ping().await?;
-    Ok("The connection works.".to_string())
+    Ok("Connection successful.".to_string())
 }
 
 #[tauri::command]
@@ -308,8 +308,8 @@ async fn session_for<R: Runtime>(
     }
     if key != DEFAULT_SESSION && pool.at_cap().await {
         return Err(Error::Configuration(format!(
-            "This connection already uses {} sessions. Close a tab, or raise the session \
-             limit in the connection options.",
+            "This connection is already using {} sessions. Close a tab or raise Max sessions \
+             in the connection settings.",
             pool.cap()
         )));
     }
@@ -626,7 +626,7 @@ where
 fn limit_reason(error: &Error) -> String {
     match error {
         Error::Timeout(seconds) => format!(
-            "The statement passed the limit of {seconds} seconds, so the connection was closed."
+            "The statement ran longer than {seconds} seconds, so the connection was closed."
         ),
         _ => "The statement was stopped, so the connection was closed.".to_string(),
     }
@@ -675,7 +675,7 @@ pub fn prepare_parameters(
 /// The message for a parameter that the statement names and the request left
 /// out.
 fn missing_parameter(name: &str) -> Error {
-    Error::Configuration(format!("The parameter ':{name}' has no value."))
+    Error::Configuration(format!("Parameter ':{name}' needs a value."))
 }
 
 /// Lists the names of the parameters of a statement. The interface asks for a
@@ -1422,12 +1422,12 @@ async fn object_script(
 ) -> Result<String> {
     if statement != ScriptStatement::Create {
         return Err(Error::Configuration(
-            "A trigger or an event gives a CREATE statement alone.".to_string(),
+            "Triggers and events can only be scripted as CREATE.".to_string(),
         ));
     }
     let no_text = || {
         Error::Configuration(format!(
-            "The engine gives no CREATE text for '{}'.",
+            "The database returned no CREATE script for '{}'.",
             place.name
         ))
     };
@@ -1466,7 +1466,7 @@ fn script_text(
         // The other forms are built from the columns, and a relation that
         // reports none gives no statement at all.
         return Err(Error::Configuration(
-            "The object reports no column, so the statement cannot be built.".to_string(),
+            "The object has no columns, so the statement can't be generated.".to_string(),
         ));
     }
     Ok(match statement {
@@ -2076,7 +2076,7 @@ fn decode_base64(text: &str) -> Result<Vec<u8>> {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD
         .decode(text.as_bytes())
-        .map_err(|error| Error::Configuration(format!("The file content is damaged: {error}")))
+        .map_err(|error| Error::Configuration(format!("The file content is corrupt: {error}")))
 }
 
 /// Runs a statement again with a higher row limit and writes the rows
@@ -2117,7 +2117,7 @@ pub async fn export_query<R: Runtime>(
             session_for(&app, &state, &connection_id, tab_id.as_deref()).await?;
         if !crate::sql::only_reads(&query, open.dialect) {
             return Err(Error::Unsupported(
-                "An export to a file runs the statement again, so it accepts a statement that only reads."
+                "Exporting to a file runs the statement again, so only read-only statements can be exported."
                     .to_string(),
             ));
         }
@@ -2347,7 +2347,7 @@ impl crate::db::sink::RowSink for FileSink {
                 let sheet = self
                     .sheet
                     .as_mut()
-                    .ok_or_else(|| Error::Anyhow(anyhow::anyhow!("The sheet is not open.")))?;
+                    .ok_or_else(|| Error::Anyhow(anyhow::anyhow!("The sheet isn't open.")))?;
                 // A sheet holds a bounded number of rows. The rows past the
                 // bound stay out of the file, and the summary reports the
                 // result as truncated.
@@ -2749,7 +2749,7 @@ mod tests {
 
     #[test]
     fn a_limit_that_ended_a_run_names_the_limit() {
-        assert!(limit_reason(&Error::Timeout(90)).contains("limit of 90 seconds"));
+        assert!(limit_reason(&Error::Timeout(90)).contains("longer than 90 seconds"));
         assert!(limit_reason(&Error::Cancelled).contains("stopped"));
     }
 
@@ -2858,7 +2858,7 @@ mod tests {
     fn an_object_without_columns_gives_no_statement() {
         let error = script_text(Dialect::Sqlite, "\"t\"", ScriptStatement::Insert, &[], None)
             .expect_err("a statement cannot be built");
-        assert!(error.to_string().contains("reports no column"));
+        assert!(error.to_string().contains("has no columns"));
     }
 
     #[test]
@@ -2926,7 +2926,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(select.to_string().contains("CREATE statement alone"));
+        assert!(select.to_string().contains("only be scripted as CREATE"));
 
         // A trigger that is gone gives no text, and SQLite has no event.
         for (name, object_type) in [
@@ -2943,7 +2943,7 @@ mod tests {
             .unwrap_err();
             assert!(error
                 .to_string()
-                .contains(&format!("no CREATE text for '{name}'")));
+                .contains(&format!("no CREATE script for '{name}'")));
         }
     }
 
@@ -3016,7 +3016,7 @@ mod tests {
             connection.options.connection_url = Some(with_password.into());
             let error = refuse_password_in_string(&connection).unwrap_err();
             assert_eq!(error.category(), crate::error::ErrorCategory::Configuration);
-            assert!(error.to_string().contains("Password box"));
+            assert!(error.to_string().contains("Password field"));
             connection.options.connection_url = Some(without.into());
             assert!(refuse_password_in_string(&connection).is_ok());
         }
@@ -3251,7 +3251,7 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(error.category(), crate::error::ErrorCategory::Configuration);
-        assert!(error.to_string().contains("Type the password"));
+        assert!(error.to_string().contains("Enter the password"));
 
         // The same record with the password of the caller goes through, and
         // the store gives nothing to it.
@@ -3709,7 +3709,7 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(error.category(), crate::error::ErrorCategory::Configuration);
-        assert!(error.to_string().contains("session limit"));
+        assert!(error.to_string().contains("Max sessions"));
 
         // The tab that holds a session keeps it, and the default session
         // stays outside the cap.

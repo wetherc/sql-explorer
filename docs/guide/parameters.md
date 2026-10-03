@@ -22,17 +22,17 @@ The bar above the editor lists each of the statement's parameters with its
 current value, and a missing value reads `unset`. Click a name, or click
 **Parameters**, to open the values dialog.
 
-## Value forms
+## Value types
 
-Each value keeps the form that you choose, so a value stays text even when it
+Each value keeps the type that you choose, so a value stays text even when it
 looks like a number, and an identifier such as `007` keeps its leading zeros.
 
-| Form          | What it sends                                 |
+| Type          | What it sends                                 |
 | ------------- | --------------------------------------------- |
 | Text          | The text exactly as you typed it              |
 | Number        | A number. Text that isn't a number is refused |
-| True or false | One of the two words                          |
-| Empty value   | The engine's empty value                      |
+| Boolean       | `true` or `false`                             |
+| NULL          | `NULL`                                        |
 
 If a value is missing when you run the statement, the dialog opens first. The
 values stay with the tab, so the next run doesn't ask again, and they come back

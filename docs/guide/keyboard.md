@@ -18,20 +18,20 @@ show.
 
 ## Editor, tabs and panels
 
-| Keys                             | Action                             |
-| -------------------------------- | ---------------------------------- |
-| `Ctrl`/`Cmd` + `Enter`           | Run the statement under the cursor |
-| `Ctrl`/`Cmd` + `Shift` + `Enter` | Run the whole script               |
-| `Ctrl`/`Cmd` + `S`               | Save the query to a file           |
-| `Shift` + `Alt` + `F`            | Format the statement               |
-| `Ctrl`/`Cmd` + `T` or `N`        | Open a query in a new tab          |
-| `Ctrl`/`Cmd` + `O`               | Open a query from a file           |
-| `Ctrl`/`Cmd` + `Shift` + `O`     | Open a folder of queries           |
-| `Ctrl`/`Cmd` + `W`               | Close the tab                      |
-| `Ctrl`/`Cmd` + `1` to `4`        | Show one of the four side panels   |
-| `Ctrl`/`Cmd` + `B`               | Show or hide the side panel        |
-| `Ctrl`/`Cmd` + `J`               | Show or hide the results panel     |
-| `Ctrl`/`Cmd` + `,`               | Open the settings                  |
+| Keys                             | Action                           |
+| -------------------------------- | -------------------------------- |
+| `Ctrl`/`Cmd` + `Enter`           | Run statement                    |
+| `Ctrl`/`Cmd` + `Shift` + `Enter` | Run script                       |
+| `Ctrl`/`Cmd` + `S`               | Save query                       |
+| `Shift` + `Alt` + `F`            | Format SQL                       |
+| `Ctrl`/`Cmd` + `T` or `N`        | New query                        |
+| `Ctrl`/`Cmd` + `O`               | Open query…                      |
+| `Ctrl`/`Cmd` + `Shift` + `O`     | Open folder…                     |
+| `Ctrl`/`Cmd` + `W`               | Close tab                        |
+| `Ctrl`/`Cmd` + `1` to `4`        | Show one of the four side panels |
+| `Ctrl`/`Cmd` + `B`               | Toggle side panel                |
+| `Ctrl`/`Cmd` + `J`               | Toggle results panel             |
+| `Ctrl`/`Cmd` + `,`               | Open settings                    |
 
 ## Object explorer
 

@@ -3,17 +3,17 @@
     <PanelHeader
       v-model:filter="explorer.filter"
       filter-placeholder="Filter objects"
-      filter-label="Filter the objects"
+      filter-label="Filter objects"
       filter-test-id="explorer-filter"
     >
       <template #actions>
-        <v-tooltip location="bottom" text="Read the objects again">
+        <v-tooltip location="bottom" text="Refresh">
           <template #activator="{ props: tip }">
             <v-btn
               v-bind="tip"
               icon="mdi-refresh"
               size="small"
-              aria-label="Read the objects again"
+              aria-label="Refresh objects"
               data-test="explorer-refresh"
               @click="refreshRoots"
             />
@@ -43,7 +43,7 @@
           variant="flat"
           size="small"
           prepend-icon="mdi-lan-connect"
-          text="Open a connection"
+          text="Show connections"
           data-test="explorer-open-connections"
           @click="emit('open-connections')"
         />
@@ -86,7 +86,7 @@
         <v-list-item
           v-if="isRelation(menuNode)"
           prepend-icon="mdi-format-list-bulleted"
-          title="Copy the name"
+          title="Copy name"
           data-test="menu-copy-name"
           @click="copyName(menuNode)"
         />
@@ -100,14 +100,14 @@
         <v-list-item
           v-if="isExpandable(menuNode)"
           prepend-icon="mdi-refresh"
-          title="Read this branch again"
+          title="Refresh"
           data-test="menu-refresh"
           @click="explorer.refresh(menuNode, openKeys)"
         />
         <v-list-item
           v-if="menuNode.nodeType === 'connection'"
           prepend-icon="mdi-lan-disconnect"
-          title="Close this connection"
+          title="Disconnect"
           data-test="menu-disconnect"
           @click="disconnectHere(menuNode)"
         />
@@ -117,9 +117,9 @@
     <ConfirmDialog
       v-if="pendingDisconnect"
       :open="pendingDisconnect !== null"
-      title="Close this connection?"
+      title="Disconnect?"
       :message="stoppedStatementsMessage(queries.runningOn(pendingDisconnect))"
-      confirm-text="Close it"
+      confirm-text="Disconnect"
       danger
       @confirm="confirmDisconnect(pendingDisconnect)"
       @cancel="pendingDisconnect = null"
@@ -180,13 +180,11 @@ function openProperties(node: ExplorerNode): void {
  */
 const menuNode = computed(() => menu.node)
 
-const emptyTitle = computed(() =>
-  connections.hasActive ? 'Nothing matches the filter' : 'No open connection',
-)
+const emptyTitle = computed(() => (connections.hasActive ? 'No matches' : 'No open connections'))
 const emptyHint = computed(() =>
   connections.hasActive
-    ? 'Clear the filter to see the whole tree.'
-    : 'Open a connection to see its databases, tables and columns.',
+    ? 'Clear the filter to see everything.'
+    : 'Connect to a server to browse its databases, tables, and columns.',
 )
 
 async function onActivate(node: ExplorerNode): Promise<void> {
@@ -347,7 +345,7 @@ async function copyName(node: ExplorerNode): Promise<void> {
     if (clipboard) {
       await clipboard.writeText(quoted)
     }
-    ui.success('The name is on the clipboard.')
+    ui.success('Name copied.')
   } catch (error) {
     ui.reportError(error)
   }

@@ -137,7 +137,7 @@ export const useHistoryStore = defineStore('history', () => {
     try {
       await api.clearHistory()
       entries.value = []
-      ui.success('The history is empty.')
+      ui.success('History cleared.')
     } catch (error) {
       ui.reportError(error)
     }
@@ -151,7 +151,7 @@ export const useHistoryStore = defineStore('history', () => {
     folder?: string | null
   }): Promise<SavedQuery | null> {
     if (!query.name.trim()) {
-      ui.warn('A saved statement needs a name.')
+      ui.warn('Enter a name for the saved statement.')
       return null
     }
     const record: SavedQuery = {
@@ -165,7 +165,7 @@ export const useHistoryStore = defineStore('history', () => {
     try {
       await api.saveQuery(record)
       savedQueries.value = await api.getSavedQueries()
-      ui.success(`The statement '${record.name}' is saved.`)
+      ui.success(`Saved statement '${record.name}'.`)
       return record
     } catch (error) {
       ui.reportError(error)

@@ -217,13 +217,13 @@ export const useQueryStore = defineStore('query', () => {
   ): Promise<boolean> {
     const trimmed = query.trim()
     if (trimmed === '') {
-      ui.warn('There is no statement to run.')
+      ui.warn('There is nothing to run.')
       return false
     }
 
     const state = stateFor(tabId)
     if (state.running) {
-      ui.warn('This tab already runs a statement.')
+      ui.warn('A statement is already running in this tab.')
       return false
     }
 
@@ -316,7 +316,7 @@ export const useQueryStore = defineStore('query', () => {
       recordScan(state.stats)
       succeeded = true
       if (run.fresh.some((table) => table.truncated)) {
-        ui.warn('The row limit stopped the read. Raise it in the settings to see more rows.')
+        ui.warn('Results stopped at the row limit. Raise the limit in Settings to see more rows.')
       }
     } catch (error) {
       // The messages of the tab hold the same failure, with its whole detail,
@@ -432,8 +432,8 @@ export const useQueryStore = defineStore('query', () => {
     if (bytes > limit) {
       const cost = scanCost(bytes, settings.settings.athenaPricePerTerabyte)
       ui.warn(
-        `That statement scanned more than the warning limit of ${settings.settings.athenaScanWarningGb} GB.`,
-        `The estimated cost is $${cost.toFixed(2)}. Change the limit in the settings.`,
+        `That statement scanned more than the ${settings.settings.athenaScanWarningGb} GB warning limit.`,
+        `Estimated cost: $${cost.toFixed(2)}. You can change the limit in Settings.`,
       )
     }
   }
@@ -478,7 +478,7 @@ export const useQueryStore = defineStore('query', () => {
       const kept = state.panes.filter((item) => item.pinned).length
       if (kept >= settings.settings.maxPinnedResults) {
         ui.warn(
-          `This tab already keeps ${kept} results. Close one, or raise the limit in the settings.`,
+          `This tab already has ${kept} pinned results. Unpin one, or raise the limit in Settings.`,
         )
         return
       }

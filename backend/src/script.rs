@@ -86,7 +86,7 @@ pub fn update_statement(dialect: Dialect, name: &str, columns: &[AppColumn]) -> 
     });
 
     let where_clause = if keys.is_empty() {
-        "    1 = 0; -- No primary key was found. Name the rows to change.".to_string()
+        "    1 = 0; -- No primary key found. Add a condition for the rows to update.".to_string()
     } else {
         let last = keys.len() - 1;
         keys.iter()
@@ -136,8 +136,8 @@ pub fn create_draft(dialect: Dialect, name: &str, columns: &[AppColumn]) -> Stri
     }
 
     format!(
-        "-- This text is a draft, built from the column list.\n\
-         -- It holds no index, no default, no other constraint and no collation.\n\
+        "-- Draft generated from the column list.\n\
+         -- Indexes, defaults, other constraints and collations are not included.\n\
          CREATE TABLE {name} (\n{}\n);",
         lines.join(",\n")
     )
@@ -254,8 +254,9 @@ mod tests {
     fn an_update_without_a_key_matches_no_row() {
         let columns = vec![column("name", "text", true, false)];
         let text = update_statement(Dialect::Sqlite, "\"t\"", &columns);
-        assert!(text
-            .ends_with("WHERE\n    1 = 0; -- No primary key was found. Name the rows to change."));
+        assert!(text.ends_with(
+            "WHERE\n    1 = 0; -- No primary key found. Add a condition for the rows to update."
+        ));
     }
 
     #[test]
@@ -269,7 +270,7 @@ mod tests {
     #[test]
     fn a_draft_holds_the_types_the_null_rule_and_the_key() {
         let text = create_draft(Dialect::MsSql, "[dbo].[t]", &two_columns());
-        assert!(text.starts_with("-- This text is a draft, built from the column list."));
+        assert!(text.starts_with("-- Draft generated from the column list."));
         assert!(text.contains("CREATE TABLE [dbo].[t] (\n    [id] int NOT NULL,"));
         assert!(text.contains("    [name] nvarchar(50) NULL,"));
         assert!(text.ends_with("    PRIMARY KEY ([id])\n);"));

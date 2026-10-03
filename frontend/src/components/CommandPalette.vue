@@ -8,13 +8,13 @@
           v-model="filter"
           autofocus
           hide-details
-          placeholder="Type the name of a command"
+          placeholder="Type a command"
           prepend-inner-icon="mdi-magnify"
           role="combobox"
           aria-expanded="true"
           aria-controls="palette-listbox"
           :aria-activedescendant="activeId"
-          aria-label="Type the name of a command"
+          aria-label="Search commands"
           data-test="palette-filter"
           @keydown.down.prevent="move(1)"
           @keydown.up.prevent="move(-1)"
@@ -50,7 +50,7 @@
         </v-list-item>
 
         <v-list-item v-if="matches.length === 0" role="presentation" data-test="palette-empty">
-          <v-list-item-title class="text-medium-emphasis">No command matches.</v-list-item-title>
+          <v-list-item-title class="text-medium-emphasis">No matching commands</v-list-item-title>
         </v-list-item>
       </v-list>
     </v-card>

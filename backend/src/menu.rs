@@ -47,7 +47,7 @@ pub const FILE_COMMANDS: [MenuCommand; 4] = [
     },
     MenuCommand {
         id: "file.openFolder",
-        label: "Open a Folder",
+        label: "Open Folder…",
         accelerator: "CmdOrCtrl+Shift+O",
     },
     MenuCommand {

@@ -201,7 +201,7 @@ export function toXlsx(result: ResultSet, name = 'Result'): Uint8Array {
   if (count > MAX_SHEET_COLUMNS) {
     const payload: ErrorPayload = {
       category: ErrorCategory.Unsupported,
-      message: `An Excel sheet holds at most ${MAX_SHEET_COLUMNS} columns, and the result has ${count} columns. Export the result as CSV or JSON.`,
+      message: `Excel sheets allow at most ${MAX_SHEET_COLUMNS} columns, but this result has ${count}. Export it as CSV or JSON instead.`,
       detail: null,
     }
     // The error is also a payload, so the notice shows the category of the fault.

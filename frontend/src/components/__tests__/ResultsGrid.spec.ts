@@ -102,7 +102,7 @@ describe('ResultsGrid', () => {
       await vi.runAllTimersAsync()
       await wrapper.vm.$nextTick()
 
-      expect(wrapper.find('[data-test="grid-empty"]').text()).toBe('No row matches the filter.')
+      expect(wrapper.find('[data-test="grid-empty"]').text()).toBe('No rows match the filter.')
     } finally {
       vi.useRealTimers()
     }
@@ -578,7 +578,7 @@ describe('ResultsGrid', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
 
     const items = [...document.querySelectorAll('[data-test="grid-export-item"]')]
-    expect(items[0]?.textContent).toContain('the selected rows')
+    expect(items[0]?.textContent).toContain('selected rows')
     items[0]?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     const asked = wrapper.emitted('export') as Array<[string, ResultSet]>
     expect(asked[0]![1].rows).toEqual([[2, 'Grace']])
@@ -737,7 +737,7 @@ describe('ResultsGrid as a grid a reader can follow', () => {
     const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
     const table = grid(wrapper)
 
-    expect(table.attributes('aria-label')).toBe('The rows of the result')
+    expect(table.attributes('aria-label')).toBe('Result rows')
     // The count holds the row of the headers as well as the three rows.
     expect(table.attributes('aria-rowcount')).toBe('4')
     expect(table.attributes('aria-colcount')).toBe('3')

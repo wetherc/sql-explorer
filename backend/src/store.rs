@@ -163,7 +163,7 @@ pub fn read_saved_queries<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<SavedQue
 pub fn write_saved_query<R: Runtime>(app: &AppHandle<R>, query: &SavedQuery) -> Result<()> {
     if query.id.trim().is_empty() {
         return Err(Error::Configuration(
-            "A saved statement needs an identifier.".to_string(),
+            "A saved statement needs an ID.".to_string(),
         ));
     }
     edit_queries(

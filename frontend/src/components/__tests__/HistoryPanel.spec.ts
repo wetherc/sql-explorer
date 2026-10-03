@@ -42,10 +42,10 @@ describe('HistoryPanel', () => {
 
   it('says so when nothing has run and nothing is saved', async () => {
     const wrapper = mountWithPlugins(HistoryPanel)
-    expect(wrapper.text()).toContain('No statement has run yet')
+    expect(wrapper.text()).toContain('No history yet')
 
     await wrapper.find('[data-test="mode-saved"]').trigger('click')
-    expect(wrapper.text()).toContain('No statement is saved yet')
+    expect(wrapper.text()).toContain('No saved statements')
   })
 
   it('lists the statements that ran, with the facts of each one', async () => {
@@ -277,7 +277,7 @@ describe('HistoryPanel height', () => {
     delete globalThis.ResizeObserver
     try {
       const wrapper = mountWithPlugins(HistoryPanel)
-      expect(wrapper.text()).toContain('No statement has run yet')
+      expect(wrapper.text()).toContain('No history yet')
       wrapper.unmount()
     } finally {
       globalThis.ResizeObserver = held

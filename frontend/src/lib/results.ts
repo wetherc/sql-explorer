@@ -282,7 +282,9 @@ function dictValue(column: Extract<SegmentColumn, { encoding: 'dict' }>, row: nu
   }
   const code = column.codes[row] ?? 0
   if (code >= column.ends.length) {
-    throw new Error(`The rows name the text ${code} of a dictionary of ${column.ends.length}.`)
+    throw new Error(
+      `The result refers to dictionary entry ${code}, but the dictionary has only ${column.ends.length} entries.`,
+    )
   }
   const held = column.cache[code]
   if (held !== undefined) {
@@ -457,7 +459,7 @@ export class ResultStream {
   private armIdle(): void {
     this.stopIdle()
     this.idleTimer = setTimeout(() => {
-      this.fault = new Error('The last rows of the run did not arrive.')
+      this.fault = new Error('The last rows of the result never arrived.')
       this.wake()
     }, this.idleMs)
   }
@@ -490,7 +492,7 @@ export class ResultStream {
           at = this.readEnd(view, buffer, at)
           break
         default:
-          throw new Error(`The rows hold a frame of the unknown type ${frameType}.`)
+          throw new Error(`The result contains a frame of unknown type ${frameType}.`)
       }
     }
   }
@@ -586,7 +588,7 @@ function readColumn(
   // A form the reader does not know says nothing about the bytes that
   // follow it, so the walk of the frames stops here and not further along.
   if (encoding > ENCODING_DICT) {
-    throw new Error(`The rows hold a column of the unknown form ${encoding}.`)
+    throw new Error(`The result contains a column with unknown encoding ${encoding}.`)
   }
   const nulls = readMask(buffer, at, rows)
   switch (encoding) {

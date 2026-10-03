@@ -52,7 +52,7 @@ describe('DbExplorer', () => {
 
   it('points at the connections when none is open', () => {
     const wrapper = mountWithPlugins(DbExplorer)
-    expect(wrapper.text()).toContain('No open connection')
+    expect(wrapper.text()).toContain('No open connections')
     expect(wrapper.find('[data-test="explorer-open-connections"]').exists()).toBe(true)
   })
 
@@ -117,7 +117,7 @@ describe('DbExplorer', () => {
     // The filter of the tree holds the text for a short pause.
     await new Promise((resolve) => setTimeout(resolve, FILTER_DELAY_MS + 20))
     await wrapper.vm.$nextTick()
-    expect(wrapper.text()).toContain('Nothing matches the filter')
+    expect(wrapper.text()).toContain('No matches')
   })
 
   it('builds the preview statement in the backend and runs it', async () => {

@@ -194,7 +194,7 @@ describe('toXlsx', () => {
       message: expect.stringContaining('16384'),
       detail: null,
     })
-    expect((caught as Error).message).toContain('16385 columns')
+    expect((caught as Error).message).toContain('this result has 16385')
 
     const parts = unzipSync(toXlsx(wide(MAX_SHEET_COLUMNS)))
     expect(strFromU8(parts['xl/worksheets/sheet1.xml']!)).toContain('<c r="XFD1" t="inlineStr">')

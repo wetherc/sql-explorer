@@ -1,7 +1,7 @@
 <template>
   <div class="query-view">
     <div class="toolbar d-flex align-center ga-2 px-2 py-1">
-      <v-tooltip location="bottom" text="Run the statement under the cursor (Ctrl/Cmd + Enter)">
+      <v-tooltip location="bottom" text="Run statement at cursor (Ctrl/Cmd + Enter)">
         <template #activator="{ props: tip }">
           <v-btn
             v-bind="tip"
@@ -18,7 +18,7 @@
         </template>
       </v-tooltip>
 
-      <v-tooltip location="bottom" text="Run the whole script (Ctrl/Cmd + Shift + Enter)">
+      <v-tooltip location="bottom" text="Run script (Ctrl/Cmd + Shift + Enter)">
         <template #activator="{ props: tip }">
           <v-btn
             v-bind="tip"
@@ -47,7 +47,7 @@
 
       <v-divider vertical class="mx-1" />
 
-      <v-tooltip location="bottom" text="Lay out the statement (Shift + Alt + F)">
+      <v-tooltip location="bottom" text="Format SQL (Shift + Alt + F)">
         <template #activator="{ props: tip }">
           <v-btn
             v-bind="tip"
@@ -60,7 +60,7 @@
         </template>
       </v-tooltip>
 
-      <v-tooltip location="bottom" text="Give the values of the named parameters">
+      <v-tooltip location="bottom" text="Set parameter values">
         <template #activator="{ props: tip }">
           <v-btn
             v-bind="tip"
@@ -87,11 +87,11 @@
         <v-list density="compact">
           <v-list-item data-test="plan-estimated" @click="readPlan(PlanMode.Estimated)">
             <v-list-item-title>Estimated plan</v-list-item-title>
-            <v-list-item-subtitle>The statement does not run.</v-list-item-subtitle>
+            <v-list-item-subtitle>Doesn't run the statement</v-list-item-subtitle>
           </v-list-item>
           <v-list-item data-test="plan-actual" @click="askForActualPlan()">
             <v-list-item-title>Actual plan</v-list-item-title>
-            <v-list-item-subtitle>The statement runs.</v-list-item-subtitle>
+            <v-list-item-subtitle>Runs the statement</v-list-item-subtitle>
           </v-list-item>
         </v-list>
       </v-menu>
@@ -123,8 +123,8 @@
         size="small"
         variant="text"
         icon="mdi-bookmark-outline"
-        aria-label="Save this statement in the library"
-        title="Save this statement in the library"
+        aria-label="Save to library"
+        title="Save to library"
         data-test="save-query-button"
         @click="savingQuery = true"
       />
@@ -204,7 +204,7 @@
                   mdi-pin
                 </v-icon>
                 <span>{{ paneLabel(pane) }}</span>
-                <span v-if="pane.pinned" class="app-visually-hidden">, kept</span>
+                <span v-if="pane.pinned" class="app-visually-hidden">, pinned</span>
               </v-tab>
               <v-tab :value="MESSAGES_TAB" data-test="messages-tab">
                 Messages
@@ -216,7 +216,7 @@
               <template v-if="activePane">
                 <v-tooltip
                   location="bottom"
-                  :text="activePane.pinned ? 'Let this result go' : 'Keep this result'"
+                  :text="activePane.pinned ? 'Unpin result' : 'Pin result'"
                 >
                   <template #activator="{ props: tip }">
                     <v-btn
@@ -224,19 +224,19 @@
                       :icon="activePane.pinned ? 'mdi-pin' : 'mdi-pin-outline'"
                       :color="activePane.pinned ? 'warning' : undefined"
                       size="small"
-                      :aria-label="activePane.pinned ? 'Let this result go' : 'Keep this result'"
+                      :aria-label="activePane.pinned ? 'Unpin result' : 'Pin result'"
                       data-test="pin-result"
                       @click="queries.togglePin(tab.id, activePane.id)"
                     />
                   </template>
                 </v-tooltip>
-                <v-tooltip location="bottom" text="Close this result">
+                <v-tooltip location="bottom" text="Close result">
                   <template #activator="{ props: tip }">
                     <v-btn
                       v-bind="tip"
                       icon="mdi-close"
                       size="small"
-                      aria-label="Close this result"
+                      aria-label="Close result"
                       data-test="close-result"
                       @click="queries.closePane(tab.id, activePane.id)"
                     />
@@ -246,11 +246,7 @@
 
               <v-tooltip
                 location="bottom"
-                :text="
-                  resultsBelow
-                    ? 'Move the results beside the editor'
-                    : 'Move the results below the editor'
-                "
+                :text="resultsBelow ? 'Move results to the right' : 'Move results below the editor'"
               >
                 <template #activator="{ props: tip }">
                   <v-btn
@@ -258,9 +254,7 @@
                     :icon="resultsBelow ? 'mdi-dock-right' : 'mdi-dock-bottom'"
                     size="small"
                     :aria-label="
-                      resultsBelow
-                        ? 'Move the results beside the editor'
-                        : 'Move the results below the editor'
+                      resultsBelow ? 'Move results to the right' : 'Move results below the editor'
                     "
                     data-test="move-results"
                     @click="layout.toggleResultsOrientation()"
@@ -268,13 +262,13 @@
                 </template>
               </v-tooltip>
 
-              <v-tooltip location="bottom" text="Put the results away">
+              <v-tooltip location="bottom" text="Hide results">
                 <template #activator="{ props: tip }">
                   <v-btn
                     v-bind="tip"
                     icon="mdi-chevron-down"
                     size="small"
-                    aria-label="Put the results away"
+                    aria-label="Hide results"
                     data-test="collapse-results"
                     @click="layout.setResultsCollapsed(true)"
                   />
@@ -336,7 +330,7 @@
                 class="text-medium-emphasis"
                 data-test="no-messages"
               >
-                Run a statement to see its messages here.
+                Messages from the server appear here when you run a statement.
               </div>
             </div>
           </div>
@@ -357,7 +351,7 @@
         icon="mdi-chevron-up"
         size="small"
         variant="text"
-        aria-label="Bring the results back"
+        aria-label="Show results"
         data-test="expand-results"
         @click="layout.setResultsCollapsed(false)"
       />
@@ -365,12 +359,12 @@
 
     <AppDialog v-model="askingTable" max-width="420">
       <v-card>
-        <v-card-title class="text-subtitle-1">Name the table</v-card-title>
+        <v-card-title class="text-subtitle-1">Target table</v-card-title>
         <v-card-text>
           <v-text-field
             v-model="insertTable"
             label="Table"
-            hint="The name the INSERT statements write to."
+            hint="The table name used in the INSERT statements."
             persistent-hint
             autofocus
             data-test="insert-table-name"
@@ -391,10 +385,10 @@
 
     <AppDialog v-model="askingParams" max-width="520">
       <v-card ref="paramCard">
-        <v-card-title class="text-subtitle-1">Give the values of the parameters</v-card-title>
+        <v-card-title class="text-subtitle-1">Parameter values</v-card-title>
         <v-card-text class="d-flex flex-column ga-3">
           <div class="text-caption text-medium-emphasis" data-test="parameters-help">
-            Write <code>:name</code> in the statement to make a parameter.
+            Add a parameter by writing <code>:name</code> in the statement.
           </div>
           <div
             v-for="row of paramRows"
@@ -408,7 +402,7 @@
               :items="PARAM_TYPES"
               item-title="title"
               item-value="value"
-              label="Form"
+              label="Type"
               hide-details
               class="param-type"
               :data-test="`parameter-type-${row.name}`"
@@ -439,7 +433,7 @@
           <v-btn text="Cancel" data-test="parameters-cancel" @click="cancelParams" />
           <v-btn
             color="primary"
-            text="Use these values"
+            text="Apply"
             :disabled="paramsAreWrong"
             data-test="parameters-confirm"
             @click="confirmParams"
@@ -450,10 +444,10 @@
 
     <ConfirmDialog
       :open="askingPlan"
-      title="Run the statement for its plan"
-      message="The actual plan comes from a real run. The statement runs on the server, so a
-               statement that writes rows writes them, and a statement on Athena scans data."
-      confirm-text="Run it"
+      title="Run statement for actual plan?"
+      message="To get the actual plan, the server has to run the statement. Any rows it writes
+               are really written, and on Athena the query scans data you pay for."
+      confirm-text="Run"
       @confirm="confirmActualPlan"
       @cancel="askingPlan = false"
     />
@@ -461,8 +455,8 @@
     <ConfirmDialog
       :open="pendingConnection !== null"
       title="Change the connection?"
-      message="A statement of this tab runs, and a change of the connection stops it."
-      confirm-text="Stop it and change"
+      message="A statement is running in this tab. Changing the connection will stop it."
+      confirm-text="Stop and change"
       danger
       @confirm="confirmConnection"
       @cancel="pendingConnection = null"
@@ -470,7 +464,7 @@
 
     <AppDialog v-model="savingQuery" max-width="480">
       <v-card>
-        <v-card-title class="text-subtitle-1">Save this statement</v-card-title>
+        <v-card-title class="text-subtitle-1">Save to library</v-card-title>
         <v-card-text class="d-flex flex-column ga-3">
           <v-text-field v-model="saveName" label="Name" autofocus data-test="save-query-name" />
           <v-text-field v-model="saveFolder" label="Folder" placeholder="Saved queries" />
@@ -679,8 +673,8 @@ function paneLabel(pane: ResultPane): string {
 const PARAM_TYPES = [
   { title: 'Text', value: ParamType.Text },
   { title: 'Number', value: ParamType.Number },
-  { title: 'True or false', value: ParamType.Boolean },
-  { title: 'Empty value', value: ParamType.Null },
+  { title: 'Boolean', value: ParamType.Boolean },
+  { title: 'NULL', value: ParamType.Null },
 ]
 
 /** The two words that a value of the true or false form takes. */
@@ -818,7 +812,7 @@ async function editParams(): Promise<void> {
     return
   }
   if (names.length === 0) {
-    ui.warn('This statement holds no parameter.')
+    ui.warn('This statement has no parameters.')
     return
   }
   paramRows.value = alignParams(names, props.tab.params)
@@ -883,13 +877,13 @@ function onPaneResize(panes: Array<{ size: number }>): void {
 }
 
 function onCopied(): void {
-  ui.success('The rows are on the clipboard.')
+  ui.success('Rows copied to the clipboard.')
 }
 
 async function run(statement: string): Promise<void> {
   const connectionId = props.tab.connectionId
   if (!connectionId) {
-    ui.warn('Choose a connection before you run a statement.')
+    ui.warn('Choose a connection to run this statement.')
     return
   }
   // The rows of a run are what the user asked for, so the panel comes back.
@@ -912,7 +906,7 @@ function runAll(): void {
 function readPlan(mode: PlanMode): void {
   const connectionId = props.tab.connectionId
   if (!connectionId) {
-    ui.warn('Choose a connection before you read a plan.')
+    ui.warn('Choose a connection to see the plan.')
     return
   }
   const text = editorRef.value?.currentStatement() ?? props.tab.query
@@ -935,7 +929,7 @@ function formatStatement(): void {
 }
 
 function onFormatFailed(message: string): void {
-  ui.warn('The statement could not be laid out.', message)
+  ui.warn("Couldn't format the SQL.", message)
 }
 
 function cancel(): void {
@@ -980,7 +974,7 @@ async function onExportAll(pane: ResultPane, format: ExportAllFormat): Promise<v
   // of that run. A kept result of an older run thus writes its own rows.
   const run = pane.run
   if (!run) {
-    ui.warn('A plan has no rows to write again. Run the statement first.')
+    ui.warn("This result is a plan, so there's no query to re-run. Run the statement first.")
     return
   }
   try {
@@ -999,11 +993,11 @@ async function onExportAll(pane: ResultPane, format: ExportAllFormat): Promise<v
     }
     if (summary.truncated) {
       ui.warn(
-        `The export limit stopped the read at ${summary.rows.toLocaleString()} rows.`,
-        'Raise the export limit in the settings.',
+        `Export stopped at the ${summary.rows.toLocaleString()}-row limit.`,
+        'You can raise the export limit in Settings.',
       )
     } else {
-      ui.success(`${summary.rows.toLocaleString()} rows are written to ${summary.path}.`)
+      ui.success(`Exported ${summary.rows.toLocaleString()} rows to ${summary.path}.`)
     }
   } catch (error) {
     ui.reportError(error)
@@ -1028,7 +1022,7 @@ async function exportResult(result: ResultSet, format: ExportFormat): Promise<vo
     if (!path) {
       return
     }
-    ui.success(`The result is written to ${path}.`)
+    ui.success(`Result exported to ${path}.`)
   } catch (error) {
     ui.reportError(error)
   }
@@ -1072,7 +1066,7 @@ async function saveToFile(): Promise<void> {
     if (path) {
       await api.writeTextFile(path, text)
       tabs.markClean(props.tab.id, text)
-      ui.success(`The file ${baseName(path)} is written.`)
+      ui.success(`Saved ${baseName(path)}.`)
       return
     }
     const written = await api.saveStatementFile({
@@ -1086,7 +1080,7 @@ async function saveToFile(): Promise<void> {
     tabs.setFilePath(props.tab.id, written)
     tabs.rename(props.tab.id, baseName(written))
     tabs.markClean(props.tab.id, text)
-    ui.success(`The file ${baseName(written)} is written.`)
+    ui.success(`Saved ${baseName(written)}.`)
   } catch (error) {
     ui.reportError(error)
   } finally {

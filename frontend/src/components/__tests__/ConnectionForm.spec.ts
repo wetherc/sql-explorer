@@ -95,7 +95,7 @@ describe('ConnectionForm', () => {
     expect(wrapper.find('[data-test="keychain-note"]').exists()).toBe(false)
     useConnectionsStore().passwordsPersist = false
     await wrapper.vm.$nextTick()
-    expect(wrapper.find('[data-test="keychain-note"]').text()).toContain('not reachable')
+    expect(wrapper.find('[data-test="keychain-note"]').text()).toContain("isn't available")
   })
 
   it('shows the file field for SQLite and hides the rest', async () => {
@@ -140,7 +140,7 @@ describe('ConnectionForm', () => {
 
   it('reports the fields a record still needs', async () => {
     const wrapper = await mountForm(connectionFixture({ name: '' }))
-    expect(wrapper.find('[data-test="form-problems"]').text()).toContain('needs a name')
+    expect(wrapper.find('[data-test="form-problems"]').text()).toContain('Enter a name')
   })
 
   it('shows every problem at once, and not a part of them', async () => {
@@ -152,9 +152,9 @@ describe('ConnectionForm', () => {
     const lines = wrapper.findAll('[data-test="form-problems"] .v-alert__content div')
     expect(lines).toHaveLength(3)
     expect(lines.map((line) => line.text())).toEqual([
-      'The connection needs a name.',
-      'The connection needs a host.',
-      'The port must be a whole number between 1 and 65535.',
+      'Enter a name for the connection.',
+      'Enter a host for the connection.',
+      'Port must be a whole number from 1 to 65535.',
     ])
   })
 
@@ -168,7 +168,7 @@ describe('ConnectionForm', () => {
     // The warning stays when the engine changes to one with more fields.
     await wrapper.findComponent({ name: 'VSelect' }).vm.$emit('update:modelValue', DbType.Athena)
     await settle()
-    expect(wrapper.find('[data-test="form-problems"]').text()).toContain('needs a name')
+    expect(wrapper.find('[data-test="form-problems"]').text()).toContain('Enter a name')
     expect(wrapper.find('.form-body').element.contains(warning)).toBe(false)
   })
 
@@ -179,10 +179,10 @@ describe('ConnectionForm', () => {
     await settle()
 
     for (const [mode, text] of [
-      [TlsMode.VerifyFull, 'identity of the server is checked'],
-      [TlsMode.Require, 'unverified certificate is accepted'],
-      [TlsMode.Prefer, 'continues without encryption'],
-      [TlsMode.Disable, 'clear text'],
+      [TlsMode.VerifyFull, "Checks the server's identity"],
+      [TlsMode.Require, 'unverified certificates are accepted'],
+      [TlsMode.Prefer, 'unencrypted connection'],
+      [TlsMode.Disable, 'plain text'],
     ] as const) {
       const tlsSelect = wrapper
         .findAllComponents({ name: 'VSelect' })
@@ -220,7 +220,7 @@ describe('ConnectionForm', () => {
   })
 
   it('tests the record the form holds', async () => {
-    apiStub.testConnection.mockResolvedValue('The connection works.')
+    apiStub.testConnection.mockResolvedValue('Connection successful.')
     const wrapper = await mountForm()
     await wrapper.find('[data-test="test-button"]').trigger('click')
     await settle()
@@ -230,7 +230,7 @@ describe('ConnectionForm', () => {
   })
 
   it('keeps the stored password when a test runs with an empty box', async () => {
-    apiStub.testConnection.mockResolvedValue('The connection works.')
+    apiStub.testConnection.mockResolvedValue('Connection successful.')
     const wrapper = await mountForm(connectionFixture({ password: '' }))
     await wrapper.find('[data-test="test-button"]').trigger('click')
     await settle()
@@ -242,7 +242,7 @@ describe('ConnectionForm', () => {
   })
 
   it('sends an empty password when a new record is tested', async () => {
-    apiStub.testConnection.mockResolvedValue('The connection works.')
+    apiStub.testConnection.mockResolvedValue('Connection successful.')
     const wrapper = await mountForm(connectionFixture({ password: '' }), true)
     await wrapper.find('[data-test="test-button"]').trigger('click')
     await settle()
@@ -443,11 +443,11 @@ describe('ConnectionForm advanced options', () => {
       return found.exists() ? found.text() : null
     }
     const mssql = await switchText(connectionFixture())
-    expect(mssql).toContain('Ask for a read-only replica')
+    expect(mssql).toContain('Read-only replica')
     expect(mssql).toContain('still accepts writes')
     const sqlite = await switchText(connectionFixture({ dbType: DbType.Sqlite }))
-    expect(sqlite).toContain('Open a read-only session')
-    expect(sqlite).toContain('The file opens read-only.')
+    expect(sqlite).toContain('Read-only session')
+    expect(sqlite).toContain('Opens the file as read-only.')
     expect(await switchText(connectionFixture({ dbType: DbType.Athena }))).toBeNull()
 
     // A server engine gives the hint of a server session.
@@ -603,14 +603,14 @@ describe('ConnectionForm advanced options', () => {
 
     expect(apiStub.saveConnection).not.toHaveBeenCalled()
     expect(
-      useUiStore().notices.some((notice) => notice.message.includes('needs an access key ID')),
+      useUiStore().notices.some((notice) => notice.message.includes('Enter an access key ID')),
     ).toBe(true)
   })
 
   it('says that a static pair of keys needs no session token', async () => {
     const wrapper = await mountForm(athenaWithKeys())
     expect(wrapper.find('[data-test="aws-token-field"]').text()).toContain(
-      'Not required for static IAM keys',
+      'Not needed for long-term IAM keys',
     )
   })
 })
@@ -695,8 +695,8 @@ describe('ConnectionForm with every field filled', () => {
     expect((select!.props('items') as Array<{ title: string }>).map((item) => item.title)).toEqual([
       'SQL login',
       'Windows Authentication',
-      'Microsoft Entra ID with the Azure CLI',
-      'Microsoft Entra ID with an access token',
+      'Microsoft Entra ID (Azure CLI)',
+      'Microsoft Entra ID (access token)',
     ])
   })
 
@@ -740,15 +740,13 @@ describe('ConnectionForm with every field filled', () => {
       .findAllComponents({ name: 'VTextField' })
       .find((item) => item.attributes('data-test') === 'access-token-field')
     const toggle = wrapper.find('[data-test="toggle-token"]')
-    expect(toggle.attributes('aria-label')).toBe('Show the token')
+    expect(toggle.attributes('aria-label')).toBe('Show token')
     expect(toggle.attributes('aria-pressed')).toBe('false')
 
     await toggle.trigger('click')
     await wrapper.vm.$nextTick()
     expect(reveal!.props('type')).toBe('text')
-    expect(wrapper.find('[data-test="toggle-token"]').attributes('aria-label')).toBe(
-      'Hide the token',
-    )
+    expect(wrapper.find('[data-test="toggle-token"]').attributes('aria-label')).toBe('Hide token')
 
     await select!.vm.$emit('update:modelValue', MssqlAuth.EntraAzureCli)
     await wrapper.vm.$nextTick()
@@ -934,7 +932,7 @@ describe('ConnectionForm with a token that is too old', () => {
       .findAllComponents({ name: 'VTextField' })
       .find((item) => item.attributes('data-test') === 'access-token-field')
     expect(field!.props('error')).toBe(true)
-    expect(wrapper.text()).toContain('The stored token is too old')
+    expect(wrapper.text()).toContain('The saved token has expired')
     expect(document.activeElement).toBe(
       wrapper.find('[data-test="access-token-field"] input').element,
     )

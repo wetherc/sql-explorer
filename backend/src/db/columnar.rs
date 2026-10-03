@@ -447,7 +447,7 @@ impl ChunkSink {
             .send(InvokeResponseBody::Raw(buffer))
             .map_err(|error| {
                 Error::Anyhow(anyhow::anyhow!(
-                    "The rows could not reach the window: {error}"
+                    "Couldn't send the rows to the window: {error}"
                 ))
             })
     }

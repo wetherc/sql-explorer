@@ -8,14 +8,14 @@
 
       <v-tooltip
         location="bottom"
-        :text="settings.isDark ? 'Use the light theme' : 'Use the dark theme'"
+        :text="settings.isDark ? 'Switch to light theme' : 'Switch to dark theme'"
       >
         <template #activator="{ props: tip }">
           <v-btn
             v-bind="tip"
             :icon="settings.isDark ? 'mdi-weather-sunny' : 'mdi-weather-night'"
             size="small"
-            aria-label="Change the theme"
+            aria-label="Toggle theme"
             data-test="theme-toggle"
             @click="settings.toggleTheme()"
           />
@@ -93,7 +93,7 @@
         class="panel-resizer"
         role="separator"
         aria-orientation="vertical"
-        aria-label="Width of the side panel"
+        aria-label="Side panel width"
         :aria-valuenow="layout.layout.panelWidth"
         :aria-valuemin="MIN_PANEL_WIDTH"
         :aria-valuemax="MAX_PANEL_WIDTH"
@@ -131,7 +131,7 @@
       @update:model-value="ui.setKeyboardHelpOpen"
     >
       <v-card>
-        <v-card-title class="text-subtitle-1">Keys</v-card-title>
+        <v-card-title class="text-subtitle-1">Keyboard shortcuts</v-card-title>
         <v-card-text>
           <div
             v-for="command in commandsWithKeys"
@@ -166,7 +166,7 @@
           />
           <v-slider
             :model-value="settings.settings.fontSize"
-            label="Editor text size"
+            label="Editor font size"
             :min="9"
             :max="24"
             :step="1"
@@ -192,7 +192,7 @@
           <div class="settings-group">Results</div>
           <v-switch
             :model-value="settings.settings.autoRunPreview"
-            label="Run a preview at once"
+            label="Run table previews right away"
             hide-details
             @update:model-value="(value) => settings.update({ autoRunPreview: Boolean(value) })"
           />
@@ -200,16 +200,16 @@
             :model-value="settings.settings.maxRows"
             label="Row limit"
             type="number"
-            hint="The largest number of rows one result set holds. Between 1 and 1000000."
+            hint="Maximum rows fetched per result set, from 1 to 1,000,000."
             persistent-hint
             data-test="setting-max-rows"
             @update:model-value="(value) => settings.update({ maxRows: Number(value) })"
           />
           <v-text-field
             :model-value="settings.settings.maxPinnedResults"
-            label="Results a tab keeps"
+            label="Pinned results per tab"
             type="number"
-            hint="The largest number of results one tab keeps against the next run. Between 1 and 20."
+            hint="How many pinned results each tab keeps across runs, from 1 to 20."
             persistent-hint
             data-test="setting-max-pinned"
             @update:model-value="(value) => settings.update({ maxPinnedResults: Number(value) })"
@@ -218,7 +218,7 @@
             :model-value="settings.settings.exportRowLimit"
             label="Export row limit"
             type="number"
-            hint="The row limit of an export that writes straight to a file. Between 1000 and 100000000."
+            hint="Maximum rows for an export that streams straight to a file, from 1,000 to 100,000,000."
             persistent-hint
             data-test="setting-export-limit"
             @update:model-value="(value) => settings.update({ exportRowLimit: Number(value) })"
@@ -228,11 +228,11 @@
           <div class="settings-group">Athena</div>
           <v-text-field
             :model-value="settings.settings.athenaPricePerTerabyte"
-            label="Athena price for each terabyte"
+            label="Athena price per terabyte"
             type="number"
             step="0.01"
             prefix="$"
-            hint="An estimate. The rate changes by region and by contract."
+            hint="Used for cost estimates. The actual rate depends on your region and contract."
             persistent-hint
             data-test="setting-athena-price"
             @update:model-value="
@@ -241,21 +241,21 @@
           />
           <v-text-field
             :model-value="settings.settings.athenaScanWarningGb"
-            label="Warn above this scan in gigabytes"
+            label="Scan warning threshold (GB)"
             type="number"
-            hint="A statement that scans more than this raises a warning. Between 1 and 1000000."
+            hint="Warn when a statement scans more than this, from 1 to 1,000,000."
             persistent-hint
             data-test="setting-athena-warning"
             @update:model-value="(value) => settings.update({ athenaScanWarningGb: Number(value) })"
           />
 
           <v-divider />
-          <div class="settings-group">The schema the editor reads</div>
+          <div class="settings-group">Autocomplete</div>
           <v-text-field
             :model-value="settings.settings.schemaSnapshotColumns"
-            label="Columns the editor learns"
+            label="Column limit"
             type="number"
-            hint="The largest number of columns one read of a schema keeps. Between 100 and 200000."
+            hint="Maximum columns loaded per schema for autocomplete, from 100 to 200,000."
             persistent-hint
             data-test="setting-snapshot-columns"
             @update:model-value="
@@ -265,8 +265,8 @@
           <v-switch
             :model-value="settings.settings.schemaSnapshotOwnConnection"
             color="primary"
-            label="Read the schema on a second connection"
-            hint="One more session on the server, and no wait for a statement of the user."
+            label="Load schema on a separate connection"
+            hint="Uses one more server session, but never waits for your running statements."
             persistent-hint
             data-test="setting-snapshot-connection"
             @update:model-value="
@@ -276,7 +276,7 @@
         </v-card-text>
         <v-card-actions>
           <v-btn
-            text="Reset to the defaults"
+            text="Reset to defaults"
             data-test="settings-reset"
             @click="resettingSettings = true"
           />
@@ -288,9 +288,9 @@
 
     <ConfirmDialog
       :open="resettingSettings"
-      title="Reset every setting?"
-      message="Every setting goes back to the value a new installation starts with."
-      confirm-text="Reset them"
+      title="Reset all settings?"
+      message="Every setting goes back to its default value."
+      confirm-text="Reset"
       danger
       @confirm="resetSettings"
       @cancel="resettingSettings = false"
@@ -372,7 +372,7 @@ const railItems: Array<{ value: Panel; icon: string; label: string }> = [
   { value: 'connections', icon: 'mdi-lan-connect', label: 'Connections' },
   { value: 'explorer', icon: 'mdi-database-search', label: 'Explorer' },
   { value: 'files', icon: 'mdi-folder-outline', label: 'Files' },
-  { value: 'history', icon: 'mdi-history', label: 'History and saved statements' },
+  { value: 'history', icon: 'mdi-history', label: 'History' },
 ]
 
 function onConnected(): void {
@@ -463,7 +463,7 @@ function hasActiveTab(): boolean {
 const commands: Command[] = [
   {
     id: 'query.run',
-    title: 'Run the statement',
+    title: 'Run statement',
     group: 'Query',
     key: 'mod+enter',
     enabled: hasActiveTab,
@@ -471,7 +471,7 @@ const commands: Command[] = [
   },
   {
     id: 'query.runAll',
-    title: 'Run the whole script',
+    title: 'Run script',
     group: 'Query',
     key: 'mod+shift+enter',
     enabled: hasActiveTab,
@@ -479,7 +479,7 @@ const commands: Command[] = [
   },
   {
     id: 'query.stop',
-    title: 'Stop the statement',
+    title: 'Stop',
     group: 'Query',
     key: 'mod+shift+c',
     enabled: hasActiveTab,
@@ -487,7 +487,7 @@ const commands: Command[] = [
   },
   {
     id: 'query.save',
-    title: 'Save the query to a file',
+    title: 'Save query',
     group: 'File',
     key: 'mod+s',
     enabled: hasActiveTab,
@@ -495,7 +495,7 @@ const commands: Command[] = [
   },
   {
     id: 'editor.format',
-    title: 'Format the statement',
+    title: 'Format SQL',
     group: 'Editor',
     key: 'shift+alt+f',
     enabled: hasActiveTab,
@@ -513,21 +513,21 @@ const commands: Command[] = [
   },
   {
     id: 'file.open',
-    title: 'Open a query',
+    title: 'Open query…',
     group: 'File',
     key: 'mod+o',
     run: () => void files.openFileFromDialog(),
   },
   {
     id: 'file.openFolder',
-    title: 'Open a folder',
+    title: 'Open folder…',
     group: 'File',
     key: 'mod+shift+o',
     run: () => void files.openFolder(),
   },
   {
     id: 'tab.rename',
-    title: 'Rename the tab',
+    title: 'Rename tab',
     group: 'Tabs',
     key: null,
     enabled: hasActiveTab,
@@ -535,7 +535,7 @@ const commands: Command[] = [
   },
   {
     id: 'tab.close',
-    title: 'Close the tab',
+    title: 'Close tab',
     group: 'Tabs',
     key: 'mod+w',
     enabled: hasActiveTab,
@@ -543,49 +543,49 @@ const commands: Command[] = [
   },
   {
     id: 'view.connections',
-    title: 'Show the connections',
+    title: 'Show connections',
     group: 'View',
     key: 'mod+1',
     run: () => layout.showPanel('connections'),
   },
   {
     id: 'view.explorer',
-    title: 'Show the explorer',
+    title: 'Show explorer',
     group: 'View',
     key: 'mod+2',
     run: () => layout.showPanel('explorer'),
   },
   {
     id: 'view.files',
-    title: 'Show the files',
+    title: 'Show files',
     group: 'View',
     key: 'mod+3',
     run: () => layout.showPanel('files'),
   },
   {
     id: 'view.history',
-    title: 'Show the history',
+    title: 'Show history',
     group: 'View',
     key: 'mod+4',
     run: () => layout.showPanel('history'),
   },
   {
     id: 'view.togglePanel',
-    title: 'Show or hide the side panel',
+    title: 'Toggle side panel',
     group: 'View',
     key: 'mod+b',
     run: () => layout.togglePanel(),
   },
   {
     id: 'view.results',
-    title: 'Show or hide the results panel',
+    title: 'Toggle results panel',
     group: 'View',
     key: 'mod+j',
     run: () => layout.toggleResults(),
   },
   {
     id: 'app.settings',
-    title: 'Open the settings',
+    title: 'Open settings',
     group: 'Application',
     key: 'mod+,',
     run: () => {
@@ -594,21 +594,21 @@ const commands: Command[] = [
   },
   {
     id: 'app.palette',
-    title: 'Open the command palette',
+    title: 'Command palette',
     group: 'Application',
     key: 'mod+shift+p',
     run: () => ui.setPaletteOpen(true),
   },
   {
     id: 'app.keys',
-    title: 'Show the key list',
+    title: 'Keyboard shortcuts',
     group: 'Application',
     key: 'f1',
     run: () => ui.setKeyboardHelpOpen(true),
   },
   {
     id: 'app.guide',
-    title: 'Open the guide',
+    title: 'Open guide',
     group: 'Application',
     key: null,
     run: () => ui.setGuideOpen(true),

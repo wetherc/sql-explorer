@@ -191,7 +191,7 @@ describe('ConnectionManager', () => {
     await settle()
 
     expect(document.body.textContent).toContain('Edit Server')
-    expect(document.body.textContent).toContain('The stored token is too old')
+    expect(document.body.textContent).toContain('The saved token has expired')
     expect(connections.expiredTokenId).toBeNull()
     expect(wrapper.findComponent({ name: 'ConnectionForm' }).props('needsNewToken')).toBe(true)
   })

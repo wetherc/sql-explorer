@@ -280,7 +280,7 @@ impl SavedConnection {
 
     pub fn validate(&self) -> Result<(), String> {
         if self.id.trim().is_empty() {
-            return Err("The connection needs an identifier.".to_string());
+            return Err("The connection needs an ID.".to_string());
         }
         if self.name.trim().is_empty() {
             return Err("The connection needs a name.".to_string());
@@ -289,7 +289,7 @@ impl SavedConnection {
             DbType::Sqlite => {
                 let path = self.options.file_path.as_deref().unwrap_or("");
                 if path.trim().is_empty() {
-                    return Err("A SQLite connection needs the path of a file.".to_string());
+                    return Err("A SQLite connection needs a file path.".to_string());
                 }
             }
             DbType::Athena => {
@@ -314,8 +314,8 @@ impl SavedConnection {
             DbType::Mssql => {
                 if self.options.connection_url.is_some() && self.options.mssql_auth.is_entra() {
                     return Err(
-                        "A connection string carries its own authentication. Remove the string, \
-                         or choose the SQL login."
+                        "A connection string sets its own authentication. Remove the connection \
+                         string or switch to SQL login."
                             .to_string(),
                     );
                 }
@@ -476,7 +476,7 @@ mod tests {
     fn validation_needs_an_identifier_and_a_name() {
         let mut connection = base(DbType::Mssql);
         connection.id = "  ".into();
-        assert!(connection.validate().unwrap_err().contains("identifier"));
+        assert!(connection.validate().unwrap_err().contains("needs an ID"));
 
         let mut connection = base(DbType::Mssql);
         connection.name = String::new();
@@ -563,7 +563,7 @@ mod tests {
         input.options.mssql_auth = MssqlAuth::EntraAzureCli;
         input.options.connection_url = Some("Server=tcp:host,1433".into());
         let message = input.validate().err().unwrap();
-        assert!(message.contains("carries its own authentication"));
+        assert!(message.contains("sets its own authentication"));
 
         // The SQL login goes through, because the string holds its own login.
         input.options.mssql_auth = MssqlAuth::SqlLogin;

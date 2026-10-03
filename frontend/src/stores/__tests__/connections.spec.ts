@@ -65,19 +65,19 @@ describe('validateConnection', () => {
 
   it('needs a name', () => {
     expect(validateConnection(connectionFixture({ name: ' ' }))).toContain(
-      'The connection needs a name.',
+      'Enter a name for the connection.',
     )
   })
 
   it('needs a host and a port for a network engine', () => {
     expect(validateConnection(connectionFixture({ host: '' }))).toContain(
-      'The connection needs a host.',
+      'Enter a host for the connection.',
     )
     expect(validateConnection(connectionFixture({ host: null }))).toContain(
-      'The connection needs a host.',
+      'Enter a host for the connection.',
     )
     expect(validateConnection(connectionFixture({ port: null }))).toContain(
-      'The port must be a whole number between 1 and 65535.',
+      'Port must be a whole number from 1 to 65535.',
     )
     expect(validateConnection(connectionFixture({ port: 0 }))).toHaveLength(1)
     expect(validateConnection(connectionFixture({ port: 70000 }))).toHaveLength(1)
@@ -91,13 +91,13 @@ describe('validateConnection', () => {
       return validateConnection(connection)
     }
     expect(empty('connectTimeoutSecs')).toEqual([
-      'The connect timeout must be a whole number of 0 or more.',
+      'Connect timeout must be a whole number, 0 or greater.',
     ])
     expect(empty('queryTimeoutSecs')).toEqual([
-      'The statement timeout must be a whole number of 0 or more.',
+      'Statement timeout must be a whole number, 0 or greater.',
     ])
-    expect(empty('maxRows')).toEqual(['The row limit must be a whole number of 0 or more.'])
-    expect(empty('maxSessions')).toEqual(['The max sessions must be a whole number of 1 or more.'])
+    expect(empty('maxRows')).toEqual(['Row limit must be a whole number, 0 or greater.'])
+    expect(empty('maxSessions')).toEqual(['Max sessions must be a whole number, 1 or greater.'])
     const connection = connectionFixture()
     connection.options.maxRows = -1
     connection.options.queryTimeoutSecs = 2.5
@@ -113,7 +113,7 @@ describe('validateConnection', () => {
     expect(validateConnection(connection)).toEqual([])
     connection.options.maxSessions = 0
     expect(validateConnection(connection)).toEqual([
-      'The max sessions must be a whole number of 1 or more.',
+      'Max sessions must be a whole number, 1 or greater.',
     ])
   })
 
@@ -125,9 +125,7 @@ describe('validateConnection', () => {
 
   it('needs a file for SQLite', () => {
     const connection = connectionFixture({ dbType: DbType.Sqlite })
-    expect(validateConnection(connection)).toContain(
-      'A SQLite connection needs the path of a file.',
-    )
+    expect(validateConnection(connection)).toContain('Enter the path to a SQLite database file.')
     connection.options.filePath = '/tmp/a.db'
     expect(validateConnection(connection)).toEqual([])
   })
@@ -135,8 +133,8 @@ describe('validateConnection', () => {
   it('needs a region and a place for the results for Athena', () => {
     const connection = connectionFixture({ dbType: DbType.Athena })
     expect(validateConnection(connection)).toEqual([
-      'An Athena connection needs an AWS region.',
-      'An Athena connection needs a workgroup or an output location.',
+      'Enter an AWS region for the Athena connection.',
+      'Enter a workgroup or an output location for the Athena connection.',
     ])
     connection.options.awsRegion = 'us-east-1'
     connection.options.athenaWorkgroup = 'primary'
@@ -154,7 +152,7 @@ describe('validateConnection', () => {
     connection.options.awsCredentialSource = AwsCredentialSource.Keys
 
     expect(validateConnection(connection)).toEqual([
-      'An Athena connection with keys needs an access key ID.',
+      'Enter an access key ID, or choose another credential source.',
     ])
 
     // The secret access key is not asked for here, because the keychain
@@ -202,7 +200,7 @@ describe('connections store', () => {
     const connections = useConnectionsStore()
     await connections.load()
     expect(connections.nameFor('c1')).toBe('Server')
-    expect(connections.nameFor('gone')).toBe('Connection that is gone')
+    expect(connections.nameFor('gone')).toBe('Deleted connection')
   })
 
   it('reads the engines the build supports', async () => {
@@ -409,10 +407,10 @@ describe('connections store', () => {
   })
 
   it('tests a record and reports the answer', async () => {
-    apiStub.testConnection.mockResolvedValue('The connection works.')
+    apiStub.testConnection.mockResolvedValue('Connection successful.')
     const connections = useConnectionsStore()
     expect(await connections.test(connectionFixture())).toBe(true)
-    expect(useUiStore().notices[0]?.message).toBe('The connection works.')
+    expect(useUiStore().notices[0]?.message).toBe('Connection successful.')
     expect(connections.testing).toBe(false)
   })
 
@@ -430,9 +428,7 @@ describe('connections store', () => {
     expect(await connections.save(connection)).toBe(false)
     expect(apiStub.testConnection).not.toHaveBeenCalled()
     expect(apiStub.saveConnection).not.toHaveBeenCalled()
-    expect(useUiStore().notices[0]?.message).toBe(
-      'The row limit must be a whole number of 0 or more.',
-    )
+    expect(useUiStore().notices[0]?.message).toBe('Row limit must be a whole number, 0 or greater.')
   })
 
   it('reports a failed test', async () => {

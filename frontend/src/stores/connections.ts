@@ -60,38 +60,38 @@ export function createId(): string {
 export function validateConnection(connection: SavedConnection): string[] {
   const problems: string[] = []
   if (!connection.name.trim()) {
-    problems.push('The connection needs a name.')
+    problems.push('Enter a name for the connection.')
   }
   // A number box that the user empties gives a text, and the backend
   // refuses a text where it reads a whole number.
   const { connectTimeoutSecs, queryTimeoutSecs, maxRows, maxSessions } = connection.options
   if (!isCount(connectTimeoutSecs)) {
-    problems.push('The connect timeout must be a whole number of 0 or more.')
+    problems.push('Connect timeout must be a whole number, 0 or greater.')
   }
   if (!isCount(queryTimeoutSecs)) {
-    problems.push('The statement timeout must be a whole number of 0 or more.')
+    problems.push('Statement timeout must be a whole number, 0 or greater.')
   }
   if (!isCount(maxRows)) {
-    problems.push('The row limit must be a whole number of 0 or more.')
+    problems.push('Row limit must be a whole number, 0 or greater.')
   }
   if (!isCount(maxSessions) || maxSessions < 1) {
-    problems.push('The max sessions must be a whole number of 1 or more.')
+    problems.push('Max sessions must be a whole number, 1 or greater.')
   }
   switch (connection.dbType) {
     case DbType.Sqlite:
       if (!connection.options.filePath?.trim()) {
-        problems.push('A SQLite connection needs the path of a file.')
+        problems.push('Enter the path to a SQLite database file.')
       }
       break
     case DbType.Athena:
       if (!connection.options.awsRegion?.trim()) {
-        problems.push('An Athena connection needs an AWS region.')
+        problems.push('Enter an AWS region for the Athena connection.')
       }
       if (
         !connection.options.athenaWorkgroup?.trim() &&
         !connection.options.athenaOutputLocation?.trim()
       ) {
-        problems.push('An Athena connection needs a workgroup or an output location.')
+        problems.push('Enter a workgroup or an output location for the Athena connection.')
       }
       // The secret access key is not checked here, because the keychain can
       // already hold it and the form then shows an empty box. The backend
@@ -100,17 +100,17 @@ export function validateConnection(connection: SavedConnection): string[] {
         connection.options.awsCredentialSource === AwsCredentialSource.Keys &&
         !connection.options.awsAccessKeyId?.trim()
       ) {
-        problems.push('An Athena connection with keys needs an access key ID.')
+        problems.push('Enter an access key ID, or choose another credential source.')
       }
       break
     default:
       if (!connection.options.connectionUrl?.trim()) {
         if (!connection.host?.trim()) {
-          problems.push('The connection needs a host.')
+          problems.push('Enter a host for the connection.')
         }
         const port = connection.port
         if (port === null || !Number.isInteger(port) || port < 1 || port > 65535) {
-          problems.push('The port must be a whole number between 1 and 65535.')
+          problems.push('Port must be a whole number from 1 to 65535.')
         }
       }
   }
@@ -196,7 +196,7 @@ export const useConnectionsStore = defineStore('connections', () => {
    * means nothing to a reader, so such a tab reports that the record is gone.
    */
   function nameFor(id: string): string {
-    return byId(id)?.name ?? 'Connection that is gone'
+    return byId(id)?.name ?? 'Deleted connection'
   }
 
   /** Reads what the connection form needs from the backend: the engines of
@@ -250,7 +250,7 @@ export const useConnectionsStore = defineStore('connections', () => {
     try {
       await api.saveConnection(connection)
       await load()
-      ui.success(`The connection '${connection.name}' is saved.`)
+      ui.success(`Saved connection '${connection.name}'.`)
       return true
     } catch (error) {
       ui.reportError(error)

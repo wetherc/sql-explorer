@@ -43,7 +43,7 @@ describe('StatusBar', () => {
     const wrapper = mountWithPlugins(StatusBar)
     useTabsStore().add({ connectionId: 'ghost' })
     await wrapper.vm.$nextTick()
-    expect(wrapper.find('[data-test="status-connection"]').text()).toBe('Connection that is gone')
+    expect(wrapper.find('[data-test="status-connection"]').text()).toBe('Deleted connection')
     expect(wrapper.find('[data-test="status-dialect"]').text()).toBe('SQL')
   })
 

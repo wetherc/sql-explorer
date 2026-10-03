@@ -82,7 +82,7 @@
         v-else
         icon="mdi-folder-open-outline"
         title="No folders yet"
-        hint="Open a folder to reach the statements that it holds."
+        hint="Open a folder to browse its SQL files."
       >
         <v-btn
           color="primary"

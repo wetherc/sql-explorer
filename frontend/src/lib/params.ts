@@ -77,10 +77,10 @@ export function paramProblem(value: ParamValue): string | null {
     return null
   }
   if (value.valueType === ParamType.Number) {
-    return Number.isFinite(Number(text)) ? null : 'Write a number.'
+    return Number.isFinite(Number(text)) ? null : 'Enter a number.'
   }
   if (value.valueType === ParamType.Boolean) {
-    return booleanOfText(text) === null ? 'Write true or false.' : null
+    return booleanOfText(text) === null ? 'Enter true or false.' : null
   }
   return null
 }

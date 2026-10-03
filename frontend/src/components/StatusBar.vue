@@ -181,11 +181,11 @@ const sessionCost = computed(() =>
 )
 
 const scanTooltip = computed(() => {
-  const rate = `The rate is $${settings.settings.athenaPricePerTerabyte} for each terabyte.`
+  const rate = `Based on $${settings.settings.athenaPricePerTerabyte} per terabyte scanned.`
   const reused = state.value?.stats?.resultReused
-    ? ' The engine gave the result of an earlier run, which costs nothing.'
+    ? ' Athena reused an earlier result, so this run was free.'
     : ''
-  return `An estimate. ${rate}${reused}`
+  return `Estimated cost. ${rate}${reused}`
 })
 
 const dialectLabel = computed(() => {

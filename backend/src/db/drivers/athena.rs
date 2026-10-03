@@ -123,7 +123,7 @@ async fn stop_execution(client: &Client, execution_id: &str) -> Result<()> {
         .query_execution_id(execution_id)
         .send()
         .await
-        .map_err(|error| describe(error, "The statement could not be stopped"))?;
+        .map_err(|error| describe(error, "Couldn't stop the statement"))?;
     Ok(())
 }
 
@@ -144,7 +144,7 @@ async fn start_statement(
         let started = start
             .send()
             .await
-            .map_err(|error| describe(error, "The statement could not be started"))?;
+            .map_err(|error| describe(error, "Couldn't start the statement"))?;
         let execution_id = started.query_execution_id().unwrap_or_default().to_string();
         if record_execution(&running, run, &execution_id) {
             return Ok(execution_id);
@@ -296,15 +296,15 @@ pub const DEFAULT_CATALOG: &str = "AwsDataCatalog";
 
 /// The words that name a pair of keys with a part missing.
 const INCOMPLETE_KEYS_MESSAGE: &str =
-    "An Athena connection with keys needs an access key ID and a secret access key.";
+    "Access key authentication needs both an access key ID and a secret access key.";
 
 /// The name this application gives to the credentials it builds itself.
 const CREDENTIALS_SOURCE: &str = "sql-explorer";
 
 /// The words that name a session token which is too old.
 const EXPIRED_TOKEN_MESSAGE: &str =
-    "The session token has expired. Paste a new one, or use a profile, which reads a fresh token \
-     on each connection.";
+    "The session token has expired. Paste a new one, or switch to an AWS profile, which gets a \
+     fresh token for each connection.";
 
 /// Builds the credentials that the user typed, or `None` when the
 /// connection reads the chain of the AWS tools instead.
@@ -482,11 +482,11 @@ impl AthenaDriver {
                 .query_execution_id(execution_id)
                 .send()
                 .await
-                .map_err(|error| describe(error, "The state of the statement could not be read"))?;
+                .map_err(|error| describe(error, "Couldn't get the statement's status"))?;
 
-            let execution = execution
-                .query_execution()
-                .ok_or_else(|| Error::Athena("The service returned no statement.".to_string()))?;
+            let execution = execution.query_execution().ok_or_else(|| {
+                Error::Athena("Athena didn't return the query execution.".to_string())
+            })?;
             let status = execution.status();
             let state = status.and_then(|status| status.state());
 
@@ -555,7 +555,7 @@ impl AthenaDriver {
                 .send();
             let page = before_deadline(deadline, options.timeout_secs, request)
                 .await?
-                .map_err(|error| describe(error, "The result could not be read"))?;
+                .map_err(|error| describe(error, "Couldn't read the results"))?;
 
             let has_columns = page
                 .result_set()
@@ -752,7 +752,7 @@ impl AthenaDriver {
                 .set_next_token(token)
                 .send()
                 .await
-                .map_err(|error| describe(error, "The databases could not be listed"));
+                .map_err(|error| describe(error, "Couldn't list the databases"));
             let page = match page {
                 Ok(page) => page,
                 Err(error) if answer_is_unreadable(&error) => {
@@ -838,8 +838,8 @@ impl DatabaseDriver for AthenaDriver {
     ) -> Result<RunSummary> {
         if params.is_some_and(|values| !values.is_empty()) {
             return Err(Error::Unsupported(
-                "Athena takes no bound parameters through this client. Put the values into the \
-                 statement."
+                "Athena doesn't support bound parameters in this client. Put the values directly in \
+                 the statement."
                     .to_string(),
             ));
         }
@@ -910,7 +910,7 @@ impl DatabaseDriver for AthenaDriver {
                 .set_next_token(token)
                 .send()
                 .await
-                .map_err(|error| describe(error, "The tables could not be listed"));
+                .map_err(|error| describe(error, "Couldn't list the tables"));
             let page = match page {
                 Ok(page) => page,
                 Err(error) if answer_is_unreadable(&error) => {
@@ -955,7 +955,7 @@ impl DatabaseDriver for AthenaDriver {
             .table_name(table)
             .send()
             .await
-            .map_err(|error| describe(error, "The columns could not be read"));
+            .map_err(|error| describe(error, "Couldn't read the columns"));
         let metadata = match metadata {
             Ok(metadata) => metadata,
             Err(error) if answer_is_unreadable(&error) => {
