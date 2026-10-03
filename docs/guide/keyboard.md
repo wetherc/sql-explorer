@@ -1,3 +1,9 @@
+---
+title: The keyboard
+description: Keyboard shortcuts for the editor, the tabs and the panels.
+order: 9
+---
+
 # The keyboard
 
 One registry holds every command of the application. The command palette

@@ -1,3 +1,9 @@
+---
+title: The results grid
+description: Sort, filter and select the rows of a result.
+order: 7
+---
+
 # The results grid
 
 The grid draws only the rows that stand in view, so a large result stays

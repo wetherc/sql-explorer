@@ -1,3 +1,10 @@
+---
+title: Where to start
+description: Open a connection, write a statement and run it.
+order: 1
+permalink: /guide/
+---
+
 # Where to start
 
 Open a connection in the connections panel. The explorer then shows the

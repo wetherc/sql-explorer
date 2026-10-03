@@ -1,44 +1,58 @@
 /**
  * The topics of the guide inside the application.
  *
- * The application bundles no documentation of the repository, and the content
- * security policy allows no remote origin, so the text of the guide lives with
- * the code and travels with the build.
+ * The content security policy allows no remote origin, so the build bundles
+ * the text of the guide. Each topic is a Markdown file under `docs/guide/` at
+ * the root of the repository. The GitHub Pages site publishes the same files,
+ * so the application and the site show one text.
  *
- * Each topic is a Markdown file under `src/guide/`. The build reads the text
- * of the file, and the dialog turns it into HTML. No text of the user reaches
- * that HTML, so it needs no cleaning step.
+ * Each file starts with Jekyll front matter, which gives the title of the
+ * topic and its place in the list. The dialog turns the rest of the file into
+ * HTML. No text of the user reaches that HTML, so it needs no cleaning step.
  */
 import { marked } from 'marked'
-import startText from '@/guide/start.md?raw'
-import connectionsText from '@/guide/connections.md?raw'
-import explorerText from '@/guide/explorer.md?raw'
-import tabsText from '@/guide/tabs.md?raw'
-import runningText from '@/guide/running.md?raw'
-import parametersText from '@/guide/parameters.md?raw'
-import resultsText from '@/guide/results.md?raw'
-import exportsText from '@/guide/exports.md?raw'
-import keyboardText from '@/guide/keyboard.md?raw'
+
+const FILES = import.meta.glob<string>('../../../docs/guide/*.md', {
+  query: '?raw',
+  import: 'default',
+  eager: true,
+})
 
 export interface GuideTopic {
-  /** The name the list and the tests use. */
+  /** The name the list and the tests use, which is the name of the file. */
   id: string
   title: string
-  /** The Markdown text of the topic. */
+  /** The place of the topic in the list, from the `order` field. */
+  order: number
+  /** The Markdown text of the topic, without its front matter. */
   body: string
 }
 
-export const GUIDE_TOPICS: GuideTopic[] = [
-  { id: 'start', title: 'Where to start', body: startText },
-  { id: 'connections', title: 'Connections', body: connectionsText },
-  { id: 'explorer', title: 'The explorer', body: explorerText },
-  { id: 'tabs', title: 'Tabs and saved statements', body: tabsText },
-  { id: 'running', title: 'Run and stop', body: runningText },
-  { id: 'parameters', title: 'Parameters', body: parametersText },
-  { id: 'results', title: 'The results grid', body: resultsText },
-  { id: 'exports', title: 'Exports and the two row limits', body: exportsText },
-  { id: 'keyboard', title: 'The keyboard', body: keyboardText },
-]
+const FRONT_MATTER = /^---\r?\n([\s\S]*?)\r?\n---\r?\n+/
+
+/**
+ * Reads one file of the guide. A file without front matter, a title or an
+ * order throws, so the tests stop a file that the list cannot place.
+ */
+export function parseTopic(path: string, text: string): GuideTopic {
+  const id = path.replace(/^.*\//, '').replace(/\.md$/, '')
+  const match = FRONT_MATTER.exec(text)
+  const fields = new Map<string, string>()
+  for (const line of (match?.[1] ?? '').split(/\r?\n/)) {
+    const colon = line.indexOf(':')
+    if (colon > 0) fields.set(line.slice(0, colon).trim(), line.slice(colon + 1).trim())
+  }
+  const title = fields.get('title')
+  const order = Number(fields.get('order'))
+  if (!match || !title || !Number.isFinite(order)) {
+    throw new Error(`The guide file '${id}' needs a title and an order in its front matter.`)
+  }
+  return { id, title, order, body: text.slice(match[0].length) }
+}
+
+export const GUIDE_TOPICS: GuideTopic[] = Object.entries(FILES)
+  .map(([path, text]) => parseTopic(path, text))
+  .sort((a, b) => a.order - b.order)
 
 /** Finds one topic by its name, or the first topic for a name it does not hold. */
 export function topicById(id: string): GuideTopic {

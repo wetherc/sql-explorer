@@ -11,3 +11,7 @@ defaults:
       path: ""
     values:
       layout: default
+  - scope:
+      path: "guide"
+    values:
+      layout: guide

@@ -219,7 +219,9 @@ a:focus-visible,
 .content > ul,
 .content > ol,
 .content > h2,
-.content > h3 {
+.content > h3,
+.content > h4,
+.content > pre {
   max-width: var(--measure);
   margin-left: auto;
   margin-right: auto;
@@ -279,6 +281,89 @@ a:focus-visible,
   box-shadow: var(--shadow);
 }
 
+/* A page of the guide: the list of topics beside the text of one topic. */
+.guide {
+  display: grid;
+  grid-template-columns: 14rem minmax(0, 1fr);
+  gap: 3rem;
+  padding-top: 2.5rem;
+}
+
+.guide-nav {
+  position: sticky;
+  top: 5rem;
+  align-self: start;
+  font-size: 0.9375rem;
+}
+
+.guide-nav__title {
+  margin: 0 0 0.5rem;
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.guide-nav ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.guide-nav a {
+  display: block;
+  padding: 0.3rem 0.75rem;
+  border-left: 2px solid var(--border);
+  color: var(--text-muted);
+}
+
+.guide-nav a:hover {
+  color: var(--text);
+  text-decoration: none;
+}
+
+.guide-nav a[aria-current="page"] {
+  border-left-color: var(--primary);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.guide-body {
+  max-width: var(--measure);
+  min-width: 0;
+}
+
+.guide-body h1 {
+  margin-top: 0;
+  font-size: 2.25rem;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+}
+
+.guide-body h2 {
+  margin-top: 3rem;
+}
+
+.content table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 0.9375rem;
+}
+
+.content th,
+.content td {
+  padding: 0.45rem 0.8rem;
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.content th {
+  background: var(--surface);
+}
+
 .site-footer {
   padding: 2rem 0;
   border-top: 1px solid var(--border);
@@ -307,5 +392,32 @@ a:focus-visible,
 
   .content h2 {
     margin-top: 3rem;
+  }
+}
+
+@media (max-width: 800px) {
+  .guide {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1.5rem;
+  }
+
+  .guide-nav {
+    position: static;
+  }
+
+  .guide-nav ul {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.5rem;
+  }
+
+  .guide-nav a {
+    padding: 0.2rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+  }
+
+  .guide-nav a[aria-current="page"] {
+    border-color: var(--primary);
   }
 }

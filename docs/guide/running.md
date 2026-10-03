@@ -1,3 +1,9 @@
+---
+title: Run and stop
+description: Run a statement or a whole script, and stop a statement that takes too long.
+order: 5
+---
+
 # Run and stop
 
 Choose a connection at the top of the tab, then write a statement.

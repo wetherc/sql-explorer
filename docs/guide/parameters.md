@@ -1,3 +1,9 @@
+---
+title: Parameters
+description: Use named parameters such as :country and give their values when a statement runs.
+order: 6
+---
+
 # Parameters
 
 Write `:name` in a statement to make a parameter:

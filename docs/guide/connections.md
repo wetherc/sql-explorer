@@ -1,3 +1,9 @@
+---
+title: Connections
+description: Set up connections to MS SQL Server, AWS Athena, PostgreSQL, MySQL, MariaDB and SQLite.
+order: 2
+---
+
 # Connections
 
 Open the connections panel from the rail. The **New connection** button opens

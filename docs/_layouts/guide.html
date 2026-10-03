@@ -1,0 +1,17 @@
+---
+layout: default
+---
+{%- assign topics = site.pages | where_exp: "item", "item.path contains 'guide/'" | sort: "order" -%}
+<div class="guide">
+  <nav class="guide-nav" aria-label="Guide topics">
+    <p class="guide-nav__title">Guide</p>
+    <ul>
+      {%- for topic in topics %}
+      <li><a href="{{ topic.url | relative_url }}"{% if topic.url == page.url %} aria-current="page"{% endif %}>{{ topic.title }}</a></li>
+      {%- endfor %}
+    </ul>
+  </nav>
+  <article class="guide-body">
+    {{ content }}
+  </article>
+</div>

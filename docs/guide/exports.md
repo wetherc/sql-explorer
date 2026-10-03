@@ -1,3 +1,9 @@
+---
+title: Exports and the two row limits
+description: Export rows to CSV, JSON, Markdown, INSERT statements or Excel, and set the two row limits.
+order: 8
+---
+
 # Exports and the two row limits
 
 A result goes to a CSV, JSON, Markdown, INSERT or Excel file, or to the

@@ -420,7 +420,8 @@ frontend/         The Vue half
     lib/          The calls to the backend and the pure helpers
     stores/       The state of the interface
     types/        The shapes the backend sends
-docs/             The state of the work and the limits of the application
+docs/             The GitHub Pages site
+  guide/          The user guide, which the app bundles and the site publishes
 ```
 
 ## What it does not do

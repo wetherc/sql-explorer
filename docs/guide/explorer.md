@@ -1,3 +1,9 @@
+---
+title: The explorer
+description: Browse a server's databases, schemas, tables, views, triggers and other objects, and script them.
+order: 3
+---
+
 # The explorer
 
 The explorer shows the objects of each open connection: the databases, the

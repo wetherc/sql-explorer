@@ -19,6 +19,7 @@
           <span>{{ site.title }}</span>
         </a>
         <nav class="site-nav" aria-label="Project links">
+          <a href="{{ "/guide/" | relative_url }}">Guide</a>
           <a href="https://github.com/wetherc/sql-explorer">GitHub</a>
           <a href="https://github.com/wetherc/sql-explorer/releases">Releases</a>
           <a href="https://github.com/wetherc/sql-explorer/issues">Issues</a>
@@ -26,6 +27,7 @@
       </div>
     </header>
 
+    {%- if page.url == "/" %}
     <section class="hero">
       <div class="wrap">
         <img class="hero__icon" src="{{ "/assets/icon.png" | relative_url }}" alt="" width="96" height="96">
@@ -41,10 +43,12 @@
         </ul>
         <p class="hero__actions">
           <a class="button button--primary" href="https://github.com/wetherc/sql-explorer/releases">Download</a>
+          <a class="button" href="{{ "/guide/" | relative_url }}">Read the guide</a>
           <a class="button" href="https://github.com/wetherc/sql-explorer">View the source</a>
         </p>
       </div>
     </section>
+    {%- endif %}
 
     <main class="wrap content">
       {{ content }}

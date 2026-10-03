@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { GUIDE_TOPICS, renderTopic, topicById } from '@/lib/guide'
+import { GUIDE_TOPICS, parseTopic, renderTopic, topicById } from '@/lib/guide'
 
 describe('GUIDE_TOPICS', () => {
   it('holds at least one topic, with a name and a text for each', () => {
@@ -27,6 +27,41 @@ describe('GUIDE_TOPICS', () => {
     const names = GUIDE_TOPICS.map((topic) => topic.id)
     expect(new Set(names).size).toBe(names.length)
   })
+
+  it('lists the topics in the order of their front matter, with each place once', () => {
+    const places = GUIDE_TOPICS.map((topic) => topic.order)
+    expect(places).toEqual([...places].sort((a, b) => a - b))
+    expect(new Set(places).size).toBe(places.length)
+    expect(GUIDE_TOPICS[0]!.id).toBe('start')
+  })
+})
+
+describe('parseTopic', () => {
+  it('reads the name, the title and the order, and leaves the front matter out of the text', () => {
+    const topic = parseTopic(
+      '../../../docs/guide/tabs.md',
+      '---\ntitle: Tabs: and more\norder: 4\nno colon here\n---\n\n# Tabs: and more\n\nText.\n',
+    )
+    expect(topic).toEqual({
+      id: 'tabs',
+      title: 'Tabs: and more',
+      order: 4,
+      body: '# Tabs: and more\n\nText.\n',
+    })
+  })
+
+  it('reads front matter with Windows line ends', () => {
+    const topic = parseTopic('a.md', '---\r\ntitle: A\r\norder: 1\r\n---\r\n# A\r\n')
+    expect(topic.title).toBe('A')
+    expect(topic.body).toBe('# A\r\n')
+  })
+
+  it('throws for a file without front matter, a title or an order', () => {
+    expect(() => parseTopic('a.md', '# A\n')).toThrow("'a'")
+    expect(() => parseTopic('a.md', '---\norder: 1\n---\n# A\n')).toThrow()
+    expect(() => parseTopic('a.md', '---\ntitle: A\n---\n# A\n')).toThrow()
+    expect(() => parseTopic('a.md', '---\ntitle: A\norder: first\n---\n# A\n')).toThrow()
+  })
 })
 
 describe('renderTopic', () => {
@@ -34,6 +69,7 @@ describe('renderTopic', () => {
     const html = renderTopic({
       id: 'x',
       title: 'A topic',
+      order: 1,
       body: '# A topic\n\nOne **word** stands out.\n\n- first\n- second\n',
     })
 
@@ -44,7 +80,7 @@ describe('renderTopic', () => {
   })
 
   it('keeps a text that starts with something other than a title', () => {
-    const html = renderTopic({ id: 'x', title: 'A topic', body: 'Plain words.\n' })
+    const html = renderTopic({ id: 'x', title: 'A topic', order: 1, body: 'Plain words.\n' })
     expect(html).toContain('<p>Plain words.</p>')
   })
 

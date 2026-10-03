@@ -1,3 +1,9 @@
+---
+title: Tabs and saved statements
+description: Work in several editor tabs, each with its own server session, and save statements for later.
+order: 4
+---
+
 # Tabs and saved statements
 
 The **+** button of the tab row opens a tab, and so do `Ctrl` or `Cmd` with
