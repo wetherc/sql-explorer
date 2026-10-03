@@ -81,6 +81,83 @@ server's certificate by default.
 
 Download a build from the
 [releases page](https://github.com/wetherc/sql-explorer/releases), or build it
-from source by following the
-[README](https://github.com/wetherc/sql-explorer#setup). SQL Explorer is free
-and open source under the MIT license.
+from source with the steps below. SQL Explorer is free and open source under
+the MIT license.
+
+### Build from source
+
+Every platform needs Node.js 20.19 or later (or 22.12 or later), pnpm and a
+Rust toolchain from [rustup](https://rustup.rs/). Install pnpm with
+`npm install -g pnpm`, then clone the repository and install its
+dependencies:
+
+```sh
+git clone https://github.com/wetherc/sql-explorer.git
+cd sql-explorer
+pnpm install
+```
+
+#### macOS
+
+Install Xcode's command line tools, then build the app bundle and the `.dmg`
+image:
+
+```sh
+xcode-select --install
+pnpm build:macos
+```
+
+You'll find both under `backend/target/release/bundle/`.
+
+#### Windows
+
+Install the Visual Studio C++ build tools and the WebView2 runtime, then build
+the NSIS installer:
+
+```sh
+pnpm tauri build --bundles nsis
+```
+
+You can also cross-compile the Windows installer on a Mac. Add the Windows
+target and the tools it needs, then run `pnpm build:windows`:
+
+```sh
+rustup target add x86_64-pc-windows-msvc
+cargo install cargo-xwin
+brew install nsis llvm
+pnpm build:windows
+```
+
+`cargo-xwin` downloads the Windows SDK and the MSVC headers on its first run.
+The installer lands in
+`backend/target/x86_64-pc-windows-msvc/release/bundle/nsis/`. A Mac can't
+build the MSI installer, because the WiX toolset runs only on Windows.
+
+#### Linux
+
+SQL Explorer uses Tauri 2, which needs WebKitGTK 4.1. On Ubuntu 24.04 or
+Debian 13, install the system libraries and then build the packages:
+
+```sh
+sudo apt update
+sudo apt install -y \
+    libwebkit2gtk-4.1-dev \
+    libgtk-3-dev \
+    libayatana-appindicator3-dev \
+    librsvg2-dev \
+    libxdo-dev \
+    libssl-dev \
+    libkrb5-dev \
+    clang \
+    pkg-config \
+    build-essential \
+    curl wget file
+pnpm build:linux
+```
+
+The `libkrb5-dev` headers and `clang` let the build include Windows
+authentication (Integrated Security) for MS SQL Server. The `.deb` package,
+the `.rpm` package and the AppImage land in `backend/target/release/bundle/`.
+
+For development builds, tests and the rest of the toolchain, see the
+[README](https://github.com/wetherc/sql-explorer#setup).
