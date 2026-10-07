@@ -44,61 +44,90 @@
               @click="selectConnection(connection)"
             >
               <template #prepend>
-                <v-badge
-                  :color="healthColor(connection.id)"
-                  dot
-                  offset-x="2"
-                  offset-y="10"
-                  :aria-label="healthLabel(connection.id)"
-                >
-                  <v-icon :color="connection.color ?? undefined" size="small">
-                    {{ engineIcon(connection.dbType) }}
-                  </v-icon>
-                </v-badge>
+                <v-tooltip location="bottom" :text="healthTip(connection.id)">
+                  <template #activator="{ props: tip }">
+                    <v-badge
+                      v-bind="tip"
+                      :model-value="healthColor(connection.id) !== null"
+                      :color="healthColor(connection.id) ?? undefined"
+                      dot
+                      offset-x="2"
+                      offset-y="10"
+                      data-test="health-dot"
+                    >
+                      <v-icon
+                        :color="connection.color ?? undefined"
+                        size="small"
+                        aria-hidden="true"
+                      >
+                        {{ engineIcon(connection.dbType) }}
+                      </v-icon>
+                    </v-badge>
+                  </template>
+                </v-tooltip>
               </template>
 
-              <v-list-item-title>{{ connection.name }}</v-list-item-title>
-              <v-list-item-subtitle>{{ subtitle(connection) }}</v-list-item-subtitle>
+              <v-list-item-title :title="connection.name" data-test="connection-name">
+                {{ connection.name
+                }}<span class="d-sr-only">, {{ healthLabel(connection.id) }}</span>
+              </v-list-item-title>
+              <v-list-item-subtitle :title="subtitle(connection)">
+                {{ subtitle(connection) }}
+              </v-list-item-subtitle>
 
               <template #append>
-                <v-btn
-                  :icon="
-                    connections.isActive(connection.id) ? 'mdi-lan-disconnect' : 'mdi-lan-connect'
-                  "
-                  :color="connections.isActive(connection.id) ? 'error' : 'success'"
-                  :loading="connections.connecting[connection.id] === true"
-                  size="x-small"
-                  :aria-label="connections.isActive(connection.id) ? 'Disconnect' : 'Connect'"
-                  data-test="toggle-connection"
-                  @click.stop="toggle(connection)"
-                />
+                <v-tooltip
+                  location="bottom"
+                  :text="connections.isActive(connection.id) ? 'Disconnect' : 'Connect'"
+                >
+                  <template #activator="{ props: tip }">
+                    <v-btn
+                      v-bind="tip"
+                      :icon="
+                        connections.isActive(connection.id)
+                          ? 'mdi-lan-disconnect'
+                          : 'mdi-lan-connect'
+                      "
+                      :color="connections.isActive(connection.id) ? 'error' : 'success'"
+                      :loading="connections.connecting[connection.id] === true"
+                      size="x-small"
+                      :aria-label="connections.isActive(connection.id) ? 'Disconnect' : 'Connect'"
+                      data-test="toggle-connection"
+                      @click.stop="toggle(connection)"
+                    />
+                  </template>
+                </v-tooltip>
                 <v-menu>
                   <template #activator="{ props: menu }">
-                    <v-btn
-                      v-bind="menu"
-                      icon="mdi-dots-vertical"
-                      size="x-small"
-                      aria-label="More actions"
-                      data-test="connection-menu"
-                      @click.stop
-                    />
+                    <v-tooltip location="bottom" text="More actions">
+                      <template #activator="{ props: tip }">
+                        <v-btn
+                          v-bind="mergeProps(menu, tip)"
+                          icon="mdi-dots-vertical"
+                          size="x-small"
+                          aria-label="More actions"
+                          data-test="connection-menu"
+                          @click.stop
+                        />
+                      </template>
+                    </v-tooltip>
                   </template>
                   <v-list density="compact">
                     <v-list-item
-                      prepend-icon="mdi-pencil"
-                      title="Edit"
+                      prepend-icon="mdi-pencil-outline"
+                      title="Edit…"
                       data-test="edit-connection"
                       @click="startEdit(connection)"
                     />
                     <v-list-item
                       prepend-icon="mdi-content-duplicate"
-                      title="Duplicate"
+                      title="Duplicate…"
                       data-test="duplicate-connection"
                       @click="duplicate(connection)"
                     />
                     <v-list-item
-                      prepend-icon="mdi-delete"
-                      title="Delete"
+                      prepend-icon="mdi-delete-outline"
+                      title="Delete…"
                       base-color="error"
                       data-test="delete-connection"
                       @click="askDelete(connection)"
@@ -129,11 +158,12 @@
       </EmptyState>
     </div>
 
-    <AppDialog v-if="draft" v-model="editing" max-width="620" persistent scrollable>
+    <AppDialog v-if="draft" v-model="editing" size="medium" persistent scrollable>
       <ConnectionForm
         :connection="draft"
         :is-new="isNew"
         :needs-new-token="needsNewToken"
+        :is-copy="isCopy"
         @close="editing = false"
         @saved="onSaved"
       />
@@ -149,6 +179,9 @@
       @cancel="deleting = false"
     >
       This removes <strong>{{ pendingDelete.name }}</strong> and its saved password.
+      <template v-if="queries.runningOn(pendingDelete.id) > 0">
+        <br /><br /><span data-test="delete-running">{{ runningMessage(pendingDelete.id) }}</span>
+      </template>
     </ConfirmDialog>
 
     <ConfirmDialog
@@ -166,7 +199,7 @@
 
 <script setup lang="ts">
 import AppDialog from './AppDialog.vue'
-import { ref, watch } from 'vue'
+import { mergeProps, ref, watch } from 'vue'
 import ConnectionForm from './ConnectionForm.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import EmptyState from './EmptyState.vue'
@@ -187,6 +220,8 @@ const editing = ref(false)
 const isNew = ref(true)
 const draft = ref<SavedConnection | null>(null)
 const deleting = ref(false)
+/** True while the form edits a copy, whose secrets stay with the original. */
+const isCopy = ref(false)
 /** True while the form asks for an access token that is fresh. */
 const needsNewToken = ref(false)
 const pendingDelete = ref<SavedConnection | null>(null)
@@ -218,24 +253,44 @@ function engineIcon(dbType: DbType): string {
   }
 }
 
-function healthColor(id: string): string {
+/** The last failure to connect to one server, if its last attempt failed. */
+function lastError(id: string): string | undefined {
+  return connections.lastError[id]
+}
+
+/** The colour of the dot beside a connection, or null for no dot. */
+function healthColor(id: string): string | null {
   switch (connections.health[id]) {
     case ConnectionHealth.Connected:
       return 'success'
     case ConnectionHealth.Reconnecting:
       return 'warning'
     default:
-      return 'transparent'
+      return lastError(id) ? 'error' : null
   }
 }
 
 function healthLabel(id: string): string {
-  return connections.health[id] ?? 'not connected'
+  switch (connections.health[id]) {
+    case ConnectionHealth.Connected:
+      return 'Connected'
+    case ConnectionHealth.Reconnecting:
+      return 'Reconnecting'
+    default:
+      return lastError(id) ? 'Connection failed' : 'Not connected'
+  }
+}
+
+/** The tooltip of the dot, which adds the reason of a failure. */
+function healthTip(id: string): string {
+  const failure = connections.health[id] === ConnectionHealth.Connected ? undefined : lastError(id)
+  return failure ? `${healthLabel(id)}: ${failure}` : healthLabel(id)
 }
 
 function startNew(): void {
   draft.value = newConnection()
   isNew.value = true
+  isCopy.value = false
   needsNewToken.value = false
   editing.value = true
 }
@@ -243,6 +298,7 @@ function startNew(): void {
 function startEdit(connection: SavedConnection): void {
   draft.value = { ...connection, options: { ...connection.options }, password: '' }
   isNew.value = false
+  isCopy.value = false
   needsNewToken.value = false
   editing.value = true
 }
@@ -250,6 +306,7 @@ function startEdit(connection: SavedConnection): void {
 function duplicate(connection: SavedConnection): void {
   draft.value = connections.duplicate(connection)
   isNew.value = true
+  isCopy.value = true
   needsNewToken.value = false
   editing.value = true
 }
@@ -280,8 +337,11 @@ function askDelete(connection: SavedConnection): void {
 async function confirmDelete(connection: SavedConnection): Promise<void> {
   deleting.value = false
   pendingDelete.value = null
-  explorer.removeRoot(connection.id)
   await connections.remove(connection.id)
+  // A delete that failed leaves the record in the list, and its tree stays.
+  if (!connections.byId(connection.id)) {
+    explorer.removeRoot(connection.id)
+  }
 }
 
 async function toggle(connection: SavedConnection): Promise<void> {

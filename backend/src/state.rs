@@ -147,7 +147,10 @@ pub struct AppState {
     /// One record for each statement that runs, keyed by the identifier the
     /// user interface gave it.
     pub running: Mutex<HashMap<String, RunningRequest>>,
-    pub secrets: Box<dyn SecretStore>,
+    /// The store of the passwords. Each command clones it into a blocking
+    /// thread, because a call to the keychain can wait for a prompt of the
+    /// operating system.
+    pub secrets: Arc<dyn SecretStore>,
     /// The folders that the user opened through the dialog of the operating
     /// system. A command that reads or writes a file refuses every path that
     /// lies outside these folders.
@@ -156,6 +159,10 @@ pub struct AppState {
     /// resolved paths, with the most recent last. A grant admits that one
     /// file and not the folder around it.
     pub file_grants: Mutex<Vec<std::path::PathBuf>>,
+    /// One change of the folders and the files at a time. A change reads the
+    /// list of the state and writes it to the record, and two changes at
+    /// once could write the older list last.
+    pub files_record: Mutex<()>,
 }
 
 /// The number of single-file grants that the state keeps. A new grant past
@@ -163,7 +170,7 @@ pub struct AppState {
 pub const MAX_FILE_GRANTS: usize = 200;
 
 impl AppState {
-    pub fn new(secrets: Box<dyn SecretStore>) -> Self {
+    pub fn new(secrets: Arc<dyn SecretStore>) -> Self {
         Self {
             connections: Mutex::new(HashMap::new()),
             background: Mutex::new(HashMap::new()),
@@ -171,6 +178,7 @@ impl AppState {
             secrets,
             file_roots: Mutex::new(Vec::new()),
             file_grants: Mutex::new(Vec::new()),
+            files_record: Mutex::new(()),
         }
     }
 
@@ -327,6 +335,23 @@ impl AppState {
             .await
             .remove(connection_id)
             .is_some()
+    }
+
+    /// Removes an open connection when it still uses the given pool of
+    /// sessions. A connect that ran in the meantime put a new connection in
+    /// its place, and that one stays. Returns true when it removed one.
+    pub async fn remove_if_same(&self, connection_id: &str, sessions: &Arc<SessionPool>) -> bool {
+        let mut connections = self.connections.lock().await;
+        if !connections
+            .get(connection_id)
+            .is_some_and(|open| Arc::ptr_eq(&open.sessions, sessions))
+        {
+            return false;
+        }
+        connections.remove(connection_id);
+        drop(connections);
+        self.background.lock().await.remove(connection_id);
+        true
     }
 
     /// Registers a statement of a connection that runs, and returns its
@@ -488,7 +513,7 @@ mod tests {
     }
 
     fn state() -> AppState {
-        AppState::new(Box::new(MemoryStore::default()))
+        AppState::new(Arc::new(MemoryStore::default()))
     }
 
     #[tokio::test]

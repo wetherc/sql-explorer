@@ -7,6 +7,8 @@ import {
   MAX_CELL_UNITS,
   MAX_SHEET_COLUMNS,
   escapeXml,
+  excelNumber,
+  isNumericType,
   sheetName,
   sheetXml,
   stripForbiddenXml,
@@ -121,7 +123,7 @@ describe('sheetXml', () => {
       [1],
     ]
     const xml = sheetXml({
-      columns: cells.map((_cell, index) => ({ name: String(2024 + index), typeName: 'x' })),
+      columns: cells.map((_cell, index) => ({ name: String(2024 + index), typeName: 'numeric' })),
       rows: [cells],
       truncated: false,
     })
@@ -133,6 +135,55 @@ describe('sheetXml', () => {
     expect(xml).toContain('<c r="E2"><v>1e+21</v></c>')
     for (const column of ['F', 'G', 'H', 'I', 'J']) {
       expect(xml).toContain(`<c r="${column}2" t="inlineStr">`)
+    }
+  })
+})
+
+describe('sheetXml with column types', () => {
+  it('writes a number text as a number in a numeric column alone', () => {
+    const xml = sheetXml({
+      columns: [
+        { name: 'amount', typeName: 'decimal(10,2)' },
+        { name: 'code', typeName: 'varchar' },
+        { name: 'count', typeName: 'text' },
+      ],
+      rows: [['12.50', '+1555', 7]],
+      truncated: false,
+    })
+    expect(xml).toContain('<c r="A2"><v>12.5</v></c>')
+    expect(xml).toContain('<c r="B2" t="inlineStr"><is><t xml:space="preserve">+1555</t>')
+    // A JSON number stays a number in a text column.
+    expect(xml).toContain('<c r="C2"><v>7</v></c>')
+  })
+
+  it('reads a cell past the known columns as a text column', () => {
+    const xml = sheetXml({ columns: [], rows: [['5']], truncated: false })
+    expect(xml).toContain('<c r="A2" t="inlineStr">')
+  })
+})
+
+describe('excelNumber', () => {
+  it('keeps a whole part with a zero in front of other digits as text', () => {
+    for (const text of ['00123', '-007', '+01.5', '01e3']) {
+      expect(excelNumber(text)).toBeNull()
+    }
+  })
+
+  it('reads a single zero in the whole part as a number', () => {
+    expect(excelNumber('0')).toBe('0')
+    expect(excelNumber('0.25')).toBe('0.25')
+    expect(excelNumber('-0.5')).toBe('-0.5')
+    expect(excelNumber('.5')).toBe('0.5')
+  })
+})
+
+describe('isNumericType', () => {
+  it('reads the first word of the type name', () => {
+    for (const name of ['int', 'decimal(10,2)', 'double precision', ' INT UNSIGNED', 'int8']) {
+      expect(isNumericType(name)).toBe(true)
+    }
+    for (const name of ['', 'varchar(10)', 'text', 'bit', 'interval']) {
+      expect(isNumericType(name)).toBe(false)
     }
   })
 })

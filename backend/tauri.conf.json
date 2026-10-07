@@ -41,7 +41,10 @@
     ],
     "linux": {
       "deb": {
-        "depends": []
+        "depends": ["libgssapi-krb5-2", "libssl3"]
+      },
+      "rpm": {
+        "depends": ["krb5-libs", "openssl-libs"]
       }
     },
     "macOS": {

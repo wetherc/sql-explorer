@@ -47,16 +47,22 @@ export const MAX_CELL_UNITS = 32767
  * number with at most 15 significant digits whose value is finite. A longer
  * number goes in as text, because Excel would round 1234567890123456789 to
  * 1234567890123456800.
+ *
+ * A whole part with a zero in front of other digits, as in the code `00123`,
+ * also goes in as text. A database never writes a number in that form, and
+ * the number cell would lose the zeros. The backend writer follows the same
+ * rules.
  */
-function excelNumber(text: string): string | null {
+export function excelNumber(text: string): string | null {
   if (!isPlainNumber(text)) {
     return null
   }
-  const digits = text
-    .split(/[eE]/)[0]!
-    .replace(/^[+-]/, '')
-    .replace('.', '')
-    .replace(/^0+|0+$/g, '')
+  const mantissa = text.split(/[eE]/)[0]!.replace(/^[+-]/, '')
+  const whole = mantissa.split('.')[0]!
+  if (whole.length > 1 && whole.startsWith('0')) {
+    return null
+  }
+  const digits = mantissa.replace('.', '').replace(/^0+|0+$/g, '')
   const value = Number(text)
   return Number.isFinite(value) && digits.length <= EXCEL_DIGITS ? String(value) : null
 }
@@ -79,6 +85,26 @@ function textCell(reference: string, text: string): string {
   return `<c r="${reference}" t="inlineStr"><is><t xml:space="preserve">${escaped}</t></is></c>`
 }
 
+/** The first words of the type names whose columns contain numbers. */
+const NUMERIC_TYPES = new Set(
+  (
+    'tinyint smallint mediumint int integer bigint int2 int4 int8 decimal dec ' +
+    'numeric number float float4 float8 double real money smallmoney'
+  ).split(' '),
+)
+
+/**
+ * True when a column of this type contains numbers, so that a text value of the
+ * column can go in as a number cell. The test reads the first word of the
+ * type name, without a length or a precision, so `decimal(10,2)`, `double
+ * precision` and `int unsigned` all count as numeric. The backend writer
+ * reads the type names in the same way.
+ */
+export function isNumericType(typeName: string): boolean {
+  const word = typeName.trim().toLowerCase().split(/[\s(]/)[0]!
+  return NUMERIC_TYPES.has(word)
+}
+
 /** Names a column of a spreadsheet: 1 gives A, 27 gives AA. */
 export function columnName(index: number): string {
   let rest = index
@@ -93,11 +119,12 @@ export function columnName(index: number): string {
 
 /**
  * Writes one cell of the sheet. A number, and a text that holds only a
- * number, go in as a number when Excel can keep the value exactly, so that
- * `SUM` reads a DECIMAL column and every PostgreSQL column of the simple
- * protocol. Any other number goes in as text.
+ * number in a numeric column, go in as a number when Excel can keep the
+ * value exactly, so that `SUM` reads a DECIMAL column and every PostgreSQL
+ * column of the simple protocol. A text column keeps a code such as `+1555`
+ * or `12E3` as text. Any other number goes in as text.
  */
-function cellXml(reference: string, value: CellValue): string {
+function cellXml(reference: string, value: CellValue, numeric: boolean): string {
   if (isNullCell(value)) {
     return ''
   }
@@ -105,14 +132,20 @@ function cellXml(reference: string, value: CellValue): string {
     return `<c r="${reference}" t="b"><v>${value ? 1 : 0}</v></c>`
   }
   const text = formatCell(value)
-  const number = typeof value === 'number' || typeof value === 'string' ? excelNumber(text) : null
+  const asNumber = typeof value === 'number' || (typeof value === 'string' && numeric)
+  const number = asNumber ? excelNumber(text) : null
   return number === null ? textCell(reference, text) : `<c r="${reference}"><v>${number}</v></c>`
 }
 
-/** Writes one row of the sheet. */
-function rowXml(values: CellValue[], rowNumber: number): string {
+/**
+ * Writes one row of the sheet. `numeric` gives, for each column, whether a
+ * text value can go in as a number cell.
+ */
+function rowXml(values: CellValue[], rowNumber: number, numeric: boolean[]): string {
   const cells = values
-    .map((value, index) => cellXml(`${columnName(index + 1)}${rowNumber}`, value))
+    .map((value, index) =>
+      cellXml(`${columnName(index + 1)}${rowNumber}`, value, numeric[index] === true),
+    )
     .join('')
   return `<row r="${rowNumber}">${cells}</row>`
 }
@@ -124,7 +157,8 @@ export function sheetXml(result: ResultSet): string {
     textCell(`${columnName(index + 1)}1`, column.name),
   )
   const header = `<row r="1">${names.join('')}</row>`
-  const body = result.rows.map((row, index) => rowXml(row, index + 2)).join('')
+  const numeric = result.columns.map((column) => isNumericType(column.typeName))
+  const body = result.rows.map((row, index) => rowXml(row, index + 2, numeric)).join('')
   return (
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
     '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +

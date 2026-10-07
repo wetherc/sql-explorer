@@ -602,9 +602,8 @@ describe('ConnectionForm advanced options', () => {
     await settle()
 
     expect(apiStub.saveConnection).not.toHaveBeenCalled()
-    expect(
-      useUiStore().notices.some((notice) => notice.message.includes('Enter an access key ID')),
-    ).toBe(true)
+    expect(wrapper.find('[data-test="form-problems"]').text()).toContain('Enter an access key ID')
+    expect(useUiStore().notices).toHaveLength(0)
   })
 
   it('says that a static pair of keys needs no session token', async () => {
@@ -1013,5 +1012,203 @@ describe('ConnectionForm without a stored password', () => {
     expect(apiStub.saveConnection).toHaveBeenCalledWith(
       expect.objectContaining({ password: 'typed-in' }),
     )
+  })
+})
+
+describe('ConnectionForm answers inside the form', () => {
+  beforeEach(() => {
+    Object.values(apiStub).forEach((fn) => fn.mockReset())
+    apiStub.getConnections.mockResolvedValue([])
+    apiStub.listActiveConnections.mockResolvedValue([])
+    apiStub.saveConnection.mockResolvedValue(undefined)
+  })
+
+  it('writes a passed test in the form and not in a notice', async () => {
+    apiStub.testConnection.mockResolvedValue('Connection successful.')
+    const wrapper = await mountForm()
+    await wrapper.find('[data-test="test-button"]').trigger('click')
+    await settle()
+    expect(wrapper.find('[data-test="test-result"]').text()).toContain('Connection successful.')
+    expect(useUiStore().notices).toHaveLength(0)
+    await wrapper.findComponent({ name: 'VAlert' }).vm.$emit('click:close')
+    await wrapper.vm.$nextTick()
+  })
+
+  it('writes a failed test and its detail in the form', async () => {
+    apiStub.testConnection.mockRejectedValue({
+      category: 'authentication',
+      message: 'Login failed.',
+      detail: 'Msg 18456',
+    })
+    const wrapper = await mountForm()
+    await wrapper.find('[data-test="test-button"]').trigger('click')
+    await settle()
+    const result = wrapper.find('[data-test="test-result"]')
+    expect(result.text()).toContain('Login failed.')
+    expect(result.text()).toContain('Msg 18456')
+    const close = wrapper
+      .findAllComponents({ name: 'VAlert' })
+      .find((alert) => alert.attributes('data-test')?.includes('test-result'))
+    await close!.vm.$emit('click:close')
+    expect(wrapper.find('[data-test="test-result"]').exists()).toBe(false)
+  })
+
+  it('runs no test while the form lists a problem', async () => {
+    const wrapper = await mountForm(connectionFixture({ name: '' }))
+    await wrapper.find('[data-test="test-button"]').trigger('click')
+    await settle()
+    expect(apiStub.testConnection).not.toHaveBeenCalled()
+    expect(useUiStore().notices).toHaveLength(0)
+  })
+
+  it('shuts the fields and the Save button while a test runs', async () => {
+    let finish: (value: string) => void = () => {}
+    apiStub.testConnection.mockReturnValue(new Promise<string>((resolve) => (finish = resolve)))
+    const wrapper = await mountForm()
+    await wrapper.find('[data-test="test-button"]').trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-test="host-field"] input').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-test="save-button"]').attributes('disabled')).toBeDefined()
+    finish('ok')
+    await settle()
+    expect(wrapper.find('[data-test="save-button"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('drops the answer of a test that ends after the form closed', async () => {
+    let fail: (reason: unknown) => void = () => {}
+    let pass: (value: string) => void = () => {}
+    apiStub.testConnection
+      .mockReturnValueOnce(new Promise<string>((_resolve, reject) => (fail = reject)))
+      .mockReturnValueOnce(new Promise<string>((resolve) => (pass = resolve)))
+    const first = await mountForm()
+    await first.find('[data-test="test-button"]').trigger('click')
+    first.unmount()
+    fail(new Error('late'))
+    await settle()
+    const second = await mountForm()
+    await second.find('[data-test="test-button"]').trigger('click')
+    second.unmount()
+    pass('late')
+    await settle()
+    expect(useUiStore().notices).toHaveLength(0)
+  })
+
+  it('asks before it discards changes, and closes at once without them', async () => {
+    const wrapper = await mountForm()
+    await wrapper.find('[data-test="cancel-button"]').trigger('click')
+    expect(wrapper.emitted('close')).toHaveLength(1)
+
+    await wrapper.find('[data-test="name-field"] input').setValue('Changed')
+    await wrapper.find('[data-test="cancel-button"]').trigger('click')
+    await settle()
+    expect(wrapper.emitted('close')).toHaveLength(1)
+    ;(document.querySelector('[data-test="confirm-cancel"]') as HTMLElement).click()
+    await settle()
+    expect(wrapper.emitted('close')).toHaveLength(1)
+
+    await wrapper.find('[data-test="cancel-button"]').trigger('click')
+    await settle()
+    ;(document.querySelector('[data-test="confirm-accept"]') as HTMLElement).click()
+    await settle()
+    expect(wrapper.emitted('close')).toHaveLength(2)
+  })
+
+  it('treats a record the parent gives as the new starting point', async () => {
+    const wrapper = await mountForm()
+    await wrapper.setProps({ connection: connectionFixture({ name: 'Other' }) })
+    await settle()
+    await wrapper.find('[data-test="cancel-button"]').trigger('click')
+    expect(wrapper.emitted('close')).toHaveLength(1)
+  })
+
+  it('saves nothing when Enter submits the form', async () => {
+    const wrapper = await mountForm()
+    await wrapper.find('form').trigger('submit')
+    await settle()
+    expect(apiStub.saveConnection).not.toHaveBeenCalled()
+    expect(wrapper.emitted('close')).toBeUndefined()
+  })
+
+  it('shuts the port box while a named instance is set', async () => {
+    const record = connectionFixture()
+    record.options.instanceName = 'SQLEXPRESS'
+    const wrapper = await mountForm(record)
+    const port = wrapper.find('[data-test="port-field"]')
+    expect(port.find('input').attributes('disabled')).toBeDefined()
+    expect(port.text()).toContain('SQL Browser gives the port')
+  })
+
+  it('asks for the password again for a copy', async () => {
+    const wrapper = mountWithPlugins(ConnectionForm, {
+      props: { connection: connectionFixture({ password: '' }), isNew: true, isCopy: true },
+    })
+    useConnectionsStore().engines = engines
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-test="password-field"]').text()).toContain(
+      'Enter the password again for the copy.',
+    )
+  })
+
+  it('asks for the AWS secret again for a copy', async () => {
+    const record = connectionFixture({ dbType: DbType.Athena, host: null, port: null })
+    record.options.awsCredentialSource = AwsCredentialSource.Keys
+    const wrapper = mountWithPlugins(ConnectionForm, {
+      props: { connection: record, isNew: true, isCopy: true },
+    })
+    useConnectionsStore().engines = engines
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-test="aws-secret-field"]').text()).toContain('for the copy')
+  })
+
+  it('requires the password again when a saved record points at another server', async () => {
+    const wrapper = await mountForm(connectionFixture({ password: '' }))
+    expect(wrapper.find('[data-test="form-problems"]').exists()).toBe(false)
+    await wrapper.find('[data-test="host-field"] input').setValue('elsewhere.example.com')
+    expect(wrapper.find('[data-test="password-field"]').text()).toContain(
+      'Enter the password again because the server changed.',
+    )
+    await wrapper.find('[data-test="save-button"]').trigger('click')
+    await settle()
+    expect(apiStub.saveConnection).not.toHaveBeenCalled()
+
+    await wrapper.find('[data-test="password-field"] input').setValue('new secret')
+    await wrapper.find('[data-test="save-button"]').trigger('click')
+    await settle()
+    expect(apiStub.saveConnection).toHaveBeenCalled()
+  })
+
+  it('compares the fields of the server as the backend does', async () => {
+    const wrapper = await mountForm(connectionFixture({ password: '' }))
+    const hint = () => wrapper.find('[data-test="password-field"]').text()
+    // Spaces at the ends of a field name no new server.
+    await wrapper.find('[data-test="host-field"] input').setValue('  localhost ')
+    expect(hint()).not.toContain('again')
+  })
+
+  it('requires the AWS secret again when the access key ID changes', async () => {
+    const record = connectionFixture({ dbType: DbType.Athena, host: null, port: null })
+    record.options.awsRegion = 'us-east-1'
+    record.options.awsCredentialSource = AwsCredentialSource.Keys
+    record.options.awsAccessKeyId = 'AKIAEXAMPLE'
+    const wrapper = await mountForm(record)
+    await wrapper.find('[data-test="aws-access-key-field"] input').setValue('AKIAOTHER')
+    expect(wrapper.find('[data-test="aws-secret-field"]').text()).toContain(
+      'Enter the secret access key again because the server changed.',
+    )
+  })
+
+  it('requires the AWS secret again when the region of a saved record changes', async () => {
+    const record = connectionFixture({ dbType: DbType.Athena, host: null, port: null })
+    record.options.awsRegion = 'us-east-1'
+    record.options.athenaWorkgroup = 'primary'
+    record.options.awsCredentialSource = AwsCredentialSource.Keys
+    record.options.awsAccessKeyId = 'AKIAEXAMPLE'
+    const wrapper = await mountForm(record)
+    expect(wrapper.find('[data-test="aws-secret-field"]').text()).not.toContain('again')
+    await wrapper.find('[data-test="aws-region-field"] input').setValue('eu-west-1')
+    expect(wrapper.find('[data-test="aws-secret-field"]').text()).toContain(
+      'Enter the secret access key again because the server changed.',
+    )
+    expect(wrapper.find('[data-test="form-problems"]').text()).toContain('secret access key')
   })
 })

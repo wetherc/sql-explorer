@@ -33,7 +33,6 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 
 tauri = { version = "2", features = [] }
-tauri-plugin-store = "2"
 tauri-plugin-dialog = "2"
 
 # The TLS of `tiberius` runs on the library of the operating system, not on
@@ -100,8 +99,8 @@ tiberius = { version = "0.12.3", default-features = false, features = ["winauth"
 
 [target.'cfg(unix)'.dependencies]
 # On a system that is not Windows, Integrated Security means Kerberos through
-# GSSAPI. macOS carries the GSS framework and Linux carries the MIT or the
-# Heimdal library, so the feature needs no extra package.
+# GSSAPI. macOS has the GSS framework. Linux needs the MIT Kerberos library, so
+# the deb and rpm packages in `tauri.conf.json` depend on it.
 tiberius = { version = "0.12.3", default-features = false, features = [
     "integrated-auth-gssapi",
 ] }
@@ -132,11 +131,13 @@ tokio = { version = "1", features = ["test-util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
+# A release build unwinds on a panic. Tauri and tokio then stop only the task
+# that panicked, and the window stays open with its unsaved tabs. With
+# `panic = "abort"`, one panic in a command closes the whole application.
 [profile.release]
 codegen-units = 1
 lto = true
 opt-level = "s"
-panic = "abort"
 strip = true
 
 # `tiberius` 0.12.3 holds each write of the TLS handshake in a buffer and sends

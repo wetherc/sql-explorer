@@ -61,6 +61,41 @@ describe('QueryTabs', () => {
     expect(wrapper.findAll('.dirty-mark')).toHaveLength(1)
   })
 
+  it('frees the kept editor model of a closed tab', async () => {
+    const { keptKeys } = await import('@/components/editorModels')
+    mountWithPlugins(QueryTabs)
+    const tabs = useTabsStore()
+    const first = tabs.add()
+    await settle()
+    const second = tabs.add()
+    await settle()
+    expect(keptKeys()).toEqual(expect.arrayContaining([first.id, second.id]))
+
+    tabs.close(first.id)
+    await settle()
+    expect(keptKeys()).not.toContain(first.id)
+    expect(keptKeys()).toContain(second.id)
+  })
+
+  it('frees the model of the shown tab only after its editor has gone', async () => {
+    const { monaco } = await import('@/plugins/monaco')
+    const order: string[] = []
+    vi.mocked(monaco.editor.create).mockClear()
+    vi.mocked(monaco.editor.createModel).mockClear()
+    mountWithPlugins(QueryTabs)
+    const tabs = useTabsStore()
+    const shown = tabs.add()
+    await settle()
+    const editor = vi.mocked(monaco.editor.create).mock.results[0]!.value
+    const model = vi.mocked(monaco.editor.createModel).mock.results[0]!.value
+    vi.mocked(editor.dispose).mockImplementation(() => order.push('editor'))
+    vi.mocked(model.dispose).mockImplementation(() => order.push('model'))
+
+    tabs.close(shown.id)
+    await settle()
+    expect(order).toEqual(['editor', 'model'])
+  })
+
   it('closes a tab from its own button', async () => {
     const wrapper = mountWithPlugins(QueryTabs)
     const tabs = useTabsStore()
@@ -79,6 +114,46 @@ describe('QueryTabs', () => {
 
     await wrapper.find('[data-test="query-tab"]').trigger('keydown', { key: 'Delete' })
     expect(tabs.tabs).toHaveLength(0)
+  })
+
+  it('keeps the tab open when Backspace arrives', async () => {
+    const wrapper = mountWithPlugins(QueryTabs)
+    const tabs = useTabsStore()
+    tabs.add()
+    await settle()
+
+    await wrapper.find('[data-test="query-tab"]').trigger('keydown', { key: 'Backspace' })
+    expect(tabs.tabs).toHaveLength(1)
+  })
+
+  it('marks a tab whose statement runs and a tab whose last run failed', async () => {
+    const wrapper = mountWithPlugins(QueryTabs)
+    const tabs = useTabsStore()
+    const running = tabs.add()
+    const failed = tabs.add()
+    tabs.add()
+    const queries = useQueryStore()
+    queries.stateFor(running.id).running = true
+    ;(queries.stateFor(failed.id) as unknown as { failed: boolean }).failed = true
+    await settle()
+
+    expect(wrapper.findAll('[data-test="tab-running"]')).toHaveLength(1)
+    expect(wrapper.findAll('[data-test="tab-failed"]')).toHaveLength(1)
+    expect(wrapper.text()).toContain(', running')
+    expect(wrapper.text()).toContain(', last run failed')
+  })
+
+  it('names the tab and its connection in the tooltip of the title', async () => {
+    const wrapper = mountWithPlugins(QueryTabs)
+    await useConnectionsStore().load()
+    const tabs = useTabsStore()
+    const name = connectionFixture().name
+    tabs.add({ title: 'Report', connectionId: connectionFixture().id })
+    tabs.add({ title: 'Loose', connectionId: null })
+    await settle()
+
+    const titles = wrapper.findAll('[data-test="tab-title"]').map((el) => el.attributes('title'))
+    expect(titles).toEqual([`Report (${name})`, 'Loose'])
   })
 
   it('speaks the change of a tab that a reader cannot see', async () => {

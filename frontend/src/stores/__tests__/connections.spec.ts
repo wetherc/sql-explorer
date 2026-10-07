@@ -12,6 +12,8 @@ const {
   newConnection,
   useConnectionsStore,
   validateConnection,
+  firstProblem,
+  ATHENA_REUSE_MAX_MINUTES,
 } = await import('@/stores/connections')
 const { useUiStore } = await import('@/stores/ui')
 const { useExplorerStore } = await import('@/stores/explorer')
@@ -59,36 +61,72 @@ describe('createId', () => {
 })
 
 describe('validateConnection', () => {
+  const listed = (connection: Parameters<typeof validateConnection>[0]) =>
+    Object.values(validateConnection(connection))
+
+  it('names the field of each problem, and gives the first one', () => {
+    const connection = connectionFixture({ name: '', host: '' })
+    connection.port = '' as unknown as number
+    const problems = validateConnection(connection)
+    expect(Object.keys(problems)).toEqual(['name', 'host', 'port'])
+    expect(firstProblem(problems)).toBe('Enter a name for the connection.')
+    expect(firstProblem({})).toBeNull()
+  })
+
+  it('needs a max age from 0 to 7 days when Athena reuses results', () => {
+    const connection = connectionFixture({ dbType: DbType.Athena })
+    connection.options.awsRegion = 'us-east-1'
+    connection.options.athenaWorkgroup = 'primary'
+    connection.options.athenaResultReuseMaxAgeMinutes = 99999
+    // A max age that is not used is not checked.
+    expect(validateConnection(connection)).toEqual({})
+    connection.options.athenaResultReuse = true
+    expect(Object.keys(validateConnection(connection))).toEqual(['athenaResultReuseMaxAgeMinutes'])
+    connection.options.athenaResultReuseMaxAgeMinutes = '' as unknown as number
+    expect(listed(connection)).toEqual([
+      'Max age must be a whole number of minutes from 0 to 10080.',
+    ])
+    connection.options.athenaResultReuseMaxAgeMinutes = ATHENA_REUSE_MAX_MINUTES
+    expect(validateConnection(connection)).toEqual({})
+    connection.options.athenaResultReuseMaxAgeMinutes = 0
+    expect(validateConnection(connection)).toEqual({})
+  })
+
   it('accepts a complete record', () => {
-    expect(validateConnection(connectionFixture())).toEqual([])
+    expect(listed(connectionFixture())).toEqual([])
   })
 
   it('needs a name', () => {
-    expect(validateConnection(connectionFixture({ name: ' ' }))).toContain(
-      'Enter a name for the connection.',
-    )
+    expect(listed(connectionFixture({ name: ' ' }))).toContain('Enter a name for the connection.')
   })
 
   it('needs a host and a port for a network engine', () => {
-    expect(validateConnection(connectionFixture({ host: '' }))).toContain(
-      'Enter a host for the connection.',
-    )
-    expect(validateConnection(connectionFixture({ host: null }))).toContain(
-      'Enter a host for the connection.',
-    )
-    expect(validateConnection(connectionFixture({ port: null }))).toContain(
+    expect(listed(connectionFixture({ host: '' }))).toContain('Enter a host for the connection.')
+    expect(listed(connectionFixture({ host: null }))).toContain('Enter a host for the connection.')
+    expect(listed(connectionFixture({ port: null }))).toContain(
       'Port must be a whole number from 1 to 65535.',
     )
-    expect(validateConnection(connectionFixture({ port: 0 }))).toHaveLength(1)
-    expect(validateConnection(connectionFixture({ port: 70000 }))).toHaveLength(1)
-    expect(validateConnection(connectionFixture({ port: 1.5 }))).toHaveLength(1)
+    expect(listed(connectionFixture({ port: 0 }))).toHaveLength(1)
+    expect(listed(connectionFixture({ port: 70000 }))).toHaveLength(1)
+    expect(listed(connectionFixture({ port: 1.5 }))).toHaveLength(1)
+  })
+
+  it('reads no port for a named instance of MS SQL Server', () => {
+    const named = connectionFixture({ dbType: DbType.Mssql, port: null })
+    named.options.instanceName = 'SQLEXPRESS'
+    expect(listed(named)).toEqual([])
+    named.options.instanceName = '  '
+    expect(listed(named)).toContain('Port must be a whole number from 1 to 65535.')
+    const other = connectionFixture({ dbType: DbType.Postgres, port: null })
+    other.options.instanceName = 'SQLEXPRESS'
+    expect(listed(other)).toContain('Port must be a whole number from 1 to 65535.')
   })
 
   it('needs a whole number in each number box', () => {
     const empty = (key: 'connectTimeoutSecs' | 'queryTimeoutSecs' | 'maxRows' | 'maxSessions') => {
       const connection = connectionFixture()
       ;(connection.options as unknown as Record<string, unknown>)[key] = ''
-      return validateConnection(connection)
+      return listed(connection)
     }
     expect(empty('connectTimeoutSecs')).toEqual([
       'Connect timeout must be a whole number, 0 or greater.',
@@ -101,7 +139,7 @@ describe('validateConnection', () => {
     const connection = connectionFixture()
     connection.options.maxRows = -1
     connection.options.queryTimeoutSecs = 2.5
-    expect(validateConnection(connection)).toHaveLength(2)
+    expect(listed(connection)).toHaveLength(2)
   })
 
   it('accepts 0 in a timeout and needs one session or more', () => {
@@ -110,39 +148,37 @@ describe('validateConnection', () => {
     connection.options.queryTimeoutSecs = 0
     connection.options.maxRows = 0
     connection.options.maxSessions = 1
-    expect(validateConnection(connection)).toEqual([])
+    expect(listed(connection)).toEqual([])
     connection.options.maxSessions = 0
-    expect(validateConnection(connection)).toEqual([
-      'Max sessions must be a whole number, 1 or greater.',
-    ])
+    expect(listed(connection)).toEqual(['Max sessions must be a whole number, 1 or greater.'])
   })
 
   it('needs no host when a connection string is given', () => {
     const connection = connectionFixture({ host: '', port: null })
     connection.options.connectionUrl = 'server=tcp:other,1433'
-    expect(validateConnection(connection)).toEqual([])
+    expect(listed(connection)).toEqual([])
   })
 
   it('needs a file for SQLite', () => {
     const connection = connectionFixture({ dbType: DbType.Sqlite })
-    expect(validateConnection(connection)).toContain('Enter the path to a SQLite database file.')
+    expect(listed(connection)).toContain('Enter the path to a SQLite database file.')
     connection.options.filePath = '/tmp/a.db'
-    expect(validateConnection(connection)).toEqual([])
+    expect(listed(connection)).toEqual([])
   })
 
   it('needs a region and a place for the results for Athena', () => {
     const connection = connectionFixture({ dbType: DbType.Athena })
-    expect(validateConnection(connection)).toEqual([
+    expect(listed(connection)).toEqual([
       'Enter an AWS region for the Athena connection.',
       'Enter a workgroup or an output location for the Athena connection.',
     ])
     connection.options.awsRegion = 'us-east-1'
     connection.options.athenaWorkgroup = 'primary'
-    expect(validateConnection(connection)).toEqual([])
+    expect(listed(connection)).toEqual([])
 
     connection.options.athenaWorkgroup = null
     connection.options.athenaOutputLocation = 's3://bucket/'
-    expect(validateConnection(connection)).toEqual([])
+    expect(listed(connection)).toEqual([])
   })
 
   it('needs an access key ID for Athena with keys', () => {
@@ -151,14 +187,14 @@ describe('validateConnection', () => {
     connection.options.athenaWorkgroup = 'primary'
     connection.options.awsCredentialSource = AwsCredentialSource.Keys
 
-    expect(validateConnection(connection)).toEqual([
+    expect(listed(connection)).toEqual([
       'Enter an access key ID, or choose another credential source.',
     ])
 
     // The secret access key is not asked for here, because the keychain
     // can already hold it.
     connection.options.awsAccessKeyId = 'AKIAEXAMPLE'
-    expect(validateConnection(connection)).toEqual([])
+    expect(listed(connection)).toEqual([])
   })
 })
 
@@ -322,6 +358,35 @@ describe('connections store', () => {
     const connections = useConnectionsStore()
     expect(await connections.connect(connectionFixture())).toBe(false)
     expect(connections.isActive('c1')).toBe(false)
+    expect(connections.lastError.c1).toBe('refused')
+
+    // A connect that works clears the reason, and so does a delete.
+    apiStub.connect.mockResolvedValue(infoFixture())
+    expect(await connections.connect(connectionFixture())).toBe(true)
+    expect(connections.lastError.c1).toBeUndefined()
+    apiStub.connect.mockRejectedValue({ category: 'connection', message: 'refused', detail: null })
+    await connections.connect(connectionFixture())
+    apiStub.deleteConnection.mockResolvedValue(undefined)
+    apiStub.getConnections.mockResolvedValue([])
+    apiStub.listActiveConnections.mockResolvedValue([])
+    await connections.remove('c1')
+    expect(connections.lastError).toEqual({})
+  })
+
+  it('starts no second connect while one runs', async () => {
+    let answer: (value: unknown) => void = () => {}
+    apiStub.connect.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          answer = resolve
+        }),
+    )
+    const connections = useConnectionsStore()
+    const first = connections.connect(connectionFixture())
+    expect(await connections.connect(connectionFixture())).toBe(false)
+    answer(infoFixture())
+    expect(await first).toBe(true)
+    expect(apiStub.connect).toHaveBeenCalledTimes(1)
   })
 
   it('keeps the state of a connection that a new read finds again', async () => {
@@ -463,7 +528,11 @@ describe('connections store', () => {
     })
     expect(connections.isActive('c1')).toBe(false)
     expect(connections.selectedId).toBeNull()
-    expect(useUiStore().notices[0]?.message).toBe('the socket closed')
+    const notice = useUiStore().notices[0]
+    expect(notice?.message).toBe('the socket closed')
+    expect(notice?.level).toBe('error')
+    expect(notice?.timeout).toBe(-1)
+    expect(connections.lastError.c1).toBe('the socket closed')
   })
 
   it('takes the tree of a dropped connection away', () => {

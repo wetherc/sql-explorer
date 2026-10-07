@@ -1,17 +1,17 @@
 //! The files that hold the settings, the history and the saved queries.
 //!
 //! Every read is tolerant: one record that cannot be understood is written
-//! to the log and left out, so a single damaged entry does not stop the
-//! whole list from loading.
+//! to the log, left out and reported to the window, so a single damaged
+//! entry does not stop the whole list from loading.
 
 use crate::error::{Error, Result};
 use crate::history::{push_entry, trim_history, HistoryEntry, SavedQuery};
+use crate::jsonfile;
 use crate::storage::SavedConnection;
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 use std::path::PathBuf;
 use tauri::{AppHandle, Runtime};
-use tauri_plugin_store::StoreExt;
 
 /// The file that holds the saved connections.
 pub const CONNECTIONS_FILE: &str = "connections.json";
@@ -22,29 +22,40 @@ pub const WORKSPACE_FILE: &str = "workspace.json";
 /// The file that holds the folders and the single files the user accepted.
 pub const FOLDERS_FILE: &str = "folders.json";
 
-/// One change of the history or of the saved queries at a time.
-///
-/// Each change reads a list, changes it and writes it back. Two runs that end
-/// together call the command on two threads, and without the lock the second
-/// write drops the entry of the first.
-static QUERIES_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Reads one list of the file of the queries, changes it and writes it back,
-/// under the lock of that file.
-fn edit_queries<R: Runtime, T, F>(app: &AppHandle<R>, key: &str, change: F) -> Result<()>
+/// Reads one list of a file, changes it and writes it back, under the lock
+/// of that file. Two runs that end together then cannot drop the entry of
+/// each other.
+fn edit_list<R: Runtime, T, F>(app: &AppHandle<R>, file: &str, key: &str, change: F) -> Result<()>
 where
     T: DeserializeOwned + serde::Serialize,
     F: FnOnce(&mut Vec<T>),
 {
-    let _edit = QUERIES_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let store = app.store(settings_path(QUERIES_FILE))?;
-    let mut list: Vec<T> = parse_list(store.get(key));
-    change(&mut list);
-    store.set(key, serde_json::to_value(&list)?);
-    store.save()?;
-    Ok(())
+    let path = settings_path(app, file)?;
+    jsonfile::update(&path, |values| {
+        let mut list: Vec<T> = parse_list(file, values.get(key).cloned());
+        change(&mut list);
+        values.insert(key.to_string(), serde_json::to_value(&list)?);
+        Ok::<_, Error>(())
+    })?
+}
+
+/// Sets one value of a file and writes the file.
+fn set_value<R: Runtime>(
+    app: &AppHandle<R>,
+    file: &str,
+    key: &str,
+    value: JsonValue,
+) -> Result<()> {
+    let path = settings_path(app, file)?;
+    jsonfile::update(&path, |values| {
+        values.insert(key.to_string(), value);
+    })
+}
+
+/// Reads one value of a file.
+fn get_value<R: Runtime>(app: &AppHandle<R>, file: &str, key: &str) -> Result<Option<JsonValue>> {
+    let path = settings_path(app, file)?;
+    Ok(jsonfile::read(&path)?.remove(key))
 }
 
 const HISTORY_KEY: &str = "history";
@@ -55,23 +66,36 @@ const GRANTS_KEY: &str = "files";
 
 /// The path of one file of the settings.
 ///
-/// A relative path lands in the data folder of the application, which is what
-/// the release build uses. A test names a folder of its own, so no test reads
-/// or writes the files of the real application.
+/// The files live in the data folder of the application. A test names a
+/// folder of its own, so no test reads or writes the files of the real
+/// application.
 #[cfg(not(test))]
-fn settings_path(name: &str) -> PathBuf {
-    PathBuf::from(name)
+fn settings_path<R: Runtime>(app: &AppHandle<R>, name: &str) -> Result<PathBuf> {
+    use tauri::Manager;
+    Ok(app.path().app_data_dir()?.join(name))
 }
 
 #[cfg(test)]
-fn settings_path(name: &str) -> PathBuf {
-    tests::settings_folder().join(name)
+fn settings_path<R: Runtime>(_app: &AppHandle<R>, name: &str) -> Result<PathBuf> {
+    Ok(tests::settings_folder().join(name))
+}
+
+/// Reports the records of a file that could not be understood.
+fn note_dropped(file: &str, dropped: usize) {
+    if dropped > 0 {
+        let records = if dropped == 1 { "record" } else { "records" };
+        jsonfile::note_problem(format!(
+            "{dropped} {records} in {file} couldn't be read and {} left out.",
+            if dropped == 1 { "was" } else { "were" }
+        ));
+    }
 }
 
 /// Reads every value of a file and drops the records that cannot be
 /// understood.
-fn parse_values<T: DeserializeOwned>(values: Vec<(String, JsonValue)>) -> Vec<T> {
-    values
+fn parse_values<T: DeserializeOwned>(file: &str, values: Vec<(String, JsonValue)>) -> Vec<T> {
+    let total = values.len();
+    let parsed: Vec<T> = values
         .into_iter()
         .filter_map(|(key, value)| match serde_json::from_value::<T>(value) {
             Ok(parsed) => Some(parsed),
@@ -80,16 +104,19 @@ fn parse_values<T: DeserializeOwned>(values: Vec<(String, JsonValue)>) -> Vec<T>
                 None
             }
         })
-        .collect()
+        .collect();
+    note_dropped(file, total - parsed.len());
+    parsed
 }
 
 /// Reads a list out of one key of a file, and drops the entries that
 /// cannot be understood.
-fn parse_list<T: DeserializeOwned>(value: Option<JsonValue>) -> Vec<T> {
+fn parse_list<T: DeserializeOwned>(file: &str, value: Option<JsonValue>) -> Vec<T> {
     let Some(JsonValue::Array(items)) = value else {
         return Vec::new();
     };
-    items
+    let total = items.len();
+    let parsed: Vec<T> = items
         .into_iter()
         .filter_map(|item| match serde_json::from_value::<T>(item) {
             Ok(parsed) => Some(parsed),
@@ -98,13 +125,15 @@ fn parse_list<T: DeserializeOwned>(value: Option<JsonValue>) -> Vec<T> {
                 None
             }
         })
-        .collect()
+        .collect();
+    note_dropped(file, total - parsed.len());
+    parsed
 }
 
 pub fn read_connections<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<SavedConnection>> {
-    let store = app.store(settings_path(CONNECTIONS_FILE))?;
-    let values: Vec<(String, JsonValue)> = store.entries();
-    let mut connections: Vec<SavedConnection> = parse_values(values);
+    let path = settings_path(app, CONNECTIONS_FILE)?;
+    let values: Vec<(String, JsonValue)> = jsonfile::read(&path)?.into_iter().collect();
+    let mut connections: Vec<SavedConnection> = parse_values(CONNECTIONS_FILE, values);
     connections
         .iter_mut()
         .for_each(SavedConnection::adopt_integrated_flag);
@@ -116,24 +145,25 @@ pub fn write_connection<R: Runtime>(
     app: &AppHandle<R>,
     connection: &SavedConnection,
 ) -> Result<()> {
-    let store = app.store(settings_path(CONNECTIONS_FILE))?;
-    store.set(connection.id.clone(), serde_json::to_value(connection)?);
-    store.save()?;
-    Ok(())
+    set_value(
+        app,
+        CONNECTIONS_FILE,
+        &connection.id,
+        serde_json::to_value(connection)?,
+    )
 }
 
 pub fn delete_connection<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<()> {
-    let store = app.store(settings_path(CONNECTIONS_FILE))?;
-    store.delete(id);
-    store.save()?;
-    Ok(())
+    let path = settings_path(app, CONNECTIONS_FILE)?;
+    jsonfile::update(&path, |values| {
+        values.remove(id);
+    })
 }
 
 /// Reads the history. A file that holds more than the limits allow gives the
 /// newer entries alone, and the next write of the file drops the others.
 pub fn read_history<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<HistoryEntry>> {
-    let store = app.store(settings_path(QUERIES_FILE))?;
-    let mut history = parse_list(store.get(HISTORY_KEY));
+    let mut history = parse_list(QUERIES_FILE, get_value(app, QUERIES_FILE, HISTORY_KEY)?);
     trim_history(&mut history);
     Ok(history)
 }
@@ -142,20 +172,26 @@ pub fn read_history<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<HistoryEntry>>
 /// list, so the function gives no list back. A large history then stays out of
 /// the answer of each execution.
 pub fn add_history<R: Runtime>(app: &AppHandle<R>, entry: HistoryEntry) -> Result<()> {
-    edit_queries(app, HISTORY_KEY, |history: &mut Vec<HistoryEntry>| {
-        push_entry(history, entry)
-    })
+    edit_list(
+        app,
+        QUERIES_FILE,
+        HISTORY_KEY,
+        |history: &mut Vec<HistoryEntry>| push_entry(history, entry),
+    )
 }
 
 pub fn clear_history<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
-    edit_queries(app, HISTORY_KEY, |history: &mut Vec<HistoryEntry>| {
-        history.clear()
-    })
+    edit_list(
+        app,
+        QUERIES_FILE,
+        HISTORY_KEY,
+        |history: &mut Vec<HistoryEntry>| history.clear(),
+    )
 }
 
 pub fn read_saved_queries<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<SavedQuery>> {
-    let store = app.store(settings_path(QUERIES_FILE))?;
-    let mut queries: Vec<SavedQuery> = parse_list(store.get(SAVED_KEY));
+    let mut queries: Vec<SavedQuery> =
+        parse_list(QUERIES_FILE, get_value(app, QUERIES_FILE, SAVED_KEY)?);
     queries.sort_by_key(|query| query.name.to_lowercase());
     Ok(queries)
 }
@@ -166,8 +202,9 @@ pub fn write_saved_query<R: Runtime>(app: &AppHandle<R>, query: &SavedQuery) -> 
             "A saved statement needs an ID.".to_string(),
         ));
     }
-    edit_queries(
+    edit_list(
         app,
+        QUERIES_FILE,
         SAVED_KEY,
         |queries: &mut Vec<SavedQuery>| match queries.iter_mut().find(|item| item.id == query.id) {
             Some(existing) => *existing = query.clone(),
@@ -177,9 +214,12 @@ pub fn write_saved_query<R: Runtime>(app: &AppHandle<R>, query: &SavedQuery) -> 
 }
 
 pub fn delete_saved_query<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<()> {
-    edit_queries(app, SAVED_KEY, |queries: &mut Vec<SavedQuery>| {
-        queries.retain(|item| item.id != id)
-    })
+    edit_list(
+        app,
+        QUERIES_FILE,
+        SAVED_KEY,
+        |queries: &mut Vec<SavedQuery>| queries.retain(|item| item.id != id),
+    )
 }
 
 /// Reads the folders that the user accepted in an earlier session.
@@ -188,44 +228,56 @@ pub fn delete_saved_query<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<()
 /// the interface chose, so a folder reaches the list only after the user
 /// accepted it in a dialog of the operating system.
 pub fn read_file_roots<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<String>> {
-    let store = app.store(settings_path(FOLDERS_FILE))?;
-    Ok(parse_list(store.get(ROOTS_KEY)))
+    Ok(parse_list(
+        FOLDERS_FILE,
+        get_value(app, FOLDERS_FILE, ROOTS_KEY)?,
+    ))
 }
 
 /// Writes the folders that the user accepted.
 pub fn write_file_roots<R: Runtime>(app: &AppHandle<R>, roots: &[String]) -> Result<()> {
-    let store = app.store(settings_path(FOLDERS_FILE))?;
-    store.set(ROOTS_KEY, serde_json::to_value(roots)?);
-    store.save()?;
-    Ok(())
+    set_value(app, FOLDERS_FILE, ROOTS_KEY, serde_json::to_value(roots)?)
 }
 
 /// Reads the single files that the user accepted in an earlier session. The
 /// same rule as for the folders applies: only a dialog of the operating
 /// system adds a file to this list.
 pub fn read_file_grants<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<String>> {
-    let store = app.store(settings_path(FOLDERS_FILE))?;
-    Ok(parse_list(store.get(GRANTS_KEY)))
+    Ok(parse_list(
+        FOLDERS_FILE,
+        get_value(app, FOLDERS_FILE, GRANTS_KEY)?,
+    ))
 }
 
 /// Writes the single files that the user accepted.
 pub fn write_file_grants<R: Runtime>(app: &AppHandle<R>, files: &[String]) -> Result<()> {
-    let store = app.store(settings_path(FOLDERS_FILE))?;
-    store.set(GRANTS_KEY, serde_json::to_value(files)?);
-    store.save()?;
-    Ok(())
+    set_value(app, FOLDERS_FILE, GRANTS_KEY, serde_json::to_value(files)?)
 }
 
 pub fn read_workspace<R: Runtime>(app: &AppHandle<R>) -> Result<JsonValue> {
-    let store = app.store(settings_path(WORKSPACE_FILE))?;
-    Ok(store.get(WORKSPACE_KEY).unwrap_or(JsonValue::Null))
+    Ok(get_value(app, WORKSPACE_FILE, WORKSPACE_KEY)?.unwrap_or(JsonValue::Null))
 }
 
 pub fn write_workspace<R: Runtime>(app: &AppHandle<R>, workspace: JsonValue) -> Result<()> {
-    let store = app.store(settings_path(WORKSPACE_FILE))?;
-    store.set(WORKSPACE_KEY, workspace);
-    store.save()?;
-    Ok(())
+    set_value(app, WORKSPACE_FILE, WORKSPACE_KEY, workspace)
+}
+
+/// Reads every file of the settings once and gives the problems found in
+/// them. A damaged file is moved aside during the read, and the window shows
+/// each problem once at start.
+pub fn storage_problems<R: Runtime>(app: &AppHandle<R>) -> Vec<String> {
+    let reads = [
+        read_connections(app).err(),
+        read_history(app).err(),
+        read_saved_queries(app).err(),
+        read_workspace(app).err(),
+        read_file_roots(app).err(),
+        read_file_grants(app).err(),
+    ];
+    for error in reads.into_iter().flatten() {
+        jsonfile::note_problem(error.to_string());
+    }
+    jsonfile::take_problems()
 }
 
 #[cfg(test)]
@@ -242,7 +294,8 @@ mod tests {
         thread_local! {
             static FOLDER: PathBuf = {
                 let path = std::env::temp_dir().join(format!(
-                    "sql-explorer-settings-{:?}",
+                    "sql-explorer-settings-{}-{:?}",
+                    std::process::id(),
                     std::thread::current().id()
                 ));
                 let _ = std::fs::remove_dir_all(&path);
@@ -264,7 +317,7 @@ mod tests {
             ("b".to_string(), serde_json::json!({ "broken": true })),
             ("c".to_string(), record("c", "Gamma")),
         ];
-        let parsed: Vec<SavedConnection> = parse_values(values);
+        let parsed: Vec<SavedConnection> = parse_values("t.json", values);
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].id, "a");
         assert_eq!(parsed[0].db_type, DbType::Sqlite);
@@ -273,7 +326,7 @@ mod tests {
 
     #[test]
     fn an_empty_file_gives_an_empty_list() {
-        let parsed: Vec<SavedConnection> = parse_values(Vec::new());
+        let parsed: Vec<SavedConnection> = parse_values("t.json", Vec::new());
         assert!(parsed.is_empty());
     }
 
@@ -292,22 +345,21 @@ mod tests {
             },
             { "nope": 1 }
         ]);
-        let entries: Vec<HistoryEntry> = parse_list(Some(value));
+        let entries: Vec<HistoryEntry> = parse_list("t.json", Some(value));
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, "1");
     }
 
     #[test]
     fn a_value_that_is_not_a_list_gives_an_empty_list() {
-        let entries: Vec<HistoryEntry> = parse_list(None);
+        let entries: Vec<HistoryEntry> = parse_list("t.json", None);
         assert!(entries.is_empty());
-        let entries: Vec<HistoryEntry> = parse_list(Some(serde_json::json!("text")));
+        let entries: Vec<HistoryEntry> = parse_list("t.json", Some(serde_json::json!("text")));
         assert!(entries.is_empty());
     }
 
     fn app_with_store() -> tauri::App<tauri::test::MockRuntime> {
         tauri::test::mock_builder()
-            .plugin(tauri_plugin_store::Builder::default().build())
             .build(tauri::generate_context!())
             .unwrap()
     }
@@ -369,6 +421,41 @@ mod tests {
         delete_saved_query(app.handle(), "b").unwrap();
         assert_eq!(read_saved_queries(app.handle()).unwrap().len(), 1);
         assert!(write_saved_query(app.handle(), &saved(" ", "Blank")).is_err());
+    }
+
+    #[test]
+    fn dropped_records_and_damaged_files_are_reported() {
+        let _problems = crate::jsonfile::PROBLEM_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let app = app_with_store();
+        let _: Vec<HistoryEntry> = parse_list("one.json", Some(serde_json::json!([{ "nope": 1 }])));
+        let _: Vec<HistoryEntry> = parse_list(
+            "two.json",
+            Some(serde_json::json!([{ "nope": 1 }, { "nope": 2 }])),
+        );
+        std::fs::write(settings_folder().join(WORKSPACE_FILE), b"{").unwrap();
+        // A folder in the place of a file gives an error that is reported too.
+        std::fs::create_dir_all(settings_folder().join(FOLDERS_FILE)).unwrap();
+        let problems = storage_problems(app.handle());
+        assert!(problems
+            .contains(&"1 record in one.json couldn't be read and was left out.".to_string()));
+        assert!(problems
+            .contains(&"2 records in two.json couldn't be read and were left out.".to_string()));
+        assert!(problems
+            .iter()
+            .any(|text| text.starts_with("workspace.json couldn't be read")));
+        assert_eq!(read_workspace(app.handle()).unwrap(), JsonValue::Null);
+        assert!(problems.iter().any(|text| text.contains("folders.json")));
+    }
+
+    #[test]
+    fn the_settings_round_trip() {
+        let app = app_with_store();
+        write_workspace(app.handle(), serde_json::json!({ "tabs": 2 })).unwrap();
+        assert_eq!(read_workspace(app.handle()).unwrap()["tabs"], 2);
+        write_file_grants(app.handle(), &["/a.sql".to_string()]).unwrap();
+        assert_eq!(read_file_grants(app.handle()).unwrap(), ["/a.sql"]);
     }
 
     #[test]

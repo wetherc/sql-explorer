@@ -62,17 +62,23 @@ impl PreloginMessage {
         feature = "native-tls",
         feature = "vendored-openssl"
     ))]
-    pub fn negotiated_encryption(&self, expected: EncryptionLevel) -> EncryptionLevel {
+    pub fn negotiated_encryption(
+        &self,
+        expected: EncryptionLevel,
+    ) -> crate::Result<EncryptionLevel> {
         match (expected, self.encryption) {
             (EncryptionLevel::NotSupported, EncryptionLevel::NotSupported) => {
-                EncryptionLevel::NotSupported
+                Ok(EncryptionLevel::NotSupported)
             }
-            (EncryptionLevel::Off, EncryptionLevel::Off) => EncryptionLevel::Off,
-            (EncryptionLevel::On, EncryptionLevel::Off)
-            | (EncryptionLevel::On, EncryptionLevel::NotSupported) => {
-                panic!("Server does not allow the requested encryption level.")
+            (EncryptionLevel::Off, EncryptionLevel::Off) => Ok(EncryptionLevel::Off),
+            // A client that asks for encryption cannot get it from a server
+            // without TLS. The caller may open a new connection without it.
+            (EncryptionLevel::On | EncryptionLevel::Required, EncryptionLevel::NotSupported) => {
+                Err(crate::Error::Tls(
+                    crate::error::ENCRYPTION_NOT_SUPPORTED.to_string(),
+                ))
             }
-            (_, _) => EncryptionLevel::On,
+            (_, _) => Ok(EncryptionLevel::On),
         }
     }
 
@@ -81,8 +87,8 @@ impl PreloginMessage {
         feature = "native-tls",
         feature = "vendored-openssl"
     )))]
-    pub fn negotiated_encryption(&self, _: EncryptionLevel) -> EncryptionLevel {
-        EncryptionLevel::NotSupported
+    pub fn negotiated_encryption(&self, _: EncryptionLevel) -> crate::Result<EncryptionLevel> {
+        Ok(EncryptionLevel::NotSupported)
     }
 }
 

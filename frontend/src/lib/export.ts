@@ -97,9 +97,23 @@ export function toMarkdown(result: ResultSet): string {
   return lines.join('\n')
 }
 
-/** Writes a text as a literal of SQL, with its quotes doubled. */
-function textLiteral(text: string): string {
-  return `'${text.replace(/'/g, "''")}'`
+/**
+ * Writes a text as a literal of SQL, with its quotes doubled. SQL Server
+ * gets an N literal, so a character outside the code page of the database
+ * keeps its value. MySQL reads a backslash in a quoted text as an escape,
+ * so a text with a backslash or a control character goes in as the hex of
+ * its UTF-8 bytes.
+ */
+function textLiteral(text: string, dialect: Dialect): string {
+  // eslint-disable-next-line no-control-regex
+  if (dialect === Dialect.MySql && /[\\\x00-\x1f\x7f]/.test(text)) {
+    const hex = [...new TextEncoder().encode(text)]
+      .map((byte) => byte.toString(16).padStart(2, '0').toUpperCase())
+      .join('')
+    return `_utf8mb4 X'${hex}'`
+  }
+  const quoted = `'${text.replace(/'/g, "''")}'`
+  return dialect === Dialect.MsSql ? `N${quoted}` : quoted
 }
 
 /**
@@ -152,12 +166,12 @@ export function toSqlLiteral(value: CellValue, dialect: Dialect): string {
     return value ? '1' : '0'
   }
   if (Array.isArray(value) && dialect === Dialect.Postgres) {
-    return textLiteral(postgresArrayText(value))
+    return textLiteral(postgresArrayText(value), dialect)
   }
   if (Array.isArray(value) && dialect === Dialect.Athena) {
     return `ARRAY[${value.map((each) => toSqlLiteral(each, dialect)).join(', ')}]`
   }
-  return textLiteral(formatCell(value))
+  return textLiteral(formatCell(value), dialect)
 }
 
 /**

@@ -27,6 +27,7 @@
     <div class="explorer-body">
       <ExplorerTree
         v-if="explorer.visibleNodes.length > 0"
+        ref="tree"
         :nodes="explorer.visibleNodes"
         :open-keys="openKeys"
         :selected-key="selectedKey"
@@ -34,6 +35,7 @@
         @expand="onExpand"
         @collapse="onCollapse"
         @context="onContext"
+        @retry="onRetry"
       />
 
       <EmptyState v-else icon="mdi-database-off-outline" :title="emptyTitle" :hint="emptyHint">
@@ -51,7 +53,7 @@
     </div>
 
     <v-menu v-model="menu.open" :target="[menu.x, menu.y]" data-test="explorer-menu">
-      <v-list v-if="menuNode" density="compact" min-width="220">
+      <v-list v-if="menuNode" ref="menuList" density="compact" min-width="220">
         <v-list-item
           v-if="isRelation(menuNode)"
           prepend-icon="mdi-table-eye"
@@ -134,7 +136,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, nextTick, reactive, ref, watch, type ComponentPublicInstance } from 'vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import EmptyState from './EmptyState.vue'
 import ExplorerTree from './ExplorerTree.vue'
@@ -167,6 +169,30 @@ const propertiesOpen = ref(false)
 const propertiesNode = ref<ExplorerNode | null>(null)
 /** The connection that waits on an answer, while statements run on it. */
 const pendingDisconnect = ref<string | null>(null)
+
+const tree = ref<InstanceType<typeof ExplorerTree> | null>(null)
+const menuList = ref<ComponentPublicInstance | null>(null)
+
+/**
+ * Moves the focus into the menu when it opens, and back to its row when it
+ * shuts. The menu opens at a point and has no element that opened it, so
+ * nothing else gives the focus back, and it would fall to the page body.
+ */
+watch(
+  () => menu.open,
+  async (open) => {
+    await nextTick()
+    if (open) {
+      const list = menuList.value?.$el as HTMLElement | undefined
+      list?.querySelector<HTMLElement>('.v-list-item')?.focus()
+      return
+    }
+    const active = document.activeElement
+    if (menu.node && (active === null || active === document.body)) {
+      tree.value?.focusRow(menu.node.key)
+    }
+  },
+)
 
 /** Opens the properties of one relation. */
 function openProperties(node: ExplorerNode): void {
@@ -204,6 +230,11 @@ async function onExpand(node: ExplorerNode): Promise<void> {
   const next = new Set(openKeys.value)
   next.add(node.key)
   openKeys.value = next
+  await explorer.expand(node)
+}
+
+/** Reads a branch again after its read failed. The node stays open. */
+async function onRetry(node: ExplorerNode): Promise<void> {
   await explorer.expand(node)
 }
 
@@ -342,9 +373,11 @@ async function copyName(node: ExplorerNode): Promise<void> {
   try {
     const quoted = await api.quoteIdentifier(node.connectionId, node.table ?? node.label)
     const clipboard = globalThis.navigator?.clipboard
-    if (clipboard) {
-      await clipboard.writeText(quoted)
+    if (!clipboard) {
+      ui.warn("Couldn't reach the clipboard, so the name wasn't copied.")
+      return
     }
+    await clipboard.writeText(quoted)
     ui.success('Name copied.')
   } catch (error) {
     ui.reportError(error)

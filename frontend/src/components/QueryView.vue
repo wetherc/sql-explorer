@@ -1,11 +1,11 @@
 <template>
   <div class="query-view">
     <div class="toolbar d-flex align-center ga-2 px-2 py-1">
-      <v-tooltip location="bottom" text="Run statement at cursor (Ctrl/Cmd + Enter)">
+      <v-tooltip location="bottom" :text="`Run statement at cursor (${keyLabel('mod+enter')})`">
         <template #activator="{ props: tip }">
           <v-btn
             v-bind="tip"
-            :disabled="!canRun"
+            :disabled="!canRun || state.running"
             :loading="state.running"
             color="primary"
             variant="flat"
@@ -18,11 +18,11 @@
         </template>
       </v-tooltip>
 
-      <v-tooltip location="bottom" text="Run script (Ctrl/Cmd + Shift + Enter)">
+      <v-tooltip location="bottom" :text="`Run script (${keyLabel('mod+shift+enter')})`">
         <template #activator="{ props: tip }">
           <v-btn
             v-bind="tip"
-            :disabled="!canRun"
+            :disabled="!canRun || state.running"
             size="small"
             prepend-icon="mdi-playlist-play"
             text="Run all"
@@ -34,20 +34,25 @@
 
       <!-- Stop stands beside Run, so it carries a weight of its own. It is
            quieter than Run, because Run is the button of the work. -->
-      <v-btn
-        v-if="state.running"
-        color="error"
-        variant="tonal"
-        size="small"
-        prepend-icon="mdi-stop"
-        text="Stop"
-        data-test="cancel-button"
-        @click="cancel()"
-      />
+      <v-tooltip v-if="state.running" location="bottom" :text="`Stop (${keyLabel('mod+shift+c')})`">
+        <template #activator="{ props: tip }">
+          <v-btn
+            v-bind="tip"
+            :disabled="stopping"
+            color="error"
+            variant="tonal"
+            size="small"
+            prepend-icon="mdi-stop"
+            :text="stopping ? 'Stopping…' : 'Stop'"
+            data-test="cancel-button"
+            @click="cancel()"
+          />
+        </template>
+      </v-tooltip>
 
       <v-divider vertical class="mx-1" />
 
-      <v-tooltip location="bottom" text="Format SQL (Shift + Alt + F)">
+      <v-tooltip location="bottom" :text="`Format SQL (${keyLabel('shift+alt+f')})`">
         <template #activator="{ props: tip }">
           <v-btn
             v-bind="tip"
@@ -77,7 +82,7 @@
         <template #activator="{ props: menu }">
           <v-btn
             v-bind="menu"
-            :disabled="!canRun"
+            :disabled="!canRun || state.running"
             size="small"
             prepend-icon="mdi-sitemap-outline"
             text="Plan"
@@ -110,24 +115,33 @@
 
       <v-spacer />
 
-      <v-btn
-        size="small"
-        prepend-icon="mdi-content-save-outline"
-        text="Save"
-        :loading="savingFile"
-        data-test="save-file-button"
-        @click="saveToFile"
-      />
+      <v-tooltip location="bottom" :text="`Save to file (${keyLabel('mod+s')})`">
+        <template #activator="{ props: tip }">
+          <v-btn
+            v-bind="tip"
+            size="small"
+            prepend-icon="mdi-content-save-outline"
+            text="Save"
+            :loading="savingFile"
+            data-test="save-file-button"
+            @click="saveToFile"
+          />
+        </template>
+      </v-tooltip>
 
-      <v-btn
-        size="small"
-        variant="text"
-        icon="mdi-bookmark-outline"
-        aria-label="Save to library"
-        title="Save to library"
-        data-test="save-query-button"
-        @click="savingQuery = true"
-      />
+      <v-tooltip location="bottom" text="Save query…">
+        <template #activator="{ props: tip }">
+          <v-btn
+            v-bind="tip"
+            size="small"
+            variant="text"
+            icon="mdi-bookmark-outline"
+            aria-label="Save query…"
+            data-test="save-query-button"
+            @click="savingQuery = true"
+          />
+        </template>
+      </v-tooltip>
     </div>
 
     <!-- The bar names the parameters that the statement holds, so the
@@ -163,6 +177,8 @@
         <SqlEditor
           ref="editorRef"
           :model-value="tab.query"
+          :model-key="tab.id"
+          :error-marker="errorMarker"
           :theme="settings.editorTheme"
           :font-size="settings.settings.fontSize"
           :word-wrap="settings.settings.wordWrap"
@@ -174,6 +190,7 @@
           @show-keys="ui.setKeyboardHelpOpen(true)"
           @run-statement="runStatement()"
           @run-all="runAll()"
+          @marker-cleared="queries.clearErrorLocation(tab.id)"
         />
       </pane>
       <!-- The pane keeps its content while the panel is away, so the grid
@@ -213,6 +230,26 @@
             </v-tabs>
 
             <div class="results-actions d-flex align-center ga-1 px-1">
+              <v-chip
+                v-if="exportingAll"
+                size="small"
+                label
+                prepend-icon="mdi-download"
+                data-test="export-all-busy"
+              >
+                <span role="status">Exporting all rows…</span>
+                <template #append>
+                  <v-btn
+                    size="x-small"
+                    variant="text"
+                    class="ml-1"
+                    :disabled="exportingAll.stopping"
+                    :text="exportingAll.stopping ? 'Stopping…' : 'Stop'"
+                    data-test="export-all-stop"
+                    @click="stopExportAll(exportingAll)"
+                  />
+                </template>
+              </v-chip>
               <template v-if="activePane">
                 <v-tooltip
                   location="bottom"
@@ -293,9 +330,11 @@
                 :rows="pane.rows"
                 :truncated="pane.truncated"
                 :busy="state.running && pane.pinned"
+                :exporting="exportingAll !== null"
                 @export="onExport"
                 @export-all="(format: ExportAllFormat) => onExportAll(pane, format)"
                 @copied="onCopied"
+                @copy-failed="onCopyFailed"
               />
             </template>
 
@@ -305,10 +344,33 @@
                 type="error"
                 variant="tonal"
                 class="mb-3"
+                :icon="errorIcon(state.error.category)"
                 data-test="query-error"
               >
                 <div class="font-weight-medium">{{ state.error.message }}</div>
                 <pre v-if="state.error.detail" class="error-detail">{{ state.error.detail }}</pre>
+                <div v-if="errorHint" class="mt-1" data-test="query-error-advice">
+                  {{ errorHint }}
+                </div>
+                <div class="d-flex ga-2 mt-2">
+                  <v-btn
+                    v-if="errorMarker"
+                    size="small"
+                    variant="outlined"
+                    prepend-icon="mdi-arrow-right-bottom"
+                    :text="`Go to line ${errorMarker.line}`"
+                    data-test="query-error-goto"
+                    @click="goToError"
+                  />
+                  <v-btn
+                    size="small"
+                    variant="outlined"
+                    prepend-icon="mdi-content-copy"
+                    text="Copy error"
+                    data-test="query-error-copy"
+                    @click="copyError(state.error)"
+                  />
+                </div>
               </v-alert>
 
               <div
@@ -464,7 +526,7 @@
 
     <AppDialog v-model="savingQuery" max-width="480">
       <v-card>
-        <v-card-title class="text-subtitle-1">Save to library</v-card-title>
+        <v-card-title class="text-subtitle-1">Save query</v-card-title>
         <v-card-text class="d-flex flex-column ga-3">
           <v-text-field v-model="saveName" label="Name" autofocus data-test="save-query-name" />
           <v-text-field v-model="saveFolder" label="Folder" placeholder="Saved queries" />
@@ -488,7 +550,8 @@ import SqlEditor from './SqlEditor.vue'
 import ResultsGrid from './ResultsGrid.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import { api } from '@/lib/api'
-import { forgetTabActions, registerTabActions } from '@/lib/commands'
+import { appleKeyboard, chordLabel, forgetTabActions, registerTabActions } from '@/lib/commands'
+import { errorAdvice, errorIcon, fullErrorText, isCancellation, toErrorPayload } from '@/lib/errors'
 import { exportFileName, toCsv, toInsertStatements, toJson, toMarkdown } from '@/lib/export'
 import { bytesToBase64, toXlsx } from '@/lib/xlsx'
 import { formatClockTime, formatRowCount } from '@/lib/format'
@@ -502,9 +565,18 @@ import { useSettingsStore } from '@/stores/settings'
 import { useTabsStore } from '@/stores/tabs'
 import { useUiStore } from '@/stores/ui'
 import { alignParams, needsAValue, paramChipLabel, paramProblem, paramsForRun } from '@/lib/params'
-import { Dialect, ParamType, PlanMode, type ParamValue, type ResultSet } from '@/types/api'
+import {
+  Dialect,
+  ParamType,
+  PlanMode,
+  type ErrorPayload,
+  type ExportSummary,
+  type ParamValue,
+  type ResultSet,
+} from '@/types/api'
+import type { ErrorMarker } from './SqlEditor.vue'
 import type { ExportAllFormat, ExportFormat } from './ResultsGrid.vue'
-import type { ResultPane } from '@/stores/query'
+import type { ResultPane, RunningExport } from '@/stores/query'
 import type { QueryTab } from '@/stores/tabs'
 
 /** The value that stands for the Messages tab. */
@@ -595,6 +667,46 @@ const canRun = computed(() => {
   const id = props.tab.connectionId
   return id !== null && connections.isActive(id)
 })
+
+/** True after the user pressed Stop and before the run ends. */
+const stopping = computed(() => state.value.stopping)
+
+/** True when the keyboard uses Cmd, for the key names in the tooltips. */
+const apple = appleKeyboard()
+
+function keyLabel(spec: string): string {
+  return chordLabel(spec, apple)
+}
+
+/**
+ * The place in the editor where the last run failed. The store gives it in
+ * the coordinates of the editor, so the mark lands on the text the user sees.
+ */
+const errorMarker = computed<ErrorMarker | null>(() => {
+  const error = state.value.error
+  const location = state.value.errorLocation
+  return error && location ? { ...location, message: error.message } : null
+})
+
+/** What the user can do about the last failure, when there is advice. */
+const errorHint = computed(() => (state.value.error ? errorAdvice(state.value.error) : ''))
+
+function goToError(): void {
+  const marker = errorMarker.value
+  if (marker) {
+    editorRef.value?.reveal(marker.line, marker.column)
+  }
+}
+
+/** Puts the message and the detail of the last failure on the clipboard. */
+async function copyError(error: ErrorPayload): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(fullErrorText(error))
+    ui.success('Error copied to the clipboard.')
+  } catch {
+    ui.warn("Couldn't copy the error to the clipboard.")
+  }
+}
 
 /**
  * The result that is open, or nothing while the messages stand in its place.
@@ -880,7 +992,14 @@ function onCopied(): void {
   ui.success('Rows copied to the clipboard.')
 }
 
-async function run(statement: string): Promise<void> {
+function onCopyFailed(reason: string): void {
+  ui.warn("Couldn't copy to the clipboard.", reason)
+}
+
+/** The place in the editor where a sent text begins, counted from 1. */
+type TextStart = { line: number; column: number }
+
+async function run(statement: string, start?: TextStart): Promise<void> {
   const connectionId = props.tab.connectionId
   if (!connectionId) {
     ui.warn('Choose a connection to run this statement.')
@@ -889,17 +1008,22 @@ async function run(statement: string): Promise<void> {
   // The rows of a run are what the user asked for, so the panel comes back.
   layout.setResultsCollapsed(false)
   await withParams(statement, (values) => {
-    void queries.execute(props.tab.id, connectionId, statement, values)
+    void queries.execute(props.tab.id, connectionId, statement, values, start)
   })
 }
 
-function runStatement(statement?: string): void {
-  const text = statement ?? editorRef.value?.currentStatement() ?? props.tab.query
-  void run(text)
+/** The text to run from the editor and where it begins, or the whole tab. */
+function editorRun(): { text: string; start?: TextStart } {
+  return editorRef.value?.currentRun() ?? { text: props.tab.query, start: { line: 1, column: 1 } }
+}
+
+function runStatement(): void {
+  const { text, start } = editorRun()
+  void run(text, start)
 }
 
 function runAll(): void {
-  void run(props.tab.query)
+  void run(props.tab.query, { line: 1, column: 1 })
 }
 
 /** Reads the plan of the statement under the cursor. */
@@ -909,7 +1033,9 @@ function readPlan(mode: PlanMode): void {
     ui.warn('Choose a connection to see the plan.')
     return
   }
-  const text = editorRef.value?.currentStatement() ?? props.tab.query
+  // The backend measures the place of a plan failure in the text with the
+  // plan keyword in front, so a plan gives no place in the editor.
+  const { text } = editorRun()
   void withParams(text, (values) => {
     void queries.explain(props.tab.id, connectionId, text, mode, values)
   })
@@ -977,10 +1103,19 @@ async function onExportAll(pane: ResultPane, format: ExportAllFormat): Promise<v
     ui.warn("This result is a plan, so there's no query to re-run. Run the statement first.")
     return
   }
+  // The state of the tab keeps the export, so a view that mounts again while
+  // the export runs can't start a second one.
+  const state = queries.stateFor(props.tab.id)
+  if (state.exporting) {
+    ui.warn('An export is already running in this tab.')
+    return
+  }
+  const requestId = `export-${props.tab.id}-${Date.now()}`
+  state.exporting = { connectionId: run.connectionId, requestId, stopping: false }
   try {
     const summary = await api.exportQuery({
       connectionId: run.connectionId,
-      requestId: `export-${props.tab.id}-${Date.now()}`,
+      requestId,
       query: run.query,
       defaultName: exportFileName(props.tab.title, format),
       format,
@@ -991,16 +1126,58 @@ async function onExportAll(pane: ResultPane, format: ExportAllFormat): Promise<v
     if (!summary) {
       return
     }
-    if (summary.truncated) {
-      ui.warn(
-        `Export stopped at the ${summary.rows.toLocaleString()}-row limit.`,
-        'You can raise the export limit in Settings.',
-      )
+    reportExport(summary)
+  } catch (error) {
+    if (isCancellation(toErrorPayload(error))) {
+      ui.info('Export stopped.')
     } else {
-      ui.success(`Exported ${summary.rows.toLocaleString()} rows to ${summary.path}.`)
+      ui.reportError(error)
     }
+  } finally {
+    state.exporting = null
+  }
+}
+
+/** Tells the user how an export of all rows ended. */
+function reportExport(summary: ExportSummary): void {
+  const rows = summary.rows.toLocaleString()
+  if (summary.sheetFull) {
+    ui.warn(
+      `Export stopped at ${rows} rows because an Excel sheet has no room for more rows.`,
+      'Export to CSV to get every row.',
+    )
+  } else if (summary.truncated) {
+    ui.warn(
+      `Export stopped at the ${rows}-row limit.`,
+      'You can raise the export limit in Settings.',
+    )
+  } else {
+    ui.success(`Exported ${rows} rows to ${summary.path}.`)
+  }
+  // The backend names a problem with the content of the file, for example
+  // text that an Excel cell could not keep whole.
+  if (summary.warning) {
+    ui.warn(summary.warning)
+  }
+}
+
+/** The export of all rows that runs in this tab, so the user can stop it. */
+const exportingAll = computed(() => state.value.exporting)
+
+/**
+ * Stops the export of all rows. The backend knows the request only after the
+ * user chose the file, so a stop while the save dialog is open finds nothing
+ * to stop, and the backend answers without an error. The Stop button thus
+ * works again after each answer, and a later press stops the export.
+ */
+async function stopExportAll(running: RunningExport): Promise<void> {
+  running.stopping = true
+  try {
+    await api.cancelQuery(running.connectionId, running.requestId)
   } catch (error) {
     ui.reportError(error)
+  } finally {
+    running.stopping = false
   }
 }
 
@@ -1064,9 +1241,17 @@ async function saveToFile(): Promise<void> {
     const text = props.tab.query
     const path = props.tab.filePath
     if (path) {
-      await api.writeTextFile(path, text)
+      const asked = props.tab.encoding
+      const used = await api.writeTextFile(path, text, asked)
       tabs.markClean(props.tab.id, text)
-      ui.success(`Saved ${baseName(path)}.`)
+      if (used !== asked) {
+        tabs.setEncoding(props.tab.id, used)
+      }
+      if (asked === 'windows1252' && used === 'utf8bom') {
+        ui.warn("Saved as UTF-8 because the text has characters that Windows-1252 can't store.")
+      } else {
+        ui.success(`Saved ${baseName(path)}.`)
+      }
       return
     }
     const written = await api.saveStatementFile({
@@ -1077,10 +1262,13 @@ async function saveToFile(): Promise<void> {
     if (written === null) {
       return
     }
-    tabs.setFilePath(props.tab.id, written)
-    tabs.rename(props.tab.id, baseName(written))
+    tabs.setFilePath(props.tab.id, written.path)
+    // The next save writes the encoding of the new file, and not the
+    // encoding of a file that the tab showed before.
+    tabs.setEncoding(props.tab.id, written.encoding)
+    tabs.rename(props.tab.id, baseName(written.path))
     tabs.markClean(props.tab.id, text)
-    ui.success(`Saved ${baseName(written)}.`)
+    ui.success(`Saved ${baseName(written.path)}.`)
   } catch (error) {
     ui.reportError(error)
   } finally {
@@ -1098,8 +1286,13 @@ async function confirmSave(): Promise<void> {
     folder: saveFolder.value,
   })
   if (saved) {
-    tabs.rename(props.tab.id, saved.name)
-    tabs.markClean(props.tab.id, text)
+    tabs.setSavedQuery(props.tab.id, saved.id)
+    // A tab of a file keeps the name of the file and its unsaved mark, because
+    // the save to the library does not write the file.
+    if (props.tab.filePath === null) {
+      tabs.rename(props.tab.id, saved.name)
+      tabs.markClean(props.tab.id, text)
+    }
     savingQuery.value = false
   }
 }

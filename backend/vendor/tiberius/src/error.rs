@@ -4,6 +4,10 @@ pub use std::io::ErrorKind as IoErrorKind;
 use std::{borrow::Cow, convert::Infallible, io};
 use thiserror::Error;
 
+/// The text of the TLS error for a server that does not support encryption
+/// when the client asked for it.
+pub const ENCRYPTION_NOT_SUPPORTED: &str = "The server does not support encryption.";
+
 /// A unified error enum that contains several errors that might occurr during
 /// the lifecycle of this driver
 #[derive(Debug, Clone, Error, PartialEq, Eq)]

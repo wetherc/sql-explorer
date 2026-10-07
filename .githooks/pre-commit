@@ -24,10 +24,13 @@ set -e
 root=$(git rev-parse --show-toplevel)
 cd "$root"
 
-# The smallest line coverage of the backend, in percent. The drivers need a
-# live server for much of their code, and the unit tests reach no server.
-# The value is the whole percent below the coverage that the unit tests give.
-BACKEND_MIN_LINES=87
+# The smallest line and function coverage of the backend, in percent. The
+# drivers need a live server for much of their code, and the unit tests reach
+# no server. Each value is the whole percent below the coverage that the unit
+# tests give. Branch coverage needs a nightly compiler, so the hook does not
+# measure it.
+BACKEND_MIN_LINES=91
+BACKEND_MIN_FUNCTIONS=86
 
 fail() {
     printf '\n\033[31mThe commit stopped: %s\033[0m\n' "$1" >&2
@@ -81,6 +84,7 @@ command -v cargo-llvm-cov >/dev/null 2>&1 || fail 'cargo-llvm-cov is not install
 # keeps their files (src/db/drivers/live.rs and src/db/drivers/*/live.rs) out
 # of the report. Without it, their lines count as lines that no test runs.
 (cd backend && cargo llvm-cov --summary-only --fail-under-lines "$BACKEND_MIN_LINES" \
+    --fail-under-functions "$BACKEND_MIN_FUNCTIONS" \
     --ignore-filename-regex '/live(\.rs|/)') ||
     fail 'a backend test failed, or the coverage is too low'
 (cd backend && cargo test --manifest-path vendor/tiberius/Cargo.toml --no-default-features --features tds73 --lib) || fail 'a test of the vendored tiberius failed'

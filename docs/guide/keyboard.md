@@ -22,7 +22,8 @@ show.
 | -------------------------------- | -------------------------------- |
 | `Ctrl`/`Cmd` + `Enter`           | Run statement                    |
 | `Ctrl`/`Cmd` + `Shift` + `Enter` | Run script                       |
-| `Ctrl`/`Cmd` + `S`               | Save query                       |
+| `Ctrl`/`Cmd` + `Shift` + `C`     | Stop                             |
+| `Ctrl`/`Cmd` + `S`               | Save to file                     |
 | `Shift` + `Alt` + `F`            | Format SQL                       |
 | `Ctrl`/`Cmd` + `T` or `N`        | New query                        |
 | `Ctrl`/`Cmd` + `O`               | Open query…                      |
@@ -32,6 +33,8 @@ show.
 | `Ctrl`/`Cmd` + `B`               | Toggle side panel                |
 | `Ctrl`/`Cmd` + `J`               | Toggle results panel             |
 | `Ctrl`/`Cmd` + `,`               | Open settings                    |
+
+**Rename tab** and **Open guide** have no key. Run them from the palette.
 
 ## Object explorer
 

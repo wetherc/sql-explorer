@@ -7,6 +7,7 @@ vi.mock('@/lib/api', () => ({ api: apiStub, CONNECTION_STATUS_EVENT: 'connection
 
 const { parseWorkspace, useTabsStore } = await import('@/stores/tabs')
 const { useConnectionsStore } = await import('@/stores/connections')
+const { useUiStore } = await import('@/stores/ui')
 
 describe('parseWorkspace', () => {
   it('gives an empty workspace for a record it cannot read', () => {
@@ -29,8 +30,9 @@ describe('parseWorkspace', () => {
           savedQueryId: 'q1',
           params: [{ name: 'id', valueType: 'number', text: '7' }],
           filePath: '/data/one.sql',
+          encoding: 'utf16le',
         },
-        { id: 'b', query: 'SELECT 2' },
+        { id: 'b', query: 'SELECT 2', encoding: 'ebcdic' },
         { id: 'c' },
         'nonsense',
         null,
@@ -47,6 +49,7 @@ describe('parseWorkspace', () => {
       savedQueryId: 'q1',
       params: [{ name: 'id', valueType: 'number', text: '7' }],
       filePath: '/data/one.sql',
+      encoding: 'utf16le',
     })
     expect(workspace.tabs[1]).toEqual({
       id: 'b',
@@ -57,6 +60,7 @@ describe('parseWorkspace', () => {
       savedQueryId: null,
       params: [],
       filePath: null,
+      encoding: 'utf8',
     })
     expect(workspace.activeTabId).toBe('b')
   })
@@ -323,6 +327,7 @@ describe('tabs store', () => {
           savedQueryId: null,
           params: [],
           filePath: null,
+          encoding: 'utf8',
         },
       ],
       activeTabId: tab.id,
@@ -348,6 +353,40 @@ describe('tabs store', () => {
     apiStub.saveWorkspace.mockRejectedValue(new Error('read only'))
     await tabs.persist()
     expect(tabs.tabs).toHaveLength(1)
+    const ui = useUiStore()
+    expect(ui.notices).toHaveLength(1)
+    expect(ui.notices[0]?.message).toMatch(/Couldn't save the open tabs/)
+    expect(ui.notices[0]?.detail).toContain('read only')
+    expect(ui.notices[0]?.timeout).toBe(-1)
+
+    // The same failure again gives no second notice, and a write that
+    // succeeds lets the next failure give one.
+    await tabs.persist()
+    expect(ui.notices).toHaveLength(1)
+    apiStub.saveWorkspace.mockResolvedValueOnce(undefined)
+    await tabs.persist()
+    await tabs.persist()
+    expect(ui.notices).toHaveLength(2)
+  })
+
+  it('links a tab to its saved query and records its encoding', () => {
+    const tabs = useTabsStore()
+    const tab = tabs.add({ savedQueryId: 'q1', encoding: 'windows1252' })
+    expect(tab.savedQueryId).toBe('q1')
+    expect(tab.encoding).toBe('windows1252')
+    expect(tabs.add().savedQueryId).toBeNull()
+
+    const before = tabs.revision
+    tabs.setSavedQuery(tab.id, 'q2')
+    tabs.setEncoding(tab.id, 'utf8bom')
+    expect(tabs.tabs[0]?.savedQueryId).toBe('q2')
+    expect(tabs.tabs[0]?.encoding).toBe('utf8bom')
+    expect(tabs.revision).toBe(before + 2)
+
+    // A tab that is not there is left alone.
+    tabs.setSavedQuery('gone', 'q3')
+    tabs.setEncoding('gone', 'utf8')
+    expect(tabs.revision).toBe(before + 2)
   })
 
   it('continues the titles after the highest restored one', async () => {
@@ -384,6 +423,20 @@ describe('tabs store', () => {
 
     expect(tabs.tabs).toEqual([])
     expect(tabs.activeTabId).toBeNull()
+    const notice = useUiStore().notices[0]
+    expect(notice?.message).toBe("Couldn't open the tabs of the last session.")
+    expect(notice?.timeout).toBe(-1)
+
+    // The empty list does not replace the file, so a restart can try again.
+    apiStub.saveWorkspace.mockResolvedValue(undefined)
+    await tabs.persist()
+    expect(apiStub.saveWorkspace).not.toHaveBeenCalled()
+    // A tab the user opens is written, and from then on every change is.
+    const tab = tabs.add()
+    await tabs.persist()
+    tabs.close(tab.id)
+    await tabs.persist()
+    expect(apiStub.saveWorkspace).toHaveBeenCalledTimes(2)
   })
 
   it('restores the file that a tab came from', async () => {
@@ -391,7 +444,7 @@ describe('tabs store', () => {
       tabs: [{ id: 'a', query: 'SELECT 1', filePath: '/data/a.sql' }],
       activeTabId: 'a',
     })
-    apiStub.readTextFile.mockResolvedValue('SELECT 1')
+    apiStub.readTextFile.mockResolvedValue({ contents: 'SELECT 1', encoding: 'utf8' })
     const tabs = useTabsStore()
 
     await tabs.restore()
@@ -426,7 +479,7 @@ describe('tabs store', () => {
       ],
       activeTabId: 'a',
     })
-    apiStub.readTextFile.mockResolvedValue('SELECT 2')
+    apiStub.readTextFile.mockResolvedValue({ contents: 'SELECT 2', encoding: 'utf8' })
     const tabs = useTabsStore()
 
     await tabs.restore()
@@ -444,7 +497,7 @@ describe('tabs store', () => {
       tabs: [{ id: 'a', query: 'SELECT 2', filePath: '/data/a.sql' }],
       activeTabId: 'a',
     })
-    apiStub.readTextFile.mockResolvedValue('SELECT 1')
+    apiStub.readTextFile.mockResolvedValue({ contents: 'SELECT 1', encoding: 'utf8' })
     const tabs = useTabsStore()
 
     await tabs.restore()

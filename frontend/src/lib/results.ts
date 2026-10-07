@@ -16,6 +16,7 @@ const FRAME_BEGIN_SET = 1
 const FRAME_CHUNK = 2
 const FRAME_END_SET = 3
 const FRAME_END = 4
+const FRAME_MESSAGE = 5
 
 const ENCODING_NULL = 0
 const ENCODING_BOOL = 1
@@ -298,14 +299,24 @@ function dictValue(column: Extract<SegmentColumn, { encoding: 'dict' }>, row: nu
 }
 
 /**
- * Reads one JSON value. A value that holds a number that a JavaScript number
- * cannot hold with every digit stays the text that the server sent, so an
- * array of bigint values or a jsonb document shows its digits.
+ * True when a JavaScript number keeps every digit of a JSON number and the
+ * grid shows it as the server wrote it. A number with no exponent must come
+ * back as the same text, so `1.0`, `10.50` and `-0` keep their zeros.
+ */
+function keepsForm(token: string): boolean {
+  return exactAsNumber(token) && (/[eE]/.test(token) || String(Number(token)) === token)
+}
+
+/**
+ * Reads one JSON value. A value that contains a number that a JavaScript
+ * number cannot keep with every digit, or whose zeros a number drops, stays
+ * the text that the server sent, so an array of bigint values or a jsonb
+ * document shows its digits.
  */
 export function parseJsonCell(text: string): CellValue {
   // A string in quotes is skipped, and each number outside one is checked.
   for (const [token] of text.matchAll(/"(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g)) {
-    if (!token.startsWith('"') && !exactAsNumber(token)) {
+    if (!token.startsWith('"') && !keepsForm(token)) {
       return text
     }
   }
@@ -351,6 +362,8 @@ export interface ResultStreamHandlers {
   onRows?: (table: ResultTable) => void
   /** A result set has ended, with every row it holds. */
   onSet: (table: ResultTable) => void
+  /** The server sent a message while the run goes on. */
+  onMessage?: (message: Message) => void
   /** The run has ended. */
   onEnd: (end: RunEnd) => void
 }
@@ -491,6 +504,9 @@ export class ResultStream {
         case FRAME_END:
           at = this.readEnd(view, buffer, at)
           break
+        case FRAME_MESSAGE:
+          at = this.readMessage(view, buffer, at)
+          break
         default:
           throw new Error(`The result contains a frame of unknown type ${frameType}.`)
       }
@@ -545,6 +561,12 @@ export class ResultStream {
       this.handlers.onSet(table)
     }
     return at + 5
+  }
+
+  private readMessage(view: DataView, buffer: ArrayBuffer, at: number): number {
+    const json = readText(view, buffer, at)
+    this.handlers.onMessage?.(JSON.parse(json.text) as Message)
+    return json.at
   }
 
   private readEnd(view: DataView, buffer: ArrayBuffer, at: number): number {

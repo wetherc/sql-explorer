@@ -198,6 +198,20 @@ describe('toSqlLiteral', () => {
     expect(toSqlLiteral({ a: 1 }, Dialect.Postgres)).toBe(`'{"a":1}'`)
   })
 
+  it('writes an N literal for SQL Server, so each character keeps its value', () => {
+    expect(toSqlLiteral("Zoë's", Dialect.MsSql)).toBe("N'Zoë''s'")
+  })
+
+  it('writes a MySQL text with a backslash or a control character as hex', () => {
+    expect(toSqlLiteral('C:\\temp', Dialect.MySql)).toBe("_utf8mb4 X'433A5C74656D70'")
+    expect(toSqlLiteral('a\nb', Dialect.MySql)).toBe("_utf8mb4 X'610A62'")
+    expect(toSqlLiteral('é\t', Dialect.MySql)).toBe("_utf8mb4 X'C3A909'")
+    // A text with neither keeps its doubled quotes.
+    expect(toSqlLiteral("it's", Dialect.MySql)).toBe("'it''s'")
+    // Other engines read a backslash as itself.
+    expect(toSqlLiteral('C:\\temp', Dialect.Postgres)).toBe("'C:\\temp'")
+  })
+
   it('writes a boolean as a word where the engine refuses a number', () => {
     expect(toSqlLiteral(true, Dialect.Postgres)).toBe('TRUE')
     expect(toSqlLiteral(false, Dialect.Postgres)).toBe('FALSE')
@@ -228,7 +242,7 @@ describe('toSqlLiteral', () => {
 describe('toInsertStatements', () => {
   it('writes one statement for each row with the quotes of the dialect', () => {
     expect(toInsertStatements(result, 'dbo.people', Dialect.MsSql)).toBe(
-      "INSERT INTO [dbo].[people] ([id], [name]) VALUES (1, 'Ada');\n" +
+      "INSERT INTO [dbo].[people] ([id], [name]) VALUES (1, N'Ada');\n" +
         'INSERT INTO [dbo].[people] ([id], [name]) VALUES (2, NULL);',
     )
   })

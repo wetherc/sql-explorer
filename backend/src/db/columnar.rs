@@ -25,6 +25,7 @@ pub const FRAME_BEGIN_SET: u8 = 1;
 pub const FRAME_CHUNK: u8 = 2;
 pub const FRAME_END_SET: u8 = 3;
 pub const FRAME_END: u8 = 4;
+pub const FRAME_MESSAGE: u8 = 5;
 
 /// How the values of one column of one chunk are held.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,8 +204,15 @@ pub fn write_end_set(buffer: &mut Vec<u8>, set: u32, truncated: bool) {
     buffer.push(u8::from(truncated));
 }
 
-/// Writes the frame that ends the run. The JSON holds the messages of the
-/// server and the numbers of the run.
+/// Writes the frame that sends one message of the server while the run goes
+/// on. The JSON contains one message.
+pub fn write_message(buffer: &mut Vec<u8>, message_json: &str) {
+    buffer.push(FRAME_MESSAGE);
+    write_text(buffer, message_json);
+}
+
+/// Writes the frame that ends the run. The JSON contains the messages that no
+/// message frame sent, and the numbers of the run.
 pub fn write_end(buffer: &mut Vec<u8>, summary_json: &str) {
     buffer.push(FRAME_END);
     write_text(buffer, summary_json);
@@ -411,6 +419,8 @@ pub struct ChunkSink {
     /// The measure of the bytes of the batch, against `CHUNK_BYTES`.
     batch_weight: usize,
     truncated: bool,
+    /// The messages that no message frame sent. The frame that ends the run
+    /// sends them.
     messages: Vec<Message>,
 }
 
@@ -519,8 +529,21 @@ impl RowSink for ChunkSink {
         self.send(buffer)
     }
 
+    /// Sends the message at once, so a long run shows its messages while it
+    /// goes on. The rows that wait in the open chunk go first, so the window
+    /// gets the rows and the messages in the order the server sent them. A
+    /// message that the channel refuses goes in the frame that ends the run.
     fn message(&mut self, message: Message) {
-        self.messages.push(message);
+        let flushed = self.flush().is_ok();
+        let sent = flushed
+            && serde_json::to_string(&message).ok().is_some_and(|json| {
+                let mut buffer = Vec::new();
+                write_message(&mut buffer, &json);
+                self.send(buffer).is_ok()
+            });
+        if !sent {
+            self.messages.push(message);
+        }
     }
 }
 
@@ -554,6 +577,9 @@ mod tests {
         },
         End {
             summary: String,
+        },
+        Message {
+            json: String,
         },
     }
 
@@ -622,6 +648,7 @@ mod tests {
                 FRAME_END => Frame::End {
                     summary: self.text(),
                 },
+                FRAME_MESSAGE => Frame::Message { json: self.text() },
                 other => panic!("the frame {other} is unknown"),
             }
         }
@@ -1110,9 +1137,15 @@ mod tests {
         })
         .unwrap();
 
-        let frames = frames_of(&messages.lock().unwrap());
-        assert_eq!(frames.len(), 4);
+        let mut frames = frames_of(&messages.lock().unwrap());
+        assert_eq!(frames.len(), 5);
         assert!(matches!(frames[0], Frame::BeginSet { set: 0, .. }));
+        // The row that came before the message goes out before it.
+        let Frame::Message { json } = frames.remove(2) else {
+            panic!("the third frame is not a message");
+        };
+        let message: JsonValue = serde_json::from_str(&json).unwrap();
+        assert_eq!(message["text"], "1 row returned.");
         assert_eq!(
             frames[1],
             Frame::Chunk {
@@ -1134,7 +1167,7 @@ mod tests {
         let value: JsonValue = serde_json::from_str(summary).unwrap();
         assert_eq!(value["elapsedMs"], 8);
         assert_eq!(value["rowsAffected"], 0);
-        assert_eq!(value["messages"][0]["text"], "1 row returned.");
+        assert_eq!(value["messages"], json!([]));
     }
 
     #[test]
@@ -1265,22 +1298,117 @@ mod tests {
         let (channel, messages) = collecting_channel();
         let mut sink = ChunkSink::new(channel, 10);
         sink.begin_set(columns()).unwrap();
-        sink.row(vec![json!(1), json!("one")]).unwrap();
         sink.message(Message::info("halfway"));
+        sink.row(vec![json!(1), json!("one")]).unwrap();
         sink.fail(5).unwrap();
 
         let frames = frames_of(&messages.lock().unwrap());
-        // The set never ended, so its rows go nowhere: the run holds the
-        // frame that opened the set and the frame that ends the run.
-        assert_eq!(frames.len(), 2);
+        // The set never ended, so its rows go nowhere. The run sends the
+        // frame that opened the set, the message, and the frame that ends
+        // the run.
+        assert_eq!(frames.len(), 3);
         assert!(matches!(frames[0], Frame::BeginSet { set: 0, .. }));
-        let Frame::End { summary } = &frames[1] else {
+        assert!(matches!(&frames[1], Frame::Message { json } if json.contains("halfway")));
+        let Frame::End { summary } = &frames[2] else {
             panic!("the last frame does not end the run");
         };
         let value: JsonValue = serde_json::from_str(summary).unwrap();
         assert_eq!(value["elapsedMs"], 5);
         assert_eq!(value["rowsAffected"], JsonValue::Null);
-        assert_eq!(value["messages"][0]["text"], "halfway");
+        assert_eq!(value["messages"], json!([]));
+    }
+
+    #[test]
+    fn a_message_that_the_channel_refuses_goes_in_the_end_frame() {
+        let refused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let kept: Kept = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (flag, held) = (refused.clone(), kept.clone());
+        let channel = Channel::new(move |body| {
+            if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(tauri::Error::FailedToReceiveMessage);
+            }
+            if let InvokeResponseBody::Raw(bytes) = body {
+                held.lock().unwrap().push(bytes);
+            }
+            Ok(())
+        });
+        let mut sink = ChunkSink::new(channel, 10);
+        sink.message(Message::info("kept"));
+        refused.store(false, std::sync::atomic::Ordering::SeqCst);
+        sink.finish(RunSummary {
+            rows_affected: None,
+            elapsed_ms: 1,
+            stats: None,
+        })
+        .unwrap();
+        let frames = frames_of(&kept.lock().unwrap());
+        let Frame::End { summary } = &frames[0] else {
+            panic!("the frame does not end the run");
+        };
+        let value: JsonValue = serde_json::from_str(summary).unwrap();
+        assert_eq!(value["messages"][0]["text"], "kept");
+    }
+
+    #[test]
+    fn the_messages_keep_their_place_among_the_rows() {
+        let (channel, messages) = collecting_channel();
+        let mut sink = ChunkSink::new(channel, 10);
+        sink.message(Message::info("first"));
+        sink.begin_set(vec![ColumnInfo::new("a", "int")]).unwrap();
+        sink.row(vec![json!(1)]).unwrap();
+        sink.message(Message::info("second"));
+        sink.row(vec![json!(2)]).unwrap();
+        sink.end_set(false).unwrap();
+        sink.message(Message::info("third"));
+        sink.finish(RunSummary::default()).unwrap();
+
+        let order: Vec<String> = frames_of(&messages.lock().unwrap())
+            .into_iter()
+            .map(|frame| match frame {
+                Frame::BeginSet { .. } => "begin".to_string(),
+                Frame::Chunk { rows, .. } => format!("rows {}", rows[0][0]),
+                Frame::EndSet { .. } => "end set".to_string(),
+                Frame::Message { json } => {
+                    let value: JsonValue = serde_json::from_str(&json).unwrap();
+                    value["text"].as_str().unwrap().to_string()
+                }
+                Frame::End { .. } => "end".to_string(),
+            })
+            .collect();
+        assert_eq!(
+            order,
+            ["first", "begin", "rows 1", "second", "rows 2", "end set", "third", "end"]
+        );
+    }
+
+    #[test]
+    fn a_message_after_rows_the_channel_refuses_goes_in_the_end_frame() {
+        let refused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let kept: Kept = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (flag, held) = (refused.clone(), kept.clone());
+        let channel = Channel::new(move |body| {
+            if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(tauri::Error::FailedToReceiveMessage);
+            }
+            if let InvokeResponseBody::Raw(bytes) = body {
+                held.lock().unwrap().push(bytes);
+            }
+            Ok(())
+        });
+        let mut sink = ChunkSink::new(channel, 10);
+        sink.begin_set(vec![ColumnInfo::new("a", "int")]).unwrap();
+        sink.row(vec![json!(1)]).unwrap();
+        refused.store(true, std::sync::atomic::Ordering::SeqCst);
+        sink.message(Message::info("late"));
+        refused.store(false, std::sync::atomic::Ordering::SeqCst);
+        sink.finish(RunSummary::default()).unwrap();
+
+        let frames = frames_of(&kept.lock().unwrap());
+        let Some(Frame::End { summary }) = frames.last() else {
+            panic!("the last frame does not end the run");
+        };
+        let value: JsonValue = serde_json::from_str(summary).unwrap();
+        assert_eq!(value["messages"][0]["text"], "late");
     }
 
     #[test]

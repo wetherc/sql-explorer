@@ -118,7 +118,11 @@ export const useLayoutStore = defineStore('layout', () => {
   }
 
   function persist(storage: Pick<Storage, 'setItem'> | null = safeStorage()): void {
-    storage?.setItem(LAYOUT_KEY, JSON.stringify(layout.value))
+    try {
+      storage?.setItem(LAYOUT_KEY, JSON.stringify(layout.value))
+    } catch {
+      // A full or blocked storage keeps the values for this session alone.
+    }
   }
 
   function update(patch: Partial<Layout>): void {

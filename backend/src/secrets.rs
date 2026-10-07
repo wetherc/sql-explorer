@@ -102,20 +102,20 @@ impl SecretStore for MemoryStore {
 
 /// Selects the store to use. The keychain is tried first, and the store in
 /// memory takes over when the keychain refuses to work.
-pub fn build_store() -> Box<dyn SecretStore> {
+pub fn build_store() -> std::sync::Arc<dyn SecretStore> {
     let candidate = KeychainStore;
     let probe = "sql-explorer-probe";
     match candidate
         .set(probe, "probe")
         .and_then(|()| candidate.delete(probe))
     {
-        Ok(()) => Box::new(candidate),
+        Ok(()) => std::sync::Arc::new(candidate),
         Err(error) => {
             log::warn!(
                 "The keychain of the system is not reachable, so the passwords stay in memory \
                  for this session only: {error}"
             );
-            Box::new(MemoryStore::default())
+            std::sync::Arc::new(MemoryStore::default())
         }
     }
 }

@@ -15,14 +15,14 @@
             v-bind="tip"
             :icon="settings.isDark ? 'mdi-weather-sunny' : 'mdi-weather-night'"
             size="small"
-            aria-label="Toggle theme"
+            :aria-label="settings.isDark ? 'Switch to light theme' : 'Switch to dark theme'"
             data-test="theme-toggle"
             @click="settings.toggleTheme()"
           />
         </template>
       </v-tooltip>
 
-      <v-tooltip location="bottom" text="Settings">
+      <v-tooltip location="bottom" :text="`Settings (${chordLabel('mod+,', apple)})`">
         <template #activator="{ props: tip }">
           <v-btn
             v-bind="tip"
@@ -38,7 +38,12 @@
 
     <v-navigation-drawer permanent rail :width="RAIL_WIDTH" class="rail">
       <v-list density="compact" nav>
-        <v-tooltip v-for="item in railItems" :key="item.value" location="right" :text="item.label">
+        <v-tooltip
+          v-for="item in railItems"
+          :key="item.value"
+          location="right"
+          :text="`${item.label} (${chordLabel(item.key, apple)})`"
+        >
           <template #activator="{ props: tip }">
             <v-list-item
               v-bind="tip"
@@ -127,7 +132,7 @@
 
     <AppDialog
       :model-value="ui.keyboardHelpOpen"
-      max-width="520"
+      size="small"
       @update:model-value="ui.setKeyboardHelpOpen"
     >
       <v-card>
@@ -150,157 +155,12 @@
       </v-card>
     </AppDialog>
 
-    <AppDialog v-model="settingsOpen" max-width="560" scrollable>
-      <v-card>
-        <v-card-title class="text-subtitle-1">Settings</v-card-title>
-        <v-card-text class="d-flex flex-column ga-4">
-          <!-- The settings stand in groups, because a list of twelve controls
-               in no order gives the reader nothing to hold on to. -->
-          <div class="settings-group">Appearance</div>
-          <v-select
-            :model-value="settings.settings.theme"
-            :items="THEME_CHOICES"
-            label="Theme"
-            data-test="setting-theme"
-            @update:model-value="(value) => settings.update({ theme: value })"
-          />
-          <v-slider
-            :model-value="settings.settings.fontSize"
-            label="Editor font size"
-            :min="9"
-            :max="24"
-            :step="1"
-            thumb-label
-            hide-details
-            data-test="setting-font-size"
-            @update:model-value="(value) => settings.update({ fontSize: Number(value) })"
-          />
-          <v-switch
-            :model-value="settings.settings.wordWrap"
-            label="Wrap long lines"
-            hide-details
-            @update:model-value="(value) => settings.update({ wordWrap: Boolean(value) })"
-          />
-          <v-switch
-            :model-value="settings.settings.showLineNumbers"
-            label="Show line numbers"
-            hide-details
-            @update:model-value="(value) => settings.update({ showLineNumbers: Boolean(value) })"
-          />
-
-          <v-divider />
-          <div class="settings-group">Results</div>
-          <v-switch
-            :model-value="settings.settings.autoRunPreview"
-            label="Run table previews right away"
-            hide-details
-            @update:model-value="(value) => settings.update({ autoRunPreview: Boolean(value) })"
-          />
-          <v-text-field
-            :model-value="settings.settings.maxRows"
-            label="Row limit"
-            type="number"
-            hint="Maximum rows fetched per result set, from 1 to 1,000,000."
-            persistent-hint
-            data-test="setting-max-rows"
-            @update:model-value="(value) => settings.update({ maxRows: Number(value) })"
-          />
-          <v-text-field
-            :model-value="settings.settings.maxPinnedResults"
-            label="Pinned results per tab"
-            type="number"
-            hint="How many pinned results each tab keeps across runs, from 1 to 20."
-            persistent-hint
-            data-test="setting-max-pinned"
-            @update:model-value="(value) => settings.update({ maxPinnedResults: Number(value) })"
-          />
-          <v-text-field
-            :model-value="settings.settings.exportRowLimit"
-            label="Export row limit"
-            type="number"
-            hint="Maximum rows for an export that streams straight to a file, from 1,000 to 100,000,000."
-            persistent-hint
-            data-test="setting-export-limit"
-            @update:model-value="(value) => settings.update({ exportRowLimit: Number(value) })"
-          />
-
-          <v-divider />
-          <div class="settings-group">Athena</div>
-          <v-text-field
-            :model-value="settings.settings.athenaPricePerTerabyte"
-            label="Athena price per terabyte"
-            type="number"
-            step="0.01"
-            prefix="$"
-            hint="Used for cost estimates. The actual rate depends on your region and contract."
-            persistent-hint
-            data-test="setting-athena-price"
-            @update:model-value="
-              (value) => settings.update({ athenaPricePerTerabyte: Number(value) })
-            "
-          />
-          <v-text-field
-            :model-value="settings.settings.athenaScanWarningGb"
-            label="Scan warning threshold (GB)"
-            type="number"
-            hint="Warn when a statement scans more than this, from 1 to 1,000,000."
-            persistent-hint
-            data-test="setting-athena-warning"
-            @update:model-value="(value) => settings.update({ athenaScanWarningGb: Number(value) })"
-          />
-
-          <v-divider />
-          <div class="settings-group">Autocomplete</div>
-          <v-text-field
-            :model-value="settings.settings.schemaSnapshotColumns"
-            label="Column limit"
-            type="number"
-            hint="Maximum columns loaded per schema for autocomplete, from 100 to 200,000."
-            persistent-hint
-            data-test="setting-snapshot-columns"
-            @update:model-value="
-              (value) => settings.update({ schemaSnapshotColumns: Number(value) })
-            "
-          />
-          <v-switch
-            :model-value="settings.settings.schemaSnapshotOwnConnection"
-            color="primary"
-            label="Load schema on a separate connection"
-            hint="Uses one more server session, but never waits for your running statements."
-            persistent-hint
-            data-test="setting-snapshot-connection"
-            @update:model-value="
-              (value) => settings.update({ schemaSnapshotOwnConnection: value === true })
-            "
-          />
-        </v-card-text>
-        <v-card-actions>
-          <v-btn
-            text="Reset to defaults"
-            data-test="settings-reset"
-            @click="resettingSettings = true"
-          />
-          <v-spacer />
-          <v-btn text="Close" @click="settingsOpen = false" />
-        </v-card-actions>
-      </v-card>
-    </AppDialog>
-
-    <ConfirmDialog
-      :open="resettingSettings"
-      title="Reset all settings?"
-      message="Every setting goes back to its default value."
-      confirm-text="Reset"
-      danger
-      @confirm="resetSettings"
-      @cancel="resettingSettings = false"
-    />
+    <SettingsDialog v-model:open="settingsOpen" />
   </v-app>
 </template>
 
 <script setup lang="ts">
 import AppDialog from '@/components/AppDialog.vue'
-import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useTheme } from 'vuetify'
 import CommandPalette from '@/components/CommandPalette.vue'
@@ -311,7 +171,9 @@ import FilesPanel from '@/components/FilesPanel.vue'
 import HistoryPanel from '@/components/HistoryPanel.vue'
 import NoticeHost from '@/components/NoticeHost.vue'
 import QueryTabs from '@/components/QueryTabs.vue'
+import SettingsDialog from '@/components/SettingsDialog.vue'
 import StatusBar from '@/components/StatusBar.vue'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { api } from '@/lib/api'
 import {
   chordLabel,
@@ -333,7 +195,8 @@ import {
   useLayoutStore,
   type Panel,
 } from '@/stores/layout'
-import { THEME_CHOICES, useSettingsStore } from '@/stores/settings'
+import { useSettingsStore } from '@/stores/settings'
+import { useQueryStore } from '@/stores/query'
 import { useTabsStore } from '@/stores/tabs'
 import { useUiStore } from '@/stores/ui'
 import type { UnlistenFn } from '@tauri-apps/api/event'
@@ -345,6 +208,7 @@ const history = useHistoryStore()
 const layout = useLayoutStore()
 const settings = useSettingsStore()
 const tabs = useTabsStore()
+const queries = useQueryStore()
 const ui = useUiStore()
 const theme = useTheme()
 
@@ -355,24 +219,19 @@ const RAIL_WIDTH = 56
 const apple = appleKeyboard()
 
 const settingsOpen = ref(false)
-/** True while the question about resetting the settings stands open. */
-const resettingSettings = ref(false)
-
-function resetSettings(): void {
-  resettingSettings.value = false
-  settings.reset()
-}
 let unlisten: UnlistenFn | null = null
 /** The listener of the menu of the operating system. */
 let unlistenMenu: UnlistenFn | null = null
+/** The listener of the request of the window to close. */
+let unlistenClose: UnlistenFn | null = null
 /** Stops holding back the menu of the host, once the shell holds it back. */
 let unholdHostMenu: (() => void) | null = null
 
-const railItems: Array<{ value: Panel; icon: string; label: string }> = [
-  { value: 'connections', icon: 'mdi-lan-connect', label: 'Connections' },
-  { value: 'explorer', icon: 'mdi-database-search', label: 'Explorer' },
-  { value: 'files', icon: 'mdi-folder-outline', label: 'Files' },
-  { value: 'history', icon: 'mdi-history', label: 'History' },
+const railItems: Array<{ value: Panel; icon: string; label: string; key: string }> = [
+  { value: 'connections', icon: 'mdi-lan-connect', label: 'Connections', key: 'mod+1' },
+  { value: 'explorer', icon: 'mdi-database-search', label: 'Explorer', key: 'mod+2' },
+  { value: 'files', icon: 'mdi-folder-outline', label: 'Files', key: 'mod+3' },
+  { value: 'history', icon: 'mdi-history', label: 'History', key: 'mod+4' },
 ]
 
 function onConnected(): void {
@@ -456,6 +315,15 @@ function hasActiveTab(): boolean {
   return tabs.activeTabId !== null
 }
 
+/** The reason a command of a tab can't run while no tab is open. */
+const NO_TAB_REASON = 'Open a query tab first.'
+
+/** True while a statement of the open tab runs. */
+function isRunning(): boolean {
+  const id = tabs.activeTabId
+  return id !== null && queries.peekState(id)?.running === true
+}
+
 /**
  * Every command of the application. The key handler below reads this list,
  * and so does the palette, so a new command needs one record here.
@@ -467,6 +335,7 @@ const commands: Command[] = [
     group: 'Query',
     key: 'mod+enter',
     enabled: hasActiveTab,
+    disabledReason: () => NO_TAB_REASON,
     run: () => actionsOfActiveTab()?.runStatement(),
   },
   {
@@ -475,6 +344,7 @@ const commands: Command[] = [
     group: 'Query',
     key: 'mod+shift+enter',
     enabled: hasActiveTab,
+    disabledReason: () => NO_TAB_REASON,
     run: () => actionsOfActiveTab()?.runAll(),
   },
   {
@@ -482,15 +352,17 @@ const commands: Command[] = [
     title: 'Stop',
     group: 'Query',
     key: 'mod+shift+c',
-    enabled: hasActiveTab,
+    enabled: isRunning,
+    disabledReason: () => (hasActiveTab() ? 'Nothing is running.' : NO_TAB_REASON),
     run: () => actionsOfActiveTab()?.cancel(),
   },
   {
     id: 'query.save',
-    title: 'Save query',
+    title: 'Save to file',
     group: 'File',
     key: 'mod+s',
     enabled: hasActiveTab,
+    disabledReason: () => NO_TAB_REASON,
     run: () => actionsOfActiveTab()?.save(),
   },
   {
@@ -499,6 +371,7 @@ const commands: Command[] = [
     group: 'Editor',
     key: 'shift+alt+f',
     enabled: hasActiveTab,
+    disabledReason: () => NO_TAB_REASON,
     run: () => actionsOfActiveTab()?.format(),
   },
   {
@@ -531,6 +404,7 @@ const commands: Command[] = [
     group: 'Tabs',
     key: null,
     enabled: hasActiveTab,
+    disabledReason: () => NO_TAB_REASON,
     run: () => queryTabs.value?.renameActiveTab(),
   },
   {
@@ -539,6 +413,7 @@ const commands: Command[] = [
     group: 'Tabs',
     key: 'mod+w',
     enabled: hasActiveTab,
+    disabledReason: () => NO_TAB_REASON,
     run: () => queryTabs.value?.closeActiveTab(),
   },
   {
@@ -623,6 +498,11 @@ const commandsWithKeys = computed(() => commands.filter((command) => command.key
  * command reached from a key follow one path.
  */
 function runCommandById(id: string): void {
+  // A command from the menu must not act behind a dialog, for the same
+  // reason as a key.
+  if (ui.dialogOpen) {
+    return
+  }
   const command = commands.find((entry) => entry.id === id)
   if (command && commandEnabled(command)) {
     command.run()
@@ -642,7 +522,7 @@ const menuCommandStates = computed(() =>
   // two lists sees one order.
   MENU_COMMAND_IDS.map((id) => {
     const command = commands.find((entry) => entry.id === id)
-    return { id, enabled: command ? commandEnabled(command) : false }
+    return { id, enabled: command ? !ui.dialogOpen && commandEnabled(command) : false }
   }),
 )
 
@@ -707,6 +587,13 @@ onMounted(async () => {
     // The window still answers every key without the menu of the system.
     ui.reportError(error)
   }
+  await showStorageProblems()
+  try {
+    unlistenClose = await getCurrentWindow().onCloseRequested(flushPersist)
+  } catch {
+    // Outside the desktop host there is no window to close, and the write
+    // after the pause still keeps the tabs.
+  }
   try {
     unlisten = await api.onConnectionStatus((event) => connections.applyStatus(event))
   } catch (error) {
@@ -727,7 +614,27 @@ onBeforeUnmount(() => {
   unlisten = null
   unlistenMenu?.()
   unlistenMenu = null
+  unlistenClose?.()
+  unlistenClose = null
 })
+
+/**
+ * Shows each problem the backend found with its stored files, such as a
+ * settings file it could not read. Each one stays until the user takes it
+ * away, because the user may need to act on it. A failed read reports
+ * nothing.
+ */
+async function showStorageProblems(): Promise<void> {
+  let problems: string[] = []
+  try {
+    problems = (await api.storageProblems()) ?? []
+  } catch {
+    return
+  }
+  for (const problem of problems) {
+    ui.warn(problem, null, { kept: true })
+  }
+}
 
 // The theme follows the choice of the user, and the theme of the host as well
 // while the choice is to follow the host.
@@ -758,12 +665,22 @@ watch(
     }, PERSIST_DELAY_MS)
   },
 )
-onBeforeUnmount(() => {
-  if (persistTimer !== null) {
-    clearTimeout(persistTimer)
-    persistTimer = null
-    void tabs.persist()
+
+/**
+ * Writes the tabs at once when a write waits for its pause. The window waits
+ * for this before it closes, so the last keystrokes reach the disk.
+ */
+async function flushPersist(): Promise<void> {
+  if (persistTimer === null) {
+    return
   }
+  clearTimeout(persistTimer)
+  persistTimer = null
+  await tabs.persist()
+}
+
+onBeforeUnmount(() => {
+  void flushPersist()
 })
 </script>
 
@@ -773,20 +690,11 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 
-/* A row of the rail holds an icon and no text. The library keeps a gap of 32
+/* A row of the rail has an icon and no text. The library keeps a gap of 32
    pixels after the icon for the text that would follow it, and the icon with
-   that gap is wider than the row. Centring the two together pushed the icon
-   out of the highlight behind it and against the edge of the window. The gap
-   goes, and the icon sits in the middle of its row. */
-/* The name of one group of settings, above the controls that belong to it. */
-.settings-group {
-  font-size: var(--app-text-sm);
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: rgb(var(--v-theme-on-surface-variant));
-}
-
+   that gap is wider than the row, so the icon would sit against the edge of
+   the window and outside the highlight behind it. Without the gap the icon
+   sits in the middle of its row. */
 .rail :deep(.v-list-item) {
   --v-list-prepend-gap: 0px;
 

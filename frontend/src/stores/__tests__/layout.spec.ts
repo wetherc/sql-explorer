@@ -123,6 +123,12 @@ describe('useLayoutStore', () => {
     const layout = useLayoutStore()
 
     expect(() => layout.persist(null)).not.toThrow()
+    const full = {
+      setItem: () => {
+        throw new Error('QuotaExceededError')
+      },
+    }
+    expect(() => layout.persist(full)).not.toThrow()
   })
 
   it('holds a new share of the editor inside the limits of the split', () => {

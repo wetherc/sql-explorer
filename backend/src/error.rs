@@ -35,6 +35,8 @@ pub enum ErrorCategory {
     Secret,
     /// The driver does not support the operation.
     Unsupported,
+    /// The request is not valid, for a reason that is not about a connection.
+    Invalid,
     /// Any other failure.
     Internal,
 }
@@ -54,6 +56,7 @@ impl ErrorCategory {
             ErrorCategory::Storage => "storage",
             ErrorCategory::Secret => "secret",
             ErrorCategory::Unsupported => "unsupported",
+            ErrorCategory::Invalid => "invalid",
             ErrorCategory::Internal => "internal",
         }
     }
@@ -66,6 +69,10 @@ pub struct ErrorPayload {
     pub category: &'static str,
     pub message: String,
     pub detail: Option<String>,
+    /// The line of the failure, from 1, in the text that the window sent.
+    pub line: Option<u32>,
+    /// The column of the failure, from 1, on that line.
+    pub column: Option<u32>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -91,6 +98,19 @@ pub enum Error {
     #[error("{0}")]
     Unsupported(String),
 
+    /// A request that is not valid, such as a parameter with no value or a
+    /// file that is too large.
+    #[error("{0}")]
+    Invalid(String),
+
+    /// An error at a known place in the text that the window sent.
+    #[error("{inner}")]
+    Located {
+        inner: Box<Error>,
+        line: u32,
+        column: u32,
+    },
+
     #[error(transparent)]
     Tiberius(#[from] tiberius::error::Error),
 
@@ -115,8 +135,9 @@ pub enum Error {
     #[error(transparent)]
     SerdeJson(#[from] serde_json::Error),
 
-    #[error(transparent)]
-    Store(#[from] tauri_plugin_store::Error),
+    /// A file of the settings that could not be read or written.
+    #[error("{0}")]
+    Storage(String),
 
     #[error(transparent)]
     Tauri(#[from] tauri::Error),
@@ -131,17 +152,88 @@ pub enum Error {
 /// The number MySQL reports when `KILL QUERY` ended a statement.
 const MYSQL_QUERY_INTERRUPTED: u16 = 1317;
 
-/// True when the failure is the one Postgres sends after a stop.
-fn is_postgres_stop(error: &tokio_postgres::Error) -> bool {
-    error.code() == Some(&tokio_postgres::error::SqlState::QUERY_CANCELED)
-}
+/// The numbers MySQL and MariaDB send when they refuse a login: access
+/// denied for the user (1045), access denied to the database (1044), and no
+/// password for an account that uses socket login (1698).
+const MYSQL_LOGIN_REFUSED: [u16; 3] = [1045, 1044, 1698];
 
-/// True when the failure is the one MySQL sends after a stop.
+/// The number MS SQL Server sends when it refuses a login.
+const MSSQL_LOGIN_FAILED: u32 = 18456;
+
+/// True when the failure is the one MySQL sends after a stop. The MySQL
+/// driver uses it to know that a stop ended the statement.
 pub(crate) fn is_mysql_stop(error: &mysql_async::Error) -> bool {
     matches!(
         error,
         mysql_async::Error::Server(server) if server.code == MYSQL_QUERY_INTERRUPTED
     )
+}
+
+/// Gives the category of a Postgres error. The driver keeps the reason of a
+/// failure private, but its text names the reason and the vendored driver
+/// fixes that text, so the match is on the text.
+fn postgres_category(error: &tokio_postgres::Error) -> ErrorCategory {
+    if let Some(db) = error.as_db_error() {
+        // Class 28 is "invalid authorization specification".
+        return if db.code().code().starts_with("28") {
+            ErrorCategory::Authentication
+        } else {
+            ErrorCategory::Database
+        };
+    }
+    if error.is_closed() {
+        return ErrorCategory::Connection;
+    }
+    match error.to_string().as_str() {
+        "error communicating with the server"
+        | "error performing TLS handshake"
+        | "error connecting to server"
+        | "timeout waiting for server" => ErrorCategory::Connection,
+        "authentication error" => ErrorCategory::Authentication,
+        "invalid connection string" | "invalid configuration" => ErrorCategory::Configuration,
+        _ => ErrorCategory::Database,
+    }
+}
+
+/// Gives the category of a MySQL error.
+fn mysql_category(error: &mysql_async::Error) -> ErrorCategory {
+    use mysql_async::{DriverError, Error as MySqlError};
+    match error {
+        MySqlError::Io(_)
+        | MySqlError::Driver(DriverError::ConnectionClosed | DriverError::PoolDisconnected) => {
+            ErrorCategory::Connection
+        }
+        MySqlError::Server(server) if MYSQL_LOGIN_REFUSED.contains(&server.code) => {
+            ErrorCategory::Authentication
+        }
+        MySqlError::Url(_) => ErrorCategory::Configuration,
+        _ => ErrorCategory::Database,
+    }
+}
+
+/// Gives the category of an MS SQL Server error.
+fn mssql_category(error: &tiberius::error::Error) -> ErrorCategory {
+    use tiberius::error::Error as MsError;
+    match error {
+        // The Stop button sends an attention signal, and the server answers
+        // that with this error.
+        MsError::Canceled => ErrorCategory::Cancelled,
+        MsError::Io { .. } | MsError::Tls(_) | MsError::Routing { .. } => ErrorCategory::Connection,
+        MsError::Gssapi(_) => ErrorCategory::Authentication,
+        MsError::Server(token) if token.code() == MSSQL_LOGIN_FAILED => {
+            ErrorCategory::Authentication
+        }
+        _ => ErrorCategory::Database,
+    }
+}
+
+/// Gives the category of a SQLite error. A file that SQLite can't open is a
+/// fault of the file, not of a statement.
+fn sqlite_category(error: &rusqlite::Error) -> ErrorCategory {
+    match error.sqlite_error_code() {
+        Some(rusqlite::ErrorCode::CannotOpen) => ErrorCategory::Io,
+        _ => ErrorCategory::Database,
+    }
 }
 
 impl Error {
@@ -155,56 +247,99 @@ impl Error {
             Error::Configuration(_) | Error::MySqlUrl(_) => ErrorCategory::Configuration,
             Error::Authentication(_) => ErrorCategory::Authentication,
             Error::Unsupported(_) => ErrorCategory::Unsupported,
-            // A stop reaches the server on a channel of its own, and the
-            // server then ends the statement and reports that through the
-            // connection. That report is the answer to the Stop button of the
-            // user, not a fault of the database.
-            Error::Postgres(error) if is_postgres_stop(error) => ErrorCategory::Cancelled,
-            Error::MySql(error) if is_mysql_stop(error) => ErrorCategory::Cancelled,
-            Error::Tiberius(tiberius::error::Error::Canceled) => ErrorCategory::Cancelled,
-            Error::Tiberius(_)
-            | Error::MySql(_)
-            | Error::Postgres(_)
-            | Error::Sqlite(_)
-            | Error::Athena(_) => ErrorCategory::Database,
+            Error::Invalid(_) => ErrorCategory::Invalid,
+            Error::Located { inner, .. } => inner.category(),
+            Error::Tiberius(error) => mssql_category(error),
+            Error::MySql(error) => mysql_category(error),
+            Error::Postgres(error) => postgres_category(error),
+            Error::Sqlite(error) => sqlite_category(error),
+            Error::Athena(_) => ErrorCategory::Database,
             Error::Io(_) => ErrorCategory::Io,
-            Error::Store(_) | Error::SerdeJson(_) => ErrorCategory::Storage,
+            Error::Storage(_) | Error::SerdeJson(_) => ErrorCategory::Storage,
             Error::Keyring(_) => ErrorCategory::Secret,
             Error::Tauri(_) | Error::Anyhow(_) => ErrorCategory::Internal,
         }
     }
 
-    /// Builds the payload that the user interface receives.
-    pub fn to_payload(&self) -> ErrorPayload {
-        ErrorPayload {
-            category: self.category().as_str(),
-            message: self.to_string(),
-            detail: self.server_detail().or_else(|| source_chain(self)),
+    /// True when the error is what an engine sends after a request to stop
+    /// the statement, or a loss of the connection that a stop can cause.
+    /// Other errors, such as a syntax error or a deadlock, are not.
+    pub fn is_stop_reply(&self) -> bool {
+        match self {
+            Error::Located { inner, .. } => inner.is_stop_reply(),
+            Error::Postgres(error) => {
+                error
+                    .as_db_error()
+                    .is_some_and(|db| db.code().code() == "57014")
+                    || self.category() == ErrorCategory::Connection
+            }
+            Error::MySql(error) => {
+                is_mysql_stop(error) || self.category() == ErrorCategory::Connection
+            }
+            Error::Sqlite(error) => {
+                error.sqlite_error_code() == Some(rusqlite::ErrorCode::OperationInterrupted)
+            }
+            _ => matches!(
+                self.category(),
+                ErrorCategory::Cancelled | ErrorCategory::Connection | ErrorCategory::Io
+            ),
         }
     }
 
-    /// What the server said about an error of its own, beside the text.
-    ///
-    /// MS SQL Server carries the number, the severity, the state, the line and
-    /// the procedure of every error it reports. A reader needs the number to
-    /// look the error up and the line to find the place in a long script.
-    fn server_detail(&self) -> Option<String> {
-        let Error::Tiberius(tiberius::error::Error::Server(token)) = self else {
-            return None;
+    /// Marks the error with the place in the sent text where it happened.
+    /// The line and the column count from 1. An error that already has a
+    /// place keeps it.
+    pub fn at(self, line: u32, column: u32) -> Error {
+        match self {
+            Error::Located { .. } => self,
+            inner => Error::Located {
+                inner: Box::new(inner),
+                line,
+                column,
+            },
+        }
+    }
+
+    /// Builds the payload that the user interface receives.
+    pub fn to_payload(&self) -> ErrorPayload {
+        if let Error::Located {
+            inner,
+            line,
+            column,
+        } = self
+        {
+            return ErrorPayload {
+                line: Some(*line),
+                column: Some(*column),
+                ..inner.to_payload()
+            };
+        }
+        let (message, detail) = match self {
+            Error::Postgres(error) => postgres_text(error),
+            Error::MySql(mysql_async::Error::Server(server)) => (
+                server.message.clone(),
+                Some(format!("Error {}, SQLSTATE {}", server.code, server.state)),
+            ),
+            Error::Tiberius(tiberius::error::Error::Server(token)) => {
+                (self.to_string(), Some(mssql_error_detail(token)))
+            }
+            _ => (self.to_string(), source_chain(self)),
         };
-        Some(server_error_detail(
-            token.code(),
-            token.class(),
-            token.state(),
-            token.line(),
-            token.procedure(),
-        ))
+        ErrorPayload {
+            category: self.category().as_str(),
+            message,
+            detail,
+            line: None,
+            column: None,
+        }
     }
 }
 
-/// Writes the fields that MS SQL Server sends with an error of its own. A
-/// line of zero and a procedure with no name are left out, because a
-/// statement that the user sent carries neither.
+/// Writes the fields that MS SQL Server sends with an error of its own, in
+/// the form that SQL Server Management Studio shows. A reader needs the
+/// number to look the error up and the line to find the place in a long
+/// script. A procedure with no name is left out, because a statement that
+/// the user sent has none.
 pub fn server_error_detail(
     code: u32,
     severity: u8,
@@ -212,18 +347,120 @@ pub fn server_error_detail(
     line: u32,
     procedure: &str,
 ) -> String {
-    let mut parts = vec![
-        format!("Number {code}"),
-        format!("severity {severity}"),
-        format!("state {state}"),
-    ];
-    if line > 0 {
-        parts.push(format!("line {line}"));
-    }
+    let mut text = format!("Msg {code}, Level {severity}, State {state}, Line {line}");
     if !procedure.is_empty() {
-        parts.push(format!("procedure {procedure}"));
+        text.push_str(", Procedure ");
+        text.push_str(procedure);
     }
-    parts.join(", ")
+    text
+}
+
+/// Writes the detail of an error or a message that MS SQL Server sent.
+pub fn mssql_error_detail(token: &tiberius::error::TokenError) -> String {
+    server_error_detail(
+        token.code(),
+        token.class(),
+        token.state(),
+        token.line(),
+        token.procedure(),
+    )
+}
+
+/// Gives the text and the detail of a Postgres error. A statement error
+/// shows the text of the server, and the detail gives the SQLSTATE and every
+/// other field that the server sent. Any other error names the reason of the
+/// driver and its first cause, because the reason alone, such as "error
+/// connecting to server", does not tell the user what to fix.
+fn postgres_text(error: &tokio_postgres::Error) -> (String, Option<String>) {
+    let Some(db) = error.as_db_error() else {
+        let Some(cause) = error.source() else {
+            return (error.to_string(), None);
+        };
+        return (format!("{error}: {cause}"), source_chain(cause));
+    };
+    let mut lines = vec![format!(
+        "SQLSTATE {}, severity {}",
+        db.code().code(),
+        db.severity()
+    )];
+    let mut field = |name: &str, value: Option<&str>| {
+        if let Some(value) = value {
+            lines.push(format!("{name}: {value}"));
+        }
+    };
+    field("Detail", db.detail());
+    field("Hint", db.hint());
+    let position = match db.position() {
+        Some(tokio_postgres::error::ErrorPosition::Original(at)) => Some(at.to_string()),
+        Some(tokio_postgres::error::ErrorPosition::Internal { position, query }) => {
+            Some(format!("{position} in the internal query: {query}"))
+        }
+        None => None,
+    };
+    field("Position", position.as_deref());
+    field("Where", db.where_());
+    field("Schema", db.schema());
+    field("Table", db.table());
+    field("Column", db.column());
+    field("Data type", db.datatype());
+    field("Constraint", db.constraint());
+    (db.message().to_string(), Some(lines.join("\n")))
+}
+
+/// A place in a text: the line and the column, both from 1. The column
+/// counts UTF-16 code units, as the editor of the window does.
+pub type Place = (u32, u32);
+
+/// Finds the place that follows the given characters. A line ends at `\n`,
+/// and a `\r` takes no column, so a text with Windows line ends gives the
+/// same places as one with `\n` only.
+fn place_after<I: Iterator<Item = char>>(chars: I) -> Place {
+    let (mut line, mut column) = (1u32, 1u32);
+    for c in chars {
+        match c {
+            '\n' => {
+                line += 1;
+                column = 1;
+            }
+            '\r' => {}
+            other => column += other.len_utf16() as u32,
+        }
+    }
+    (line, column)
+}
+
+/// Turns a Postgres error position into a place. Postgres counts the
+/// position in characters, from 1, inside the statement text that it got.
+/// A position of zero is treated as 1, and a position past the end gives
+/// the place after the last character.
+pub fn place_of_char_position(text: &str, position: u32) -> Place {
+    let before = position.saturating_sub(1) as usize;
+    place_after(text.chars().take(before))
+}
+
+/// Gives the place of the byte at `offset` in `text`, such as the start of a
+/// statement inside a script. An offset that is not on a character boundary
+/// counts the character that contains it as before the place.
+pub fn place_of_byte_offset(text: &str, offset: usize) -> Place {
+    place_after(
+        text.char_indices()
+            .take_while(|(index, _)| *index < offset)
+            .map(|(_, c)| c),
+    )
+}
+
+/// Moves a place inside a statement to a place inside the whole text, from
+/// the place where the statement starts. Only the first line of the
+/// statement shares a line with the text before it, so only that line gets
+/// the start column added.
+pub fn offset_place(start: Place, relative: Place) -> Place {
+    let (start_line, start_column) = start;
+    let (line, column) = relative;
+    if line <= 1 {
+        (start_line, start_column + column.max(1) - 1)
+    } else {
+        (start_line + line - 1, column)
+    }
 }
 
 /// Joins every cause below the given error into one text block. Returns
@@ -260,23 +497,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_detail_of_a_server_error_names_the_number_and_the_place() {
+    fn the_detail_of_a_server_error_has_the_form_of_management_studio() {
         assert_eq!(
             server_error_detail(208, 16, 1, 3, "usp_load"),
-            "Number 208, severity 16, state 1, line 3, procedure usp_load"
+            "Msg 208, Level 16, State 1, Line 3, Procedure usp_load"
         );
-        // A statement of the user carries no procedure, and a line of zero
-        // means the server named none.
+        // A statement of the user has no procedure.
         assert_eq!(
-            server_error_detail(4060, 11, 1, 0, ""),
-            "Number 4060, severity 11, state 1"
+            server_error_detail(4060, 11, 1, 1, ""),
+            "Msg 4060, Level 11, State 1, Line 1"
         );
     }
 
     #[test]
     fn an_error_that_is_not_of_the_server_keeps_the_chain_of_causes() {
         let error: Error = tiberius::error::Error::Tls("handshake".into()).into();
-        assert_eq!(error.to_payload().detail, None);
+        let payload = error.to_payload();
+        assert_eq!(payload.category, "connection");
+        assert_eq!(payload.detail, None);
     }
 
     #[test]
@@ -292,6 +530,8 @@ mod tests {
             (ErrorCategory::Storage, "storage"),
             (ErrorCategory::Secret, "secret"),
             (ErrorCategory::Unsupported, "unsupported"),
+            (ErrorCategory::Authentication, "authentication"),
+            (ErrorCategory::Invalid, "invalid"),
             (ErrorCategory::Internal, "internal"),
         ];
         for (category, text) in categories {
@@ -348,7 +588,7 @@ mod tests {
 
     #[test]
     fn driver_errors_map_to_the_database_category() {
-        let tiberius: Error = tiberius::error::Error::Tls("handshake".into()).into();
+        let tiberius: Error = tiberius::error::Error::Protocol("bad packet".into()).into();
         assert_eq!(tiberius.category(), ErrorCategory::Database);
 
         let mysql: Error = mysql_async::Error::Other("boom".into()).into();
@@ -398,22 +638,194 @@ mod tests {
     }
 
     #[test]
-    fn a_postgres_error_maps_to_the_database_category() {
+    fn a_bad_postgres_connection_string_is_a_configuration_error() {
         // `tokio_postgres::Error` has no public constructor, so build one
         // through a parse failure of a connection string.
-        let error = "host=".parse::<tokio_postgres::Config>().unwrap_err();
+        let error = "port=nope".parse::<tokio_postgres::Config>().unwrap_err();
         let mapped: Error = error.into();
-        assert_eq!(mapped.category(), ErrorCategory::Database);
+        assert_eq!(mapped.category(), ErrorCategory::Configuration);
+        let payload = mapped.to_payload();
+        assert!(
+            payload.message.starts_with("invalid connection string: "),
+            "{}",
+            payload.message
+        );
+        assert_eq!(payload.detail, None);
     }
 
     #[test]
-    fn a_failure_that_mysql_sends_after_a_stop_is_a_stop() {
+    fn a_postgres_error_with_no_cause_gives_the_reason_alone() {
+        // The parse of a value with no end quote fails with no cause.
+        let error = "host='open".parse::<tokio_postgres::Config>().unwrap_err();
+        let payload = Error::Postgres(error).to_payload();
+        assert!(payload.message.starts_with("invalid connection string"));
+    }
+
+    #[tokio::test]
+    async fn a_postgres_server_that_does_not_answer_is_a_connection_error() {
+        // Port 1 has no server, so the connect fails at once.
+        let error = tokio_postgres::connect(
+            "host=127.0.0.1 port=1 user=x connect_timeout=5",
+            tokio_postgres::NoTls,
+        )
+        .await
+        .err()
+        .unwrap();
+        let mapped = Error::Postgres(error);
+        assert_eq!(mapped.category(), ErrorCategory::Connection);
+        let payload = mapped.to_payload();
+        assert!(
+            payload.message.starts_with("error connecting to server: "),
+            "{}",
+            payload.message
+        );
+    }
+
+    #[test]
+    fn a_mysql_stop_is_known_but_the_category_stays_database() {
+        // The server sends the same error for a KILL from another session,
+        // so only the token of the run can tell a stop of the user.
         let stopped = mysql_async::Error::Server(mysql_async::ServerError {
             code: MYSQL_QUERY_INTERRUPTED,
             state: "70100".to_string(),
             message: "Query execution was interrupted".to_string(),
         });
-        assert_eq!(Error::MySql(stopped).category(), ErrorCategory::Cancelled);
+        assert!(is_mysql_stop(&stopped));
+        assert_eq!(Error::MySql(stopped).category(), ErrorCategory::Database);
+        assert!(!is_mysql_stop(&mysql_async::Error::Other("boom".into())));
+    }
+
+    #[test]
+    fn a_refused_mysql_login_is_an_authentication_error() {
+        for code in [1045, 1044, 1698] {
+            let refused = mysql_async::Error::Server(mysql_async::ServerError {
+                code,
+                state: "28000".to_string(),
+                message: "Access denied for user 'x'@'localhost'".to_string(),
+            });
+            assert_eq!(
+                Error::MySql(refused).category(),
+                ErrorCategory::Authentication
+            );
+        }
+    }
+
+    #[test]
+    fn a_mysql_connection_fault_is_a_connection_error() {
+        let io = mysql_async::Error::Io(mysql_async::IoError::Io(std::io::Error::other("reset")));
+        assert_eq!(Error::MySql(io).category(), ErrorCategory::Connection);
+        for driver in [
+            mysql_async::DriverError::ConnectionClosed,
+            mysql_async::DriverError::PoolDisconnected,
+        ] {
+            assert_eq!(
+                Error::MySql(mysql_async::Error::Driver(driver)).category(),
+                ErrorCategory::Connection
+            );
+        }
+        let url = mysql_async::Error::Url(mysql_async::UrlError::UnsupportedScheme {
+            scheme: "http".into(),
+        });
+        assert_eq!(Error::MySql(url).category(), ErrorCategory::Configuration);
+    }
+
+    #[test]
+    fn a_mysql_server_error_gives_the_text_and_the_number() {
+        let error = Error::MySql(mysql_async::Error::Server(mysql_async::ServerError {
+            code: 1146,
+            state: "42S02".to_string(),
+            message: "Table 'db.nope' doesn't exist".to_string(),
+        }));
+        let payload = error.to_payload();
+        assert_eq!(payload.category, "database");
+        assert_eq!(payload.message, "Table 'db.nope' doesn't exist");
+        assert_eq!(
+            payload.detail.as_deref(),
+            Some("Error 1146, SQLSTATE 42S02")
+        );
+    }
+
+    #[test]
+    fn mssql_errors_take_the_category_of_their_cause() {
+        use tiberius::error::Error as MsError;
+        let connection = [
+            MsError::Io {
+                kind: std::io::ErrorKind::ConnectionReset,
+                message: "reset".into(),
+            },
+            MsError::Tls("handshake".into()),
+            MsError::Routing {
+                host: "other".into(),
+                port: 1433,
+            },
+        ];
+        for error in connection {
+            assert_eq!(Error::Tiberius(error).category(), ErrorCategory::Connection);
+        }
+        assert_eq!(
+            Error::Tiberius(MsError::Gssapi("no ticket".into())).category(),
+            ErrorCategory::Authentication
+        );
+    }
+
+    #[test]
+    fn a_sqlite_file_that_cannot_open_is_a_file_error() {
+        let missing = std::env::temp_dir()
+            .join("sql-explorer-no-such-folder")
+            .join("x.db");
+        let error = rusqlite::Connection::open_with_flags(
+            missing,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(Error::Sqlite(error).category(), ErrorCategory::Io);
+    }
+
+    #[test]
+    fn only_a_stop_or_a_lost_connection_is_a_stop_reply() {
+        let mysql = |code: u16| {
+            Error::MySql(mysql_async::Error::Server(mysql_async::ServerError {
+                code,
+                state: "70100".to_string(),
+                message: "stopped".to_string(),
+            }))
+        };
+        let lost = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset");
+        let stops = [
+            Error::Cancelled,
+            Error::Tiberius(tiberius::error::Error::Canceled),
+            mysql(MYSQL_QUERY_INTERRUPTED),
+            Error::MySql(mysql_async::Error::Io(mysql_async::IoError::Io(
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe"),
+            ))),
+            Error::Postgres(tokio_postgres::Error::__private_api_timeout()),
+            Error::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_INTERRUPT),
+                None,
+            )),
+            Error::Io(lost),
+            Error::Connection("gone".into()),
+            Error::Cancelled.at(2, 3),
+        ];
+        for error in stops {
+            assert!(error.is_stop_reply(), "{error:?}");
+        }
+
+        let failures = [
+            mysql(1064),
+            mysql(1213),
+            Error::Postgres("port=nope".parse::<tokio_postgres::Config>().unwrap_err()),
+            Error::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+                None,
+            )),
+            Error::Athena("syntax error".into()),
+            Error::Invalid("bad".into()).at(1, 1),
+        ];
+        for error in failures {
+            assert!(!error.is_stop_reply(), "{error:?}");
+        }
     }
 
     #[test]
@@ -433,5 +845,165 @@ mod tests {
 
         let outside: Error = mysql_async::Error::Other("boom".into()).into();
         assert_eq!(outside.category(), ErrorCategory::Database);
+    }
+
+    #[test]
+    fn an_invalid_request_has_its_own_category() {
+        let error = Error::Invalid("Parameter ':x' needs a value.".into());
+        let payload = error.to_payload();
+        assert_eq!(payload.category, "invalid");
+        assert_eq!(payload.message, "Parameter ':x' needs a value.");
+        assert_eq!((payload.line, payload.column), (None, None));
+    }
+
+    #[test]
+    fn a_located_error_gives_its_place_and_the_payload_of_its_cause() {
+        let error = Error::Timeout(5).at(3, 7);
+        assert_eq!(error.category(), ErrorCategory::Timeout);
+        assert_eq!(
+            error.to_string(),
+            "The operation timed out after 5 seconds."
+        );
+        let payload = error.to_payload();
+        assert_eq!(payload.category, "timeout");
+        assert_eq!((payload.line, payload.column), (Some(3), Some(7)));
+        let value = serde_json::to_value(&payload).unwrap();
+        assert_eq!(value["line"], 3);
+        assert_eq!(value["column"], 7);
+    }
+
+    #[test]
+    fn a_located_error_keeps_its_first_place() {
+        let error = Error::Cancelled.at(2, 1).at(9, 9);
+        let payload = error.to_payload();
+        assert_eq!((payload.line, payload.column), (Some(2), Some(1)));
+    }
+
+    #[test]
+    fn a_postgres_position_becomes_a_place() {
+        let text = "SELECT\n  nope\r\nFROM t";
+        assert_eq!(place_of_char_position(text, 1), (1, 1));
+        assert_eq!(place_of_char_position(text, 0), (1, 1));
+        assert_eq!(place_of_char_position(text, 10), (2, 3));
+        // The `\r` of a Windows line end takes no column.
+        assert_eq!(place_of_char_position(text, 16), (3, 1));
+        assert_eq!(place_of_char_position(text, 99), (3, 7));
+        // Postgres counts characters. The editor counts UTF-16 units, so a
+        // character outside the basic plane takes two columns.
+        assert_eq!(place_of_char_position("SELECT '\u{1F600}' x", 11), (1, 12));
+        assert_eq!(place_of_char_position("SELECT 'é' x", 11), (1, 11));
+    }
+
+    #[test]
+    fn a_byte_offset_becomes_a_place() {
+        let text = "SELECT 1;\nSELECT 'é';\n  SELECT 3";
+        assert_eq!(place_of_byte_offset(text, 0), (1, 1));
+        assert_eq!(place_of_byte_offset(text, 10), (2, 1));
+        let third = text.rfind("SELECT").unwrap();
+        assert_eq!(place_of_byte_offset(text, third), (3, 3));
+        // An offset inside the two bytes of `é` counts that character.
+        let inside = text.find('é').unwrap() + 1;
+        assert_eq!(place_of_byte_offset(text, inside), (2, 10));
+    }
+
+    #[test]
+    fn a_place_in_a_statement_moves_by_the_start_of_the_statement() {
+        assert_eq!(offset_place((1, 1), (1, 1)), (1, 1));
+        assert_eq!(offset_place((4, 5), (1, 3)), (4, 7));
+        assert_eq!(offset_place((4, 5), (1, 0)), (4, 5));
+        assert_eq!(offset_place((4, 5), (3, 2)), (6, 2));
+    }
+
+    /// Opens a client of the live Postgres server, with the password that
+    /// the caller gives.
+    async fn live_postgres(
+        password: &str,
+    ) -> Option<std::result::Result<tokio_postgres::Client, tokio_postgres::Error>> {
+        let server = crate::db::drivers::live::server("SQLX_LIVE_PG")?;
+        let mut config = tokio_postgres::Config::new();
+        config
+            .host(&server.host)
+            .port(server.port)
+            .user(&server.user)
+            .password(password)
+            .dbname("postgres");
+        Some(
+            config
+                .connect(tokio_postgres::NoTls)
+                .await
+                .map(|(client, connection)| {
+                    tokio::spawn(connection);
+                    client
+                }),
+        )
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn live_a_postgres_statement_error_gives_the_text_and_the_fields_of_the_server() {
+        let Some(server) = crate::db::drivers::live::server("SQLX_LIVE_PG") else {
+            return;
+        };
+        let client = live_postgres(&server.password).await.unwrap().unwrap();
+        let error = client.simple_query("SELECT nope").await.err().unwrap();
+        let mapped = Error::Postgres(error);
+        assert_eq!(mapped.category(), ErrorCategory::Database);
+        let payload = mapped.to_payload();
+        assert_eq!(payload.message, "column \"nope\" does not exist");
+        let detail = payload.detail.unwrap();
+        assert!(
+            detail.starts_with("SQLSTATE 42703, severity ERROR\n"),
+            "{detail}"
+        );
+        assert!(detail.contains("Position: 8"), "{detail}");
+
+        // A server stop, such as a statement timeout, stays a database error,
+        // because only the token of the run knows that the user stopped it.
+        client
+            .simple_query("SET statement_timeout = 10")
+            .await
+            .unwrap();
+        let error = client
+            .simple_query("SELECT pg_sleep(5)")
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(Error::Postgres(error).category(), ErrorCategory::Database);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn live_a_refused_postgres_login_is_an_authentication_error() {
+        let Some(result) = live_postgres("not the password").await else {
+            return;
+        };
+        let mapped = Error::Postgres(result.err().unwrap());
+        assert_eq!(mapped.category(), ErrorCategory::Authentication);
+        assert!(mapped
+            .to_payload()
+            .detail
+            .unwrap()
+            .starts_with("SQLSTATE 28P01"));
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn live_a_refused_mysql_login_is_an_authentication_error() {
+        let Some(server) = crate::db::drivers::live::server("SQLX_LIVE_MYSQL") else {
+            return;
+        };
+        let options = mysql_async::OptsBuilder::default()
+            .ip_or_hostname(server.host)
+            .tcp_port(server.port)
+            .user(Some(server.user))
+            .pass(Some("not the password"));
+        let error = mysql_async::Conn::new(options).await.err().unwrap();
+        let mapped = Error::MySql(error);
+        assert_eq!(mapped.category(), ErrorCategory::Authentication);
+        assert!(mapped
+            .to_payload()
+            .detail
+            .unwrap()
+            .starts_with("Error 1045, SQLSTATE 28000"));
     }
 }

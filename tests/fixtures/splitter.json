@@ -1,0 +1,302 @@
+{
+  "description": "Scripts and the statements that the splitters of the frontend (frontend/src/lib/sql.ts) and the backend (backend/src/sql.rs) must find in them. A span of only comments and blank text is not a statement.",
+  "cases": [
+    {
+      "name": "two plain statements",
+      "dialects": [
+        "msSql",
+        "mySql",
+        "postgres",
+        "sqlite",
+        "athena"
+      ],
+      "script": "SELECT 1;\nSELECT 2;",
+      "statements": [
+        "SELECT 1",
+        "SELECT 2"
+      ]
+    },
+    {
+      "name": "no final semicolon",
+      "dialects": [
+        "msSql",
+        "mySql",
+        "postgres",
+        "sqlite",
+        "athena"
+      ],
+      "script": "SELECT 1;\nSELECT 2",
+      "statements": [
+        "SELECT 1",
+        "SELECT 2"
+      ]
+    },
+    {
+      "name": "semicolon in a string",
+      "dialects": [
+        "msSql",
+        "mySql",
+        "postgres",
+        "sqlite",
+        "athena"
+      ],
+      "script": "SELECT 'a;b';\nSELECT 2;",
+      "statements": [
+        "SELECT 'a;b'",
+        "SELECT 2"
+      ]
+    },
+    {
+      "name": "doubled quote in a string",
+      "dialects": [
+        "msSql",
+        "mySql",
+        "postgres",
+        "sqlite",
+        "athena"
+      ],
+      "script": "SELECT 'it''s; here';\nSELECT 2;",
+      "statements": [
+        "SELECT 'it''s; here'",
+        "SELECT 2"
+      ]
+    },
+    {
+      "name": "semicolon in a line comment",
+      "dialects": [
+        "msSql",
+        "mySql",
+        "postgres",
+        "sqlite",
+        "athena"
+      ],
+      "script": "SELECT 1; -- x; y\nSELECT 2;",
+      "statements": [
+        "SELECT 1",
+        "-- x; y\nSELECT 2"
+      ]
+    },
+    {
+      "name": "semicolon in a block comment",
+      "dialects": [
+        "msSql",
+        "mySql",
+        "postgres",
+        "sqlite",
+        "athena"
+      ],
+      "script": "SELECT /* a; b */ 1;\nSELECT 2;",
+      "statements": [
+        "SELECT /* a; b */ 1",
+        "SELECT 2"
+      ]
+    },
+    {
+      "name": "comment-only chunk",
+      "dialects": [
+        "msSql",
+        "mySql",
+        "postgres",
+        "sqlite",
+        "athena"
+      ],
+      "script": "SELECT 1;\n-- only a comment\n",
+      "statements": [
+        "SELECT 1"
+      ]
+    },
+    {
+      "name": "blank script",
+      "dialects": [
+        "msSql",
+        "mySql",
+        "postgres",
+        "sqlite",
+        "athena"
+      ],
+      "script": "  \n\t\n",
+      "statements": []
+    },
+    {
+      "name": "empty statements",
+      "dialects": [
+        "msSql",
+        "mySql",
+        "postgres",
+        "sqlite",
+        "athena"
+      ],
+      "script": "SELECT 1;;\n;SELECT 2;",
+      "statements": [
+        "SELECT 1",
+        "SELECT 2"
+      ]
+    },
+    {
+      "name": "double-quoted identifier",
+      "dialects": [
+        "postgres",
+        "sqlite",
+        "athena"
+      ],
+      "script": "SELECT \"a;b\" FROM t;\nSELECT 2;",
+      "statements": [
+        "SELECT \"a;b\" FROM t",
+        "SELECT 2"
+      ]
+    },
+    {
+      "name": "dollar-quoted body",
+      "dialects": [
+        "postgres"
+      ],
+      "script": "CREATE FUNCTION f() RETURNS int AS $$ SELECT 1; $$ LANGUAGE sql;\nSELECT 2;",
+      "statements": [
+        "CREATE FUNCTION f() RETURNS int AS $$ SELECT 1; $$ LANGUAGE sql",
+        "SELECT 2"
+      ]
+    },
+    {
+      "name": "tagged dollar quote",
+      "dialects": [
+        "postgres"
+      ],
+      "script": "DO $body$ BEGIN PERFORM 1; END $body$;\nSELECT 2;",
+      "statements": [
+        "DO $body$ BEGIN PERFORM 1; END $body$",
+        "SELECT 2"
+      ]
+    },
+    {
+      "name": "nested block comment",
+      "dialects": [
+        "postgres"
+      ],
+      "script": "SELECT /* a /* b; */ c; */ 1;\nSELECT 2;",
+      "statements": [
+        "SELECT /* a /* b; */ c; */ 1",
+        "SELECT 2"
+      ]
+    },
+    {
+      "name": "escape string",
+      "dialects": [
+        "postgres"
+      ],
+      "script": "SELECT E'a\\';b';\nSELECT 2;",
+      "statements": [
+        "SELECT E'a\\';b'",
+        "SELECT 2"
+      ]
+    },
+    {
+      "name": "backtick identifier",
+      "dialects": [
+        "mySql",
+        "sqlite"
+      ],
+      "script": "SELECT `a;b` FROM t;\nSELECT 2;",
+      "statements": [
+        "SELECT `a;b` FROM t",
+        "SELECT 2"
+      ]
+    },
+    {
+      "name": "backslash escape",
+      "dialects": [
+        "mySql"
+      ],
+      "script": "SELECT 'a\\';b';\nSELECT 2;",
+      "statements": [
+        "SELECT 'a\\';b'",
+        "SELECT 2"
+      ]
+    },
+    {
+      "name": "hash comment",
+      "dialects": [
+        "mySql"
+      ],
+      "script": "SELECT 1; # x; y\nSELECT 2;",
+      "statements": [
+        "SELECT 1",
+        "# x; y\nSELECT 2"
+      ]
+    },
+    {
+      "name": "delimiter command",
+      "dialects": [
+        "mySql"
+      ],
+      "script": "DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END$$\nDELIMITER ;\nSELECT 3;",
+      "statements": [
+        "CREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END",
+        "SELECT 3"
+      ]
+    },
+    {
+      "name": "delimiter only",
+      "dialects": [
+        "mySql"
+      ],
+      "script": "DELIMITER $$\n",
+      "statements": []
+    },
+    {
+      "name": "bracket identifier",
+      "dialects": [
+        "msSql",
+        "sqlite"
+      ],
+      "script": "SELECT [a;b] FROM t;\nSELECT 2;",
+      "statements": [
+        "SELECT [a;b] FROM t",
+        "SELECT 2"
+      ]
+    },
+    {
+      "name": "go separator",
+      "dialects": [
+        "msSql"
+      ],
+      "script": "SELECT 1\nGO\nSELECT 2\ngo\n",
+      "statements": [
+        "SELECT 1",
+        "SELECT 2"
+      ]
+    },
+    {
+      "name": "go with a count",
+      "dialects": [
+        "msSql"
+      ],
+      "script": "PRINT 'x'\nGO 3\nSELECT 2",
+      "statements": [
+        "PRINT 'x'",
+        "SELECT 2"
+      ]
+    },
+    {
+      "name": "go inside a string",
+      "dialects": [
+        "msSql"
+      ],
+      "script": "SELECT '\nGO\n';\nSELECT 2;",
+      "statements": [
+        "SELECT '\nGO\n'",
+        "SELECT 2"
+      ]
+    },
+    {
+      "name": "begin atomic body",
+      "dialects": [
+        "postgres"
+      ],
+      "script": "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; SELECT 2; END;\nSELECT 3;",
+      "statements": [
+        "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; SELECT 2; END",
+        "SELECT 3"
+      ]
+    }
+  ]
+}

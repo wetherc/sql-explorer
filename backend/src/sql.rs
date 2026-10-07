@@ -127,9 +127,17 @@ impl Dialect {
         matches!(self, Dialect::MySql)
     }
 
-    /// True when brackets quote an identifier.
+    /// True when brackets quote an identifier. SQLite takes `[name]` as a
+    /// quoted name for MS SQL Server compatibility.
     fn bracket_quotes(&self) -> bool {
-        matches!(self, Dialect::MsSql)
+        matches!(self, Dialect::MsSql | Dialect::Sqlite)
+    }
+
+    /// True when backticks quote an identifier. SQLite takes `` `name` ``
+    /// as a quoted name for MySQL compatibility, and Athena quotes names in
+    /// DDL with backticks.
+    fn backtick_quotes(&self) -> bool {
+        matches!(self, Dialect::MySql | Dialect::Sqlite | Dialect::Athena)
     }
 
     /// True when a block comment can hold another block comment.
@@ -291,7 +299,27 @@ fn holds_a_write_word(statement: &str, dialect: Dialect) -> bool {
 
 /// Walks a statement and gives each bare word to `visit`, in small letters.
 /// A word inside a quoted region or a comment is text and is not given.
-fn scan_words(sql: &str, dialect: Dialect, mut visit: impl FnMut(&str)) {
+fn scan_words(sql: &str, dialect: Dialect, visit: impl FnMut(&str)) {
+    scan_code(sql, dialect, visit, |_| {});
+}
+
+/// True when the statement contains a `?` placeholder outside quoted regions
+/// and comments. A `?` inside a string, as in `SELECT 'why?'`, is text.
+pub fn has_placeholder(sql: &str, dialect: Dialect) -> bool {
+    let mut found = false;
+    scan_code(sql, dialect, |_| {}, |c| found |= c == '?');
+    found
+}
+
+/// Walks a statement outside its quoted regions and comments. Each bare word
+/// goes to `visit`, in small letters, and each other character of code goes
+/// to `other`.
+fn scan_code(
+    sql: &str,
+    dialect: Dialect,
+    mut visit: impl FnMut(&str),
+    mut other: impl FnMut(char),
+) {
     let chars: Vec<char> = sql.chars().collect();
     let mut skipped = String::new();
     let mut index = 0usize;
@@ -330,7 +358,7 @@ fn scan_words(sql: &str, dialect: Dialect, mut visit: impl FnMut(&str)) {
             );
             continue;
         }
-        if c == '`' && dialect == Dialect::MySql {
+        if c == '`' && dialect.backtick_quotes() {
             index = copy_quoted(&chars, index, '`', false, &mut skipped);
             continue;
         }
@@ -355,6 +383,7 @@ fn scan_words(sql: &str, dialect: Dialect, mut visit: impl FnMut(&str)) {
             continue;
         }
 
+        other(c);
         index += 1;
     }
 }
@@ -506,7 +535,11 @@ pub fn within_delimiter(text: &str) -> String {
         return text.to_string();
     }
     let delimiter = free_delimiter(text);
-    format!("DELIMITER {delimiter}\n{text}{delimiter}\nDELIMITER ;")
+    // A text whose last line contains a `--` comment would hide a terminator on
+    // that line, so the terminator then goes on a line of its own.
+    let last_line = text.rsplit('\n').next().unwrap_or("");
+    let joint = if last_line.contains("--") { "\n" } else { "" };
+    format!("DELIMITER {delimiter}\n{text}{joint}{delimiter}\nDELIMITER ;")
 }
 
 /// The terminators that `within_delimiter` tries first, in order.
@@ -586,7 +619,7 @@ pub fn split_statements(script: &str, dialect: Dialect) -> Vec<String> {
                 copy_block_comment(&chars, index, &mut current, dialect.nested_block_comments());
             continue;
         }
-        if !c.is_whitespace() {
+        if !c.is_whitespace() && !starts_with(&chars, index, &delimiter) {
             code_seen = true;
         }
 
@@ -611,7 +644,7 @@ pub fn split_statements(script: &str, dialect: Dialect) -> Vec<String> {
             );
             continue;
         }
-        if c == '`' && dialect == Dialect::MySql {
+        if c == '`' && dialect.backtick_quotes() {
             index = copy_quoted(&chars, index, '`', false, &mut current);
             continue;
         }
@@ -642,7 +675,7 @@ pub fn split_statements(script: &str, dialect: Dialect) -> Vec<String> {
 
         // The terminator ends the statement.
         if words.depth == 0 && starts_with(&chars, index, &delimiter) {
-            push_statement(&mut statements, &mut current);
+            push_statement(&mut statements, &mut current, code_seen);
             index += delimiter.len();
             code_seen = false;
             words = BodyWords::default();
@@ -653,7 +686,7 @@ pub fn split_statements(script: &str, dialect: Dialect) -> Vec<String> {
         index += 1;
     }
 
-    push_statement(&mut statements, &mut current);
+    push_statement(&mut statements, &mut current, code_seen);
     statements
 }
 
@@ -687,11 +720,14 @@ impl BodyWords {
     }
 }
 
-/// Adds the buffer to the list when it holds more than blank space, then
-/// clears the buffer.
-fn push_statement(statements: &mut Vec<String>, current: &mut String) {
+/// Adds the buffer to the list when it contains code, then clears the buffer.
+/// A buffer of comments and blank space alone is no statement, so a comment
+/// after the last semicolon of a script does not go to the server, where an
+/// engine such as MS SQL Server or SQLite can refuse an empty statement.
+/// `frontend/src/lib/sql.ts` uses the same rule.
+fn push_statement(statements: &mut Vec<String>, current: &mut String, code_seen: bool) {
     let trimmed = current.trim();
-    if !trimmed.is_empty() {
+    if code_seen && !trimmed.is_empty() {
         statements.push(trimmed.to_string());
     }
     current.clear();
@@ -724,9 +760,11 @@ fn scan_parameters(sql: &str, dialect: Dialect, mut emit: impl FnMut(&str) -> St
     let chars: Vec<char> = sql.chars().collect();
     let mut out = String::with_capacity(sql.len());
     let mut index = 0usize;
-    // The depth of the subscripts of PostgreSQL arrays. A colon inside one,
-    // as in `a[lo:hi]`, marks a slice and carries no name.
-    let mut subscripts = 0usize;
+    // The open brackets of PostgreSQL, true for a subscript of an array. A
+    // colon inside a subscript, as in `a[lo:hi]`, marks a slice and gives no
+    // name. The brackets of an `ARRAY[...]` constructor contain values, so
+    // `ARRAY[:ids]` names a parameter.
+    let mut brackets: Vec<bool> = Vec::new();
 
     while index < chars.len() {
         let c = chars[index];
@@ -753,7 +791,7 @@ fn scan_parameters(sql: &str, dialect: Dialect, mut emit: impl FnMut(&str) -> St
             );
             continue;
         }
-        if c == '`' && dialect == Dialect::MySql {
+        if c == '`' && dialect.backtick_quotes() {
             index = copy_quoted(&chars, index, '`', false, &mut out);
             continue;
         }
@@ -770,12 +808,15 @@ fn scan_parameters(sql: &str, dialect: Dialect, mut emit: impl FnMut(&str) -> St
 
         if dialect == Dialect::Postgres {
             match c {
-                '[' => subscripts += 1,
-                ']' => subscripts = subscripts.saturating_sub(1),
+                '[' => brackets.push(opens_subscript(&chars, index)),
+                ']' => {
+                    brackets.pop();
+                }
                 _ => {}
             }
         }
-        if c == ':' && subscripts == 0 {
+        let in_subscript = brackets.last() == Some(&true);
+        if c == ':' && !in_subscript {
             // The cast of PostgreSQL holds two colons.
             if chars.get(index + 1) == Some(&':') {
                 out.push(':');
@@ -783,6 +824,8 @@ fn scan_parameters(sql: &str, dialect: Dialect, mut emit: impl FnMut(&str) -> St
                 index += 2;
                 continue;
             }
+        }
+        if c == ':' && !in_subscript && !follows_a_value(&chars, index) {
             // A name starts with a letter or a low line, so the `:30` of a
             // time or the `:2` of a slice carries no name.
             let mut end = index + 1;
@@ -805,6 +848,37 @@ fn scan_parameters(sql: &str, dialect: Dialect, mut emit: impl FnMut(&str) -> St
     }
 
     out
+}
+
+/// True when the `[` at `index` opens the subscript of an array, as in
+/// `a[1]` or `(f())[2]`, and false for the constructor `ARRAY[...]` and for a
+/// bracket after an operator.
+fn opens_subscript(chars: &[char], index: usize) -> bool {
+    let before = chars[..index].iter().rposition(|c| !c.is_whitespace());
+    let Some(at) = before else {
+        return false;
+    };
+    let c = chars[at];
+    if holds_a_name(c) {
+        let start = chars[..=at]
+            .iter()
+            .rposition(|&c| !holds_a_name(c))
+            .map_or(0, |at| at + 1);
+        let word: String = chars[start..=at].iter().collect();
+        return !word.eq_ignore_ascii_case("array");
+    }
+    matches!(c, ')' | ']' | '"')
+}
+
+/// True when the colon at `index` comes right after a name, a quoted name or
+/// a closing bracket. Such a colon is part of the text, as in the Athena type
+/// `struct<name:string>` or the `"t":x` of a JSON path, and names no
+/// parameter.
+fn follows_a_value(chars: &[char], index: usize) -> bool {
+    index > 0 && {
+        let c = chars[index - 1];
+        holds_a_name(c) || matches!(c, '\'' | '"' | '`' | ']')
+    }
 }
 
 /// Turns each `:name` of a statement into the placeholder of the dialect.
@@ -884,6 +958,11 @@ fn json_literal(value: &serde_json::Value, dialect: Dialect) -> String {
     match value {
         serde_json::Value::Null => "NULL".to_string(),
         serde_json::Value::Bool(flag) => if *flag { "true" } else { "false" }.to_string(),
+        // A negative number goes in parentheses. After a minus sign, as in
+        // `10-:n`, the bare text `10--1` would start a comment.
+        serde_json::Value::Number(number) if number.to_string().starts_with('-') => {
+            format!("({number})")
+        }
         serde_json::Value::Number(number) => number.to_string(),
         serde_json::Value::String(text) => dialect.quote_literal(text),
         other => dialect.quote_literal(&other.to_string()),
@@ -1154,6 +1233,72 @@ mod tests {
     }
 
     #[test]
+    fn a_colon_right_after_a_name_or_a_quote_names_no_parameter() {
+        assert_eq!(
+            find_parameters(
+                "CREATE TABLE t (s struct<name:string, `n`:int>) WHERE x = :id",
+                Dialect::Athena
+            ),
+            vec!["id"]
+        );
+        assert!(find_parameters("SELECT 'a':b, \"c\":d, [e]:f", Dialect::MsSql).is_empty());
+        assert_eq!(
+            find_parameters("SELECT (:a), x=:b", Dialect::MySql),
+            vec!["a", "b"]
+        );
+    }
+
+    #[test]
+    fn an_array_constructor_holds_parameters() {
+        assert_eq!(
+            find_parameters(
+                "SELECT ARRAY[:ids], array [ :more ], a[:lo]",
+                Dialect::Postgres
+            ),
+            vec!["ids", "more"]
+        );
+        assert_eq!(
+            find_parameters(
+                "SELECT (f())[1:2], \"t\"[1:2], x[1][2:3], [:n]",
+                Dialect::Postgres
+            ),
+            vec!["n"]
+        );
+    }
+
+    #[test]
+    fn a_chunk_of_comments_alone_is_no_statement() {
+        for dialect in [
+            Dialect::MsSql,
+            Dialect::Postgres,
+            Dialect::Sqlite,
+            Dialect::Athena,
+        ] {
+            assert_eq!(
+                split_statements("SELECT 1; -- end\n/* note */; ;", dialect),
+                vec!["SELECT 1"],
+                "{dialect:?}"
+            );
+            assert_eq!(
+                split_statements("-- a\nSELECT 2", dialect),
+                vec!["-- a\nSELECT 2"]
+            );
+        }
+    }
+
+    #[test]
+    fn sqlite_quotes_names_with_brackets_and_backticks() {
+        assert_eq!(
+            split_statements("SELECT [a;b], `c;d` FROM t; SELECT 2", Dialect::Sqlite),
+            vec!["SELECT [a;b], `c;d` FROM t", "SELECT 2"]
+        );
+        assert_eq!(
+            find_parameters("SELECT [:a], `:b`, :c", Dialect::Sqlite),
+            vec!["c"]
+        );
+    }
+
+    #[test]
     fn a_slice_of_an_array_carries_no_name() {
         let prepared = rewrite_parameters(
             "SELECT a[1:2], a[lo:hi], a[b[1]:n] WHERE x = :id",
@@ -1202,6 +1347,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(text, "SELECT 'O''Hara', 12, true, NULL, '[1,2]'");
+    }
+
+    #[test]
+    fn a_placeholder_counts_only_outside_text_and_comments() {
+        assert!(has_placeholder("SELECT ?", Dialect::MySql));
+        assert!(!has_placeholder(
+            "SELECT 'why?', `a?` -- b?\n/* c? */ # d?",
+            Dialect::MySql
+        ));
+        assert!(has_placeholder("SELECT 'a', x = ?", Dialect::MySql));
+    }
+
+    #[test]
+    fn a_negative_value_goes_in_parentheses() {
+        let mut values = ParamValues::new();
+        values.insert("n".to_string(), serde_json::json!(-1));
+        values.insert("f".to_string(), serde_json::json!(-2.5));
+        let text = inline_parameters("SELECT 10-:n, :f", Dialect::Athena, &values).unwrap();
+        assert_eq!(text, "SELECT 10-(-1), (-2.5)");
     }
 
     #[test]
@@ -1523,7 +1687,7 @@ mod tests {
                 "SELECT 1 -- a; b\nSELECT 2;--\tc;\nSELECT 3;--",
                 Dialect::MySql
             ),
-            vec!["SELECT 1 -- a; b\nSELECT 2", "--\tc;\nSELECT 3", "--"]
+            vec!["SELECT 1 -- a; b\nSELECT 2", "--\tc;\nSELECT 3"]
         );
         // Every other dialect reads two dashes as a comment at once.
         assert_eq!(
@@ -1601,6 +1765,14 @@ mod tests {
         // A text that the splitter keeps whole needs no command.
         let simple = "CREATE TRIGGER t BEFORE INSERT ON o FOR EACH ROW SET @a = ';'";
         assert_eq!(within_delimiter(simple), simple);
+        // A text that ends in a comment gets the terminator on a new line.
+        let commented = format!("{text} -- done");
+        let wrapped = within_delimiter(&commented);
+        assert_eq!(
+            wrapped,
+            format!("DELIMITER $$\n{commented}\n$$\nDELIMITER ;")
+        );
+        assert_eq!(split_statements(&wrapped, Dialect::MySql), vec![commented]);
     }
 
     #[test]
@@ -1691,10 +1863,10 @@ mod tests {
             split_statements(script, Dialect::MySql),
             vec!["SELECT 1; SELECT 2"]
         );
-        // A comment at the end of the script is kept as a statement.
+        // A comment at the end of the script is no statement.
         assert_eq!(
             split_statements("SELECT 1; -- end", Dialect::MySql),
-            vec!["SELECT 1", "-- end"]
+            vec!["SELECT 1"]
         );
         // MySQL runs the text of an executable comment, so the word after it
         // belongs to that statement.
@@ -2033,5 +2205,42 @@ mod tests {
             "SELECT created_at, updates, deleted FROM t",
             Dialect::Postgres
         ));
+    }
+}
+
+/// The splitter against the scripts that the frontend tests also read.
+#[cfg(test)]
+mod shared_fixture {
+    use super::*;
+
+    #[derive(Deserialize)]
+    struct Fixture {
+        cases: Vec<Case>,
+    }
+
+    #[derive(Deserialize)]
+    struct Case {
+        name: String,
+        dialects: Vec<Dialect>,
+        script: String,
+        statements: Vec<String>,
+    }
+
+    /// The frontend test `frontend/src/lib/__tests__/splitterFixture.spec.ts`
+    /// reads the same file, so both splitters find the same statements.
+    #[test]
+    fn the_splitter_finds_the_statements_of_the_shared_fixture() {
+        let fixture: Fixture =
+            serde_json::from_str(include_str!("../../tests/fixtures/splitter.json")).unwrap();
+        assert!(!fixture.cases.is_empty());
+        for case in fixture.cases {
+            for dialect in case.dialects {
+                let found: Vec<String> = split_batches(&case.script, dialect)
+                    .iter()
+                    .flat_map(|batch| split_statements(&batch.text, dialect))
+                    .collect();
+                assert_eq!(found, case.statements, "{} ({dialect:?})", case.name);
+            }
+        }
     }
 }

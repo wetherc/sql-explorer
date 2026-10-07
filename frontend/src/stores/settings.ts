@@ -181,7 +181,11 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   function persist(storage: Pick<Storage, 'setItem'> | null = safeStorage()): void {
-    storage?.setItem(SETTINGS_KEY, JSON.stringify(settings.value))
+    try {
+      storage?.setItem(SETTINGS_KEY, JSON.stringify(settings.value))
+    } catch {
+      // A full or blocked storage keeps the values for this session alone.
+    }
   }
 
   /**

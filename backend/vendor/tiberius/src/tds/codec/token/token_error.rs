@@ -18,6 +18,26 @@ pub struct TokenError {
 }
 
 impl TokenError {
+    /// Creates an error token, for a test that needs one without a server.
+    pub fn new(
+        code: u32,
+        state: u8,
+        class: u8,
+        message: impl Into<String>,
+        procedure: impl Into<String>,
+        line: u32,
+    ) -> Self {
+        TokenError {
+            code,
+            state,
+            class,
+            message: message.into(),
+            server: String::new(),
+            procedure: procedure.into(),
+            line,
+        }
+    }
+
     pub(crate) async fn decode<R>(src: &mut R) -> crate::Result<Self>
     where
         R: SqlReadBytes + Unpin,

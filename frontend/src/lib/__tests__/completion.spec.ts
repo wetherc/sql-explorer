@@ -106,6 +106,12 @@ describe('completion provider', () => {
     setCompletionSource('model:one', () => ({ index: many, dialect: Dialect.MsSql }))
     const answer = suggestionsFor(stubModel('SELECT col'), position)
     expect(answer.suggestions).toHaveLength(MAX_SUGGESTIONS)
+    expect(answer.incomplete).toBe(true)
+  })
+
+  it('marks a short list as complete', () => {
+    setCompletionSource('model:one', () => ({ index, dialect: Dialect.MsSql }))
+    expect(suggestionsFor(stubModel('SELECT tot'), position).incomplete).toBe(false)
   })
 
   it('forgets a model that is gone', () => {

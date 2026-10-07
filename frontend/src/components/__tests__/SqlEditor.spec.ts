@@ -6,6 +6,7 @@ import type { editor as MonacoEditor, languages } from 'monaco-editor'
 import { disposeSqlCompletions } from '@/lib/completion'
 import { emptySchemaIndex } from '@/lib/sql'
 import { Dialect } from '@/types/api'
+import { disposeModel, keptKeys } from '@/components/editorModels'
 
 type Handler = () => void
 
@@ -46,7 +47,13 @@ function stubEditor(value = 'SELECT 1;\nSELECT 2') {
     getValueInRange: vi.fn((range: { whole?: boolean }) => (range.whole ? value : 'SELECTED')),
     getFullModelRange: vi.fn(() => ({ whole: true })),
     getOffsetAt: vi.fn(() => 0),
+    getPositionAt: vi.fn((offset: number) => {
+      const lines = value.slice(0, offset).split('\n')
+      return { lineNumber: lines.length, column: lines[lines.length - 1]!.length + 1 }
+    }),
+    getLineCount: vi.fn(() => value.split('\n').length),
     getWordUntilPosition: vi.fn(() => ({ startColumn: 1, endColumn: 4 })),
+    getLineMaxColumn: vi.fn(() => 12),
     pushStackElement: vi.fn(),
     pushEditOperations: vi.fn(
       (_before: unknown, edits: Array<{ text: string }>, _cursor: () => unknown) => {
@@ -77,6 +84,9 @@ function stubEditor(value = 'SELECT 1;\nSELECT 2') {
     executeEdits: vi.fn(),
     focus: vi.fn(),
     dispose: vi.fn(),
+    saveViewState: vi.fn(() => ({ cursor: 'kept' })),
+    restoreViewState: vi.fn(),
+    revealLineInCenter: vi.fn(),
   }
   return {
     editor,
@@ -160,7 +170,7 @@ describe('SqlEditor', () => {
     expect(statementOf(wrapper)).toBe('SELECTED')
   })
 
-  it('gives the whole text when the editor holds no model', () => {
+  it('gives the whole text when the editor has no model', () => {
     const stub = stubEditor()
     stub.editor.getModel.mockReturnValue(null as never)
     vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
@@ -408,7 +418,7 @@ describe('SqlEditor', () => {
     expect(stub.editor.executeEdits).not.toHaveBeenCalled()
   })
 
-  it('lays out nothing when the editor holds no model', () => {
+  it('lays out nothing when the editor has no model', () => {
     const stub = stubEditor('select 1')
     stub.editor.getModel.mockReturnValue(null as never)
     vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
@@ -481,5 +491,175 @@ describe('SqlEditor settings', () => {
       expect.any(Object),
       expect.objectContaining({ wordWrap: 'off', lineNumbers: 'off' }),
     )
+  })
+
+  it('keeps the model and the view state of a tab across an unmount', async () => {
+    const stub = stubEditor('SELECT 1')
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
+    vi.mocked(monaco.editor.createModel).mockClear()
+    const first = mount(SqlEditor, { props: { modelValue: 'SELECT 1', modelKey: 'tab-a' } })
+    expect(monaco.editor.createModel).toHaveBeenCalledTimes(1)
+    const model = vi.mocked(monaco.editor.createModel).mock.results[0]!.value
+    expect(monaco.editor.create).toHaveBeenLastCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ model }),
+    )
+    // The first mount has no view state to give back.
+    expect(stub.editor.restoreViewState).not.toHaveBeenCalled()
+    first.unmount()
+    expect(stub.editor.saveViewState).toHaveBeenCalled()
+
+    mount(SqlEditor, { props: { modelValue: 'SELECT 1', modelKey: 'tab-a' } })
+    expect(monaco.editor.createModel).toHaveBeenCalledTimes(1)
+    expect(stub.editor.restoreViewState).toHaveBeenCalledWith({ cursor: 'kept' })
+    expect(keptKeys()).toContain('tab-a')
+
+    disposeModel('tab-a')
+    expect(model.dispose).toHaveBeenCalled()
+    expect(keptKeys()).not.toContain('tab-a')
+    // A second dispose of the same tab does nothing.
+    disposeModel('tab-a')
+  })
+
+  it('marks the place of a failure and clears the mark on an edit', async () => {
+    const stub = stubEditor('SELECT x')
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
+    vi.mocked(monaco.editor.setModelMarkers).mockClear()
+    const wrapper = mount(SqlEditor, {
+      props: { modelValue: 'SELECT x', errorMarker: { line: 1, column: 8, message: 'no x' } },
+    })
+    expect(monaco.editor.setModelMarkers).toHaveBeenLastCalledWith(stub.model, 'sql-explorer', [
+      expect.objectContaining({
+        message: 'no x',
+        startLineNumber: 1,
+        startColumn: 8,
+        endLineNumber: 1,
+        endColumn: 12,
+      }),
+    ])
+
+    stub.fireContentChange()
+    expect(monaco.editor.setModelMarkers).toHaveBeenLastCalledWith(stub.model, 'sql-explorer', [])
+    // A second edit has no mark to clear.
+    vi.mocked(monaco.editor.setModelMarkers).mockClear()
+    stub.fireContentChange()
+    expect(monaco.editor.setModelMarkers).not.toHaveBeenCalled()
+
+    await wrapper.setProps({ errorMarker: null })
+    expect(monaco.editor.setModelMarkers).toHaveBeenLastCalledWith(stub.model, 'sql-explorer', [])
+  })
+
+  it('sets no mark when the editor has no model', () => {
+    const stub = stubEditor()
+    stub.editor.getModel.mockReturnValue(null as never)
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
+    vi.mocked(monaco.editor.setModelMarkers).mockClear()
+    mount(SqlEditor, {
+      props: { modelValue: '', errorMarker: { line: 1, column: 1, message: 'x' } },
+    })
+    expect(monaco.editor.setModelMarkers).not.toHaveBeenCalled()
+  })
+
+  it('moves the cursor to a place and shows it', () => {
+    const stub = stubEditor()
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
+    const wrapper = mount(SqlEditor, { props: { modelValue: '' } })
+    const vm = wrapper.vm as unknown as { reveal: (line: number, column: number) => void }
+    vm.reveal(3, 4)
+    expect(stub.editor.setPosition).toHaveBeenCalledWith({ lineNumber: 3, column: 4 })
+    expect(stub.editor.revealLineInCenter).toHaveBeenCalledWith(3)
+    expect(stub.editor.focus).toHaveBeenCalled()
+
+    wrapper.unmount()
+    // The editor is gone, so the call does nothing.
+    vm.reveal(1, 1)
+  })
+
+  it('gives the text to run with the place where it begins', () => {
+    type Run = { text: string; start?: { line: number; column: number } }
+    const runOf = (wrapper: { vm: unknown }) =>
+      (wrapper.vm as { currentRun: () => Run }).currentRun()
+
+    const stub = stubEditor('SELECT 1;\nSELECT 2')
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
+    stub.model.getOffsetAt.mockReturnValue(12)
+    const wrapper = mount(SqlEditor, {
+      props: { modelValue: 'SELECT 1;\nSELECT 2', dialect: Dialect.Postgres },
+    })
+    expect(runOf(wrapper)).toEqual({ text: 'SELECT 2', start: { line: 2, column: 1 } })
+
+    // A cursor in the blank space before a statement finds it further on.
+    stub.setValue('\n\nSELECT 1')
+    stub.model.getOffsetAt.mockReturnValue(0)
+    expect(runOf(wrapper).text).toBe('SELECT 1')
+    expect(stub.model.getPositionAt).toHaveBeenLastCalledWith(2)
+
+    // Two statements start with the same line, and the cursor stands in
+    // the comment above the second. The start is the comment of the second.
+    const twins = 'SELECT a\nFROM t;\n-- pick\nSELECT a\nFROM u'
+    stub.setValue(twins)
+    stub.model.getOffsetAt.mockReturnValue(twins.indexOf('pick'))
+    expect(runOf(wrapper).start).toEqual({ line: 3, column: 1 })
+    // The cursor in the blank line above a copy of the first statement.
+    stub.setValue('SELECT a;\n\nSELECT a')
+    stub.model.getOffsetAt.mockReturnValue(10)
+    expect(runOf(wrapper)).toEqual({ text: 'SELECT a', start: { line: 3, column: 1 } })
+
+    // An empty text has no place.
+    stub.setValue('')
+    expect(runOf(wrapper)).toEqual({ text: '' })
+
+    stub.editor.getSelection.mockReturnValue({
+      isEmpty: () => false,
+      startLineNumber: 3,
+      startColumn: 2,
+    } as never)
+    expect(runOf(wrapper)).toEqual({ text: 'SELECTED', start: { line: 3, column: 2 } })
+  })
+
+  it('counts the DELIMITER line in front of a MySQL routine', () => {
+    type Run = { text: string; start?: { line: number; column: number } }
+    const runOf = (wrapper: { vm: unknown }) =>
+      (wrapper.vm as { currentRun: () => Run }).currentRun()
+    const script = 'DELIMITER $$\nCREATE PROCEDURE p()\nBEGIN\n  SELECT 1;\nEND$$\nDELIMITER ;'
+    const stub = stubEditor(script)
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
+    stub.model.getOffsetAt.mockReturnValue(script.indexOf('BEGIN'))
+    const wrapper = mount(SqlEditor, { props: { modelValue: script, dialect: Dialect.MySql } })
+    // Line 2 of the sent text is line 2 of the editor, so the start is the
+    // line above the routine.
+    expect(runOf(wrapper)).toEqual({
+      text: 'DELIMITER $$\nCREATE PROCEDURE p()\nBEGIN\n  SELECT 1;\nEND$$',
+      start: { line: 1, column: 1 },
+    })
+
+    // A routine that starts inside a line gets no place.
+    const inline = 'DELIMITER $$\nSELECT 1$$ SELECT 2; SELECT 3$$'
+    stub.setValue(inline)
+    stub.model.getOffsetAt.mockReturnValue(inline.indexOf('SELECT 3'))
+    expect(runOf(wrapper)).toEqual({ text: 'DELIMITER $$\nSELECT 2; SELECT 3$$' })
+  })
+
+  it('tells the parent when an edit removes the mark of a failure', async () => {
+    const stub = stubEditor('SELECT x\nFROM t')
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
+    vi.mocked(monaco.editor.setModelMarkers).mockClear()
+    const wrapper = mount(SqlEditor, {
+      props: { modelValue: 'SELECT x\nFROM t', errorMarker: { line: 2, column: 30, message: 'x' } },
+    })
+    // A column past the end of the line moves to the end of that line.
+    expect(monaco.editor.setModelMarkers).toHaveBeenLastCalledWith(stub.model, 'sql-explorer', [
+      expect.objectContaining({ startLineNumber: 2, startColumn: 12, endColumn: 12 }),
+    ])
+    stub.fireContentChange()
+    expect(wrapper.emitted('marker-cleared')).toHaveLength(1)
+    stub.fireContentChange()
+    expect(wrapper.emitted('marker-cleared')).toHaveLength(1)
+
+    // A line past the end of the text gets no mark.
+    await wrapper.setProps({ errorMarker: { line: 3, column: 1, message: 'gone' } })
+    expect(monaco.editor.setModelMarkers).toHaveBeenLastCalledWith(stub.model, 'sql-explorer', [])
+    stub.fireContentChange()
+    expect(wrapper.emitted('marker-cleared')).toHaveLength(1)
   })
 })

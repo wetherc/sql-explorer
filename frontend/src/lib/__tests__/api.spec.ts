@@ -146,13 +146,23 @@ describe('api', () => {
     await api.listFolder('/data')
     expect(invoke).toHaveBeenCalledWith('list_folder', { path: '/data' })
 
-    await api.readTextFile('/data/a.sql')
+    invoke.mockResolvedValueOnce({ contents: 'SELECT 2', encoding: 'windows1252' })
+    expect(await api.readTextFile('/data/a.sql')).toEqual({
+      contents: 'SELECT 2',
+      encoding: 'windows1252',
+    })
     expect(invoke).toHaveBeenCalledWith('read_text_file', { path: '/data/a.sql' })
 
     await api.writeTextFile('/data/a.sql', 'SELECT 1')
     expect(invoke).toHaveBeenCalledWith('write_text_file', {
       path: '/data/a.sql',
       contents: 'SELECT 1',
+    })
+    await api.writeTextFile('/data/a.sql', 'SELECT 1', 'utf16le')
+    expect(invoke).toHaveBeenCalledWith('write_text_file', {
+      path: '/data/a.sql',
+      contents: 'SELECT 1',
+      encoding: 'utf16le',
     })
 
     await api.saveTextFile({
@@ -192,6 +202,9 @@ describe('api', () => {
 
     await api.passwordsPersist()
     expect(invoke).toHaveBeenCalledWith('passwords_persist')
+
+    await api.storageProblems()
+    expect(invoke).toHaveBeenCalledWith('storage_problems')
 
     const entry = {
       id: 'h1',

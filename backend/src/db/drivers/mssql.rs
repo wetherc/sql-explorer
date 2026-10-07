@@ -7,10 +7,10 @@
 
 use crate::db::drivers::{
     add_constraint_column, add_included_column, add_index_column, add_snapshot_column,
-    add_snapshot_relation, add_trigger_event, constraint_type, f32_to_json, f64_to_json,
-    number_out_of_range, number_value, parameter_type_refused, relation_type, routine_type,
-    rows_affected_message, rows_returned_message, single_statement, size_text, trigger_event,
-    CancelHandle, DatabaseDriver, NumberValue,
+    add_snapshot_relation, add_trigger_event, connect_within, constraint_type, f32_to_json,
+    f64_to_json, finish_set, hex_text, non_empty, number_out_of_range, number_value,
+    parameter_type_refused, relation_type, routine_type, rows_affected_message, single_statement,
+    size_text, trigger_event, CancelHandle, DatabaseDriver, NumberValue,
 };
 use crate::db::sink::{BufferSink, RowSink, RunSummary, SinkControl};
 use crate::db::{
@@ -19,7 +19,7 @@ use crate::db::{
     RelationType, ResultSet, Routine, Schema, SchemaSnapshot, SnapshotColumn, Table, TableFact,
     Trigger, TriggerTiming,
 };
-use crate::error::{Error, Result};
+use crate::error::{mssql_error_detail, offset_place, place_of_byte_offset, Error, Result};
 use crate::sql::{only_reads, split_batches, split_statements, Dialect};
 use crate::storage::{MssqlAuth, SavedConnection, TlsMode};
 use async_trait::async_trait;
@@ -55,6 +55,7 @@ struct Walk {
 pub async fn build_config(connection: &SavedConnection) -> Result<Config> {
     let mut config = if let Some(url) = connection.options.connection_url.as_deref() {
         let mut config = parse_string(url)?;
+        add_form_settings(&mut config, connection, &string_keys(url)).await?;
         add_login_of_record(&mut config, connection);
         config
     } else {
@@ -63,16 +64,19 @@ pub async fn build_config(connection: &SavedConnection) -> Result<Config> {
 
     if connection.options.connection_url.is_none() {
         config.host(connection.effective_host());
-        if let Some(port) = connection.effective_port() {
+        // The SQL Browser service gives the port of a named instance, and
+        // `tiberius` sends the question of the instance to the configured
+        // port. A port of the record then sends the question to the instance
+        // itself, so a named instance leaves the port out.
+        if let Some(instance) = non_empty(&connection.options.instance_name) {
+            config.instance_name(instance);
+        } else if let Some(port) = connection.effective_port() {
             config.port(port);
         }
-        if let Some(instance) = non_empty(connection.options.instance_name.as_deref()) {
-            config.instance_name(instance);
-        }
-        if let Some(database) = non_empty(connection.database.as_deref()) {
+        if let Some(database) = non_empty(&connection.database) {
             config.database(database);
         }
-        if let Some(name) = non_empty(connection.options.application_name.as_deref()) {
+        if let Some(name) = non_empty(&connection.options.application_name) {
             config.application_name(name);
         }
         config.authentication(auth_method(connection).await?);
@@ -81,7 +85,7 @@ pub async fn build_config(connection: &SavedConnection) -> Result<Config> {
         // `trust_cert_ca`, so a CA file applies only to a mode that verifies.
         if !connection.options.tls_mode.verifies_certificate() {
             config.trust_cert();
-        } else if let Some(path) = non_empty(connection.options.ca_cert_path.as_deref()) {
+        } else if let Some(path) = non_empty(&connection.options.ca_cert_path) {
             config.trust_cert_ca(path);
         }
     }
@@ -94,6 +98,111 @@ pub async fn build_config(connection: &SavedConnection) -> Result<Config> {
     }
 
     Ok(config)
+}
+
+/// Applies the settings of the form that a connection string does not give.
+/// A key of the string keeps its value. The transport mode applies when the
+/// string names no `encrypt` key, and the trust of the certificate when it
+/// names no trust key. The method of the form applies when the string names
+/// no credential and the method is not the SQL login, whose password
+/// [`add_login_of_record`] adds.
+async fn add_form_settings(
+    config: &mut Config,
+    connection: &SavedConnection,
+    keys: &[String],
+) -> Result<()> {
+    let has = |names: &[&str]| keys.iter().any(|key| names.contains(&key.as_str()));
+    let mode = connection.options.tls_mode;
+    if !has(&["encrypt"]) {
+        config.encryption(encryption_level(mode));
+    }
+    // `tiberius` panics when it gets both `trust_cert` and `trust_cert_ca`,
+    // so the form adds neither when the string names one of them.
+    if !has(&["trustservercertificate", "trustservercertificateca"]) {
+        if !mode.verifies_certificate() {
+            config.trust_cert();
+        } else if let Some(path) = non_empty(&connection.options.ca_cert_path) {
+            config.trust_cert_ca(path);
+        }
+    }
+    if !has(&["application name", "applicationname"]) {
+        if let Some(name) = non_empty(&connection.options.application_name) {
+            config.application_name(name);
+        }
+    }
+    let credentials = [
+        "uid",
+        "username",
+        "user",
+        "user id",
+        "userid",
+        "password",
+        "pwd",
+        "integratedsecurity",
+        "integrated security",
+        "trusted_connection",
+    ];
+    if connection.options.mssql_auth != MssqlAuth::SqlLogin && !has(&credentials) {
+        config.authentication(auth_method(connection).await?);
+    }
+    Ok(())
+}
+
+/// Reads the keys of an ADO.NET or a JDBC connection string, in lower case.
+/// A value in braces or in quotes may contain a semicolon or an equals sign, so
+/// the walk skips such a value whole.
+fn string_keys(url: &str) -> Vec<String> {
+    let trimmed = url.trim();
+    let body = match trimmed.strip_prefix("jdbc:") {
+        Some(rest) => rest.split_once(';').map_or("", |(_, keys)| keys),
+        None => trimmed,
+    };
+    let mut keys = Vec::new();
+    let mut chars = body.chars().peekable();
+    while chars.peek().is_some() {
+        let mut key = String::new();
+        let mut has_value = false;
+        for c in chars.by_ref() {
+            match c {
+                '=' => {
+                    has_value = true;
+                    break;
+                }
+                ';' => break,
+                _ => key.push(c),
+            }
+        }
+        let key = key.trim().to_lowercase();
+        if !key.is_empty() {
+            keys.push(key);
+        }
+        if !has_value {
+            continue;
+        }
+        while chars.peek().is_some_and(|c| c.is_whitespace()) {
+            chars.next();
+        }
+        let close = match chars.peek() {
+            Some('{') => Some('}'),
+            Some('"') => Some('"'),
+            Some('\'') => Some('\''),
+            _ => None,
+        };
+        if let Some(close) = close {
+            chars.next();
+            for c in chars.by_ref() {
+                if c == close {
+                    break;
+                }
+            }
+        }
+        for c in chars.by_ref() {
+            if c == ';' {
+                break;
+            }
+        }
+    }
+    keys
 }
 
 /// Reads an ADO.NET or a JDBC connection string.
@@ -138,22 +247,79 @@ fn add_login_of_record(config: &mut Config, connection: &SavedConnection) {
     config.authentication(AuthMethod::sql_server(user, password));
 }
 
-/// Returns the text when it holds something other than blank space.
-fn non_empty(value: Option<&str>) -> Option<&str> {
-    value.map(str::trim).filter(|text| !text.is_empty())
-}
-
 /// The resource that a token for a SQL database names.
 pub const DATABASE_RESOURCE: &str = "https://database.windows.net/";
 
 /// The places a desktop application looks for the Azure CLI. An application
 /// that a desktop starts holds a short `PATH` that often misses these.
+#[cfg(not(windows))]
 const AZURE_CLI_PLACES: [&str; 4] = [
     "az",
     "/opt/homebrew/bin/az",
     "/usr/local/bin/az",
     "/usr/bin/az",
 ];
+
+/// The places of the Azure CLI on Windows. The CLI is a batch file there,
+/// so it runs through `cmd /C`.
+#[cfg(windows)]
+const AZURE_CLI_PLACES: [&str; 3] = [
+    "az.cmd",
+    r"C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd",
+    r"C:\Program Files (x86)\Microsoft SDKs\Azure\CLI2\wbin\az.cmd",
+];
+
+/// The longest time that the driver waits for the Azure CLI.
+const AZURE_CLI_WAIT: Duration = Duration::from_secs(30);
+
+/// A cached token is used only while it stays valid for this long.
+const TOKEN_REUSE_MARGIN: Duration = Duration::from_secs(5 * 60);
+
+/// The tokens that the Azure CLI gave, by the path of the CLI. A new
+/// connection then needs no new run of the CLI while the token is valid.
+static AZURE_CLI_TOKENS: std::sync::Mutex<Vec<(String, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Builds the command that runs the Azure CLI at `path`.
+fn azure_cli_command(path: &str) -> tokio::process::Command {
+    #[cfg(windows)]
+    {
+        /// The flag that stops Windows from opening a console window.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut command = tokio::process::Command::new("cmd");
+        command.arg("/C").arg(path).creation_flags(CREATE_NO_WINDOW);
+        command
+    }
+    #[cfg(not(windows))]
+    {
+        tokio::process::Command::new(path)
+    }
+}
+
+/// Gives the cached token of the CLI at `key` while it stays valid for
+/// [`TOKEN_REUSE_MARGIN`].
+fn cached_cli_token(key: &str, now: SystemTime) -> Option<String> {
+    let tokens = AZURE_CLI_TOKENS.lock().ok()?;
+    tokens
+        .iter()
+        .find(|(path, _)| path == key)
+        .map(|(_, token)| token.clone())
+        .filter(|token| {
+            token_expiry(token).is_some_and(|expiry| {
+                expiry
+                    .duration_since(now)
+                    .is_ok_and(|left| left > TOKEN_REUSE_MARGIN)
+            })
+        })
+}
+
+/// Keeps the token of the CLI at `key` for the next connection.
+fn cache_cli_token(key: &str, token: &str) {
+    if let Ok(mut tokens) = AZURE_CLI_TOKENS.lock() {
+        tokens.retain(|(path, _)| path != key);
+        tokens.push((key.to_string(), token.to_string()));
+    }
+}
 
 /// Reads the access token out of the JSON that the Azure CLI writes.
 pub fn token_from_cli_output(output: &str) -> Result<String> {
@@ -226,11 +392,17 @@ fn token_has_expired(token: &str, now: SystemTime) -> bool {
 
 /// Asks the Azure CLI for a token for the SQL database resource.
 ///
-/// The token lives for about one hour. The reconnection path builds the
-/// configuration again, so a connection that is opened again asks the CLI
-/// for a new token.
-async fn azure_cli_token(configured_path: Option<&str>) -> Result<String> {
-    let places: Vec<String> = match non_empty(configured_path) {
+/// The token lives for about one hour. A token that stays valid for more
+/// than [`TOKEN_REUSE_MARGIN`] serves the next connection too, so the CLI
+/// runs about once an hour. A CLI that does not answer within
+/// [`AZURE_CLI_WAIT`] is stopped.
+async fn azure_cli_token(configured_path: &Option<String>) -> Result<String> {
+    let configured = non_empty(configured_path);
+    let key = configured.unwrap_or_default().to_string();
+    if let Some(token) = cached_cli_token(&key, SystemTime::now()) {
+        return Ok(token);
+    }
+    let places: Vec<String> = match configured {
         Some(path) => vec![path.to_string()],
         None => AZURE_CLI_PLACES
             .iter()
@@ -240,27 +412,40 @@ async fn azure_cli_token(configured_path: Option<&str>) -> Result<String> {
 
     let mut last: Option<String> = None;
     for path in &places {
-        let outcome = tokio::process::Command::new(path)
+        let run = azure_cli_command(path)
             .arg("account")
             .arg("get-access-token")
             .arg("--resource")
             .arg(DATABASE_RESOURCE)
             .arg("--output")
             .arg("json")
-            .output()
-            .await;
+            .kill_on_drop(true)
+            .output();
+        let outcome = tokio::time::timeout(AZURE_CLI_WAIT, run)
+            .await
+            .map_err(|_| {
+                Error::Authentication(format!(
+                    "The Azure CLI didn't answer within {} seconds.",
+                    AZURE_CLI_WAIT.as_secs()
+                ))
+            })?;
 
         match outcome {
             Ok(output) if output.status.success() => {
                 let text = String::from_utf8_lossy(&output.stdout);
-                return token_from_cli_output(&text);
+                let token = token_from_cli_output(&text)?;
+                cache_cli_token(&key, &token);
+                return Ok(token);
             }
             Ok(output) => {
                 // The CLI ran and refused. A further place would give the
                 // same answer, so the reason is reported at once.
                 let reason = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                return Err(Error::Authentication(cli_refusal(&reason)));
+            }
+            Err(error) if configured.is_some() => {
                 return Err(Error::Authentication(format!(
-                    "The Azure CLI couldn't get a token. Run `az login` and try again. {reason}"
+                    "Couldn't run the Azure CLI at {path}. Check the Azure CLI path. {error}"
                 )));
             }
             Err(error) => last = Some(error.to_string()),
@@ -273,6 +458,16 @@ async fn azure_cli_token(configured_path: Option<&str>) -> Result<String> {
     )))
 }
 
+/// The text for a CLI that ran and gave no token. The advice to sign in
+/// applies only when the CLI itself asks for `az login`.
+fn cli_refusal(reason: &str) -> String {
+    if reason.to_lowercase().contains("az login") {
+        format!("The Azure CLI couldn't get a token. Run `az login` and try again. {reason}")
+    } else {
+        format!("The Azure CLI couldn't get a token. {reason}")
+    }
+}
+
 /// Selects the authentication method. Windows Integrated Security needs the
 /// `winauth` feature, which builds on Windows only.
 async fn auth_method(connection: &SavedConnection) -> Result<AuthMethod> {
@@ -282,13 +477,13 @@ async fn auth_method(connection: &SavedConnection) -> Result<AuthMethod> {
         // cache that `kinit` fills.
         MssqlAuth::Integrated => Ok(AuthMethod::Integrated),
         MssqlAuth::EntraAzureCli => {
-            let token = azure_cli_token(connection.options.azure_cli_path.as_deref()).await?;
+            let token = azure_cli_token(&connection.options.azure_cli_path).await?;
             Ok(AuthMethod::aad_token(token))
         }
         MssqlAuth::EntraAccessToken => {
             // The token is a credential, so it travels in the field that the
             // secret store holds and never reaches the settings file.
-            let token = non_empty(connection.password.as_deref()).ok_or_else(|| {
+            let token = non_empty(&connection.password).ok_or_else(|| {
                 Error::Authentication(
                     "This connection needs an access token. Paste one, or switch to the Azure CLI method."
                         .to_string(),
@@ -310,47 +505,89 @@ async fn auth_method(connection: &SavedConnection) -> Result<AuthMethod> {
     }
 }
 
+/// The count of redirects that one login follows. An availability group
+/// listener or an Azure gateway sends one redirect.
+const MAX_REDIRECTS: usize = 3;
+
+/// Opens the socket and logs in. A named instance asks the SQL Browser
+/// service for its port. A server that answers the login with a redirect,
+/// such as the read-only routing of an availability group, gets a new socket
+/// to the host and the port that it names.
+async fn open_client(
+    mut config: Config,
+) -> std::result::Result<MssqlClient, tiberius::error::Error> {
+    let mut routed: Option<String> = None;
+    for _ in 0..=MAX_REDIRECTS {
+        let tcp = match &routed {
+            Some(address) => TcpStream::connect(address.as_str()).await?,
+            None if config.get_instance_name().is_some() => {
+                use tiberius::SqlBrowser;
+                TcpStream::connect_named(&config).await?
+            }
+            None => TcpStream::connect(config.get_addr()).await?,
+        };
+        if let Err(error) = tcp.set_nodelay(true) {
+            log::warn!("Could not disable the Nagle algorithm: {error}");
+        }
+        match Client::connect(config.clone(), tcp.compat_write()).await {
+            Err(tiberius::error::Error::Routing { host, port }) => {
+                log::info!("The server sent the login to {host}:{port}.");
+                routed = Some(format!("{host}:{port}"));
+                config.host(host);
+                config.port(port);
+            }
+            other => return other,
+        }
+    }
+    Err(tiberius::error::Error::Protocol(
+        "The server redirected the login too many times.".into(),
+    ))
+}
+
 /// Maps the transport setting of the application onto the encryption level
 /// of `tiberius`.
 pub fn encryption_level(mode: TlsMode) -> EncryptionLevel {
     match mode {
         // `NotSupported` tells the server that this client has no TLS.
         TlsMode::Disable => EncryptionLevel::NotSupported,
-        // `Off` encrypts the login packet only.
-        TlsMode::Prefer => EncryptionLevel::Off,
-        TlsMode::Require | TlsMode::VerifyFull => EncryptionLevel::Required,
+        // `Off` encrypts the login packet only, so `Prefer` asks for full
+        // encryption. See [`MssqlDriver::connect`] for a server without TLS.
+        TlsMode::Prefer | TlsMode::Require | TlsMode::VerifyFull => EncryptionLevel::Required,
     }
 }
 
 impl MssqlDriver {
+    /// Opens a connection. One time limit covers the socket, the TLS
+    /// handshake, the login, and each redirect and retry of the login.
+    ///
+    /// The mode `Prefer` asks for full encryption and trusts any
+    /// certificate. A server without TLS refuses that request, and the
+    /// driver then opens one more connection without encryption.
     pub async fn connect(connection: &SavedConnection) -> Result<Box<dyn DatabaseDriver>> {
         let config = build_config(connection).await?;
-        let limit = Duration::from_secs(connection.options.connect_timeout_secs.max(1));
-
-        // A named instance listens on a port that the SQL Browser service
-        // gives out, so the port in the configuration does not apply.
-        let uses_instance = non_empty(connection.options.instance_name.as_deref()).is_some()
-            || connection
+        let limit = connection.options.connect_timeout_secs.max(1);
+        let auth = connection.options.mssql_auth;
+        let falls_back = connection.options.tls_mode == TlsMode::Prefer
+            && connection
                 .options
                 .connection_url
                 .as_deref()
-                .map(|url| url.contains('\\'))
-                .unwrap_or(false);
-
-        let tcp = if uses_instance {
-            use tiberius::SqlBrowser;
-            while_connecting(limit, TcpStream::connect_named(&config)).await??
-        } else {
-            while_connecting(limit, TcpStream::connect(config.get_addr())).await??
-        };
-
-        if let Err(error) = tcp.set_nodelay(true) {
-            log::warn!("Could not disable the Nagle algorithm: {error}");
-        }
-
-        let client = while_connecting(limit, Client::connect(config, tcp.compat_write()))
-            .await?
-            .map_err(|error| describe_login(error, connection.options.mssql_auth))?;
+                .is_none_or(|url| !string_keys(url).iter().any(|key| key == "encrypt"));
+        let client = connect_within(limit, async move {
+            match open_client(config.clone()).await {
+                Err(tiberius::error::Error::Tls(text))
+                    if falls_back && text == tiberius::error::ENCRYPTION_NOT_SUPPORTED =>
+                {
+                    log::info!("The server has no TLS, so the connection is not encrypted.");
+                    let mut plain = config;
+                    plain.encryption(EncryptionLevel::NotSupported);
+                    open_client(plain).await
+                }
+                other => other,
+            }
+        })
+        .await?
+        .map_err(|error| describe_login(error, auth))?;
         Ok(Box::new(MssqlDriver { client }))
     }
 
@@ -408,7 +645,7 @@ impl MssqlDriver {
             match item {
                 QueryItem::Metadata(metadata) => {
                     if open {
-                        end_set(sink, count, truncated)?;
+                        finish_set(sink, count, truncated)?;
                         open = false;
                     }
                     // After a stop the sets that remain drain without a feed.
@@ -448,7 +685,7 @@ impl MssqlDriver {
                 }
                 QueryItem::Done(done_rows) => {
                     if open {
-                        end_set(sink, count, truncated)?;
+                        finish_set(sink, count, truncated)?;
                         open = false;
                     } else if let (Some(changed), false) = (done_rows, stopped) {
                         rows_affected = Some(rows_affected.unwrap_or(0) + changed);
@@ -482,7 +719,7 @@ impl MssqlDriver {
             }
         }
         if open {
-            end_set(sink, count, truncated)?;
+            finish_set(sink, count, truncated)?;
         }
         if ended_at_limit {
             sink.message(Message::info(ENDED_AT_THE_LIMIT_MESSAGE.to_string()));
@@ -575,18 +812,6 @@ fn names_a_ticket_fault(text: &str) -> bool {
     .any(|mark| lower.contains(mark))
 }
 
-/// Runs a step of the opening of a connection under the time limit. A step
-/// that does not finish reports the connection and not the statement, because
-/// the advice for a slow statement does not fit a server that never answered.
-async fn while_connecting<F: std::future::Future>(limit: Duration, future: F) -> Result<F::Output> {
-    tokio::time::timeout(limit, future).await.map_err(|_| {
-        Error::Connection(format!(
-            "The server didn't finish opening the connection within {} seconds.",
-            limit.as_secs()
-        ))
-    })
-}
-
 /// Builds the statement that reads the CREATE text of one view or one
 /// synonym. MS SQL Server keeps no text for a table, so a table gives no
 /// statement and the command layer builds a draft instead.
@@ -673,6 +898,24 @@ pub fn select_plan_sets(sets: Vec<ResultSet>) -> (Vec<ResultSet>, bool) {
     }
 }
 
+/// Marks a server error with its line in the whole text. The server counts
+/// the lines of a batch from 1, and `start` is the byte offset of the batch
+/// in `query`. An error without a line, or a batch that was not found in the
+/// text, keeps no place.
+fn locate_error(error: Error, query: &str, start: Option<usize>) -> Error {
+    let line = match &error {
+        Error::Tiberius(tiberius::error::Error::Server(token)) if token.line() > 0 => token.line(),
+        _ => return error,
+    };
+    match start {
+        Some(start) => {
+            let (line, column) = offset_place(place_of_byte_offset(query, start), (line, 1));
+            error.at(line, column)
+        }
+        None => error,
+    }
+}
+
 /// The message for an error that the server sent after the first error of a
 /// batch, with the number, the severity, the state and the line that SQL
 /// Server Management Studio shows.
@@ -680,20 +923,8 @@ fn later_error(error: &tiberius::error::TokenError) -> Message {
     Message {
         level: MessageLevel::Error,
         text: error.message().to_string(),
-        detail: Some(format!(
-            "Msg {}, Level {}, State {}, Line {}",
-            error.code(),
-            error.class(),
-            error.state(),
-            error.line()
-        )),
+        detail: Some(mssql_error_detail(error)),
     }
-}
-
-/// Reports the count of rows of the open result set and ends the set.
-fn end_set(sink: &mut dyn RowSink, count: usize, truncated: bool) -> Result<()> {
-    sink.message(rows_returned_message(count, truncated));
-    sink.end_set(truncated)
 }
 
 /// Turns the JSON parameters into values that `tiberius` can bind.
@@ -806,7 +1037,16 @@ impl DatabaseDriver for MssqlDriver {
             ));
         }
 
+        // The end of the last batch found in the text, so that a batch that
+        // stands twice is found at its own place.
+        let mut cursor = 0;
         'batches: for batch in batches {
+            let start = query[cursor..]
+                .find(batch.text.as_str())
+                .map(|at| cursor + at);
+            if let Some(at) = start {
+                cursor = at + batch.text.len();
+            }
             let statements = split_statements(&batch.text, Dialect::MsSql);
             // A statement that only reads leaves the state of the session as
             // it found it, so one probe serves every run of the batch.
@@ -828,7 +1068,8 @@ impl DatabaseDriver for MssqlDriver {
                         sink,
                         may_end_early,
                     )
-                    .await?;
+                    .await
+                    .map_err(|error| locate_error(error, query, start))?;
                 if let Some(changed) = walk.rows_affected {
                     rows_affected = Some(rows_affected.unwrap_or(0) + changed);
                 }
@@ -980,8 +1221,16 @@ impl DatabaseDriver for MssqlDriver {
                     c.NUMERIC_PRECISION, \
                     c.NUMERIC_SCALE, \
                     c.IS_NULLABLE, \
-                    CASE WHEN k.COLUMN_NAME IS NULL THEN 0 ELSE 1 END AS IS_KEY \
+                    c.DATETIME_PRECISION, \
+                    CASE WHEN k.COLUMN_NAME IS NULL THEN 0 ELSE 1 END AS IS_KEY, \
+                    CASE WHEN sc.is_identity = 1 OR sc.is_computed = 1 \
+                           OR c.DATA_TYPE IN ('timestamp', 'rowversion') \
+                         THEN 1 ELSE 0 END AS IS_GENERATED \
              FROM {catalog}.INFORMATION_SCHEMA.COLUMNS AS c \
+             LEFT JOIN {catalog}.sys.columns AS sc \
+               ON sc.object_id = OBJECT_ID(QUOTENAME(c.TABLE_CATALOG) + '.' \
+                      + QUOTENAME(c.TABLE_SCHEMA) + '.' + QUOTENAME(c.TABLE_NAME)) \
+              AND sc.name = c.COLUMN_NAME \
              LEFT JOIN ( \
                  SELECT ku.TABLE_SCHEMA, ku.TABLE_NAME, ku.COLUMN_NAME \
                  FROM {catalog}.INFORMATION_SCHEMA.TABLE_CONSTRAINTS AS tc \
@@ -1006,12 +1255,20 @@ impl DatabaseDriver for MssqlDriver {
                 let precision = row.try_get::<u8, _>(3)?;
                 let scale = row.try_get::<i32, _>(4)?;
                 let nullable = row.try_get::<&str, _>(5)?.unwrap_or("YES");
-                let is_key = row.try_get::<i32, _>(6)?.unwrap_or(0);
+                let fraction = row.try_get::<i16, _>(6)?;
+                let is_key = row.try_get::<i32, _>(7)?.unwrap_or(0);
+                let is_generated = row.try_get::<i32, _>(8)?.unwrap_or(0);
                 columns.push(AppColumn {
                     name,
-                    data_type: format_type(base, length, precision, scale),
+                    data_type: format_type(
+                        base,
+                        length,
+                        precision,
+                        scale.or(fraction.map(i32::from)),
+                    ),
                     nullable: nullable.eq_ignore_ascii_case("YES"),
                     is_primary_key: is_key == 1,
+                    is_generated: is_generated == 1,
                 });
             }
         }
@@ -1419,6 +1676,11 @@ fn constraint_query(catalog: &str) -> String {
 
 /// Joins the base type with the length or the precision, so that the
 /// explorer shows `varchar(50)` and not `varchar`.
+///
+/// A `datetime2`, `time` or `datetimeoffset` column takes the count of the
+/// digits of its fraction of a second as `scale`. INFORMATION_SCHEMA gives
+/// that count as DATETIME_PRECISION. A `float` of 24 bits of precision or
+/// less is stored as `real`, so it shows as `real`.
 pub fn format_type(
     base: &str,
     length: Option<i32>,
@@ -1436,6 +1698,11 @@ pub fn format_type(
             (Some(precision), None) => format!("{base}({precision})"),
             _ => base.to_string(),
         },
+        "datetime2" | "time" | "datetimeoffset" => match scale {
+            Some(digits) => format!("{base}({digits})"),
+            None => base.to_string(),
+        },
+        "float" if precision.is_some_and(|bits| bits <= 24) => "real".to_string(),
         _ => base.to_string(),
     }
 }
@@ -1643,9 +1910,7 @@ fn text_or_null(text: Option<String>) -> JsonValue {
 fn bytes_to_hex(bytes: &[u8]) -> String {
     let mut text = String::with_capacity(2 + bytes.len() * 2);
     text.push_str("0x");
-    for byte in bytes {
-        text.push_str(&format!("{byte:02X}"));
-    }
+    hex_text(&mut text, bytes, true);
     text
 }
 
@@ -2962,10 +3227,14 @@ mod tests {
 
     #[tokio::test]
     async fn the_cancel_handle_signals_and_reports_no_fault() {
-        let handle = MssqlCancel(Arc::new(AttentionHandle::default()));
+        let attention = Arc::new(AttentionHandle::default());
+        let handle = MssqlCancel(attention.clone());
+        assert!(!attention.is_signalled());
         handle.cancel().await.unwrap();
+        assert!(attention.is_signalled());
         // A second request for a statement that already stopped does no harm.
         handle.cancel().await.unwrap();
+        assert!(attention.is_signalled());
     }
 
     #[test]
@@ -3287,7 +3556,11 @@ mod tests {
         input.options.connection_url = Some("server=tcp:a,1433".into());
         input.options.mssql_auth = MssqlAuth::Integrated;
         let config = build_config(&input).await.unwrap();
-        assert_eq!(config.get_authentication().password(), Some(""));
+        // A string without a credential takes the method of the form.
+        assert!(matches!(
+            config.get_authentication(),
+            AuthMethod::Integrated
+        ));
 
         // The string names a method that sends no password.
         input.options.mssql_auth = MssqlAuth::SqlLogin;
@@ -3347,7 +3620,7 @@ mod tests {
             encryption_level(TlsMode::Disable),
             EncryptionLevel::NotSupported
         );
-        assert_eq!(encryption_level(TlsMode::Prefer), EncryptionLevel::Off);
+        assert_eq!(encryption_level(TlsMode::Prefer), EncryptionLevel::Required);
         assert_eq!(
             encryption_level(TlsMode::Require),
             EncryptionLevel::Required
@@ -3376,10 +3649,119 @@ mod tests {
     }
 
     #[test]
-    fn non_empty_removes_blank_values() {
-        assert_eq!(non_empty(Some(" a ")), Some("a"));
-        assert_eq!(non_empty(Some("   ")), None);
-        assert_eq!(non_empty(None), None);
+    fn the_keys_of_a_connection_string_are_read_past_quoted_values() {
+        assert_eq!(
+            string_keys("Server=a;Password={x;encrypt=1};User Id = sa; Encrypt=\"a;b\";App='q;r'"),
+            ["server", "password", "user id", "encrypt", "app"]
+        );
+        assert_eq!(
+            string_keys("jdbc:sqlserver://h:1433;databaseName=d;trustServerCertificate=true"),
+            ["databasename", "trustservercertificate"]
+        );
+        assert!(string_keys("jdbc:sqlserver://h").is_empty());
+        assert_eq!(string_keys("Server=a;;"), ["server"]);
+    }
+
+    #[tokio::test]
+    async fn a_connection_string_takes_the_settings_of_the_form_that_it_does_not_give() {
+        let mut input = connection();
+        input.options.tls_mode = TlsMode::Prefer;
+        input.options.application_name = Some("Explorer".into());
+        input.options.connection_url = Some("Server=tcp:h,1433;User Id=sa".into());
+        let config = build_config(&input).await.unwrap();
+        let debug = format!("{config:?}");
+        assert!(debug.contains("encryption: Required"), "{debug}");
+        assert!(debug.contains("TrustAll"), "{debug}");
+        assert!(debug.contains("Explorer"), "{debug}");
+
+        input.options.connection_url =
+            Some("Server=tcp:h,1433;User Id=sa;Encrypt=false;TrustServerCertificate=false;Application Name=Mine".into());
+        let config = build_config(&input).await.unwrap();
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("encryption: Required"), "{debug}");
+        assert!(!debug.contains("TrustAll"), "{debug}");
+        assert!(
+            debug.contains("Mine") && !debug.contains("Explorer"),
+            "{debug}"
+        );
+
+        input.options.tls_mode = TlsMode::VerifyFull;
+        input.options.ca_cert_path = Some("/tmp/ca.pem".into());
+        input.options.connection_url = Some("Server=tcp:h,1433;User Id=sa".into());
+        let debug = format!("{:?}", build_config(&input).await.unwrap());
+        assert!(debug.contains("ca.pem"), "{debug}");
+
+        input.options.mssql_auth = MssqlAuth::EntraAccessToken;
+        input.password = Some("token".into());
+        input.options.connection_url = Some("Server=tcp:h,1433".into());
+        let config = build_config(&input).await.unwrap();
+        assert!(matches!(
+            config.get_authentication(),
+            AuthMethod::AADToken(_)
+        ));
+        input.options.connection_url = Some("Server=tcp:h,1433;User Id=sa;Password=p".into());
+        let config = build_config(&input).await.unwrap();
+        assert!(matches!(
+            config.get_authentication(),
+            AuthMethod::SqlServer(_)
+        ));
+    }
+
+    #[test]
+    fn a_server_error_names_its_line_in_the_whole_text() {
+        let server = |line| {
+            Error::Tiberius(tiberius::error::Error::Server(
+                tiberius::error::TokenError::new(207, 1, 16, "Invalid column name 'x'.", "", line),
+            ))
+        };
+        let query = "SELECT 1\nGO\nSELECT 2\nSELECT x";
+        let start = query.find("SELECT 2");
+        let payload = locate_error(server(2), query, start).to_payload();
+        assert_eq!((payload.line, payload.column), (Some(4), Some(1)));
+
+        let payload = locate_error(server(0), query, start).to_payload();
+        assert_eq!(payload.line, None);
+        let payload = locate_error(server(2), query, None).to_payload();
+        assert_eq!(payload.line, None);
+        let payload = locate_error(Error::Timeout(1), query, start).to_payload();
+        assert_eq!(payload.line, None);
+    }
+
+    #[test]
+    fn a_later_error_shows_the_text_of_sql_server_management_studio() {
+        let token =
+            tiberius::error::TokenError::new(208, 1, 16, "Invalid object name 't'.", "p", 3);
+        let message = later_error(&token);
+        assert_eq!(
+            message.detail.as_deref(),
+            Some(mssql_error_detail(&token).as_str())
+        );
+        assert!(message.detail.unwrap().contains("Procedure p"));
+    }
+
+    #[tokio::test]
+    async fn a_named_instance_asks_the_sql_browser_and_not_the_port_of_the_record() {
+        let mut input = connection();
+        input.options.instance_name = Some("SQLEXPRESS".into());
+        input.port = Some(1433);
+        let config = build_config(&input).await.unwrap();
+        assert_eq!(config.get_instance_name(), Some("SQLEXPRESS"));
+        assert!(config.get_addr().ends_with(":1434"));
+
+        input.options.instance_name = Some("  ".into());
+        input.port = Some(1500);
+        let config = build_config(&input).await.unwrap();
+        assert_eq!(config.get_instance_name(), None);
+        assert!(config.get_addr().ends_with(":1500"));
+    }
+
+    #[tokio::test]
+    async fn a_connection_string_names_its_instance() {
+        let mut input = connection();
+        input.options.connection_url =
+            Some("Server=tcp:db.example.com\\SQLEXPRESS;User Id=sa;Password=x".into());
+        let config = build_config(&input).await.unwrap();
+        assert_eq!(config.get_instance_name(), Some("SQLEXPRESS"));
     }
 
     #[test]
@@ -3533,6 +3915,19 @@ mod tests {
         assert_eq!(format_type("numeric", None, Some(9), None), "numeric(9)");
         assert_eq!(format_type("decimal", None, None, None), "decimal");
         assert_eq!(format_type("int", None, None, None), "int");
+        assert_eq!(
+            format_type("datetime2", None, None, Some(3)),
+            "datetime2(3)"
+        );
+        assert_eq!(format_type("time", None, None, Some(0)), "time(0)");
+        assert_eq!(
+            format_type("datetimeoffset", None, None, Some(7)),
+            "datetimeoffset(7)"
+        );
+        assert_eq!(format_type("datetime2", None, None, None), "datetime2");
+        assert_eq!(format_type("float", None, Some(24), None), "real");
+        assert_eq!(format_type("float", None, Some(53), None), "float");
+        assert_eq!(format_type("float", None, None, None), "float");
     }
 
     #[test]
@@ -3651,7 +4046,63 @@ mod tests {
             error.category(),
             crate::error::ErrorCategory::Authentication
         );
-        assert!(error.to_string().contains("Couldn't find the Azure CLI"));
+        assert!(error
+            .to_string()
+            .contains("Couldn't run the Azure CLI at /nowhere/az. Check the Azure CLI path."));
+    }
+
+    #[test]
+    fn the_advice_to_sign_in_follows_the_cli() {
+        assert!(cli_refusal("Please run 'az login' to setup account.").contains("Run `az login`"));
+        let other = cli_refusal("Subscription not found.");
+        assert!(!other.contains("Run `az login`"));
+        assert!(other.ends_with("Subscription not found."));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_token_of_the_azure_cli_serves_the_next_connection_while_it_is_valid() {
+        use std::os::unix::fs::PermissionsExt;
+        let token = token_with_claims(r#"{"exp":4000000000}"#);
+        let dir = std::env::temp_dir().join(format!("az-cli-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("az");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\necho '{{\"accessToken\": \"{token}\"}}'\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = Some(script.to_string_lossy().into_owned());
+
+        assert_eq!(azure_cli_token(&path).await.unwrap(), token);
+        // The second call takes the cached token, so the CLI need not run.
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(azure_cli_token(&path).await.unwrap(), token);
+
+        // A token that ends inside the margin is not used again.
+        let short = token_with_claims(r#"{"exp":1}"#);
+        cache_cli_token("short", &short);
+        assert_eq!(cached_cli_token("short", SystemTime::now()), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cli_that_refuses_reports_its_reason() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("az-refuse-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("az");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\necho 'Please run az login' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = Some(script.to_string_lossy().into_owned());
+        let error = azure_cli_token(&path).await.unwrap_err();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(error.to_string().contains("Run `az login`"));
     }
 
     #[test]

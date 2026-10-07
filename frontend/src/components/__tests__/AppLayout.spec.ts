@@ -4,6 +4,18 @@ import { makeApiStub, connectionFixture, infoFixture } from '../../stores/__test
 const apiStub = makeApiStub()
 vi.mock('@/lib/api', () => ({ api: apiStub, CONNECTION_STATUS_EVENT: 'connection-status' }))
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(), save: vi.fn() }))
+const host = vi.hoisted(() => ({
+  onCloseRequested: vi.fn(),
+  windowFails: false,
+}))
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: () => {
+    if (host.windowFails) {
+      throw new Error('no window')
+    }
+    return { onCloseRequested: host.onCloseRequested }
+  },
+}))
 
 const AppLayout = (await import('@/layouts/AppLayout.vue')).default
 const App = (await import('@/App.vue')).default
@@ -21,6 +33,7 @@ const { useExplorerStore } = await import('@/stores/explorer')
 const { useFilesStore } = await import('@/stores/files')
 const { SETTINGS_KEY, defaultSettings, useSettingsStore } = await import('@/stores/settings')
 const { useTabsStore } = await import('@/stores/tabs')
+const { useQueryStore } = await import('@/stores/query')
 const { useUiStore } = await import('@/stores/ui')
 const { forgetTabActions, registerTabActions } = await import('@/lib/commands')
 const { ConnectionHealth } = await import('@/types/api')
@@ -58,7 +71,7 @@ describe('AppLayout', () => {
     })
     apiStub.readTextFile.mockImplementation(async () => {
       calls.push('readTextFile')
-      return 'SELECT 1'
+      return { contents: 'SELECT 1', encoding: 'utf8' }
     })
     const wrapper = mountWithPlugins(AppLayout)
     await settle()
@@ -563,6 +576,10 @@ describe('AppLayout', () => {
     rows.value = '250'
     rows.dispatchEvent(new Event('input'))
     await settle()
+    // The box sends its value on Enter, and not on each keystroke.
+    expect(settings.settings.maxRows).not.toBe(250)
+    rows.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await settle()
     expect(settings.settings.maxRows).toBe(250)
 
     const slider = wrapper.findComponent({ name: 'VSlider' })
@@ -670,18 +687,21 @@ describe('AppLayout dialog state', () => {
       .findAllComponents({ name: 'VTextField' })
       .find((item) => item.attributes('data-test') === 'setting-max-pinned')
     await field!.vm.$emit('update:modelValue', '3')
+    await field!.vm.$emit('update:focused', false)
     expect(useSettingsStore().settings.maxPinnedResults).toBe(3)
 
     const limit = wrapper
       .findAllComponents({ name: 'VTextField' })
       .find((item) => item.attributes('data-test') === 'setting-export-limit')
     await limit!.vm.$emit('update:modelValue', '5000')
+    await limit!.vm.$emit('update:focused', false)
     expect(useSettingsStore().settings.exportRowLimit).toBe(5000)
 
     const columns = wrapper
       .findAllComponents({ name: 'VTextField' })
       .find((item) => item.attributes('data-test') === 'setting-snapshot-columns')
     await columns!.vm.$emit('update:modelValue', '4000')
+    await columns!.vm.$emit('update:focused', false)
     expect(useSettingsStore().settings.schemaSnapshotColumns).toBe(4000)
 
     const ownConnection = wrapper
@@ -694,12 +714,14 @@ describe('AppLayout dialog state', () => {
       .findAllComponents({ name: 'VTextField' })
       .find((item) => item.attributes('data-test') === 'setting-athena-price')
     await price!.vm.$emit('update:modelValue', '6.5')
+    await price!.vm.$emit('update:focused', false)
     expect(useSettingsStore().settings.athenaPricePerTerabyte).toBe(6.5)
 
     const warn = wrapper
       .findAllComponents({ name: 'VTextField' })
       .find((item) => item.attributes('data-test') === 'setting-athena-warning')
     await warn!.vm.$emit('update:modelValue', '25')
+    await warn!.vm.$emit('update:focused', false)
     expect(useSettingsStore().settings.athenaScanWarningGb).toBe(25)
     wrapper.unmount()
   })
@@ -939,6 +961,8 @@ describe('AppLayout keys', () => {
       save: vi.fn(),
     }
     registerTabActions('key-tab', actions)
+    // Stop answers only while a statement of the tab runs.
+    vi.spyOn(useQueryStore(), 'peekState').mockReturnValue({ running: true } as never)
 
     press('Enter')
     press('Enter', { shift: true })
@@ -1026,5 +1050,151 @@ describe('AppLayout keys', () => {
     const tabs = useTabsStore()
     press('KeyT')
     expect(tabs.tabs).toHaveLength(0)
+  })
+})
+
+describe('AppLayout and the host window', () => {
+  beforeEach(() => {
+    document.body.innerHTML = ''
+    localStorage.clear()
+    Object.values(apiStub).forEach((fn) => fn.mockReset())
+    apiStub.supportedEngines.mockResolvedValue([])
+    apiStub.getConnections.mockResolvedValue([])
+    apiStub.listActiveConnections.mockResolvedValue([])
+    apiStub.getHistory.mockResolvedValue([])
+    apiStub.getSavedQueries.mockResolvedValue([])
+    apiStub.getWorkspace.mockResolvedValue({ tabs: [], activeTabId: null })
+    apiStub.saveWorkspace.mockResolvedValue(undefined)
+    apiStub.fileRoots.mockResolvedValue([])
+    apiStub.queryParameters.mockResolvedValue([])
+    apiStub.onConnectionStatus.mockResolvedValue(() => {})
+    apiStub.onMenuCommand.mockResolvedValue(() => {})
+    apiStub.setMenuCommands.mockResolvedValue(undefined)
+    apiStub.storageProblems.mockResolvedValue([])
+    host.onCloseRequested.mockReset()
+    host.windowFails = false
+  })
+
+  it('writes a waiting change of the tabs before the window closes', async () => {
+    const unlistenClose = vi.fn()
+    host.onCloseRequested.mockResolvedValue(unlistenClose)
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const onClose = host.onCloseRequested.mock.calls[0]![0] as () => Promise<void>
+
+    // A write may still wait from the start, so the first call clears it.
+    await onClose()
+    apiStub.saveWorkspace.mockClear()
+    await onClose()
+    expect(apiStub.saveWorkspace).not.toHaveBeenCalled()
+
+    useTabsStore().add({ query: 'SELECT 1' })
+    await settle()
+    expect(apiStub.saveWorkspace).not.toHaveBeenCalled()
+    await onClose()
+    expect(apiStub.saveWorkspace).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+    expect(unlistenClose).toHaveBeenCalled()
+  })
+
+  it('runs without a host window', async () => {
+    host.windowFails = true
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    expect(apiStub.onConnectionStatus).toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('shows each storage problem as a notice that stays', async () => {
+    vi.mocked(apiStub.storageProblems).mockResolvedValue(['The settings file could not be read.'])
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    expect(apiStub.storageProblems).toHaveBeenCalled()
+    const notice = useUiStore().notices.find((item) => item.message.includes('settings file'))
+    expect(notice?.timeout).toBe(-1)
+    wrapper.unmount()
+  })
+
+  it('starts when the storage problems give no list', async () => {
+    vi.mocked(apiStub.storageProblems).mockResolvedValue(null as unknown as string[])
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    expect(useUiStore().notices).toHaveLength(0)
+    wrapper.unmount()
+  })
+
+  it('starts when the storage problems cannot be read', async () => {
+    vi.mocked(apiStub.storageProblems).mockRejectedValue(new Error('unknown command'))
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    expect(useUiStore().notices).toHaveLength(0)
+    wrapper.unmount()
+  })
+
+  it('ignores a menu command while a dialog is open, and greys the menu', async () => {
+    let fromMenu: (id: string) => void = () => {}
+    apiStub.onMenuCommand.mockImplementation(async (handler: (id: string) => void) => {
+      fromMenu = handler
+      return () => {}
+    })
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const ui = useUiStore()
+    ui.addDialog()
+    await settle()
+    const last = apiStub.setMenuCommands.mock.calls[
+      apiStub.setMenuCommands.mock.calls.length - 1
+    ]![0] as { enabled: boolean }[]
+    expect(last.every((state) => !state.enabled)).toBe(true)
+    const before = useTabsStore().tabs.length
+    fromMenu('tab.new')
+    expect(useTabsStore().tabs.length).toBe(before)
+    ui.removeDialog()
+    fromMenu('tab.new')
+    expect(useTabsStore().tabs.length).toBe(before + 1)
+    wrapper.unmount()
+  })
+
+  it('names the theme button by what it does', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const label = wrapper.find('[data-test="theme-toggle"]').attributes('aria-label')
+    expect(label).toMatch(/^Switch to (light|dark) theme$/)
+    wrapper.unmount()
+  })
+
+  it('names the key of each panel and of the settings in the tooltips', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const texts = wrapper.findAllComponents({ name: 'VTooltip' }).map((tip) => tip.props('text'))
+    expect(texts.some((text) => /^Connections \(.+1\)$/.test(text))).toBe(true)
+    expect(texts.some((text) => /^Settings \(.+,\)$/.test(text))).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('offers Stop only while a statement of the open tab runs, and says why', async () => {
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    type Cmd = import('@/lib/commands').Command
+    const commands = wrapper.findComponent({ name: 'CommandPalette' }).props('commands') as Cmd[]
+    const byId = (id: string) => commands.find((command) => command.id === id)!
+    const stop = byId('query.stop')
+    const run = byId('query.run')
+
+    useTabsStore().activeTabId = null
+    expect(stop.enabled!()).toBe(false)
+    expect(stop.disabledReason!()).toBe('Open a query tab first.')
+    expect(run.disabledReason!()).toBe('Open a query tab first.')
+
+    useTabsStore().add({ query: 'SELECT 1' })
+    expect(stop.enabled!()).toBe(false)
+    expect(stop.disabledReason!()).toBe('Nothing is running.')
+
+    vi.spyOn(useQueryStore(), 'peekState').mockReturnValue({ running: true } as never)
+    expect(stop.enabled!()).toBe(true)
+    for (const id of ['query.runAll', 'query.save', 'editor.format', 'tab.rename', 'tab.close']) {
+      expect(byId(id).disabledReason!()).toBe('Open a query tab first.')
+    }
+    wrapper.unmount()
   })
 })

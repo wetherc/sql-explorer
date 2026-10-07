@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ResultPane } from '@/stores/query'
+import type { TextEncoding } from '@/types/api'
 import {
   makeApiStub,
   connectionFixture,
@@ -35,6 +36,12 @@ const response = {
   elapsedMs: 8,
 }
 
+/** The notice the view raised last. */
+function lastNotice() {
+  const notices = useUiStore().notices
+  return notices[notices.length - 1]
+}
+
 /** The result that the grid hands over when it asks for an export. */
 function exported() {
   return {
@@ -58,6 +65,7 @@ function editorWithText(text: string) {
       getValueInRange: vi.fn(() => text),
       getFullModelRange: vi.fn(() => ({ whole: true })),
       getOffsetAt: vi.fn(() => 0),
+      getPositionAt: vi.fn(() => ({ lineNumber: 1, column: 1 })),
       getWordUntilPosition: vi.fn(() => ({ startColumn: 1, endColumn: 1 })),
     })),
     getSelection: vi.fn(() => null),
@@ -68,6 +76,8 @@ function editorWithText(text: string) {
     executeEdits,
     focus: vi.fn(),
     dispose: vi.fn(),
+    saveViewState: vi.fn(() => null),
+    restoreViewState: vi.fn(),
   } as unknown as ReturnType<typeof monaco.editor.create>)
   return executeEdits
 }
@@ -82,7 +92,11 @@ async function mountedWithResult() {
   return wrapper
 }
 
-async function mountView(query = 'SELECT 1', filePath: string | null = null) {
+async function mountView(
+  query = 'SELECT 1',
+  filePath: string | null = null,
+  encoding: TextEncoding = 'utf8',
+) {
   const wrapper = mountWithPlugins(QueryView, {
     props: {
       tab: {
@@ -94,6 +108,7 @@ async function mountView(query = 'SELECT 1', filePath: string | null = null) {
         savedQueryId: null,
         params: [],
         filePath,
+        encoding,
       },
     },
   })
@@ -130,6 +145,7 @@ describe('QueryView', () => {
           savedQueryId: null,
           params: [],
           filePath: null,
+          encoding: 'utf8' as const,
         },
       },
     })
@@ -676,6 +692,7 @@ describe('QueryView', () => {
           savedQueryId: null,
           params: [],
           filePath: null,
+          encoding: 'utf8' as const,
         },
       },
     })
@@ -727,6 +744,141 @@ describe('QueryView', () => {
     expect(error.text()).toContain('line 1')
   })
 
+  it('names the category, gives advice and offers to copy a failure', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    apiStub.executeQuery.mockRejectedValue({
+      category: 'timeout',
+      message: 'took too long',
+      detail: 'after 30 s',
+    })
+    const wrapper = await mountView('SELECT 1')
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+
+    const error = wrapper.find('[data-test="query-error"]')
+    expect(error.find('.mdi-timer-alert-outline').exists()).toBe(true)
+    expect(wrapper.find('[data-test="query-error-advice"]').text()).toContain('timeout')
+    // The backend named no place, so there is no line to go to.
+    expect(wrapper.find('[data-test="query-error-goto"]').exists()).toBe(false)
+
+    await wrapper.find('[data-test="query-error-copy"]').trigger('click')
+    await settle()
+    expect(writeText).toHaveBeenCalledWith('took too long\nafter 30 s')
+    expect(lastNotice()?.message).toBe('Error copied to the clipboard.')
+
+    writeText.mockRejectedValue(new Error('denied'))
+    await wrapper.find('[data-test="query-error-copy"]').trigger('click')
+    await settle()
+    expect(lastNotice()?.message).toBe("Couldn't copy the error to the clipboard.")
+  })
+
+  it('gives no advice for a failure that needs none', async () => {
+    apiStub.executeQuery.mockRejectedValue({ category: 'database', message: 'bad', detail: null })
+    const wrapper = await mountView('SELECT 1')
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+    expect(wrapper.find('[data-test="query-error-advice"]').exists()).toBe(false)
+  })
+
+  it('marks the place of a failure and moves the cursor there', async () => {
+    const setPosition = vi.fn()
+    const revealLineInCenter = vi.fn()
+    const focus = vi.fn()
+    const model = {
+      getValue: () => 'SELECT\n  bad',
+      getLineCount: () => 2,
+      getLineMaxColumn: () => 6,
+      getValueInRange: () => '',
+      getOffsetAt: () => 0,
+      getPositionAt: () => ({ lineNumber: 1, column: 1 }),
+    }
+    let changed: () => void = () => {}
+    vi.mocked(monaco.editor.create).mockReturnValue({
+      getValue: () => 'SELECT\n  bad',
+      getModel: () => model,
+      getSelection: () => null,
+      getPosition: () => null,
+      onDidChangeModelContent: vi.fn((listener: () => void) => {
+        changed = listener
+      }),
+      addAction: vi.fn(),
+      updateOptions: vi.fn(),
+      setPosition,
+      revealLineInCenter,
+      focus,
+      dispose: vi.fn(),
+      saveViewState: vi.fn(() => null),
+      restoreViewState: vi.fn(),
+    } as unknown as ReturnType<typeof monaco.editor.create>)
+    vi.mocked(monaco.editor.setModelMarkers).mockClear()
+    apiStub.executeQuery.mockRejectedValue({
+      category: 'database',
+      message: 'no column bad',
+      detail: null,
+      line: 2,
+      column: 3,
+    })
+    const wrapper = await mountView('SELECT\n  bad')
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+
+    expect(monaco.editor.setModelMarkers).toHaveBeenLastCalledWith(model, 'sql-explorer', [
+      expect.objectContaining({ startLineNumber: 2, startColumn: 3, message: 'no column bad' }),
+    ])
+    const goto = wrapper.find('[data-test="query-error-goto"]')
+    expect(goto.text()).toBe('Go to line 2')
+    await goto.trigger('click')
+    expect(setPosition).toHaveBeenCalledWith({ lineNumber: 2, column: 3 })
+    expect(revealLineInCenter).toHaveBeenCalledWith(2)
+
+    // The first edit removes the place, so a later remount shows no mark.
+    changed()
+    await settle()
+    expect(useQueryStore().stateFor('t1').errorLocation).toBeNull()
+    expect(wrapper.find('[data-test="query-error-goto"]').exists()).toBe(false)
+
+    // A plan failure names a line of the text with the plan keyword in
+    // front, so it gives no place in the editor.
+    apiStub.explainQuery.mockRejectedValue({
+      category: 'database',
+      message: 'bad plan',
+      detail: null,
+      line: 1,
+      column: 9,
+    })
+    wrapper.vm.readPlan('estimated' as never)
+    await settle()
+    expect(apiStub.explainQuery).toHaveBeenCalled()
+    expect(useQueryStore().stateFor('t1').error?.message).toBe('bad plan')
+    expect(wrapper.find('[data-test="query-error-goto"]').exists()).toBe(false)
+  })
+
+  it('disables the run buttons while a statement runs and reports a stop', async () => {
+    let release: (value: unknown) => void = () => {}
+    apiStub.executeQuery.mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve
+      }),
+    )
+    apiStub.cancelQuery.mockReturnValue(new Promise(() => {}))
+    const wrapper = await mountView()
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+
+    expect(wrapper.find('[data-test="run-button"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-test="run-all-button"]').attributes('disabled')).toBeDefined()
+
+    await wrapper.find('[data-test="cancel-button"]').trigger('click')
+    await settle()
+    const stop = wrapper.find('[data-test="cancel-button"]')
+    expect(stop.text()).toBe('Stopping…')
+    expect(stop.attributes('disabled')).toBeDefined()
+
+    release(response)
+    await settle()
+  })
+
   it('offers a Stop button only while a statement runs', async () => {
     let release: (value: unknown) => void = () => {}
     apiStub.executeQuery.mockReturnValue(
@@ -761,6 +913,7 @@ describe('QueryView', () => {
           savedQueryId: null,
           params: [],
           filePath: null,
+          encoding: 'utf8' as const,
         },
       },
     })
@@ -784,6 +937,7 @@ describe('QueryView', () => {
         savedQueryId: null,
         params: [],
         filePath: null,
+        encoding: 'utf8' as const,
       },
     ]
     await wrapper.findComponent({ name: 'SqlEditor' }).vm.$emit('update:modelValue', 'SELECT 2')
@@ -803,6 +957,7 @@ describe('QueryView', () => {
         savedQueryId: null,
         params: [],
         filePath: null,
+        encoding: 'utf8' as const,
       },
     ]
     await wrapper.findComponent({ name: 'VSelect' }).vm.$emit('update:modelValue', 'c2')
@@ -823,6 +978,7 @@ describe('QueryView', () => {
         savedQueryId: null,
         params: [],
         filePath: null,
+        encoding: 'utf8' as const,
       },
     ]
     useQueryStore().stateFor('t1').running = true
@@ -905,6 +1061,18 @@ describe('QueryView', () => {
     expect(useUiStore().notices.some((notice) => notice.level === 'error')).toBe(true)
   })
 
+  it('warns when the rows did not reach the clipboard', async () => {
+    apiStub.executeQuery.mockImplementation(streamed(response))
+    const wrapper = await mountView()
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+
+    await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('copy-failed', 'denied')
+    const notice = lastNotice()
+    expect(notice?.message).toBe("Couldn't copy to the clipboard.")
+    expect(notice?.detail).toBe('denied')
+  })
+
   it('notes that the rows reached the clipboard', async () => {
     apiStub.executeQuery.mockImplementation(streamed(response))
     const wrapper = await mountView()
@@ -930,6 +1098,7 @@ describe('QueryView', () => {
         savedQueryId: null,
         params: [],
         filePath: null,
+        encoding: 'utf8' as const,
       },
     ]
 
@@ -966,7 +1135,7 @@ describe('QueryView', () => {
   })
 
   it('writes the statement back to the file that the tab came from', async () => {
-    apiStub.writeTextFile.mockResolvedValue(undefined)
+    apiStub.writeTextFile.mockResolvedValue('utf8')
     const wrapper = await mountView('SELECT 1', '/data/report.sql')
     const tabs = useTabsStore()
     tabs.tabs = [
@@ -979,13 +1148,14 @@ describe('QueryView', () => {
         savedQueryId: null,
         params: [],
         filePath: '/data/report.sql',
+        encoding: 'utf8' as const,
       },
     ]
 
     await wrapper.find('[data-test="save-file-button"]').trigger('click')
     await settle()
 
-    expect(apiStub.writeTextFile).toHaveBeenCalledWith('/data/report.sql', 'SELECT 1')
+    expect(apiStub.writeTextFile).toHaveBeenCalledWith('/data/report.sql', 'SELECT 1', 'utf8')
     expect(apiStub.saveStatementFile).not.toHaveBeenCalled()
     expect(tabs.tabs[0]?.dirty).toBe(false)
     expect(useUiStore().notices.some((notice) => notice.level === 'success')).toBe(true)
@@ -1010,6 +1180,7 @@ describe('QueryView', () => {
         savedQueryId: null,
         params: [],
         filePath: '/data/report.sql',
+        encoding: 'utf8' as const,
       },
     ]
 
@@ -1018,14 +1189,14 @@ describe('QueryView', () => {
     finish()
     await settle()
 
-    expect(apiStub.writeTextFile).toHaveBeenCalledWith('/data/report.sql', 'SELECT 1')
+    expect(apiStub.writeTextFile).toHaveBeenCalledWith('/data/report.sql', 'SELECT 1', 'utf8')
     expect(tabs.tabs[0]?.dirty).toBe(true)
     tabs.setQuery('t1', 'SELECT 1')
     expect(tabs.tabs[0]?.dirty).toBe(false)
   })
 
   it('asks for a path when the tab holds no file, and keeps that path', async () => {
-    apiStub.saveStatementFile.mockResolvedValue('/data/daily.sql')
+    apiStub.saveStatementFile.mockResolvedValue({ path: '/data/daily.sql', encoding: 'utf8' })
     apiStub.listFolder.mockResolvedValue([])
     const wrapper = await mountView()
     const tabs = useTabsStore()
@@ -1039,6 +1210,7 @@ describe('QueryView', () => {
         savedQueryId: null,
         params: [],
         filePath: null,
+        encoding: 'windows1252' as const,
       },
     ]
     apiStub.fileRoots.mockResolvedValue(['/data'])
@@ -1052,10 +1224,12 @@ describe('QueryView', () => {
       defaultFolder: '/data',
       contents: 'SELECT 1',
     })
+    // The new file is UTF-8, so the next save writes UTF-8.
     expect(tabs.tabs[0]).toMatchObject({
       filePath: '/data/daily.sql',
       title: 'daily.sql',
       dirty: false,
+      encoding: 'utf8',
     })
   })
 
@@ -1073,8 +1247,10 @@ describe('QueryView', () => {
         savedQueryId: null,
         params: [],
         filePath: null,
+        encoding: 'utf8' as const,
       },
     ]
+    await wrapper.setProps({ tab: tabs.tabs[0] })
 
     await wrapper.find('[data-test="save-file-button"]').trigger('click')
     await settle()
@@ -1097,7 +1273,7 @@ describe('QueryView', () => {
     expect(useUiStore().notices.some((notice) => notice.level === 'error')).toBe(true)
 
     // The button works again once the first write ends.
-    apiStub.writeTextFile.mockResolvedValue(undefined)
+    apiStub.writeTextFile.mockResolvedValue('utf8')
     await wrapper.find('[data-test="save-file-button"]').trigger('click')
     await settle()
     expect(apiStub.writeTextFile).toHaveBeenCalledTimes(2)
@@ -1185,12 +1361,12 @@ describe('QueryView', () => {
   })
 
   it('writes the file when a command of the shell asks', async () => {
-    apiStub.writeTextFile.mockResolvedValue(undefined)
+    apiStub.writeTextFile.mockResolvedValue('utf8')
     await mountView('SELECT 1', '/data/report.sql')
 
     tabActions('t1')?.save()
     await settle()
-    expect(apiStub.writeTextFile).toHaveBeenCalledWith('/data/report.sql', 'SELECT 1')
+    expect(apiStub.writeTextFile).toHaveBeenCalledWith('/data/report.sql', 'SELECT 1', 'utf8')
   })
 
   it('forgets its actions when the tab goes away', async () => {
@@ -1234,6 +1410,7 @@ describe('QueryView', () => {
           savedQueryId: null,
           params: [],
           filePath: null,
+          encoding: 'utf8' as const,
         },
       },
     })
@@ -1313,6 +1490,7 @@ describe('QueryView details', () => {
           savedQueryId: 's1',
           params: [],
           filePath: null,
+          encoding: 'utf8' as const,
         },
       },
     })
@@ -1344,6 +1522,7 @@ describe('QueryView details', () => {
           savedQueryId: null,
           params: [],
           filePath: null,
+          encoding: 'utf8' as const,
         },
       },
     })
@@ -1363,6 +1542,7 @@ describe('QueryView details', () => {
           savedQueryId: null,
           params: [],
           filePath: null,
+          encoding: 'utf8' as const,
         },
       },
     })
@@ -1438,6 +1618,74 @@ describe('QueryView edge paths', () => {
       expect.objectContaining({ query: 'SELECT 99' }),
       expect.anything(),
     )
+  })
+
+  it('records the saved query on the tab and keeps the name of a file tab', async () => {
+    apiStub.saveQuery.mockResolvedValue(undefined)
+    apiStub.getSavedQueries.mockResolvedValue([])
+    const wrapper = await mountView('SELECT 1', '/data/report.sql')
+    const tabs = useTabsStore()
+    tabs.tabs = [
+      {
+        id: 't1',
+        title: 'report.sql',
+        query: 'SELECT 1',
+        connectionId: 'c1',
+        dirty: true,
+        savedQueryId: null,
+        params: [],
+        filePath: '/data/report.sql',
+        encoding: 'utf8',
+      },
+    ]
+    await wrapper.setProps({ tab: tabs.tabs[0] })
+
+    await wrapper.find('[data-test="save-query-button"]').trigger('click')
+    await settle()
+    const name = document.querySelector('[data-test="save-query-name"] input') as HTMLInputElement
+    name.value = 'Daily'
+    name.dispatchEvent(new Event('input'))
+    await settle()
+    const confirm = document.querySelector('[data-test="save-query-confirm"]') as HTMLElement
+    confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+
+    const saved = vi.mocked(apiStub.saveQuery).mock.calls[0]![0]
+    expect(tabs.tabs[0]?.savedQueryId).toBe(saved.id)
+    expect(tabs.tabs[0]?.title).toBe('report.sql')
+    expect(tabs.tabs[0]?.dirty).toBe(true)
+  })
+
+  it('records the encoding the backend used and says when it changed', async () => {
+    apiStub.writeTextFile.mockResolvedValue('utf8bom')
+    const wrapper = await mountView('SELECT 1', '/data/old.sql', 'windows1252')
+    const tabs = useTabsStore()
+    tabs.tabs = [
+      {
+        id: 't1',
+        title: 'old.sql',
+        query: 'SELECT 1',
+        connectionId: 'c1',
+        dirty: true,
+        savedQueryId: null,
+        params: [],
+        filePath: '/data/old.sql',
+        encoding: 'windows1252',
+      },
+    ]
+    await wrapper.setProps({ tab: tabs.tabs[0] })
+
+    await wrapper.find('[data-test="save-file-button"]').trigger('click')
+    await settle()
+    expect(apiStub.writeTextFile).toHaveBeenCalledWith('/data/old.sql', 'SELECT 1', 'windows1252')
+    expect(tabs.tabs[0]?.encoding).toBe('utf8bom')
+    expect(lastNotice()?.message).toContain("Windows-1252 can't store")
+
+    // The same encoding back changes nothing on the tab.
+    apiStub.writeTextFile.mockResolvedValue('utf8bom')
+    await wrapper.find('[data-test="save-file-button"]').trigger('click')
+    await settle()
+    expect(lastNotice()?.message).toBe('Saved old.sql.')
   })
 
   it('saves again under the identifier the tab came from', async () => {
@@ -1777,8 +2025,35 @@ describe('QueryView edge paths', () => {
     )
   })
 
+  it('names a placeholder table when the user gives no table name', async () => {
+    apiStub.saveTextFile.mockResolvedValue('/tmp/out.sql')
+    const wrapper = await mountedWithResult()
+
+    await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export', 'insert', exported())
+    await settle()
+    const field = document.querySelector(
+      '[data-test="insert-table-name"] input',
+    ) as HTMLInputElement
+    field.value = '   '
+    field.dispatchEvent(new Event('input'))
+    await settle()
+    ;(document.querySelector('[data-test="insert-table-confirm"]') as HTMLElement).click()
+    await settle()
+
+    expect(apiStub.saveTextFile).toHaveBeenCalledWith(
+      expect.objectContaining({ contents: expect.stringContaining('the_table') }),
+    )
+  })
+
   it('asks the backend to write every row of a result that was cut', async () => {
-    apiStub.exportQuery.mockResolvedValue({ rows: 40000, truncated: false, path: '/tmp/all.csv' })
+    apiStub.exportQuery.mockResolvedValue({
+      rows: 40000,
+      truncated: false,
+      path: '/tmp/all.csv',
+      sheetFull: false,
+      cutCells: 0,
+      warning: null,
+    })
     const wrapper = await mountedWithResult()
 
     await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export-all', 'csv')
@@ -1798,7 +2073,14 @@ describe('QueryView edge paths', () => {
   })
 
   it('asks the backend for an Excel file of every row', async () => {
-    apiStub.exportQuery.mockResolvedValue({ rows: 40000, truncated: false, path: '/tmp/all.xlsx' })
+    apiStub.exportQuery.mockResolvedValue({
+      rows: 40000,
+      truncated: false,
+      path: '/tmp/all.xlsx',
+      sheetFull: false,
+      cutCells: 0,
+      warning: null,
+    })
     const wrapper = await mountedWithResult()
 
     await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export-all', 'xlsx')
@@ -1813,12 +2095,129 @@ describe('QueryView edge paths', () => {
   })
 
   it('warns when the export limit stopped the read as well', async () => {
-    apiStub.exportQuery.mockResolvedValue({ rows: 1000000, truncated: true, path: '/tmp/all.json' })
+    apiStub.exportQuery.mockResolvedValue({
+      rows: 1000000,
+      truncated: true,
+      path: '/tmp/all.json',
+      sheetFull: false,
+      cutCells: 0,
+      warning: null,
+    })
     const wrapper = await mountedWithResult()
 
     await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export-all', 'json')
     await settle()
     expect(useUiStore().notices.some((notice) => notice.level === 'warning')).toBe(true)
+  })
+
+  it('says when an Excel sheet was full', async () => {
+    apiStub.exportQuery.mockResolvedValue({
+      rows: 1048575,
+      truncated: true,
+      path: '/tmp/all.xlsx',
+      sheetFull: true,
+      cutCells: 0,
+      warning: null,
+    })
+    const wrapper = await mountedWithResult()
+    await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export-all', 'xlsx')
+    await settle()
+    const notice = lastNotice()
+    expect(notice?.message).toContain('an Excel sheet has no room for more rows')
+    expect(notice?.detail).toBe('Export to CSV to get every row.')
+  })
+
+  it('passes on a warning of the backend about the content of the file', async () => {
+    const warning =
+      '2 cells had more than 32,767 characters, the Excel limit for one cell, so their text was cut.'
+    apiStub.exportQuery.mockResolvedValue({
+      rows: 10,
+      truncated: false,
+      path: '/tmp/all.xlsx',
+      sheetFull: false,
+      cutCells: 2,
+      warning,
+    })
+    const wrapper = await mountedWithResult()
+    await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export-all', 'xlsx')
+    await settle()
+
+    const notices = useUiStore().notices
+    expect(notices.some((notice) => notice.message === 'Exported 10 rows to /tmp/all.xlsx.')).toBe(
+      true,
+    )
+    expect(lastNotice()?.level).toBe('warning')
+    expect(lastNotice()?.message).toBe(warning)
+  })
+
+  it('shows a running export of all rows and stops it', async () => {
+    let fail: (error: unknown) => void = () => {}
+    apiStub.exportQuery.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        fail = reject
+      }),
+    )
+    let answer: (value: unknown) => void = () => {}
+    apiStub.cancelQuery.mockReturnValue(
+      new Promise((resolve) => {
+        answer = resolve
+      }),
+    )
+    const wrapper = await mountedWithResult()
+    await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export-all', 'csv')
+    await settle()
+    // The store of the tab keeps the export, so a view that mounts again
+    // sees it.
+    expect(useQueryStore().stateFor('t1').exporting?.connectionId).toBe('c1')
+    expect(wrapper.find('[data-test="export-all-busy"]').exists()).toBe(true)
+    expect(wrapper.findComponent({ name: 'ResultsGrid' }).props('exporting')).toBe(true)
+    const pane = useQueryStore().stateFor('t1').panes[0]!
+    await (
+      wrapper.vm as unknown as { onExportAll: (p: ResultPane, f: 'json') => Promise<void> }
+    ).onExportAll(pane, 'json')
+    await settle()
+    // A second request waits for the first one.
+    expect(apiStub.exportQuery).toHaveBeenCalledTimes(1)
+    expect(lastNotice()?.message).toBe('An export is already running in this tab.')
+
+    await wrapper.find('[data-test="export-all-stop"]').trigger('click')
+    await settle()
+    const requestId = vi.mocked(apiStub.exportQuery).mock.calls[0]![0].requestId
+    expect(apiStub.cancelQuery).toHaveBeenCalledWith('c1', requestId)
+    expect(wrapper.find('[data-test="export-all-stop"]').text()).toBe('Stopping…')
+
+    // A stop while the save dialog is open finds no request. The backend
+    // answers without an error, and the button works again.
+    answer(undefined)
+    await settle()
+    expect(wrapper.find('[data-test="export-all-stop"]').text()).toBe('Stop')
+    expect(useUiStore().notices.some((notice) => notice.level === 'error')).toBe(false)
+
+    fail({ category: 'cancelled', message: 'stopped', detail: null })
+    await settle()
+    expect(wrapper.find('[data-test="export-all-busy"]').exists()).toBe(false)
+    expect(lastNotice()?.message).toBe('Export stopped.')
+  })
+
+  it('reports a stop of an export that the backend refused', async () => {
+    let finish: (value: unknown) => void = () => {}
+    apiStub.exportQuery.mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve
+      }),
+    )
+    apiStub.cancelQuery.mockRejectedValue({ category: 'internal', message: 'no', detail: null })
+    const wrapper = await mountedWithResult()
+    await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export-all', 'csv')
+    await settle()
+    await wrapper.find('[data-test="export-all-stop"]').trigger('click')
+    await settle()
+    expect(lastNotice()?.level).toBe('error')
+    expect(wrapper.find('[data-test="export-all-stop"]').text()).toBe('Stop')
+
+    finish(null)
+    await settle()
+    expect(wrapper.find('[data-test="export-all-busy"]').exists()).toBe(false)
   })
 
   it('writes no whole export for a plan', async () => {
@@ -1855,7 +2254,14 @@ describe('QueryView edge paths', () => {
   })
 
   it('writes every row of a kept result with its own statement and connection', async () => {
-    apiStub.exportQuery.mockResolvedValue({ rows: 1, truncated: false, path: '/tmp/all.csv' })
+    apiStub.exportQuery.mockResolvedValue({
+      rows: 1,
+      truncated: false,
+      path: '/tmp/all.csv',
+      sheetFull: false,
+      cutCells: 0,
+      warning: null,
+    })
     const wrapper = await mountedWithResult()
     await wrapper.find('[data-test="pin-result"]').trigger('click')
     await wrapper.vm.$nextTick()

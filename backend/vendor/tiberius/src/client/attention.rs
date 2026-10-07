@@ -30,6 +30,12 @@ impl AttentionHandle {
         self.waker.wake();
     }
 
+    /// True when a signal waits for the connection to send its attention
+    /// packet.
+    pub fn is_signalled(&self) -> bool {
+        self.wanted()
+    }
+
     /// Stores the waker of the task that reads from the connection, so that a
     /// later signal wakes the task.
     pub(crate) fn register(&self, waker: &Waker) {

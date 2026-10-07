@@ -5,7 +5,8 @@ import { makeApiStub, connectionFixture, streamed } from './helpers'
 const apiStub = makeApiStub()
 vi.mock('@/lib/api', () => ({ api: apiStub, CONNECTION_STATUS_EVENT: 'connection-status' }))
 
-const { newQueryState, runRowLimit, totalRows, useQueryStore } = await import('@/stores/query')
+const { editorPosition, newQueryState, runRowLimit, totalRows, useQueryStore } =
+  await import('@/stores/query')
 const { ResultTable } = await import('@/lib/results')
 const { useConnectionsStore } = await import('@/stores/connections')
 const { useHistoryStore } = await import('@/stores/history')
@@ -42,6 +43,9 @@ describe('newQueryState', () => {
   it('starts at rest', () => {
     expect(newQueryState()).toEqual({
       running: false,
+      failed: false,
+      stopping: false,
+      errorLocation: null,
       requestId: null,
       requestConnectionId: null,
       error: null,
@@ -53,6 +57,25 @@ describe('newQueryState', () => {
       activePaneId: null,
       lastRunAt: null,
       stats: null,
+      exporting: null,
+    })
+  })
+})
+
+describe('editorPosition', () => {
+  it('adds the start of the sent text to a place inside it', () => {
+    const start = { line: 4, column: 3 }
+    expect(editorPosition('SELECT x', start, 1, 8)).toEqual({ line: 4, column: 10 })
+    expect(editorPosition('SELECT 1;\nSELECT x', start, 2, 8)).toEqual({ line: 5, column: 8 })
+  })
+
+  it('counts the blank text that the store trims away', () => {
+    const start = { line: 4, column: 3 }
+    expect(editorPosition('  SELECT x', start, 1, 8)).toEqual({ line: 4, column: 12 })
+    expect(editorPosition('\n\n  SELECT x', start, 1, 8)).toEqual({ line: 6, column: 10 })
+    expect(editorPosition('\n SELECT 1;\nSELECT x', start, 2, 8)).toEqual({
+      line: 6,
+      column: 8,
     })
   })
 })
@@ -170,6 +193,27 @@ describe('query store', () => {
         error: 'The statement was stopped.',
       }),
     )
+  })
+
+  it('keeps the view and sets no failed mark when the user stops a run', async () => {
+    const held = heldRun()
+    const queries = useQueryStore()
+    const running = queries.execute('t1', 'c1', 'SELECT 1', undefined, { line: 1, column: 1 })
+    await Promise.resolve()
+    const state = queries.stateFor('t1')
+
+    held.release({
+      category: 'cancelled',
+      message: 'The statement was stopped.',
+      detail: null,
+      line: 1,
+    })
+    expect(await running).toBe(false)
+    expect(state.failed).toBe(false)
+    // The result that the run opened last stays in view.
+    expect(state.activePaneId).toBe(state.panes[1]?.id)
+    expect(state.errorLocation).toBeNull()
+    expect(state.error?.category).toBe('cancelled')
   })
 
   it('refuses an empty statement', async () => {
@@ -333,6 +377,81 @@ describe('query store', () => {
     expect(queries.stateFor('t1').running).toBe(false)
   })
 
+  it('marks a failed run, shows the messages and gives the place in the editor', async () => {
+    apiStub.executeQuery.mockImplementation(streamed(response()))
+    const queries = useQueryStore()
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    const state = queries.stateFor('t1')
+    expect(state.activePaneId).not.toBeNull()
+
+    apiStub.executeQuery.mockRejectedValue({
+      category: 'database',
+      message: 'no such column',
+      detail: null,
+      line: 2,
+      column: 5,
+    })
+    await queries.execute('t1', 'c1', 'SELECT 1,\n    bad', undefined, { line: 10, column: 1 })
+    expect(state.failed).toBe(true)
+    expect(state.activePaneId).toBeNull()
+    expect(state.errorLocation).toEqual({ line: 11, column: 5 })
+
+    // A failure with a line and no column points at the start of the line.
+    const lineOnly = { category: 'database', message: 'bad', detail: null, line: 1 }
+    apiStub.executeQuery.mockRejectedValue(lineOnly)
+    await queries.execute('t1', 'c1', 'SELECT bad', undefined, { line: 3, column: 7 })
+    expect(state.errorLocation).toEqual({ line: 3, column: 7 })
+
+    // A plan failure gives no place, because the backend counts in the text
+    // with the plan keyword in front.
+    apiStub.explainQuery.mockRejectedValue(lineOnly)
+    await queries.explain('t1', 'c1', 'SELECT bad', 'estimated')
+    expect(state.failed).toBe(true)
+    expect(state.errorLocation).toBeNull()
+
+    // An edit in the editor removes the place, and a tab without state is
+    // left alone.
+    await queries.execute('t1', 'c1', 'SELECT bad', undefined, { line: 3, column: 7 })
+    queries.clearErrorLocation('t1')
+    expect(state.errorLocation).toBeNull()
+    queries.clearErrorLocation('missing')
+    expect(queries.peekState('missing')).toBeUndefined()
+
+    // A failure with no line, or a run with no start, gives no place.
+    await queries.execute('t1', 'c1', 'SELECT bad')
+    expect(state.errorLocation).toBeNull()
+    apiStub.executeQuery.mockRejectedValue({ category: 'database', message: 'x', detail: null })
+    await queries.execute('t1', 'c1', 'SELECT bad', undefined, { line: 1, column: 1 })
+    expect(state.errorLocation).toBeNull()
+
+    // The next run clears the mark of the failure.
+    apiStub.executeQuery.mockImplementation(streamed(response()))
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    expect(state.failed).toBe(false)
+  })
+
+  it('adds each message as it streams, then the messages of the end', async () => {
+    apiStub.executeQuery.mockImplementation(
+      async (_request: unknown, handlers: import('@/lib/results').ResultStreamHandlers) => {
+        handlers.onMessage?.({ level: 'info', text: 'first', detail: null })
+        expect(
+          useQueryStore()
+            .stateFor('t1')
+            .messages.map((m) => m.text),
+        ).toEqual(['first'])
+        handlers.onEnd({
+          messages: [{ level: 'info', text: 'last', detail: null }],
+          rowsAffected: null,
+          elapsedMs: 1,
+          stats: null,
+        })
+      },
+    )
+    const queries = useQueryStore()
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    expect(queries.stateFor('t1').messages.map((m) => m.text)).toEqual(['first', 'last'])
+  })
+
   it('reports a length of time even when the start is no longer known', async () => {
     apiStub.executeQuery.mockImplementation(async () => {
       useQueryStore().stateFor('t1').startedAt = null
@@ -423,8 +542,13 @@ describe('query store', () => {
 
     await queries.cancel('t1')
     expect(apiStub.cancelQuery).toHaveBeenCalledWith('c1', requestId)
+    expect(queries.stateFor('t1').stopping).toBe(true)
+    // A second press of Stop sends nothing more.
+    await queries.cancel('t1')
+    expect(apiStub.cancelQuery).toHaveBeenCalledTimes(1)
     release(undefined)
     await running
+    expect(queries.stateFor('t1').stopping).toBe(false)
   })
 
   it('keeps with each result the statement, the values and the connection of its run', async () => {
@@ -483,7 +607,10 @@ describe('query store', () => {
     const queries = useQueryStore()
     const running = queries.execute('t1', 'c1', 'SELECT 1')
     await queries.cancel('t1')
-    expect(useUiStore().notices.some((notice) => notice.level === 'warning')).toBe(true)
+    const notice = useUiStore().notices.find((item) => item.level === 'warning')
+    expect(notice?.message).toBe("Couldn't stop the statement. It may still be running.")
+    expect(notice?.detail).toBe('the server refused')
+    expect(queries.stateFor('t1').stopping).toBe(false)
     release(undefined)
     await running
   })

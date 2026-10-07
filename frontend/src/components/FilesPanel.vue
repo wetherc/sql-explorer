@@ -2,6 +2,18 @@
   <div class="files-panel">
     <PanelHeader>
       <template #actions>
+        <v-tooltip v-if="files.hasRoots" location="bottom" text="Refresh">
+          <template #activator="{ props: tip }">
+            <v-btn
+              v-bind="tip"
+              icon="mdi-refresh"
+              size="small"
+              aria-label="Refresh files"
+              data-test="files-refresh"
+              @click="refreshAll"
+            />
+          </template>
+        </v-tooltip>
         <v-tooltip location="bottom" text="Open a folder">
           <template #activator="{ props: tip }">
             <v-btn
@@ -21,61 +33,96 @@
 
     <div class="files-body">
       <div v-if="files.hasRoots" class="files-tree" role="tree" aria-label="Files">
-        <div
-          v-for="(row, index) of files.rows"
-          :key="row.path"
-          :ref="(element) => keepRow(row.path, element)"
-          class="file-row"
-          :style="{ paddingLeft: rowIndent(row.depth) }"
-          role="treeitem"
-          :aria-level="row.depth + 1"
-          :aria-expanded="row.entryType === 'folder' ? files.openPaths.has(row.path) : undefined"
-          :tabindex="row.path === tabStop ? 0 : -1"
-          :aria-keyshortcuts="row.depth === 0 ? 'Delete' : undefined"
-          data-test="file-row"
-          @click="activate(row)"
-          @focus="activePath = row.path"
-          @keydown="onKeydown($event, row, index)"
-        >
-          <v-icon
-            v-if="row.entryType === 'folder'"
-            size="x-small"
-            class="chevron"
-            aria-hidden="true"
-            data-test="file-chevron"
+        <template v-for="(row, index) of files.rows" :key="row.path">
+          <div
+            :ref="(element) => keepRow(row.path, element)"
+            class="file-row"
+            :style="{ paddingLeft: rowIndent(row.depth) }"
+            role="treeitem"
+            :aria-level="row.depth + 1"
+            :aria-expanded="row.entryType === 'folder' ? files.openPaths.has(row.path) : undefined"
+            :tabindex="row.path === tabStop ? 0 : -1"
+            :aria-keyshortcuts="row.depth === 0 ? 'Delete' : undefined"
+            data-test="file-row"
+            @click="activate(row)"
+            @focus="activePath = row.path"
+            @keydown="onKeydown($event, row, index)"
           >
-            {{ files.openPaths.has(row.path) ? 'mdi-chevron-down' : 'mdi-chevron-right' }}
-          </v-icon>
-          <span v-else class="chevron-space"></span>
+            <v-icon
+              v-if="row.entryType === 'folder'"
+              size="x-small"
+              class="chevron"
+              aria-hidden="true"
+              data-test="file-chevron"
+            >
+              {{ files.openPaths.has(row.path) ? 'mdi-chevron-down' : 'mdi-chevron-right' }}
+            </v-icon>
+            <span v-else class="chevron-space"></span>
 
-          <v-progress-circular
-            v-if="row.loading"
-            indeterminate
-            size="12"
-            width="2"
-            class="mr-2"
-            data-test="file-loading"
-          />
-          <v-icon v-else size="small" class="mr-2 file-icon" aria-hidden="true">
-            {{ row.entryType === 'folder' ? 'mdi-folder-outline' : 'mdi-file-document-outline' }}
-          </v-icon>
+            <v-progress-circular
+              v-if="row.loading"
+              indeterminate
+              size="12"
+              width="2"
+              class="mr-2"
+              data-test="file-loading"
+            />
+            <v-icon v-else size="small" class="mr-2 file-icon" aria-hidden="true">
+              {{ row.entryType === 'folder' ? 'mdi-folder-outline' : 'mdi-file-document-outline' }}
+            </v-icon>
 
-          <span class="file-label">{{ row.name }}</span>
+            <span class="file-label">{{ row.name }}</span>
 
-          <!-- A root can be taken out of the panel again. The mark answers
+            <!-- A root can be taken out of the panel again. The mark answers
                the mouse alone, because the row itself is the control that a
                key reaches. -->
-          <v-icon
-            v-if="row.depth === 0"
-            size="x-small"
-            class="ml-2 close-mark"
-            aria-hidden="true"
-            data-test="close-root"
-            @click.stop="files.closeRoot(row.path)"
+            <v-icon
+              v-if="row.depth === 0"
+              size="x-small"
+              class="ml-2 close-mark"
+              aria-hidden="true"
+              data-test="close-root"
+              @click.stop="files.closeRoot(row.path)"
+            >
+              mdi-close
+            </v-icon>
+          </div>
+
+          <!-- An open folder whose read failed or that has no entries says so
+             in the place of its children. -->
+          <div
+            v-if="noteOf(row) === 'error'"
+            class="file-note error-note"
+            :style="{ paddingLeft: noteIndent(row.depth) }"
+            role="treeitem"
+            :aria-level="row.depth + 2"
+            aria-disabled="true"
+            tabindex="-1"
+            data-test="file-error"
           >
-            mdi-close
-          </v-icon>
-        </div>
+            <span :title="row.error ?? undefined">Couldn't read the folder: {{ row.error }}</span>
+            <v-btn
+              size="x-small"
+              variant="text"
+              color="primary"
+              text="Retry"
+              data-test="file-retry"
+              @click.stop="files.refresh(row.path)"
+            />
+          </div>
+          <div
+            v-else-if="noteOf(row) === 'empty'"
+            class="file-note"
+            :style="{ paddingLeft: noteIndent(row.depth) }"
+            role="treeitem"
+            :aria-level="row.depth + 2"
+            aria-disabled="true"
+            tabindex="-1"
+            data-test="file-empty"
+          >
+            Empty folder
+          </div>
+        </template>
       </div>
 
       <EmptyState
@@ -108,11 +155,49 @@ import { useFilesStore, type FileNode } from '@/stores/files'
 const INDENT_STEP = 12
 /** The indent the first level starts at. */
 const BASE_INDENT = 8
+/** The room of the chevron and the icon before a label. */
+const NOTE_OFFSET = 34
 
 const files = useFilesStore()
 
 function rowIndent(depth: number): string {
   return `${BASE_INDENT + depth * INDENT_STEP}px`
+}
+
+/** The indent of the note under a folder, which lines up with a child label. */
+function noteIndent(depth: number): string {
+  return `${BASE_INDENT + (depth + 1) * INDENT_STEP + NOTE_OFFSET}px`
+}
+
+/** The note that an open folder shows in the place of its children, if any. */
+function noteOf(row: FileNode): 'error' | 'empty' | null {
+  if (row.entryType !== 'folder' || !files.openPaths.has(row.path) || row.loading) {
+    return null
+  }
+  if (row.error) {
+    return 'error'
+  }
+  return row.loaded && (row.children ?? []).length === 0 ? 'empty' : null
+}
+
+/** Reads each folder of the panel again, with the folders open below it. */
+async function refreshAll(): Promise<void> {
+  for (const root of [...files.roots]) {
+    await files.refresh(root.path)
+  }
+}
+
+/**
+ * Takes a root out of the panel and gives the focus to the root after it,
+ * or to the root before it for the last one. The focus would otherwise fall
+ * to the page body when its row goes.
+ */
+function closeRootFromKey(path: string): void {
+  const roots = files.rows.filter((candidate) => candidate.depth === 0)
+  const at = roots.findIndex((candidate) => candidate.path === path)
+  const next = roots[at + 1] ?? roots[at - 1]
+  files.closeRoot(path)
+  focusRow(next?.path)
 }
 
 /** A folder opens and closes. A file opens in a tab. */
@@ -213,7 +298,7 @@ function onKeydown(event: KeyboardEvent, row: FileNode, index: number): void {
       break
     case 'Delete':
       if (row.depth === 0) {
-        files.closeRoot(row.path)
+        closeRootFromKey(row.path)
       }
       break
     default:
@@ -276,6 +361,22 @@ function onKeydown(event: KeyboardEvent, row: FileNode, index: number): void {
 
 .file-label {
   white-space: nowrap;
+}
+
+.file-note {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px 3px 0;
+  font-size: var(--app-text-sm);
+  font-style: italic;
+  color: rgb(var(--v-theme-on-surface-variant));
+  white-space: nowrap;
+}
+
+.file-note.error-note {
+  font-style: normal;
+  color: rgb(var(--v-theme-error));
 }
 
 .close-mark {

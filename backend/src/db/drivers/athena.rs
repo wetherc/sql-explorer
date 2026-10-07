@@ -5,8 +5,8 @@
 //! The metadata comes from the data catalog through the same service.
 
 use crate::db::drivers::{
-    add_snapshot_column, f64_to_json, prefixed_plan, relation_type, rows_affected_message,
-    rows_returned_message, CancelHandle, DatabaseDriver,
+    add_snapshot_column, f64_to_json, finish_set, prefixed_plan, relation_type,
+    rows_affected_message, CancelHandle, DatabaseDriver,
 };
 use crate::db::sink::{BufferSink, RowSink, RunSummary, SinkControl};
 use crate::db::{
@@ -74,14 +74,18 @@ fn run_state(running: &Running) -> MutexGuard<'_, RunState> {
 }
 
 /// Marks the end of a run when it is dropped, also when the caller drops the
-/// run before it ends.
+/// run before it ends. A caller that drops the run during the wait for a
+/// statement, as at the time limit of the command or when the user leaves the
+/// run, leaves the statement in the service. The guard then asks the service
+/// to stop that statement, so it does not go on to scan data and cost money.
 struct RunGuard {
     running: Running,
     run: u64,
+    client: Client,
 }
 
 impl RunGuard {
-    fn begin(running: &Running) -> Self {
+    fn begin(running: &Running, client: &Client) -> Self {
         let mut state = run_state(running);
         state.run += 1;
         state.active = true;
@@ -90,6 +94,7 @@ impl RunGuard {
         RunGuard {
             running: running.clone(),
             run: state.run,
+            client: client.clone(),
         }
     }
 }
@@ -97,10 +102,23 @@ impl RunGuard {
 impl Drop for RunGuard {
     fn drop(&mut self) {
         let mut state = run_state(&self.running);
-        if state.run == self.run {
-            state.active = false;
-            state.execution_id = None;
+        if state.run != self.run {
+            return;
         }
+        state.active = false;
+        let Some(execution_id) = state.execution_id.take() else {
+            return;
+        };
+        drop(state);
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let client = self.client.clone();
+        runtime.spawn(async move {
+            if let Err(error) = stop_execution(&client, &execution_id).await {
+                log::warn!("The statement of a dropped run could not be stopped: {error}");
+            }
+        });
     }
 }
 
@@ -178,21 +196,62 @@ fn quote_literal(value: &str) -> String {
     Dialect::Athena.quote_literal(value)
 }
 
+/// Builds the snapshot of one database from the rows of the catalog
+/// statement. Each row contains the relation, its type, the column and the type
+/// of the column.
+fn snapshot_of(database: &str, set: Option<ResultSet>, max_columns: usize) -> SchemaSnapshot {
+    // The read of the catalog stops at its row limit, and the columns past
+    // that limit are then missing from the snapshot.
+    let truncated = set.as_ref().is_some_and(|set| set.truncated);
+    let rows = set.map(|set| set.rows).unwrap_or_default();
+    let mut snapshot = SchemaSnapshot {
+        database: database.to_string(),
+        complete: !truncated,
+        ..SchemaSnapshot::default()
+    };
+    for row in &rows {
+        let Some(relation) = cell_text(row, 0) else {
+            continue;
+        };
+        if !add_snapshot_column(
+            &mut snapshot,
+            max_columns,
+            None,
+            relation,
+            relation_type(&cell_text(row, 1).unwrap_or_default()),
+            SnapshotColumn {
+                name: cell_text(row, 2).unwrap_or_default(),
+                data_type: cell_text(row, 3).unwrap_or_else(|| "unknown".to_string()),
+            },
+        ) {
+            break;
+        }
+    }
+    snapshot
+}
+
 /// Builds the statement that reads the CREATE text of one object. Athena
 /// answers `SHOW CREATE` with one line of the text in each row of the first
 /// column.
+///
+/// `SHOW CREATE TABLE` is a Hive DDL statement, and Hive DDL refuses a name
+/// in double quotes, so a table name goes in backticks. `SHOW CREATE VIEW`
+/// runs in the Trino engine, which takes double quotes.
 fn create_query_text(
     database: Option<&str>,
     table: &str,
     relation_type: RelationType,
 ) -> CreateQuery {
-    let name = Dialect::Athena.qualified_name(database, None, table);
-    let word = if relation_type.is_view() {
-        "VIEW"
-    } else {
-        "TABLE"
+    if relation_type.is_view() {
+        let name = Dialect::Athena.qualified_name(database, None, table);
+        return CreateQuery::new(format!("SHOW CREATE VIEW {name}"), 0);
+    }
+    let tick = |part: &str| format!("`{}`", part.replace('`', "``"));
+    let name = match database {
+        Some(database) => format!("{}.{}", tick(database), tick(table)),
+        None => tick(table),
     };
-    CreateQuery::new(format!("SHOW CREATE {word} {name}"), 0)
+    CreateQuery::new(format!("SHOW CREATE TABLE {name}"), 0)
 }
 
 /// Builds the statement that lists the partitions of a relation.
@@ -393,7 +452,7 @@ impl AthenaDriver {
         statement: &str,
         options: &ExecOptions,
     ) -> Result<(Option<ResultSet>, QueryStats)> {
-        let guard = RunGuard::begin(&self.running);
+        let guard = RunGuard::begin(&self.running, &self.client);
         let deadline = deadline_of(options.timeout_secs);
         let (execution_id, stats) = self
             .start_and_wait(statement, options, guard.run, deadline)
@@ -508,7 +567,14 @@ impl AthenaDriver {
             }
 
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                let _ = self.stop(execution_id).await;
+                if let Err(error) = self.stop(execution_id).await {
+                    // A statement that Athena did not stop goes on to scan
+                    // data, so the user needs its execution ID to stop it.
+                    return Err(Error::Athena(format!(
+                        "The statement didn't finish within {} seconds, and Athena didn't stop it. It may still be running. Its execution ID is {execution_id}. {error}",
+                        options.timeout_secs
+                    )));
+                }
                 return Err(Error::Timeout(options.timeout_secs));
             }
             tokio::time::sleep(pause_before_check(wait, deadline, Instant::now())).await;
@@ -603,13 +669,11 @@ impl AthenaDriver {
 
             for row in rows {
                 if count >= options.max_rows {
-                    sink.message(rows_returned_message(count, true));
-                    sink.end_set(true)?;
+                    finish_set(sink, count, true)?;
                     return Ok(false);
                 }
                 if sink.row(row_to_json(row, known))? == SinkControl::Stop {
-                    sink.message(rows_returned_message(count, true));
-                    sink.end_set(true)?;
+                    finish_set(sink, count, true)?;
                     return Ok(true);
                 }
                 count += 1;
@@ -622,8 +686,7 @@ impl AthenaDriver {
         }
 
         if columns.is_some() {
-            sink.message(rows_returned_message(count, false));
-            sink.end_set(false)?;
+            finish_set(sink, count, false)?;
         }
         Ok(false)
     }
@@ -733,6 +796,7 @@ impl AthenaDriver {
                     // Athena names a partition key in this column, and the
                     // explorer marks such a column as a key.
                     is_primary_key: extra.to_lowercase().contains("partition key"),
+                    is_generated: false,
                 })
             })
             .collect())
@@ -845,7 +909,7 @@ impl DatabaseDriver for AthenaDriver {
         }
 
         let started = Instant::now();
-        let guard = RunGuard::begin(&self.running);
+        let guard = RunGuard::begin(&self.running, &self.client);
         let mut total = QueryStats::default();
         let mut rows_affected: Option<u64> = None;
         for statement in split_statements(query, Dialect::Athena) {
@@ -977,6 +1041,7 @@ impl DatabaseDriver for AthenaDriver {
                 data_type: column.r#type().unwrap_or("unknown").to_string(),
                 nullable: true,
                 is_primary_key: false,
+                is_generated: false,
             })
             .collect();
 
@@ -987,6 +1052,7 @@ impl DatabaseDriver for AthenaDriver {
             data_type: column.r#type().unwrap_or("unknown").to_string(),
             nullable: false,
             is_primary_key: true,
+            is_generated: false,
         }));
 
         Ok(columns)
@@ -1000,8 +1066,8 @@ impl DatabaseDriver for AthenaDriver {
         database: &str,
         max_columns: usize,
     ) -> Result<SchemaSnapshot> {
-        let rows = self
-            .catalog_rows(&format!(
+        let set = self
+            .catalog_set(&format!(
                 "SELECT c.table_name, t.table_type, c.column_name, c.data_type \
                  FROM information_schema.columns AS c \
                  JOIN information_schema.tables AS t \
@@ -1011,30 +1077,7 @@ impl DatabaseDriver for AthenaDriver {
                 quote_literal(database)
             ))
             .await?;
-        let mut snapshot = SchemaSnapshot {
-            database: database.to_string(),
-            complete: true,
-            ..SchemaSnapshot::default()
-        };
-        for row in &rows {
-            let Some(relation) = cell_text(row, 0) else {
-                continue;
-            };
-            if !add_snapshot_column(
-                &mut snapshot,
-                max_columns,
-                None,
-                relation,
-                relation_type(&cell_text(row, 1).unwrap_or_default()),
-                SnapshotColumn {
-                    name: cell_text(row, 2).unwrap_or_default(),
-                    data_type: cell_text(row, 3).unwrap_or_else(|| "unknown".to_string()),
-                },
-            ) {
-                break;
-            }
-        }
-        Ok(snapshot)
+        Ok(snapshot_of(database, set, max_columns))
     }
 
     /// Reads the partitions from the `$partitions` relation of the table. A
@@ -1119,7 +1162,45 @@ fn describe<E: std::error::Error + 'static, R: std::fmt::Debug>(
     if names_an_expired_token(&reason) {
         return Error::Authentication(format!("{EXPIRED_TOKEN_MESSAGE} {reason}"));
     }
+    if names_an_expired_sso_session(&reason) {
+        return Error::Authentication(format!("{EXPIRED_SSO_MESSAGE} {reason}"));
+    }
+    if names_a_missing_profile(&reason) {
+        return Error::Configuration(format!("{MISSING_PROFILE_MESSAGE} {reason}"));
+    }
+    // A request that never reached the service, as when the name of the
+    // endpoint of a region does not resolve, is a fault of the connection.
+    if matches!(error, aws_sdk_athena::error::SdkError::DispatchFailure(_)) {
+        return Error::Connection(format!("{UNREACHABLE_MESSAGE} {context}: {reason}"));
+    }
     Error::Athena(format!("{context}: {reason}"))
+}
+
+const EXPIRED_SSO_MESSAGE: &str =
+    "The AWS SSO session of the profile has expired. Run `aws sso login` for the profile, then connect again.";
+
+const MISSING_PROFILE_MESSAGE: &str =
+    "The AWS profile wasn't found in the AWS config or credentials file. Check the profile name.";
+
+const UNREACHABLE_MESSAGE: &str =
+    "Couldn't reach Athena. Check the AWS region and the network connection.";
+
+/// True when the text says that the SSO session or the SSO token of a
+/// profile is too old.
+fn names_an_expired_sso_session(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("sso") && (lower.contains("expired") || lower.contains("refresh failed"))
+}
+
+/// True when the text says that the profile that the connection names does
+/// not exist.
+fn names_a_missing_profile(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("profile")
+        && (lower.contains("could not be found")
+            || lower.contains("was not defined")
+            || lower.contains("no profile named")
+            || lower.contains("profile not found"))
 }
 
 /// The words that name a session token which is too old. AWS answers with
@@ -1335,10 +1416,29 @@ mod tests {
     }
 
     #[test]
+    fn a_snapshot_cut_at_the_row_limit_of_the_catalog_is_incomplete() {
+        let mut set = ResultSet::new(vec![ColumnInfo::new("table_name", "varchar")]);
+        set.rows = vec![vec![
+            JsonValue::from("t"),
+            JsonValue::from("BASE TABLE"),
+            JsonValue::from("id"),
+            JsonValue::from("integer"),
+        ]];
+        let whole = snapshot_of("db", Some(set.clone()), 10);
+        assert!(whole.complete);
+        assert_eq!(whole.relations.len(), 1);
+        set.truncated = true;
+        assert!(!snapshot_of("db", Some(set), 10).complete);
+        assert!(snapshot_of("db", None, 10).complete);
+    }
+
+    #[test]
     fn the_create_statement_names_the_type_of_the_object() {
         let table = create_query_text(Some("db"), "t", RelationType::Table);
-        assert_eq!(table.sql, "SHOW CREATE TABLE \"db\".\"t\"");
+        assert_eq!(table.sql, "SHOW CREATE TABLE `db`.`t`");
         assert_eq!(table.column, 0);
+        let bare = create_query_text(None, "a`b", RelationType::Table);
+        assert_eq!(bare.sql, "SHOW CREATE TABLE `a``b`");
 
         let view = create_query_text(None, "v", RelationType::View);
         assert_eq!(view.sql, "SHOW CREATE VIEW \"v\"");
@@ -1477,6 +1577,15 @@ mod tests {
         // Another refusal of the service is not this one.
         assert!(!names_an_expired_token("AccessDeniedException"));
         assert!(!names_an_expired_token("the token is valid"));
+        assert!(names_an_expired_sso_session(
+            "the SSO session associated with this profile has expired"
+        ));
+        assert!(names_an_expired_sso_session("SSO token refresh failed"));
+        assert!(!names_an_expired_sso_session("the token has expired"));
+        assert!(names_a_missing_profile(
+            "ProfileFile provider: profile `dev` was not defined"
+        ));
+        assert!(!names_a_missing_profile("profile dev is fine"));
     }
 
     #[test]
@@ -1933,6 +2042,78 @@ mod tests {
         result.unwrap();
         assert!(matches!(outcome, Err(Error::Cancelled)));
         assert!(stopped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn a_service_that_cannot_be_reached_gives_a_connection_error() {
+        let mut fake = FakeAthena::start(at_once(|_| (200, "{}".to_string()))).await;
+        let mut driver = fake.driver();
+        fake.server.abort();
+        let _ = (&mut fake.server).await;
+        // Nothing listens on the port once the server has stopped.
+        let mut sink = BufferSink::new(100);
+        let outcome = driver
+            .execute_stream("SELECT 1", None, &LIMITS, &mut sink)
+            .await;
+        let Err(Error::Connection(text)) = outcome else {
+            panic!("the run did not report the connection: {outcome:?}");
+        };
+        assert!(text.contains("Check the AWS region"));
+    }
+
+    /// A service where each statement runs until it is stopped. The stop
+    /// answers with `stop_status`.
+    async fn fake_that_runs_until_stopped(stop_status: u16) -> FakeAthena {
+        FakeAthena::start(at_once(move |operation| match operation {
+            "StartQueryExecution" => (200, STARTED.to_string()),
+            "StopQueryExecution" if stop_status == 200 => (200, "{}".to_string()),
+            "StopQueryExecution" => (
+                stop_status,
+                r#"{"__type":"InvalidRequestException","Message":"no"}"#.to_string(),
+            ),
+            _ => (
+                200,
+                r#"{"QueryExecution":{"Status":{"State":"RUNNING"}}}"#.to_string(),
+            ),
+        }))
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_run_dropped_during_the_wait_stops_the_statement() {
+        let fake = fake_that_runs_until_stopped(200).await;
+        let mut driver = fake.driver();
+        let mut sink = BufferSink::new(100);
+        let run = driver.execute_stream("SELECT 1", None, &LIMITS, &mut sink);
+        tokio::select! {
+            _ = run => panic!("the statement never ends"),
+            _ = fake.wait_for_call("GetQueryExecution") => {}
+        }
+        fake.wait_for_call("StopQueryExecution").await;
+        assert!(fake.body_of("StopQueryExecution").contains("q1"));
+    }
+
+    #[tokio::test]
+    async fn a_timeout_whose_stop_fails_names_the_execution() {
+        let fake = fake_that_runs_until_stopped(400).await;
+        let mut driver = fake.driver();
+        let mut sink = BufferSink::new(100);
+        let outcome = driver
+            .execute_stream(
+                "SELECT 1",
+                None,
+                &ExecOptions {
+                    timeout_secs: 1,
+                    ..LIMITS
+                },
+                &mut sink,
+            )
+            .await;
+        let Err(Error::Athena(text)) = outcome else {
+            panic!("the run did not report the failed stop");
+        };
+        assert!(text.contains("may still be running"));
+        assert!(text.contains("q1"));
     }
 
     /// A service whose first page of the result waits for the gate.

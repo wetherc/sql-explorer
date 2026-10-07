@@ -25,6 +25,18 @@ describe('ui store', () => {
     expect(ui.notices[2]?.timeout).toBe(6000)
   })
 
+  it('keeps a warning that the caller asks to keep, also past the limit', () => {
+    const ui = useUiStore()
+    const kept = ui.warn('storage', 'detail', { kept: true })
+    expect(kept.timeout).toBe(-1)
+    expect(kept.detail).toBe('detail')
+    // Short notices that arrive later leave first, so the kept one stays.
+    for (let index = 0; index < MAX_NOTICES + 2; index += 1) {
+      ui.success(`Notice ${index}`)
+    }
+    expect(ui.notices[0]?.id).toBe(kept.id)
+  })
+
   it('gives every notice its own identifier', () => {
     const ui = useUiStore()
     const first = ui.success('a')

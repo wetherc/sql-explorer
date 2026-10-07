@@ -92,7 +92,8 @@ impl Stream for SimpleQueryStream {
         match ready!(this.responses.poll_next(cx)?) {
             Message::CommandComplete(body) => {
                 let rows = extract_row_affected(&body)?;
-                Poll::Ready(Some(Ok(SimpleQueryMessage::CommandComplete(rows))))
+                let tag = body.tag().map_err(Error::parse)?.to_string();
+                Poll::Ready(Some(Ok(SimpleQueryMessage::CommandTag { tag, rows })))
             }
             Message::EmptyQueryResponse => {
                 Poll::Ready(Some(Ok(SimpleQueryMessage::CommandComplete(0))))

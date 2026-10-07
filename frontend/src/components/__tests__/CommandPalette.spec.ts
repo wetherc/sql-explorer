@@ -51,14 +51,65 @@ describe('CommandPalette', () => {
     expect(document.querySelector('[data-test="palette-empty"]')).not.toBeNull()
   })
 
+  /**
+   * Closes the palette as its parent does. The test environment plays no
+   * transition, so the test reports the end of the leave itself.
+   */
+  async function closeAs(wrapper: Awaited<ReturnType<typeof mountPalette>>) {
+    await wrapper.setProps({ open: false })
+    await settle()
+    wrapper.findComponent({ name: 'VDialog' }).vm.$emit('afterLeave')
+    await settle()
+  }
+
   it('runs the command the user selected and closes', async () => {
     runNewTab.mockReset()
     const wrapper = await mountPalette()
     const item = document.querySelector('[data-test="palette-item"]') as HTMLElement
     item.click()
     await settle()
-    expect(runNewTab).toHaveBeenCalled()
     expect(wrapper.emitted('update:open')?.[0]).toEqual([false])
+    await closeAs(wrapper)
+    expect(runNewTab).toHaveBeenCalledTimes(1)
+  })
+
+  it('runs the command after the dialog has given the focus back', async () => {
+    const wrapper = await mountPalette(false)
+    const opener = document.createElement('button')
+    document.body.appendChild(opener)
+    opener.focus()
+    await wrapper.setProps({ open: true })
+    await settle()
+    const focused: Array<Element | null> = []
+    runNewTab.mockReset()
+    runNewTab.mockImplementation(() => focused.push(document.activeElement))
+    const item = document.querySelector('[data-test="palette-item"]') as HTMLElement
+    item.click()
+    await settle()
+    // The close goes out at once and the command waits for the dialog to go.
+    expect(wrapper.emitted('update:open')?.[0]).toEqual([false])
+    expect(runNewTab).not.toHaveBeenCalled()
+    await closeAs(wrapper)
+    expect(focused).toEqual([opener])
+    runNewTab.mockReset()
+  })
+
+  it('runs nothing when the dialog closes without a choice', async () => {
+    runNewTab.mockReset()
+    const wrapper = await mountPalette()
+    await closeAs(wrapper)
+    expect(runNewTab).not.toHaveBeenCalled()
+  })
+
+  it('tells why a disabled command cannot run', async () => {
+    const list = commands()
+    Object.assign(list[1]!, { disabledReason: () => 'No statement is running.' })
+    mountWithPlugins(CommandPalette, { props: { open: true, commands: list, apple: false } })
+    await settle()
+    const subtitles = [...document.querySelectorAll('[data-test="palette-subtitle"]')].map((el) =>
+      el.textContent?.trim(),
+    )
+    expect(subtitles).toEqual(['Tabs', 'Query: No statement is running.'])
   })
 
   it('refuses a command that cannot run now', async () => {
@@ -75,7 +126,7 @@ describe('CommandPalette', () => {
   it('moves through the list with the arrow keys and runs with Enter', async () => {
     runNewTab.mockReset()
     runStop.mockReset()
-    await mountPalette()
+    const wrapper = await mountPalette()
     const field = document.querySelector('[data-test="palette-filter"] input') as HTMLElement
 
     // The second command cannot run, so Enter on it does nothing.
@@ -88,6 +139,7 @@ describe('CommandPalette', () => {
     field.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }))
     field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
     await settle()
+    await closeAs(wrapper)
     expect(runNewTab).toHaveBeenCalled()
   })
 

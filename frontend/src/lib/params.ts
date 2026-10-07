@@ -14,6 +14,13 @@ import { ParamType, type ParamValue } from '@/types/api'
  */
 const PLAIN_NUMBER = /^[+-]?(\d+(\.\d*)?|\.\d+)$/
 
+/**
+ * A number in decimal digits, with an optional exponent. `Number` also
+ * reads `0x10`, `0b11` and `Infinity`, which no SQL engine reads as a
+ * number value, so such a text is not a number here.
+ */
+const DECIMAL_NUMBER = /^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/
+
 /** The texts that a Boolean value accepts for true. */
 const TRUE_WORDS = ['true', 't', 'yes', 'y', 'on', '1']
 
@@ -59,7 +66,7 @@ export function jsonOfParam(value: ParamValue): unknown {
     // dialog refuses also goes as text, and the server judges it.
     const text = value.text.trim()
     const number = Number(text)
-    if (!Number.isFinite(number)) {
+    if (!DECIMAL_NUMBER.test(text) || !Number.isFinite(number)) {
       return text
     }
     return PLAIN_NUMBER.test(text) && String(number) !== text ? text : number
@@ -77,7 +84,7 @@ export function paramProblem(value: ParamValue): string | null {
     return null
   }
   if (value.valueType === ParamType.Number) {
-    return Number.isFinite(Number(text)) ? null : 'Enter a number.'
+    return DECIMAL_NUMBER.test(text) && Number.isFinite(Number(text)) ? null : 'Enter a number.'
   }
   if (value.valueType === ParamType.Boolean) {
     return booleanOfText(text) === null ? 'Enter true or false.' : null

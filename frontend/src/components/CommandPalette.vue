@@ -1,5 +1,10 @@
 <template>
-  <AppDialog :model-value="open" max-width="560" @update:model-value="close">
+  <AppDialog
+    :model-value="open"
+    max-width="560"
+    @update:model-value="close"
+    @after-leave="runPending"
+  >
     <v-card>
       <v-card-text class="pb-2">
         <!-- The field keeps the focus and the list below it holds the choice,
@@ -43,7 +48,9 @@
           @click="run(command)"
         >
           <v-list-item-title>{{ command.title }}</v-list-item-title>
-          <v-list-item-subtitle>{{ command.group }}</v-list-item-subtitle>
+          <v-list-item-subtitle data-test="palette-subtitle">{{
+            subtitle(command)
+          }}</v-list-item-subtitle>
           <template #append>
             <span v-if="command.key" class="palette-key">{{ label(command.key) }}</span>
           </template>
@@ -68,6 +75,8 @@ const emit = defineEmits<{ (event: 'update:open', value: boolean): void }>()
 const filter = ref('')
 const selected = ref(0)
 const list = ref<{ $el: HTMLElement } | null>(null)
+/** The command that runs once the dialog has gone. */
+let pending: Command | null = null
 
 const matches = computed(() => filterCommands(props.commands, filter.value))
 
@@ -80,6 +89,15 @@ const activeId = computed(() => (matches.value.length > 0 ? itemId(selected.valu
 
 function isEnabled(command: Command): boolean {
   return commandEnabled(command)
+}
+
+/**
+ * A command may tell why it can't run at the moment. The palette shows that reason
+ * under a disabled row, so the user learns what to do first.
+ */
+function subtitle(command: Command): string {
+  const reason = isEnabled(command) ? '' : command.disabledReason?.()
+  return reason ? `${command.group}: ${reason}` : command.group
 }
 
 function label(key: string): string {
@@ -117,8 +135,19 @@ function run(command: Command): void {
   if (!isEnabled(command)) {
     return
   }
+  pending = command
   close()
-  command.run()
+}
+
+/**
+ * Runs the chosen command after the dialog has gone. The dialog gives the
+ * focus back to the element that opened it as it closes, so a command that
+ * moves the focus (a rename field, another dialog) keeps it.
+ */
+function runPending(): void {
+  const command = pending
+  pending = null
+  command?.run()
 }
 
 function runSelected(): void {
@@ -129,10 +158,12 @@ function runSelected(): void {
 }
 
 // Every opening starts with an empty filter and the first command selected.
+// A palette that opens again before it has gone runs no earlier choice.
 watch(
   () => props.open,
   (open) => {
     if (open) {
+      pending = null
       filter.value = ''
       selected.value = 0
     }

@@ -1,11 +1,11 @@
 //! The MySQL and MariaDB driver.
 
 use crate::db::drivers::{
-    add_constraint_column, add_index_column, add_snapshot_column, bytes_to_json, constraint_type,
-    f32_to_json, f64_to_json, next_values, number_out_of_range, number_value,
-    parameter_type_refused, prefixed_plan, relation_type, routine_type, rows_affected_message,
-    rows_returned_message, size_text, system_roots, trigger_event, trigger_timing, CancelHandle,
-    DatabaseDriver, NumberValue,
+    add_constraint_column, add_index_column, add_snapshot_column, bytes_to_json, connect_within,
+    constraint_type, f32_to_json, f64_to_json, finish_set, next_values, non_empty,
+    number_out_of_range, number_value, parameter_type_refused, prefixed_plan, relation_type,
+    routine_type, rows_affected_message, size_text, system_roots, trigger_event, trigger_timing,
+    CancelHandle, DatabaseDriver, NumberValue,
 };
 use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{
@@ -15,6 +15,7 @@ use crate::db::{
     TableFact, Trigger,
 };
 use crate::error::{is_mysql_stop, Error, Result};
+use crate::error::{offset_place, place_of_byte_offset};
 use crate::sql::{only_reads, split_statements, Dialect};
 use crate::storage::{SavedConnection, TlsMode};
 use async_trait::async_trait;
@@ -50,13 +51,13 @@ pub fn build_opts(connection: &SavedConnection) -> Result<Opts> {
     if let Some(port) = connection.effective_port() {
         builder = builder.tcp_port(port);
     }
-    if let Some(user) = connection.user.as_deref().filter(|v| !v.is_empty()) {
+    if let Some(user) = non_empty(&connection.user) {
         builder = builder.user(Some(user.to_string()));
     }
     if let Some(password) = connection.password.as_deref().filter(|v| !v.is_empty()) {
         builder = builder.pass(Some(password.to_string()));
     }
-    if let Some(database) = connection.database.as_deref().filter(|v| !v.is_empty()) {
+    if let Some(database) = non_empty(&connection.database) {
         builder = builder.db_name(Some(database.to_string()));
     }
     builder = builder.ssl_opts(ssl_opts(connection));
@@ -77,7 +78,7 @@ pub fn string_has_password(url: &str) -> Result<bool> {
 fn add_fields_of_record(opts: Opts, connection: &SavedConnection) -> OptsBuilder {
     let mut builder = OptsBuilder::from_opts(opts.clone());
     if opts.user().is_none() {
-        if let Some(user) = connection.user.as_deref().filter(|v| !v.is_empty()) {
+        if let Some(user) = non_empty(&connection.user) {
             builder = builder.user(Some(user.to_string()));
         }
     }
@@ -187,9 +188,7 @@ async fn open_login(connection: &SavedConnection) -> Result<(Conn, Opts)> {
 impl MysqlDriver {
     pub async fn connect(connection: &SavedConnection) -> Result<Box<dyn DatabaseDriver>> {
         let limit = Duration::from_secs(connection.options.connect_timeout_secs.max(1));
-        let (conn, opts) = tokio::time::timeout(limit, open_login(connection))
-            .await
-            .map_err(|_| Error::Timeout(limit.as_secs()))??;
+        let (conn, opts) = connect_within(limit.as_secs(), open_login(connection)).await??;
         let connection_id = conn.id();
         Ok(Box::new(MysqlDriver {
             conn: Some(conn),
@@ -282,7 +281,9 @@ async fn stream_statement(
 ) -> Result<()> {
     let kill = only_reads(statement, Dialect::MySql).then_some(kill);
     let mut killed = false;
-    if options.one_statement || (values.is_some() && statement.contains('?')) {
+    if options.one_statement
+        || (values.is_some() && crate::sql::has_placeholder(statement, Dialect::MySql))
+    {
         let prepared = conn.prep(statement).await?;
         let count = usize::from(prepared.num_params());
         let bound = next_values(values.unwrap_or_default(), used, count);
@@ -448,8 +449,7 @@ async fn read_sets<P: Protocol>(
                 None => drain.await?,
             }
         }
-        sink.message(rows_returned_message(count, truncated));
-        sink.end_set(truncated)?;
+        finish_set(sink, count, truncated)?;
 
         if result.is_empty() {
             break;
@@ -576,9 +576,18 @@ impl DatabaseDriver for MysqlDriver {
 
         let values = bind_params(params)?;
         let mut used = 0;
+        // The end of the last statement found in the text, so that a
+        // statement that stands twice is found at its own place.
+        let mut cursor = 0;
         for statement in split_statements(query, Dialect::MySql) {
             if stopped {
                 break;
+            }
+            let start = query[cursor..]
+                .find(statement.as_str())
+                .map(|at| cursor + at);
+            if let Some(at) = start {
+                cursor = at + statement.len();
             }
             let kill = MysqlCancel {
                 opts: self.opts.clone(),
@@ -597,7 +606,8 @@ impl DatabaseDriver for MysqlDriver {
                 &mut stopped,
                 &kill,
             )
-            .await?;
+            .await
+            .map_err(|error| locate_error(error, query, start))?;
             report_warnings(self.conn()?, sink).await;
         }
 
@@ -648,8 +658,8 @@ impl DatabaseDriver for MysqlDriver {
             .await?;
         Ok(rows
             .into_iter()
-            .map(|(name, relation_type)| {
-                if relation_type.eq_ignore_ascii_case("VIEW") {
+            .map(|(name, word)| {
+                if relation_type(&word).is_view() {
                     Table::view(name)
                 } else {
                     Table::table(name)
@@ -664,10 +674,10 @@ impl DatabaseDriver for MysqlDriver {
         _schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<AppColumn>> {
-        let rows: Vec<(String, String, String, String)> = self
+        let rows: Vec<(String, String, String, String, String)> = self
             .conn()?
             .exec(
-                "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY \
+                "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, EXTRA \
                  FROM information_schema.COLUMNS \
                  WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
                  ORDER BY ORDINAL_POSITION",
@@ -676,11 +686,12 @@ impl DatabaseDriver for MysqlDriver {
             .await?;
         Ok(rows
             .into_iter()
-            .map(|(name, data_type, nullable, key)| AppColumn {
+            .map(|(name, data_type, nullable, key, extra)| AppColumn {
                 name,
                 data_type,
                 nullable: nullable.eq_ignore_ascii_case("YES"),
                 is_primary_key: key.eq_ignore_ascii_case("PRI"),
+                is_generated: generated_extra(&extra),
             })
             .collect())
     }
@@ -1077,6 +1088,9 @@ pub fn value_format(column_type: ColumnType, charset: u16) -> ValueFormat {
         | MYSQL_TYPE_LONGLONG | MYSQL_TYPE_YEAR => ValueFormat::Integer,
         MYSQL_TYPE_FLOAT | MYSQL_TYPE_DOUBLE => ValueFormat::Float,
         MYSQL_TYPE_BIT => ValueFormat::Bit,
+        // A GEOMETRY value is the SRID and the WKB bytes of the shape, which
+        // the server sends with no character set of text.
+        MYSQL_TYPE_GEOMETRY => ValueFormat::Binary,
         MYSQL_TYPE_STRING
         | MYSQL_TYPE_VAR_STRING
         | MYSQL_TYPE_VARCHAR
@@ -1090,6 +1104,44 @@ pub fn value_format(column_type: ColumnType, charset: u16) -> ValueFormat {
         }
         _ => ValueFormat::Other,
     }
+}
+
+/// Reads the line from the `... at line N` that ends a syntax error of the
+/// server. The server counts the lines of the statement from 1.
+fn error_line(message: &str) -> Option<u32> {
+    let at = message.rfind("at line ")?;
+    let digits: String = message[at + "at line ".len()..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
+}
+
+/// Marks a server error that names a line of the statement with its place
+/// in the whole text. `start` is the byte offset of the statement in `query`.
+fn locate_error(error: Error, query: &str, start: Option<usize>) -> Error {
+    let line = match (&error, start) {
+        (Error::MySql(mysql_async::Error::Server(server)), Some(_)) => error_line(&server.message),
+        _ => None,
+    };
+    match (line, start) {
+        (Some(line), Some(start)) => {
+            let (line, column) = offset_place(place_of_byte_offset(query, start), (line.max(1), 1));
+            error.at(line, column)
+        }
+        _ => error,
+    }
+}
+
+/// True when the `EXTRA` text of a column marks a value that the server
+/// gives: a generated column (`VIRTUAL GENERATED`, `STORED GENERATED`, or
+/// `PERSISTENT GENERATED` on MariaDB) or an `auto_increment` column. The word
+/// `DEFAULT_GENERATED` marks a default expression, and such a column takes a
+/// value from an INSERT.
+fn generated_extra(extra: &str) -> bool {
+    extra.split_whitespace().any(|word| {
+        word.eq_ignore_ascii_case("generated") || word.eq_ignore_ascii_case("auto_increment")
+    })
 }
 
 /// Names the type of a result column in the words of MySQL, such as
@@ -1291,6 +1343,65 @@ mod live;
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_syntax_error_names_its_line_in_the_whole_text() {
+        let query = "SELECT 1;\n\nSELECT\n  FROM";
+        let start = query.find("SELECT\n").unwrap();
+        let error = Error::MySql(server_error_with(
+            1064,
+            "You have an error in your SQL syntax; check the manual near 'FROM' at line 2",
+        ));
+        let located = locate_error(error, query, Some(start));
+        assert!(matches!(
+            located,
+            Error::Located {
+                line: 4,
+                column: 1,
+                ..
+            }
+        ));
+        // The first line of the statement keeps the column of its start.
+        let error = Error::MySql(server_error_with(1064, "near '' at line 1"));
+        let located = locate_error(error, "SELECT 1; SELEC", Some(10));
+        assert!(matches!(
+            located,
+            Error::Located {
+                line: 1,
+                column: 11,
+                ..
+            }
+        ));
+        // A message without a line, and a statement not found, stay as they are.
+        let plain = locate_error(
+            Error::MySql(server_error_with(1146, "no table")),
+            query,
+            Some(0),
+        );
+        assert!(matches!(plain, Error::MySql(_)));
+        let lost = locate_error(
+            Error::MySql(server_error_with(1064, "at line 2")),
+            query,
+            None,
+        );
+        assert!(matches!(lost, Error::MySql(_)));
+        assert_eq!(error_line("at line x"), None);
+    }
+
+    #[test]
+    fn a_server_given_value_counts_as_generated() {
+        for extra in [
+            "VIRTUAL GENERATED",
+            "STORED GENERATED",
+            "PERSISTENT GENERATED",
+            "auto_increment",
+        ] {
+            assert!(generated_extra(extra), "{extra}");
+        }
+        for extra in ["", "DEFAULT_GENERATED", "on update CURRENT_TIMESTAMP"] {
+            assert!(!generated_extra(extra), "{extra}");
+        }
+    }
+
     #[tokio::test]
     async fn a_stop_gives_up_at_the_connect_limit() {
         // The server takes the socket and never sends its greeting.
@@ -1322,6 +1433,14 @@ mod tests {
             code,
             message: "stopped".into(),
             state: "70100".into(),
+        })
+    }
+
+    fn server_error_with(code: u16, message: &str) -> mysql_async::Error {
+        mysql_async::Error::Server(mysql_async::ServerError {
+            code,
+            message: message.into(),
+            state: "42000".into(),
         })
     }
 
@@ -1562,6 +1681,27 @@ mod tests {
         assert_eq!(opts.user(), Some("root"));
         assert_eq!(opts.pass(), Some("p@ss:word/with?chars"));
         assert_eq!(opts.db_name(), Some("shop"));
+    }
+
+    #[tokio::test]
+    async fn a_server_that_never_answers_gives_a_connection_error() {
+        // The server takes the socket and never sends its greeting.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+            drop(socket);
+        });
+        let mut input = connection();
+        input.host = Some("127.0.0.1".into());
+        input.port = Some(port);
+        input.options.connect_timeout_secs = 1;
+        let Err(error) = MysqlDriver::connect(&input).await else {
+            panic!("the connection opened");
+        };
+        assert!(matches!(error, Error::Connection(ref text) if text.contains("within 1 seconds")));
+        server.abort();
     }
 
     #[test]
@@ -1913,6 +2053,8 @@ mod tests {
             );
             assert_eq!(value_format(column_type, text), ValueFormat::Other);
         }
+        // A GEOMETRY value is bytes whatever the character set says.
+        assert_eq!(value_format(MYSQL_TYPE_GEOMETRY, text), ValueFormat::Binary);
     }
 
     #[test]

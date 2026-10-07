@@ -45,7 +45,7 @@ describe('HistoryPanel', () => {
     expect(wrapper.text()).toContain('No history yet')
 
     await wrapper.find('[data-test="mode-saved"]').trigger('click')
-    expect(wrapper.text()).toContain('No saved statements')
+    expect(wrapper.text()).toContain('No saved queries')
   })
 
   it('lists the statements that ran, with the facts of each one', async () => {
@@ -282,5 +282,70 @@ describe('HistoryPanel height', () => {
     } finally {
       globalThis.ResizeObserver = held
     }
+  })
+})
+
+describe('HistoryPanel states', () => {
+  beforeEach(() => {
+    Object.values(apiStub).forEach((fn) => fn.mockReset())
+    apiStub.getConnections.mockResolvedValue([connectionFixture()])
+    apiStub.listActiveConnections.mockResolvedValue([infoFixture()])
+    apiStub.getHistory.mockResolvedValue([])
+    apiStub.getSavedQueries.mockResolvedValue([])
+  })
+
+  it('shows the reason of a failed statement in words', async () => {
+    apiStub.getHistory.mockResolvedValue([
+      { ...entry, id: 'h2', succeeded: false, error: 'Invalid column name.' },
+      { ...entry, id: 'h3', succeeded: false, error: null },
+    ])
+    const wrapper = mountWithPlugins(HistoryPanel)
+    await useHistoryStore().load()
+    await wrapper.vm.$nextTick()
+    const errors = wrapper.findAll('[data-test="history-error"]')
+    expect(errors[0]!.text()).toContain('Invalid column name.')
+    expect(errors[1]!.text()).toContain('Failed')
+    const rows = wrapper.findAll('[data-test="history-entry"]')
+    expect(rows[0]!.find('.d-sr-only').text()).toBe('Failed:')
+    expect(rows[0]!.find('.query-line').attributes('title')).toContain('Invalid column name.')
+    expect(rows[0]!.find('.v-icon').attributes('aria-hidden')).toBe('true')
+  })
+
+  it('names a passed statement for a reader', async () => {
+    apiStub.getHistory.mockResolvedValue([entry])
+    const wrapper = mountWithPlugins(HistoryPanel)
+    await useHistoryStore().load()
+    await wrapper.vm.$nextTick()
+    const row = wrapper.find('[data-test="history-entry"]')
+    expect(row.find('.d-sr-only').text()).toBe('Succeeded:')
+    expect(row.find('.query-line').attributes('title')).toBe('SELECT 1')
+  })
+
+  it('shuts the Clear button while the history is empty', () => {
+    const wrapper = mountWithPlugins(HistoryPanel)
+    expect(wrapper.find('[data-test="clear-history"]').attributes('disabled')).toBeDefined()
+  })
+
+  it('says when the filter hides every entry, and clears the filter', async () => {
+    apiStub.getHistory.mockResolvedValue([entry])
+    apiStub.getSavedQueries.mockResolvedValue([savedQuery])
+    const wrapper = mountWithPlugins(HistoryPanel)
+    const history = useHistoryStore()
+    await history.load()
+    history.filter = 'nothing like this'
+    await settle()
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    await wrapper.vm.$nextTick()
+    expect(wrapper.text()).toContain('No matches')
+    await wrapper.find('[data-test="history-clear-filter"]').trigger('click')
+    expect(history.filter).toBe('')
+
+    history.filter = 'nothing like this'
+    await wrapper.find('[data-test="mode-saved"]').trigger('click')
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    await wrapper.vm.$nextTick()
+    expect(wrapper.text()).toContain('No matches')
+    await wrapper.find('[data-test="saved-clear-filter"]').trigger('click')
+    expect(history.filter).toBe('')
   })
 })

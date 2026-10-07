@@ -4,318 +4,349 @@
       {{ isNew ? 'New connection' : `Edit ${draft.name || 'connection'}` }}
     </v-card-title>
 
-    <v-card-text class="form-body">
-      <v-select
-        v-model="draft.dbType"
-        :items="engineItems"
-        item-title="title"
-        item-value="value"
-        label="Engine"
-        data-test="engine-select"
-        @update:model-value="onEngineChange"
-      />
+    <!-- The fields stay read-only while a test runs, so the answer of the
+         test belongs to the values the user sees. -->
+    <v-form :disabled="testing" class="form-scroll" @submit.prevent>
+      <v-card-text class="form-body">
+        <v-select
+          v-model="draft.dbType"
+          :items="engineItems"
+          item-title="title"
+          item-value="value"
+          label="Engine"
+          data-test="engine-select"
+          @update:model-value="onEngineChange"
+        />
 
-      <v-text-field v-model="draft.name" label="Name" data-test="name-field" />
-
-      <template v-if="engine?.usesHost">
-        <div class="d-flex ga-2">
-          <v-text-field
-            v-model="draft.host"
-            label="Host"
-            class="flex-grow-1"
-            data-test="host-field"
-          />
-          <v-text-field
-            v-model.number="draft.port"
-            label="Port"
-            type="number"
-            style="max-width: 130px"
-            data-test="port-field"
-          />
-        </div>
-      </template>
-
-      <v-text-field
-        v-if="engine?.usesFile"
-        v-model="draft.options.filePath"
-        label="Database file"
-        data-test="file-field"
-      >
-        <template #append-inner>
-          <v-btn
-            icon="mdi-folder-open-outline"
-            size="x-small"
-            aria-label="Browse for file"
-            data-test="choose-file"
-            @click="chooseFile"
-          />
-        </template>
-      </v-text-field>
-
-      <v-select
-        v-if="engine?.supportsIntegratedSecurity"
-        v-model="draft.options.mssqlAuth"
-        :items="authItems"
-        item-title="title"
-        item-value="value"
-        label="Authentication"
-        :hint="authHint"
-        persistent-hint
-        data-test="auth-select"
-      />
-
-      <template v-if="engine?.usesCredentials && needsLogin">
-        <v-text-field v-model="draft.user" label="User" data-test="user-field" />
         <v-text-field
-          v-model="password"
-          label="Password"
-          :type="showPassword ? 'text' : 'password'"
-          :hint="passwordHint"
-          persistent-hint
-          data-test="password-field"
+          v-model="draft.name"
+          label="Name"
+          :error-messages="fieldProblem('name')"
+          data-test="name-field"
+        />
+
+        <template v-if="engine?.usesHost">
+          <div class="d-flex ga-2">
+            <v-text-field
+              v-model="draft.host"
+              label="Host"
+              class="flex-grow-1"
+              :error-messages="fieldProblem('host')"
+              data-test="host-field"
+            />
+            <v-text-field
+              v-model.number="draft.port"
+              label="Port"
+              type="number"
+              style="max-width: 130px"
+              :disabled="usesInstance"
+              :hint="usesInstance ? 'SQL Browser gives the port' : undefined"
+              :persistent-hint="usesInstance"
+              :error-messages="fieldProblem('port')"
+              data-test="port-field"
+            />
+          </div>
+        </template>
+
+        <v-text-field
+          v-if="engine?.usesFile"
+          v-model="draft.options.filePath"
+          label="Database file"
+          :error-messages="fieldProblem('filePath')"
+          data-test="file-field"
         >
-          <!-- The icon that shows the password is a button of its own, so a
+          <template #append-inner>
+            <v-btn
+              icon="mdi-folder-open-outline"
+              size="x-small"
+              aria-label="Browse for file"
+              data-test="choose-file"
+              @click="chooseFile"
+            />
+          </template>
+        </v-text-field>
+
+        <v-select
+          v-if="engine?.supportsIntegratedSecurity"
+          v-model="draft.options.mssqlAuth"
+          :items="authItems"
+          item-title="title"
+          item-value="value"
+          label="Authentication"
+          :hint="authHint"
+          persistent-hint
+          data-test="auth-select"
+        />
+
+        <template v-if="engine?.usesCredentials && needsLogin">
+          <v-text-field
+            v-model="draft.user"
+            label="User"
+            :error-messages="fieldProblem('user')"
+            data-test="user-field"
+          />
+          <v-text-field
+            v-model="password"
+            label="Password"
+            :type="showPassword ? 'text' : 'password'"
+            :hint="passwordHint"
+            persistent-hint
+            :error-messages="fieldProblem('password')"
+            data-test="password-field"
+          >
+            <!-- The icon that shows the password is a button of its own, so a
                reader can name it and a key can reach it. -->
+            <template #append-inner>
+              <v-btn
+                :icon="showPassword ? 'mdi-eye-off' : 'mdi-eye'"
+                :aria-label="showPassword ? 'Hide password' : 'Show password'"
+                :aria-pressed="showPassword"
+                size="x-small"
+                variant="text"
+                data-test="toggle-password"
+                @click="showPassword = !showPassword"
+              />
+            </template>
+          </v-text-field>
+        </template>
+
+        <v-text-field
+          v-if="needsAccessToken"
+          ref="tokenField"
+          v-model="password"
+          label="Access token"
+          :type="showPassword ? 'text' : 'password'"
+          :hint="tokenHint"
+          :error="needsNewToken && password.trim() === ''"
+          persistent-hint
+          data-test="access-token-field"
+        >
           <template #append-inner>
             <v-btn
               :icon="showPassword ? 'mdi-eye-off' : 'mdi-eye'"
-              :aria-label="showPassword ? 'Hide password' : 'Show password'"
+              :aria-label="showPassword ? 'Hide token' : 'Show token'"
               :aria-pressed="showPassword"
               size="x-small"
               variant="text"
-              data-test="toggle-password"
+              data-test="toggle-token"
               @click="showPassword = !showPassword"
             />
           </template>
         </v-text-field>
-      </template>
 
-      <v-text-field
-        v-if="needsAccessToken"
-        ref="tokenField"
-        v-model="password"
-        label="Access token"
-        :type="showPassword ? 'text' : 'password'"
-        :hint="tokenHint"
-        :error="needsNewToken && password.trim() === ''"
-        persistent-hint
-        data-test="access-token-field"
-      >
-        <template #append-inner>
-          <v-btn
-            :icon="showPassword ? 'mdi-eye-off' : 'mdi-eye'"
-            :aria-label="showPassword ? 'Hide token' : 'Show token'"
-            :aria-pressed="showPassword"
-            size="x-small"
-            variant="text"
-            data-test="toggle-token"
-            @click="showPassword = !showPassword"
-          />
-        </template>
-      </v-text-field>
-
-      <v-text-field
-        v-if="usesAzureCli"
-        v-model="draft.options.azureCliPath"
-        label="Azure CLI path"
-        placeholder="az"
-        hint="Only needed if the app can't find `az` on its own."
-        persistent-hint
-        data-test="azure-cli-path-field"
-      />
-
-      <v-text-field
-        v-if="engine?.usesDatabase"
-        v-model="draft.database"
-        :label="engine.dbType === 'athena' ? 'Database (Glue)' : 'Database'"
-        data-test="database-field"
-      />
-
-      <template v-if="engine?.usesAws">
         <v-text-field
-          v-model="draft.options.awsRegion"
-          label="AWS region"
-          placeholder="us-east-1"
-          data-test="aws-region-field"
-        />
-        <v-select
-          v-model="draft.options.awsCredentialSource"
-          :items="awsSourceItems"
-          item-title="title"
-          item-value="value"
-          label="Credentials"
-          data-test="aws-source-select"
-        />
-        <v-text-field
-          v-if="draft.options.awsCredentialSource === AwsCredentialSource.Chain"
-          v-model="draft.options.awsProfile"
-          label="AWS profile"
-          placeholder="default"
-          data-test="aws-profile-field"
-        />
-        <template v-else>
-          <v-text-field
-            v-model="draft.options.awsAccessKeyId"
-            label="Access key ID"
-            placeholder="AKIA..."
-            data-test="aws-access-key-field"
-          />
-          <v-text-field
-            v-model="awsSecretAccessKey"
-            label="Secret access key"
-            type="password"
-            persistent-hint
-            data-test="aws-secret-field"
-          />
-          <v-text-field
-            v-model="awsSessionToken"
-            label="Session token"
-            type="password"
-            :hint="awsTokenHint"
-            persistent-hint
-            data-test="aws-token-field"
-          />
-        </template>
-        <v-text-field
-          v-model="draft.options.athenaWorkgroup"
-          label="Workgroup"
-          placeholder="primary"
-          data-test="athena-workgroup-field"
-        />
-        <v-text-field
-          v-model="draft.options.athenaOutputLocation"
-          label="Output location"
-          placeholder="s3://bucket/prefix/"
-          data-test="athena-output-field"
-        />
-        <v-text-field
-          v-model="draft.options.athenaCatalog"
-          label="Data catalog"
-          placeholder="AwsDataCatalog"
-        />
-        <v-switch
-          v-model="draft.options.athenaResultReuse"
-          label="Reuse earlier query results"
-          hint="Reused results don't scan any data, so they're free."
+          v-if="usesAzureCli"
+          v-model="draft.options.azureCliPath"
+          label="Azure CLI path"
+          placeholder="az"
+          hint="Only needed if the app can't find `az` on its own."
           persistent-hint
-          data-test="athena-reuse-switch"
+          data-test="azure-cli-path-field"
         />
+
         <v-text-field
-          v-if="draft.options.athenaResultReuse"
-          :model-value="draft.options.athenaResultReuseMaxAgeMinutes"
-          label="Maximum result age (minutes)"
-          type="number"
-          data-test="athena-reuse-age-field"
-          @update:model-value="
-            (value) => (draft.options.athenaResultReuseMaxAgeMinutes = Number(value))
-          "
+          v-if="engine?.usesDatabase"
+          v-model="draft.database"
+          :label="engine.dbType === 'athena' ? 'Database (Glue)' : 'Database'"
+          data-test="database-field"
         />
-      </template>
 
-      <v-expansion-panels variant="accordion" class="mt-2">
-        <v-expansion-panel title="Advanced" data-test="advanced-panel">
-          <v-expansion-panel-text>
-            <div class="d-flex flex-column ga-3">
-              <template v-if="engine?.usesTls">
-                <v-select
-                  v-model="draft.options.tlsMode"
-                  :items="tlsItems"
-                  item-title="title"
-                  item-value="value"
-                  label="Transport"
-                  :hint="tlsHint"
-                  persistent-hint
-                  data-test="tls-select"
-                />
-                <v-text-field
-                  v-if="draft.options.tlsMode === 'verifyFull'"
-                  v-model="draft.options.caCertPath"
-                  label="Certificate authority file"
-                  hint="Leave empty to use the system's trusted roots."
-                  persistent-hint
-                />
-              </template>
+        <template v-if="engine?.usesAws">
+          <v-text-field
+            v-model="draft.options.awsRegion"
+            label="AWS region"
+            placeholder="us-east-1"
+            :error-messages="fieldProblem('awsRegion')"
+            data-test="aws-region-field"
+          />
+          <v-select
+            v-model="draft.options.awsCredentialSource"
+            :items="awsSourceItems"
+            item-title="title"
+            item-value="value"
+            label="Credentials"
+            data-test="aws-source-select"
+          />
+          <v-text-field
+            v-if="draft.options.awsCredentialSource === AwsCredentialSource.Chain"
+            v-model="draft.options.awsProfile"
+            label="AWS profile"
+            placeholder="default"
+            data-test="aws-profile-field"
+          />
+          <template v-else>
+            <v-text-field
+              v-model="draft.options.awsAccessKeyId"
+              :error-messages="fieldProblem('awsAccessKeyId')"
+              label="Access key ID"
+              placeholder="AKIA..."
+              data-test="aws-access-key-field"
+            />
+            <v-text-field
+              v-model="awsSecretAccessKey"
+              label="Secret access key"
+              type="password"
+              :hint="secretHint"
+              persistent-hint
+              :error-messages="fieldProblem('awsSecretAccessKey')"
+              data-test="aws-secret-field"
+            />
+            <v-text-field
+              v-model="awsSessionToken"
+              label="Session token"
+              type="password"
+              :hint="awsTokenHint"
+              persistent-hint
+              data-test="aws-token-field"
+            />
+          </template>
+          <v-text-field
+            v-model="draft.options.athenaWorkgroup"
+            :error-messages="fieldProblem('athenaWorkgroup')"
+            label="Workgroup"
+            placeholder="primary"
+            data-test="athena-workgroup-field"
+          />
+          <v-text-field
+            v-model="draft.options.athenaOutputLocation"
+            label="Output location"
+            placeholder="s3://bucket/prefix/"
+            data-test="athena-output-field"
+          />
+          <v-text-field
+            v-model="draft.options.athenaCatalog"
+            label="Data catalog"
+            placeholder="AwsDataCatalog"
+          />
+          <v-switch
+            v-model="draft.options.athenaResultReuse"
+            label="Reuse earlier query results"
+            hint="Reused results don't scan any data, so they're free."
+            persistent-hint
+            data-test="athena-reuse-switch"
+          />
+          <v-text-field
+            v-if="draft.options.athenaResultReuse"
+            :model-value="draft.options.athenaResultReuseMaxAgeMinutes"
+            :error-messages="fieldProblem('athenaResultReuseMaxAgeMinutes')"
+            label="Maximum result age (minutes)"
+            type="number"
+            data-test="athena-reuse-age-field"
+            @update:model-value="
+              (value) => (draft.options.athenaResultReuseMaxAgeMinutes = Number(value))
+            "
+          />
+        </template>
 
-              <v-text-field
-                v-if="engine?.supportsIntegratedSecurity"
-                v-model="draft.options.instanceName"
-                label="Named instance"
-                hint="SQL Browser finds the port for a named instance."
-                persistent-hint
-                data-test="instance-field"
-              />
+        <v-expansion-panels variant="accordion" class="mt-2">
+          <v-expansion-panel title="Advanced" data-test="advanced-panel">
+            <v-expansion-panel-text>
+              <div class="d-flex flex-column ga-3">
+                <template v-if="engine?.usesTls">
+                  <v-select
+                    v-model="draft.options.tlsMode"
+                    :items="tlsItems"
+                    item-title="title"
+                    item-value="value"
+                    label="Transport"
+                    :hint="tlsHint"
+                    persistent-hint
+                    data-test="tls-select"
+                  />
+                  <v-text-field
+                    v-if="draft.options.tlsMode === 'verifyFull'"
+                    v-model="draft.options.caCertPath"
+                    label="Certificate authority file"
+                    hint="Leave empty to use the system's trusted roots."
+                    persistent-hint
+                  />
+                </template>
 
-              <div class="d-flex ga-2">
                 <v-text-field
-                  v-model.number="draft.options.connectTimeoutSecs"
-                  label="Connect timeout (s)"
-                  type="number"
+                  v-if="engine?.supportsIntegratedSecurity"
+                  v-model="draft.options.instanceName"
+                  label="Named instance"
+                  hint="SQL Browser finds the port for a named instance."
+                  persistent-hint
+                  data-test="instance-field"
                 />
+
+                <div class="d-flex ga-2">
+                  <v-text-field
+                    v-model.number="draft.options.connectTimeoutSecs"
+                    :error-messages="fieldProblem('connectTimeoutSecs')"
+                    label="Connect timeout (seconds)"
+                    type="number"
+                  />
+                  <v-text-field
+                    v-model.number="draft.options.queryTimeoutSecs"
+                    :error-messages="fieldProblem('queryTimeoutSecs')"
+                    label="Statement timeout (seconds)"
+                    type="number"
+                  />
+                  <v-text-field
+                    v-model.number="draft.options.maxRows"
+                    :error-messages="fieldProblem('maxRows')"
+                    label="Row limit"
+                    type="number"
+                    hint="A query stops at this limit or the row limit in Settings, whichever is lower."
+                    persistent-hint
+                  />
+                </div>
+
                 <v-text-field
-                  v-model.number="draft.options.queryTimeoutSecs"
-                  label="Statement timeout (s)"
+                  v-model.number="draft.options.maxSessions"
+                  :error-messages="fieldProblem('maxSessions')"
+                  label="Max sessions"
                   type="number"
+                  min="1"
+                  hint="How many tabs can have their own session on this server at once."
+                  persistent-hint
+                  data-test="max-sessions-field"
                 />
+
+                <v-switch
+                  v-if="readOnlySwitch"
+                  v-model="draft.options.readOnly"
+                  :label="readOnlySwitch.label"
+                  :hint="readOnlySwitch.hint"
+                  persistent-hint
+                  data-test="read-only-switch"
+                />
+
                 <v-text-field
-                  v-model.number="draft.options.maxRows"
-                  label="Row limit"
-                  type="number"
-                  hint="A query stops at this limit or the row limit in Settings, whichever is lower."
+                  v-model="draft.options.applicationName"
+                  label="Application name"
+                  hint="The client name the server sees."
                   persistent-hint
                 />
+
+                <v-textarea
+                  v-model="draft.options.connectionUrl"
+                  label="Connection string"
+                  rows="2"
+                  hint="If set, this overrides the host, port, and database. The Transport and Authentication settings apply when the string doesn't set them. Enter the password in the Password field, not in the string."
+                  persistent-hint
+                  data-test="connection-url-field"
+                />
+
+                <div class="d-flex ga-2">
+                  <v-text-field v-model="draft.group" label="Folder" placeholder="Connections" />
+                  <v-select
+                    v-model="draft.color"
+                    :items="colorItems"
+                    item-title="title"
+                    item-value="value"
+                    label="Colour"
+                    clearable
+                  />
+                </div>
               </div>
-
-              <v-text-field
-                v-model.number="draft.options.maxSessions"
-                label="Max sessions"
-                type="number"
-                min="1"
-                hint="How many tabs can have their own session on this server at once."
-                persistent-hint
-                data-test="max-sessions-field"
-              />
-
-              <v-switch
-                v-if="readOnlySwitch"
-                v-model="draft.options.readOnly"
-                :label="readOnlySwitch.label"
-                :hint="readOnlySwitch.hint"
-                persistent-hint
-                data-test="read-only-switch"
-              />
-
-              <v-text-field
-                v-model="draft.options.applicationName"
-                label="Application name"
-                hint="The client name the server sees."
-                persistent-hint
-              />
-
-              <v-textarea
-                v-model="draft.options.connectionUrl"
-                label="Connection string"
-                rows="2"
-                hint="If set, this overrides the host, port, and database. Enter the password in the Password field, not in the string."
-                persistent-hint
-                data-test="connection-url-field"
-              />
-
-              <div class="d-flex ga-2">
-                <v-text-field v-model="draft.group" label="Folder" placeholder="Connections" />
-                <v-select
-                  v-model="draft.color"
-                  :items="colorItems"
-                  item-title="title"
-                  item-value="value"
-                  label="Colour"
-                  clearable
-                />
-              </div>
-            </div>
-          </v-expansion-panel-text>
-        </v-expansion-panel>
-      </v-expansion-panels>
-    </v-card-text>
+            </v-expansion-panel-text>
+          </v-expansion-panel>
+        </v-expansion-panels>
+      </v-card-text>
+    </v-form>
 
     <!-- The warnings stand outside the part that scrolls, so a form of many
          fields cannot push them past the edge of the card. -->
@@ -340,31 +371,58 @@
     >
       <div v-for="problem in problems" :key="problem">{{ problem }}</div>
     </v-alert>
+    <v-alert
+      v-if="testResult"
+      :type="testResult.ok ? 'success' : 'error'"
+      variant="tonal"
+      density="compact"
+      closable
+      class="form-problems mx-4 mb-2"
+      data-test="test-result"
+      @click:close="testResult = null"
+    >
+      <div>{{ testResult.message }}</div>
+      <div v-if="testResult.detail" class="test-detail">{{ testResult.detail }}</div>
+    </v-alert>
 
     <v-card-actions>
       <v-btn
-        :loading="connections.testing"
+        :loading="testing"
         prepend-icon="mdi-check-network-outline"
         text="Test"
         data-test="test-button"
         @click="test"
       />
       <v-spacer />
-      <v-btn text="Cancel" data-test="cancel-button" @click="emit('close')" />
+      <v-btn text="Cancel" data-test="cancel-button" @click="cancel" />
       <v-btn
         color="primary"
         variant="flat"
         text="Save"
+        :disabled="testing"
         data-test="save-button"
         @click="saveConnection"
       />
     </v-card-actions>
+
+    <ConfirmDialog
+      :open="confirmingDiscard"
+      title="Discard your changes?"
+      message="The changes to this connection haven't been saved."
+      confirm-text="Discard"
+      danger
+      @confirm="discard"
+      @cancel="confirmingDiscard = false"
+    />
   </v-card>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, nextTick, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, nextTick, ref, watch } from 'vue'
 import { open as openFileDialog } from '@tauri-apps/plugin-dialog'
+import ConfirmDialog from './ConfirmDialog.vue'
+import { api } from '@/lib/api'
+import { toErrorPayload } from '@/lib/errors'
 import { useConnectionsStore, defaultPortFor, validateConnection } from '@/stores/connections'
 import { useUiStore } from '@/stores/ui'
 import { AwsCredentialSource, DbType, MssqlAuth, TlsMode, type SavedConnection } from '@/types/api'
@@ -374,6 +432,8 @@ const props = defineProps<{
   isNew: boolean
   /** True when the stored token is too old and the user must paste a new one. */
   needsNewToken?: boolean
+  /** True when the record is a copy of another one, whose secrets stay behind. */
+  isCopy?: boolean
 }>()
 const emit = defineEmits<{ (event: 'close'): void; (event: 'saved', id: string): void }>()
 
@@ -476,10 +536,61 @@ const tokenHint = computed(() =>
     : 'Tokens are saved in the keychain, never in a settings file.',
 )
 
-const passwordHint = computed(() =>
-  props.isNew
+const passwordHint = computed(() => {
+  if (props.isCopy) {
+    return 'Enter the password again for the copy.'
+  }
+  if (targetChanged.value) {
+    return 'Enter the password again because the server changed.'
+  }
+  return props.isNew
     ? 'Your password is saved in the system keychain.'
-    : 'Leave empty to keep the saved password.',
+    : 'Leave empty to keep the saved password.'
+})
+
+/** The hint of the AWS secret box, for a copy or a record that points elsewhere. */
+const secretHint = computed(() => {
+  if (props.isCopy) {
+    return 'Enter the secret access key again for the copy.'
+  }
+  return targetChanged.value ? 'Enter the secret access key again because the server changed.' : ''
+})
+
+/**
+ * True when a saved record points at another server. The backend drops
+ * the stored secret in that case, so the old password is never sent to a
+ * host that the user did not save it for, and the form asks for it again.
+ */
+const targetChanged = computed(() => {
+  if (props.isNew) {
+    return false
+  }
+  // The backend compares the same fields, without the spaces at their ends,
+  // and a blank field is the same as a missing one.
+  const target = (connection: typeof draft.value): string =>
+    JSON.stringify([
+      connection.dbType,
+      connection.port ?? null,
+      ...[
+        connection.host,
+        connection.user,
+        connection.options.instanceName,
+        connection.options.connectionUrl,
+        connection.options.filePath,
+        connection.options.awsRegion,
+        connection.options.awsAccessKeyId,
+      ].map((field) => (field ?? '').trim()),
+    ])
+  return target(props.connection) !== target(draft.value)
+})
+
+/**
+ * True while a named instance is set. SQL Browser then gives the port and
+ * the backend leaves the port of the record out, so the box is shut.
+ */
+const usesInstance = computed(
+  () =>
+    draft.value.dbType === DbType.Mssql && (draft.value.options.instanceName ?? '').trim() !== '',
 )
 
 const awsTokenHint = computed(() => {
@@ -507,7 +618,77 @@ const readOnlySwitch = computed(() => {
   }
 })
 
-const problems = computed(() => validateConnection(withSecrets()))
+/** The problems of the form, by the name of the field they belong to. */
+const fieldProblems = computed<Record<string, string>>(() => {
+  const byField = { ...validateConnection(withSecrets()) }
+  if (targetChanged.value) {
+    if (usesSecretBox.value && password.value === '') {
+      byField.password = 'Enter the password again because the server changed.'
+    }
+    if (
+      draft.value.dbType === DbType.Athena &&
+      draft.value.options.awsCredentialSource === AwsCredentialSource.Keys &&
+      awsSecretAccessKey.value === ''
+    ) {
+      byField.awsSecretAccessKey = 'Enter the secret access key again because the server changed.'
+    }
+  }
+  return byField
+})
+
+const problems = computed(() => [...new Set(Object.values(fieldProblems.value))])
+
+/** The problem of one field, which the field shows under itself. */
+function fieldProblem(field: string): string[] {
+  const problem = fieldProblems.value[field]
+  return problem ? [problem] : []
+}
+
+/** True while the form waits for the answer of a test. */
+const testing = ref(false)
+/** The answer of the last test, which the form shows above its buttons. */
+const testResult = ref<{ ok: boolean; message: string; detail: string | null } | null>(null)
+/** False once the form has gone, so a late answer of a test is dropped. */
+let mounted = true
+onBeforeUnmount(() => {
+  mounted = false
+})
+
+const confirmingDiscard = ref(false)
+/**
+ * The record as it stood when the form opened, to tell whether it changed.
+ * The form takes it after its first watchers ran, because they can clear
+ * the port of a named instance.
+ */
+let opened = ''
+onMounted(() => {
+  opened = snapshot()
+})
+
+function snapshot(): string {
+  return JSON.stringify([
+    draft.value,
+    password.value,
+    awsSecretAccessKey.value,
+    awsSessionToken.value,
+  ])
+}
+
+/** Closes the form, and asks first when it has changes that are not saved. */
+function cancel(): void {
+  if (snapshot() !== opened) {
+    confirmingDiscard.value = true
+    return
+  }
+  emit('close')
+}
+
+function discard(): void {
+  confirmingDiscard.value = false
+  emit('close')
+}
+
+defineExpose({ cancel })
 
 function clone(connection: SavedConnection): SavedConnection {
   return { ...connection, options: { ...connection.options } }
@@ -581,14 +762,40 @@ function recordToSend(): SavedConnection {
   return record
 }
 
+/**
+ * Tests the record and writes the answer in the form, beside the fields it
+ * belongs to. A notice in the corner would leave the form and go by itself.
+ */
 async function test(): Promise<void> {
-  await connections.test(recordToSend())
+  if (problems.value.length > 0) {
+    testResult.value = null
+    return
+  }
+  testing.value = true
+  testResult.value = null
+  try {
+    const message = await api.testConnection(recordToSend())
+    if (mounted) {
+      testResult.value = { ok: true, message, detail: null }
+    }
+  } catch (error) {
+    if (mounted) {
+      const payload = toErrorPayload(error)
+      testResult.value = { ok: false, message: payload.message, detail: payload.detail ?? null }
+    }
+  } finally {
+    testing.value = false
+  }
 }
 
 async function saveConnection(): Promise<void> {
   if (props.needsNewToken && needsAccessToken.value && password.value.trim() === '') {
     // The stored token is too old, so an empty box cannot mean "keep it".
     ui.warn('Paste a new access token or pick a different authentication method.')
+    return
+  }
+  if (problems.value.length > 0) {
+    // The form already lists each problem, so no notice repeats them.
     return
   }
   const record = recordToSend()
@@ -607,6 +814,10 @@ watch(
     awsSecretAccessKey.value = value.awsSecretAccessKey ?? ''
     awsSessionToken.value = value.awsSessionToken ?? ''
     showPassword.value = false
+    testResult.value = null
+    void nextTick(() => {
+      opened = snapshot()
+    })
     void focusToken()
   },
 )
@@ -643,5 +854,18 @@ async function focusToken(): Promise<void> {
    way, because the fields already scroll. */
 .form-problems {
   flex: 0 0 auto;
+}
+
+/* The form takes the room between the title and the buttons and scrolls
+   inside it, as the card text does. */
+.form-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.test-detail {
+  font-size: var(--app-text-sm);
+  white-space: pre-wrap;
 }
 </style>

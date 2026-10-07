@@ -9,6 +9,7 @@ vi.mock('@/lib/api', () => ({ api: apiStub, CONNECTION_STATUS_EVENT: 'connection
 
 const {
   FILTER_DELAY_MS,
+  RELATION_SHARE_MS,
   columnNode,
   constraintHint,
   eventHint,
@@ -313,7 +314,7 @@ describe('columnNode', () => {
   it('marks a key column and reports whether a column may hold no value', () => {
     const parent = node({ nodeType: 'table', key: 'c1/db/dbo/orders', table: 'orders' })
     const key = columnNode(
-      { name: 'id', dataType: 'int', nullable: false, isPrimaryKey: true },
+      { name: 'id', dataType: 'int', nullable: false, isPrimaryKey: true, isGenerated: false },
       parent,
     )
     expect(key.icon).toBe('mdi-key-variant')
@@ -322,7 +323,7 @@ describe('columnNode', () => {
     expect(key.children).toBeUndefined()
 
     const plain = columnNode(
-      { name: 'note', dataType: 'text', nullable: true, isPrimaryKey: false },
+      { name: 'note', dataType: 'text', nullable: true, isPrimaryKey: false, isGenerated: false },
       parent,
     )
     expect(plain.icon).toBe('mdi-table-column')
@@ -939,7 +940,7 @@ describe('explorer store', () => {
 
   it('reads the columns of the folder of a table', async () => {
     apiStub.listColumns.mockResolvedValue([
-      { name: 'id', dataType: 'int', nullable: false, isPrimaryKey: true },
+      { name: 'id', dataType: 'int', nullable: false, isPrimaryKey: true, isGenerated: false },
     ])
     const explorer = await readyStore()
     const table = node({ nodeType: 'table', database: 'Sales', schema: 'dbo', table: 'orders' })
@@ -1230,7 +1231,55 @@ describe('explorer store', () => {
     })
     expect(answer).toBe(null)
     expect(explorer.snapshots).toEqual({})
-    expect(useUiStore().notices[0]?.level).toBe('error')
+    const notice = useUiStore().notices[0]
+    expect(notice?.level).toBe('warning')
+    expect(notice?.message).toBe(
+      "Couldn't read the schema of Sales, so autocomplete offers only the names in the tree.",
+    )
+    expect(notice?.detail).toBe('no')
+  })
+
+  it('says nothing about a failed schema read whose connection closed', async () => {
+    const explorer = await readyStore()
+    let fail: (reason: unknown) => void = () => {}
+    apiStub.schemaSnapshot.mockImplementation(
+      () =>
+        new Promise((_, reject) => {
+          fail = reject
+        }),
+    )
+    const read = explorer.readSnapshot('c1', 'Sales', { maxColumns: 10, ownConnection: true })
+    explorer.removeRoot('c1')
+    fail({ category: 'database', message: 'no', detail: null })
+    expect(await read).toBe(null)
+    expect(useUiStore().notices).toHaveLength(0)
+  })
+
+  it('builds the part of the snapshots of a connection only when they change', async () => {
+    apiStub.schemaSnapshot.mockImplementation(async ({ database }: { database: string }) =>
+      snapshotFixture(database),
+    )
+    apiStub.listActiveConnections.mockResolvedValue([infoFixture('c1'), infoFixture('c2')])
+    const explorer = await readyStore()
+    await useConnectionsStore().load()
+    const options = { maxColumns: 10, ownConnection: true }
+    await explorer.readSnapshot('c1', 'Sales', options)
+    await explorer.readSnapshot('c2', 'Sales', options)
+    const first = explorer.schemaIndexFor('c1')
+    expect(first.tables).toHaveLength(2)
+
+    // A snapshot of another connection leaves the index of this one as it is.
+    await explorer.readSnapshot('c2', 'Other', options)
+    expect(explorer.schemaIndexFor('c1')).toBe(first)
+    expect(explorer.schemaIndexFor('c2').databases).toEqual(['Sales', 'Other'])
+
+    // A second snapshot of the same connection adds its names.
+    await explorer.readSnapshot('c1', 'Other', options)
+    expect(explorer.schemaIndexFor('c1').databases).toEqual(['Sales', 'Other'])
+
+    // A connection whose snapshots went has no names left.
+    explorer.forgetSnapshots('c2')
+    expect(explorer.schemaIndexFor('c2')).toEqual(emptySchemaIndex())
   })
 
   it('leaves out an answer that is not a snapshot', async () => {
@@ -1372,7 +1421,76 @@ describe('explorer store', () => {
     await explorer.expand(root)
     expect(root.loaded).toBe(false)
     expect(root.children).toEqual([])
+    expect(root.error).toBe('gone')
     expect(useUiStore().notices[0]?.level).toBe('error')
+
+    // A read again clears the failure.
+    apiStub.listDatabases.mockResolvedValue([])
+    await explorer.expand(root)
+    expect(root.error).toBeNull()
+    expect(root.loaded).toBe(true)
+  })
+
+  it('takes no answer and no failure for a root that the user closed', async () => {
+    const explorer = await readyStore()
+    let fail: (reason: unknown) => void = () => {}
+    let answer: (value: unknown) => void = () => {}
+    apiStub.listDatabases.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          fail = reject
+        }),
+    )
+    const root = explorer.addRoot('c1')
+    const failing = explorer.expand(root)
+    explorer.removeRoot('c1')
+    fail({ category: 'database', message: 'gone', detail: null })
+    await failing
+    expect(root.error).toBeNull()
+    expect(useUiStore().notices).toHaveLength(0)
+
+    apiStub.listDatabases.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          answer = resolve
+        }),
+    )
+    const again = explorer.addRoot('c1')
+    const reading = explorer.expand(again)
+    explorer.removeRoot('c1')
+    answer([{ name: 'Sales' }])
+    await reading
+    expect(again.loaded).toBe(false)
+    expect(apiStub.schemaSnapshot).not.toHaveBeenCalled()
+  })
+
+  it('stops sharing the list of relations a short time after the read', async () => {
+    vi.useFakeTimers()
+    try {
+      apiStub.listTables.mockResolvedValue([])
+      const explorer = await readyStore()
+      const schema = node({ nodeType: 'schema', database: 'Sales', schema: 'dbo' })
+      await explorer.expand(folderNode('Tables', 'tables', schema))
+      await vi.advanceTimersByTimeAsync(RELATION_SHARE_MS)
+      await explorer.expand(folderNode('Views', 'views', schema))
+      expect(apiStub.listTables).toHaveBeenCalledTimes(2)
+
+      // A refresh in the pause drops the read itself, and the timer of that
+      // read then leaves the newer read alone.
+      // The read of Views is still shared, so Tables takes it.
+      await explorer.expand(folderNode('Tables', 'tables', { ...schema, key: 'a' }))
+      expect(apiStub.listTables).toHaveBeenCalledTimes(2)
+      await explorer.expand(folderNode('Views', 'views', { ...schema, key: 'z' }))
+      expect(apiStub.listTables).toHaveBeenCalledTimes(3)
+      await vi.advanceTimersByTimeAsync(RELATION_SHARE_MS / 2)
+      await explorer.refresh(schema)
+      await explorer.expand(folderNode('Tables', 'tables', { ...schema, key: 'b' }))
+      await vi.advanceTimersByTimeAsync(RELATION_SHARE_MS / 2)
+      await explorer.expand(folderNode('Views', 'views', { ...schema, key: 'c' }))
+      expect(apiStub.listTables).toHaveBeenCalledTimes(4)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('reads a branch again on request', async () => {
@@ -1470,7 +1588,7 @@ describe('explorer store', () => {
     apiStub.listSchemas.mockResolvedValue([{ name: 'dbo' }])
     apiStub.listTables.mockResolvedValue([{ name: 'orders', relationType: RelationType.Table }])
     apiStub.listColumns.mockResolvedValue([
-      { name: 'id', dataType: 'int', nullable: false, isPrimaryKey: true },
+      { name: 'id', dataType: 'int', nullable: false, isPrimaryKey: true, isGenerated: false },
     ])
 
     const explorer = await readyStore()
@@ -1583,7 +1701,7 @@ describe('explorer store', () => {
 
   it('keeps a leaf of the tree out of the reactivity', async () => {
     apiStub.listColumns.mockResolvedValue([
-      { name: 'id', dataType: 'int', nullable: false, isPrimaryKey: true },
+      { name: 'id', dataType: 'int', nullable: false, isPrimaryKey: true, isGenerated: false },
     ])
     const explorer = await readyStore()
     const columns = folderNode(

@@ -16,12 +16,20 @@ use tokio::sync::{Mutex, MutexGuard};
 /// with a sign that no tab identifier carries, so no tab can take this slot.
 pub const DEFAULT_SESSION: &str = "@default";
 
-/// The time after which an idle tab session closes.
-pub const SESSION_IDLE_REAP: Duration = Duration::from_secs(600);
+/// The time after which the periodic sweep closes an idle tab session.
+///
+/// A closed session loses its temporary tables and its `SET` options, so the
+/// limit is long. A tab that a user leaves over lunch keeps its session.
+pub const SESSION_IDLE_REAP: Duration = Duration::from_secs(60 * 60);
 
 /// The time the idle reaper gives one session to say whether it is inside
 /// an open transaction.
 pub const TRANSACTION_PROBE_LIMIT: Duration = Duration::from_secs(5);
+
+/// The time a tab session must stand idle before a new tab can close it to
+/// make room at the cap. A tab that ran a statement a moment ago keeps its
+/// temporary tables and its `SET` options.
+pub const EVICT_IDLE_AFTER: Duration = Duration::from_secs(5 * 60);
 
 /// The largest number of tab sessions one connection opens when the record
 /// of the connection names no other limit.
@@ -39,6 +47,8 @@ pub struct Session {
     pub keeps_connection_after_stop: bool,
     /// The moment the session last answered.
     last_ok: Mutex<Instant>,
+    /// The moment a request last took the session.
+    last_used: Mutex<Instant>,
     /// One check at a time for each session.
     pub health: Mutex<()>,
 }
@@ -54,6 +64,7 @@ impl Session {
             needs_ping,
             keeps_connection_after_stop,
             last_ok: Mutex::new(Instant::now()),
+            last_used: Mutex::new(Instant::now()),
             health: Mutex::new(()),
         }
     }
@@ -61,23 +72,50 @@ impl Session {
     /// Records that the session answered.
     pub async fn mark_ok(&self) {
         *self.last_ok.lock().await = Instant::now();
+        self.touch().await;
     }
 
-    /// Moves the moment of the last answer into the past, for a test.
+    /// Records that a request took the session.
+    pub async fn touch(&self) {
+        *self.last_used.lock().await = Instant::now();
+    }
+
+    /// Moves the moment of the last answer and of the last use into the
+    /// past, for a test.
     #[cfg(test)]
     pub async fn age(&self, by: Duration) {
         *self.last_ok.lock().await = Instant::now() - by;
+        *self.last_used.lock().await = Instant::now() - by;
     }
 
     /// True when the session stood idle long enough that it should be
     /// checked before it is used again.
     pub async fn needs_check(&self) -> bool {
-        self.idle_past(HEALTH_CHECK_AFTER).await
+        self.last_ok.lock().await.elapsed() >= HEALTH_CHECK_AFTER
     }
 
-    /// True when the session gave no answer within the given time.
+    /// True when no request took the session within the given time.
     pub async fn idle_past(&self, threshold: Duration) -> bool {
-        self.last_ok.lock().await.elapsed() >= threshold
+        self.last_used.lock().await.elapsed() >= threshold
+    }
+
+    /// The moment a request last took the session.
+    async fn used_at(&self) -> Instant {
+        *self.last_used.lock().await
+    }
+
+    /// True when the session can close: its driver is free, and it is not
+    /// inside an open transaction. A probe that fails or passes
+    /// [`TRANSACTION_PROBE_LIMIT`] also lets it close, because the session
+    /// then does not answer.
+    async fn can_close(&self) -> bool {
+        let probe = {
+            let Ok(mut driver) = self.driver.try_lock() else {
+                return false;
+            };
+            tokio::time::timeout(TRANSACTION_PROBE_LIMIT, driver.holds_open_transaction()).await
+        };
+        !matches!(probe, Ok(Ok(true)))
     }
 }
 
@@ -105,7 +143,7 @@ impl SessionPool {
         let pool = Self::new(cap);
         pool.sessions
             .try_lock()
-            .expect("the pool is new and nothing holds it")
+            .expect("the pool is new and nothing locks it")
             .insert(key.to_string(), Arc::new(session));
         pool
     }
@@ -176,36 +214,79 @@ impl SessionPool {
     /// while it runs. A probe that fails or passes [`TRANSACTION_PROBE_LIMIT`]
     /// removes the session, because the session then does not answer.
     pub async fn reap_idle(&self) {
-        let held: Vec<(String, Arc<Session>)> = self
-            .sessions
+        for (key, session) in self.tab_sessions().await {
+            if session.idle_past(SESSION_IDLE_REAP).await && session.can_close().await {
+                self.remove_same(&key, &session).await;
+            }
+        }
+    }
+
+    /// Closes the tab session that a request took least recently and that
+    /// can close, to make room at the cap. Returns true when one closed.
+    ///
+    /// Only a session that stood idle for [`EVICT_IDLE_AFTER`] and that no
+    /// request has in use can go. A session that is busy or inside an open
+    /// transaction stays too, so a cap that only such sessions fill leaves
+    /// the pool full.
+    pub async fn evict_least_recent(&self) -> bool {
+        let mut idle = Vec::new();
+        for (key, session) in self.tab_sessions().await {
+            if session.idle_past(EVICT_IDLE_AFTER).await {
+                idle.push((session.used_at().await, key, session));
+            }
+        }
+        idle.sort_by_key(|(used, _, _)| *used);
+        for (_, key, session) in idle {
+            if Arc::strong_count(&session) == 2
+                && session.can_close().await
+                && self.remove_unused(&key, &session).await
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The tab sessions of the pool, without the default session.
+    async fn tab_sessions(&self) -> Vec<(String, Arc<Session>)> {
+        self.sessions
             .lock()
             .await
             .iter()
             .filter(|(key, _)| *key != DEFAULT_SESSION)
             .map(|(key, session)| (key.clone(), session.clone()))
-            .collect();
-        for (key, session) in held {
-            if !session.idle_past(SESSION_IDLE_REAP).await {
-                continue;
-            }
-            let probe = {
-                let Ok(mut driver) = session.driver.try_lock() else {
-                    continue;
-                };
-                tokio::time::timeout(TRANSACTION_PROBE_LIMIT, driver.holds_open_transaction()).await
-            };
-            if matches!(probe, Ok(Ok(true))) {
-                continue;
-            }
-            // A new session that took the slot during the probe stays.
-            let mut sessions = self.sessions.lock().await;
-            if sessions
-                .get(&key)
-                .is_some_and(|current| Arc::ptr_eq(current, &session))
-            {
-                sessions.remove(&key);
-            }
+            .collect()
+    }
+
+    /// Removes the session of a key when it is still the given one. A new
+    /// session that took the slot during a probe stays.
+    async fn remove_same(&self, key: &str, session: &Arc<Session>) -> bool {
+        self.remove_if(key, session, |_| true).await
+    }
+
+    /// Removes the session of a key when it is still the given one and only
+    /// the pool and the caller keep a reference to it. A request that took
+    /// the session during the probe keeps it in the pool.
+    async fn remove_unused(&self, key: &str, session: &Arc<Session>) -> bool {
+        self.remove_if(key, session, |current| Arc::strong_count(current) == 2)
+            .await
+    }
+
+    async fn remove_if(
+        &self,
+        key: &str,
+        session: &Arc<Session>,
+        allowed: impl Fn(&Arc<Session>) -> bool,
+    ) -> bool {
+        let mut sessions = self.sessions.lock().await;
+        if sessions
+            .get(key)
+            .is_some_and(|current| Arc::ptr_eq(current, session) && allowed(current))
+        {
+            sessions.remove(key);
+            return true;
         }
+        false
     }
 }
 
@@ -518,6 +599,97 @@ mod tests {
 
         let kept = pool.get("t1").await.unwrap();
         assert!(Arc::ptr_eq(&kept, &fresh));
+    }
+
+    #[tokio::test]
+    async fn the_reap_keeps_a_session_that_a_request_took_lately() {
+        let pool = pool();
+        let session = idle_session(&pool, "t1", Probe::Idle).await;
+        session.touch().await;
+        pool.reap_idle().await;
+        assert!(pool.get("t1").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn at_the_cap_the_least_recent_session_that_can_close_goes() {
+        let pool = pool();
+        let oldest = idle_session(&pool, "oldest", Probe::Open).await;
+        oldest.age(EVICT_IDLE_AFTER * 4).await;
+        drop(oldest);
+        let busy = pool
+            .insert("busy", Session::new(Box::new(StubDriver::plain())))
+            .await;
+        busy.age(EVICT_IDLE_AFTER * 3).await;
+        let older = pool
+            .insert("older", Session::new(Box::new(StubDriver::plain())))
+            .await;
+        older.age(EVICT_IDLE_AFTER * 2).await;
+        drop(older);
+        let newer = pool
+            .insert("newer", Session::new(Box::new(StubDriver::plain())))
+            .await;
+        newer.age(EVICT_IDLE_AFTER).await;
+        drop(newer);
+        pool.insert(DEFAULT_SESSION, Session::new(Box::new(StubDriver::plain())))
+            .await;
+
+        let guard = busy.driver.lock().await;
+        assert!(pool.evict_least_recent().await);
+        drop(guard);
+
+        // The session inside a transaction and the busy one stay.
+        assert!(pool.get("oldest").await.is_some());
+        assert!(pool.get("busy").await.is_some());
+        assert!(pool.get("older").await.is_none());
+        assert!(pool.get("newer").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn the_cap_keeps_a_session_that_a_request_took_lately() {
+        let pool = pool();
+        let session = idle_session(&pool, "t1", Probe::Idle).await;
+        session.touch().await;
+        drop(session);
+        assert!(!pool.evict_least_recent().await);
+
+        // Just under the limit is still too recent.
+        let session = pool.get("t1").await.unwrap();
+        session.age(EVICT_IDLE_AFTER - Duration::from_secs(5)).await;
+        drop(session);
+        assert!(!pool.evict_least_recent().await);
+        assert!(pool.get("t1").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn the_cap_keeps_an_idle_session_that_a_request_has_in_use() {
+        let pool = pool();
+        let in_use = idle_session(&pool, "t1", Probe::Idle).await;
+        assert!(!pool.evict_least_recent().await);
+        assert!(pool.get("t1").await.is_some());
+
+        // A request that takes the session during the probe keeps it too.
+        let request = in_use.clone();
+        assert!(!pool.remove_unused("t1", &in_use).await);
+        drop(request);
+        drop(in_use);
+        assert!(pool.evict_least_recent().await);
+        assert!(pool.get("t1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_cap_full_of_open_transactions_evicts_nothing() {
+        let pool = pool();
+        idle_session(&pool, "open", Probe::Open).await;
+        assert!(!pool.evict_least_recent().await);
+        assert!(pool.get("open").await.is_some());
+        assert!(
+            !pool
+                .remove_same(
+                    "gone",
+                    &Arc::new(Session::new(Box::new(StubDriver::plain())))
+                )
+                .await
+        );
     }
 
     #[tokio::test]

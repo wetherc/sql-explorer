@@ -1,5 +1,5 @@
 <template>
-  <AppDialog :model-value="open" max-width="820" @update:model-value="emit('close')">
+  <AppDialog :model-value="open" size="large" @update:model-value="emit('close')">
     <v-card data-test="properties-dialog">
       <v-card-title class="text-subtitle-1">{{ title }}</v-card-title>
 
@@ -54,11 +54,21 @@
                 <td>{{ column.nullable ? 'yes' : 'no' }}</td>
                 <td>{{ column.isPrimaryKey ? 'yes' : '' }}</td>
               </tr>
+              <tr v-if="details.columns.length === 0">
+                <td colspan="4" class="text-medium-emphasis" data-test="no-columns">No columns.</td>
+              </tr>
             </tbody>
           </v-table>
 
           <div class="text-subtitle-2 mb-1">Indexes</div>
           <v-table density="compact" class="mb-4">
+            <thead v-if="details.indexes.length > 0">
+              <tr>
+                <th>Name</th>
+                <th>Columns</th>
+                <th>Rule</th>
+              </tr>
+            </thead>
             <tbody>
               <tr v-for="index of details.indexes" :key="index.name" data-test="property-index">
                 <td>{{ index.name }}</td>
@@ -71,7 +81,7 @@
             </tbody>
           </v-table>
 
-          <div class="text-subtitle-2 mb-1">Keys</div>
+          <div class="text-subtitle-2 mb-1">Constraints</div>
           <v-table density="compact">
             <tbody>
               <tr
@@ -83,7 +93,7 @@
                 <td class="text-medium-emphasis">{{ constraintHint(constraint) }}</td>
               </tr>
               <tr v-if="details.constraints.length === 0">
-                <td class="text-medium-emphasis" data-test="no-constraints">No keys.</td>
+                <td class="text-medium-emphasis" data-test="no-constraints">No constraints.</td>
               </tr>
             </tbody>
           </v-table>

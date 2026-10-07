@@ -156,7 +156,10 @@ pub struct QueryResponse {
 }
 
 /// Makes every column name different from the others, so that a JSON object
-/// keeps one field for each column. A repeated name gets a number.
+/// keeps one field for each column. A repeated name gets a number. A number
+/// that gives a name already in the list moves on to the next number, so the
+/// names `a`, `a`, `a_2` become `a`, `a_2`, `a_2_2`. The frontend uses the same
+/// rule.
 pub fn unique_column_names(columns: &[ColumnInfo]) -> Vec<String> {
     let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut names = Vec::with_capacity(columns.len());
@@ -166,13 +169,20 @@ pub fn unique_column_names(columns: &[ColumnInfo]) -> Vec<String> {
         } else {
             column.name.clone()
         };
-        let count = seen.entry(base.clone()).or_insert(0);
-        *count += 1;
-        if *count == 1 {
+        let count = seen.get(&base).copied().unwrap_or(0);
+        seen.insert(base.clone(), count + 1);
+        if count == 0 {
             names.push(base);
-        } else {
-            names.push(format!("{base}_{count}"));
+            continue;
         }
+        let mut extra = count + 1;
+        let mut candidate = format!("{base}_{extra}");
+        while seen.contains_key(&candidate) {
+            extra += 1;
+            candidate = format!("{base}_{extra}");
+        }
+        seen.insert(candidate.clone(), 1);
+        names.push(candidate);
     }
     names
 }
@@ -299,6 +309,11 @@ pub struct AppColumn {
     pub data_type: String,
     pub nullable: bool,
     pub is_primary_key: bool,
+    /// True when the server fills the column itself: an identity, a
+    /// computed or generated column, or a row version. An INSERT or an
+    /// UPDATE that names such a column fails.
+    #[serde(default)]
+    pub is_generated: bool,
 }
 
 /// The type of a routine that a schema contains.
@@ -920,6 +935,7 @@ mod tests {
             data_type: "int".into(),
             nullable: false,
             is_primary_key: true,
+            is_generated: false,
         };
         let text = serde_json::to_string(&column).unwrap();
         assert!(text.contains("isPrimaryKey"));
@@ -990,6 +1006,19 @@ mod tests {
             unique_column_names(&columns),
             vec!["id".to_string(), "id_2".to_string(), "column".to_string()]
         );
+    }
+    #[test]
+    fn a_numbered_name_never_repeats_a_name_in_the_list() {
+        let names = |list: &[&str]| {
+            let columns: Vec<ColumnInfo> = list
+                .iter()
+                .map(|name| ColumnInfo::new(*name, "int"))
+                .collect();
+            unique_column_names(&columns)
+        };
+        assert_eq!(names(&["a", "a", "a_2"]), vec!["a", "a_2", "a_2_2"]);
+        assert_eq!(names(&["a", "a_2", "a"]), vec!["a", "a_2", "a_3"]);
+        assert_eq!(names(&["a", "a", "a"]), vec!["a", "a_2", "a_3"]);
     }
     #[test]
     fn the_numbers_of_two_executions_add_up() {

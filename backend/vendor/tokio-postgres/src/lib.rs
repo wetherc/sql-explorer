@@ -256,6 +256,15 @@ pub enum SimpleQueryMessage {
     ///
     /// The number of rows modified or selected is returned.
     CommandComplete(u64),
+    /// A statement in the query has completed, with the tag that the server
+    /// sent, such as `INSERT 0 3` or `CREATE TABLE`, and the number at the
+    /// end of the tag. An empty query gives `CommandComplete(0)` instead.
+    CommandTag {
+        /// The tag of the statement.
+        tag: String,
+        /// The number of rows modified or selected.
+        rows: u64,
+    },
     /// Column values of the proceeding row values
     RowDescription(Arc<[SimpleColumn]>),
 }

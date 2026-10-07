@@ -12,6 +12,7 @@ import {
   quoteIfNeeded,
   isReservedWord,
   statementAt,
+  statementRunAt,
   statementBounds,
   statementAround,
   tableAliases,
@@ -401,6 +402,18 @@ describe('statementBounds', () => {
     expect(statementBounds('SELECT 1;\nDELIMITER $$', Dialect.MySql)).toEqual([[0, 8]])
   })
 
+  it('reads brackets and backticks as quotes on SQLite', () => {
+    expect(statementBounds('SELECT [a;b], `c;d`', Dialect.Sqlite)).toEqual([[0, 19]])
+  })
+
+  it('splits a SQLite trigger at each semicolon when the span need not be whole', () => {
+    const script = 'CREATE TRIGGER t AFTER INSERT ON a BEGIN SELECT 1; END'
+    expect(statementBounds(script, Dialect.Sqlite)).toEqual([
+      [0, 49],
+      [50, script.length],
+    ])
+  })
+
   it('reads a backtick as a quote on MySQL alone', () => {
     expect(statementBounds('SELECT `a;b`', Dialect.MySql)).toEqual([[0, 12]])
     expect(statementBounds('SELECT `a;b`', Dialect.Postgres)).toEqual([
@@ -481,10 +494,58 @@ describe('statementAt', () => {
   })
 })
 
+describe('statementAt with comments and SQLite triggers', () => {
+  it('gives no statement for a script of only comments', () => {
+    expect(statementAt('-- note\n/* more */', 3)).toBe('')
+    expect(statementAt('-- note;\n', 3)).toBe('')
+  })
+
+  it('runs the statement in front of a comment after the last terminator', () => {
+    expect(statementAt('SELECT 1;\n-- note', 14)).toBe('SELECT 1')
+    expect(statementAt('SELECT 1; /* note */;', 15)).toBe('SELECT 1')
+  })
+
+  it('gives no statement for a MySQL script of only a DELIMITER line', () => {
+    expect(statementAt('DELIMITER $$', 5, Dialect.MySql)).toBe('')
+    expect(statementAt('DELIMITER $$\n', 13, Dialect.MySql)).toBe('')
+  })
+
+  it('keeps a SQLite trigger whole past a CASE expression and a comment in front', () => {
+    const trigger =
+      '-- audit\nCREATE TRIGGER t AFTER INSERT ON a BEGIN ' +
+      'UPDATE b SET x = CASE WHEN 1 THEN 2 END; DELETE FROM c; END'
+    const script = `${trigger};\nSELECT 1;`
+    expect(statementAt(script, 20, Dialect.Sqlite)).toBe(trigger)
+    expect(statementAt(script, script.length - 3, Dialect.Sqlite)).toBe('SELECT 1')
+  })
+
+  it('reads a CASE in front of the body of a trigger as no body', () => {
+    const trigger =
+      'CREATE TRIGGER t AFTER UPDATE ON a WHEN CASE WHEN 1 THEN 1 END BEGIN SELECT 1; END'
+    expect(statementAt(`${trigger};SELECT 2`, 5, Dialect.Sqlite)).toBe(trigger)
+  })
+
+  it('reads a table named trigger as no trigger', () => {
+    const script = 'CREATE TABLE trigger (x BEGIN) ; SELECT 2'
+    expect(statementAt(script, 5, Dialect.Sqlite)).toBe('CREATE TABLE trigger (x BEGIN)')
+  })
+
+  it('splits a statement whose third word is not TRIGGER at each semicolon', () => {
+    const script = 'CREATE TABLE trigger_log (x) ; CREATE VIEW v AS SELECT 1 trigger; SELECT 2'
+    expect(statementAt(script, 5, Dialect.Sqlite)).toBe('CREATE TABLE trigger_log (x)')
+    expect(statementAt(script, 40, Dialect.Sqlite)).toBe('CREATE VIEW v AS SELECT 1 trigger')
+  })
+})
+
 describe('wordBefore', () => {
   it('reads the word that ends at the position', () => {
     expect(wordBefore('SELECT ord', 10)).toBe('ord')
     expect(wordBefore('SELECT ', 7)).toBe('')
+  })
+
+  it('reads letters outside ASCII as part of the word', () => {
+    expect(wordBefore('SELECT straße', 13)).toBe('straße')
+    expect(wordBefore('SELECT 名前', 9)).toBe('名前')
   })
 
   it('keeps the position inside the text', () => {
@@ -671,6 +732,55 @@ describe('tableAliases', () => {
     expect([...aliases.keys()]).toEqual(['orders', 'o'])
   })
 
+  it('steps over backslash escapes, E strings, dollar quotes and nested comments', () => {
+    expect([...tableAliases("SELECT 'it\\' FROM x' FROM orders o", Dialect.MySql).keys()]).toEqual([
+      'orders',
+      'o',
+    ])
+    expect([
+      ...tableAliases("SELECT E'it\\' FROM x' FROM orders o", Dialect.Postgres).keys(),
+    ]).toEqual(['orders', 'o'])
+    expect([
+      ...tableAliases('SELECT $q$ FROM x $q$, $1 FROM orders o', Dialect.Postgres).keys(),
+    ]).toEqual(['orders', 'o'])
+    expect([
+      ...tableAliases(
+        '/* a /* FROM x */ FROM y */ SELECT 1 FROM orders o',
+        Dialect.Postgres,
+      ).keys(),
+    ]).toEqual(['orders', 'o'])
+    expect([...tableAliases('# FROM x\nSELECT 1 FROM orders o', Dialect.MySql).keys()]).toEqual([
+      'orders',
+      'o',
+    ])
+  })
+
+  it('reads a backslash in a MySQL name in double quotes as an escape', () => {
+    expect(tableAliases('SELECT * FROM "a\\"b" o', Dialect.MySql).get('o')).toBe('a"b')
+  })
+
+  it('reads a doubled quote inside a name as one quote', () => {
+    expect(tableAliases('SELECT * FROM "a""b" o', Dialect.Postgres).get('o')).toBe('a"b')
+    expect(tableAliases('SELECT * FROM [a]]b] o', Dialect.MsSql).get('o')).toBe('a]b')
+  })
+
+  it('reads a name that no quote closes up to the end', () => {
+    expect([...tableAliases('SELECT * FROM "orders', Dialect.Postgres).keys()]).toEqual(['orders'])
+  })
+
+  it('reads the brackets and the backticks of SQLite', () => {
+    expect(tableAliases('SELECT * FROM [order lines] l', Dialect.Sqlite).get('l')).toBe(
+      'order lines',
+    )
+    expect(tableAliases('SELECT * FROM `orders` o', Dialect.Sqlite).get('o')).toBe('orders')
+  })
+
+  it('reads names and aliases with letters outside ASCII', () => {
+    const aliases = tableAliases('SELECT * FROM straße ä JOIN 😀x ON 1', Dialect.Postgres)
+    expect(aliases.get('ä')).toBe('straße')
+    expect(aliases.get('straße')).toBe('straße')
+  })
+
   it('reads two dashes in MySQL as a subtraction when no blank follows them', () => {
     const script = 'SELECT 1--1 FROM orders o'
     expect([...tableAliases(script, Dialect.MySql).keys()]).toEqual(['orders', 'o'])
@@ -787,5 +897,38 @@ describe('completionsFor with a qualifier', () => {
   it('offers every name when the statement holds no relation', () => {
     const items = completionsFor('', index, Dialect.MsSql, { qualifier: '  ' })
     expect(items.map((item) => item.label).slice(0, 3)).toEqual(['total', 'raw', 'note'])
+  })
+})
+
+describe('statementRunAt', () => {
+  it('gives the offset of the statement under the cursor', () => {
+    // Both statements start with the same line. The cursor stands in the
+    // comment above the second, so the start is that of the second.
+    const script = 'SELECT a\nFROM t;\n-- pick\nSELECT a\nFROM u'
+    expect(statementRunAt(script, script.indexOf('pick'), Dialect.Postgres)).toEqual({
+      text: '-- pick\nSELECT a\nFROM u',
+      start: script.indexOf('-- pick'),
+      wrapped: false,
+    })
+    // The blank text in front of a statement is not part of its start.
+    const blank = 'SELECT a;\n\n  SELECT a'
+    expect(statementRunAt(blank, 10, Dialect.Postgres)).toEqual({
+      text: 'SELECT a',
+      start: blank.lastIndexOf('SELECT a'),
+      wrapped: false,
+    })
+  })
+
+  it('marks a MySQL statement that gets a DELIMITER line in front', () => {
+    const script = 'DELIMITER $$\nCREATE PROCEDURE p()\nBEGIN\n  SELECT 1;\nEND$$\nDELIMITER ;'
+    expect(statementRunAt(script, script.indexOf('BEGIN'), Dialect.MySql)).toEqual({
+      text: 'DELIMITER $$\nCREATE PROCEDURE p()\nBEGIN\n  SELECT 1;\nEND$$',
+      start: script.indexOf('CREATE'),
+      wrapped: true,
+    })
+  })
+
+  it('gives an empty text at the start of a script without a statement', () => {
+    expect(statementRunAt('  \n-- note', 1)).toEqual({ text: '', start: 0, wrapped: false })
   })
 })

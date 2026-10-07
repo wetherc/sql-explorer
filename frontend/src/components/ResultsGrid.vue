@@ -18,6 +18,14 @@
         >
           Filtering… {{ Math.round(filterProgress * 100) }}%
         </span>
+        <span
+          v-if="sortProgress !== null"
+          class="text-caption text-medium-emphasis mr-2"
+          role="status"
+          data-test="grid-sorting"
+        >
+          Sorting… {{ Math.round(sortProgress * 100) }}%
+        </span>
         <span class="text-caption text-medium-emphasis mr-2" data-test="grid-count">
           {{ countLabel }}
         </span>
@@ -66,19 +74,22 @@
               <v-divider />
               <v-list-item
                 title="Export all rows to CSV"
-                subtitle="Re-runs the query and streams rows from the server"
+                :subtitle="exportAllSubtitle"
+                :disabled="exporting"
                 data-test="grid-export-all-csv"
                 @click="emit('export-all', 'csv')"
               />
               <v-list-item
                 title="Export all rows to JSON"
-                subtitle="Re-runs the query and streams rows from the server"
+                :subtitle="exportAllSubtitle"
+                :disabled="exporting"
                 data-test="grid-export-all-json"
                 @click="emit('export-all', 'json')"
               />
               <v-list-item
                 title="Export all rows to Excel"
-                subtitle="Re-runs the query and streams rows from the server"
+                :subtitle="exportAllSubtitle"
+                :disabled="exporting"
                 data-test="grid-export-all-xlsx"
                 @click="emit('export-all', 'xlsx')"
               />
@@ -120,9 +131,22 @@
           :aria-rowcount="sortedOrder.length + 1"
           :aria-colcount="result.columns.length + 1"
           :aria-busy="busy"
+          :style="{ width: `${tableWidth}px` }"
           @keydown="onGridKeyDown"
           @copy="onGridCopy"
         >
+          <!-- The table has a fixed layout, so these widths alone decide the
+               width of each column. The rows that scroll into view then
+               cannot change the widths. -->
+          <colgroup>
+            <col :style="{ width: `${rowNumberWidth}px` }" />
+            <col
+              v-for="(column, index) in result.columns"
+              :key="`${column.name}-${index}`"
+              :style="{ width: `${widthFor(index)}px` }"
+              data-test="grid-col"
+            />
+          </colgroup>
           <thead>
             <tr ref="headerRow" role="row" aria-rowindex="1">
               <th class="row-number" role="columnheader" aria-colindex="1" scope="col">#</th>
@@ -142,6 +166,7 @@
                 <button
                   type="button"
                   class="header-button"
+                  :title="`${column.name} (${column.typeName})`"
                   data-test="grid-header"
                   @click="toggleSort(index)"
                 >
@@ -158,6 +183,9 @@
                   role="separator"
                   aria-orientation="vertical"
                   :aria-label="`Resize column ${column.name}`"
+                  :aria-valuenow="widthFor(index)"
+                  :aria-valuemin="MIN_COLUMN_WIDTH"
+                  :aria-valuetext="`${widthFor(index)} pixels`"
                   tabindex="0"
                   data-test="grid-column-grip"
                   @pointerdown="startResize($event, index)"
@@ -167,7 +195,16 @@
               </th>
             </tr>
           </thead>
-          <tbody>
+          <!-- The body has one listener for each event, and the cell under
+               the event names its place through data-row and data-col. A
+               window of drawn rows then binds four listeners, not four for
+               every cell. -->
+          <tbody
+            @focusin="onBodyFocus"
+            @mouseover="onBodyHover"
+            @dblclick="onBodyDoubleClick"
+            @contextmenu="onBodyMenu"
+          >
             <!-- The two rows that hold the empty space above and below the drawn
                rows stand outside the reading, because they name nothing. -->
             <tr v-if="topPad > 0" :style="{ height: `${topPad}px` }" aria-hidden="true">
@@ -176,7 +213,10 @@
             <tr
               v-for="entry in windowRows"
               :key="entry.sourceIndex"
-              :class="{ selected: selected.has(entry.sourceIndex) }"
+              :class="{
+                selected: selected.has(entry.sourceIndex),
+                stripe: entry.position % 2 === 1,
+              }"
               role="row"
               :aria-rowindex="entry.position + 2"
               :aria-selected="selected.has(entry.sourceIndex)"
@@ -197,11 +237,9 @@
                 role="gridcell"
                 :aria-colindex="cellIndex + 2"
                 :tabindex="isFocused(entry, cellIndex) ? 0 : -1"
+                :data-row="entry.position"
+                :data-col="cellIndex"
                 data-test="grid-cell"
-                @focus="onCellFocus($event, entry.position, cellIndex)"
-                @mouseenter="revealFullValue($event, entry.position, cellIndex)"
-                @dblclick="inspect(cell, columnName(cellIndex))"
-                @contextmenu.prevent="openCellMenu($event, entry.position, cellIndex)"
               >
                 <!-- The width of a cell is capped on this element and not on
                      the cell itself, because a table of automatic width pays
@@ -284,6 +322,7 @@ import { compareSortKeys, formatCell, isNullCell, sortKey, truncate } from '@/li
 import type { SortKey } from '@/lib/format'
 import { toTabSeparated } from '@/lib/export'
 import type { ResultTable } from '@/lib/results'
+import { FALLBACK_CHAR_WIDTH } from '@/lib/textWidth'
 import type { CellValue, ResultSet } from '@/types/api'
 
 /** The forms an export can take. */
@@ -307,8 +346,17 @@ const props = withDefaults(
      *  gives it here. A grid without it reads the mark of the table once. */
     truncated?: boolean
     busy?: boolean
+    /** True while an export of all rows runs, so a second one waits. */
+    exporting?: boolean
   }>(),
-  { busy: false, rows: undefined, truncated: undefined },
+  { busy: false, exporting: false, rows: undefined, truncated: undefined },
+)
+
+/** The note under each command that exports all rows. */
+const exportAllSubtitle = computed(() =>
+  props.exporting
+    ? 'An export is already running.'
+    : 'Re-runs the query and streams rows from the server',
 )
 
 /** The number of rows of the result, which grows while the set streams. */
@@ -319,6 +367,7 @@ const emit = defineEmits<{
   (event: 'export', format: ExportFormat, rows: ResultSet): void
   (event: 'export-all', format: ExportAllFormat): void
   (event: 'copied', text: string): void
+  (event: 'copy-failed', reason: string): void
 }>()
 
 /** The height of one row, which the window of visible rows is built from. */
@@ -350,7 +399,7 @@ watch(search, (value) => {
   filterTimer = setTimeout(() => {
     filterTimer = null
     filterSource = props.result
-    appliedSearch.value = (value ?? '').trim().toLowerCase()
+    appliedSearch.value = value.trim().toLowerCase()
   }, FILTER_DELAY_MS)
 })
 
@@ -398,6 +447,7 @@ onBeforeUnmount(() => {
   }
   dropRowTexts()
   stopSortTimer()
+  stopSortKeys()
   // A drag of a grip that runs at unmount leaves its listeners on the window.
   endResize()
 })
@@ -416,8 +466,38 @@ const inspectTitle = ref('')
  * tracked read for each row.
  */
 const selected = shallowRef(new Set<number>())
-/** The row of the last plain click, from which a click with Shift reaches. */
+/**
+ * The row of the last plain click, from which a click with Shift reaches. It
+ * keeps the place of the row in the result, because a sort of rows that
+ * stream in moves the row in the view while the sort column stays the same.
+ */
 const anchor = ref<number | null>(null)
+
+/** The place of the anchor in the view, or null when the view lacks it. */
+function anchorPosition(): number | null {
+  if (anchor.value === null) {
+    return null
+  }
+  const position = sortedOrder.value.indexOf(anchor.value)
+  return position < 0 ? null : position
+}
+
+/** Takes every row of the view between the anchor and one place. */
+function selectRange(position: number): boolean {
+  const from = anchorPosition()
+  if (from === null) {
+    return false
+  }
+  const next = new Set(selected.value)
+  for (const source of sortedOrder.value.slice(
+    Math.min(from, position),
+    Math.max(from, position) + 1,
+  )) {
+    next.add(source)
+  }
+  selected.value = next
+  return true
+}
 
 /**
  * The place of every row of the result, in the order of the result. The view
@@ -591,16 +671,38 @@ let sortKeys: SortKey[] = []
 let sortKeysSource: ResultTable | null = null
 let sortKeysColumn = -1
 
-function sortKeysFor(table: ResultTable, column: number, total: number): SortKey[] {
+/**
+ * Builds one slice of the keys of a column, in the same steps as the text of
+ * the filter. Gives true when the keys cover every row.
+ */
+function buildSortKeys(table: ResultTable, column: number, total: number): boolean {
   if (sortKeysSource !== table || sortKeysColumn !== column || sortKeys.length > total) {
     sortKeys = []
     sortKeysSource = table
     sortKeysColumn = column
   }
-  for (let index = sortKeys.length; index < total; index += 1) {
-    sortKeys.push(sortKey(table.cell(index, column)))
+  const start = performance.now()
+  let read = 0
+  while (
+    sortKeys.length < total &&
+    read < BUILD_SLICE_ROWS &&
+    (read === 0 || performance.now() - start < BUILD_SLICE_MS)
+  ) {
+    sortKeys.push(sortKey(table.cell(sortKeys.length, column)))
+    read += 1
   }
-  return sortKeys
+  return sortKeys.length >= total
+}
+
+/** The part of the sort keys that is built, or null while no build runs. */
+const sortProgress = ref<number | null>(null)
+let sortKeysTimer: ReturnType<typeof setTimeout> | null = null
+
+function stopSortKeys(): void {
+  if (sortKeysTimer !== null) {
+    clearTimeout(sortKeysTimer)
+    sortKeysTimer = null
+  }
 }
 
 /** The places of the rows in the view, after the filter and the sort. */
@@ -645,9 +747,18 @@ let sortSource: ResultTable | null = null
 /** Builds the order of the view again, with the sort when one is active. */
 function updateOrder(): void {
   stopSortTimer()
+  stopSortKeys()
   const base = baseOrder()
-  orderedCount = base.length
   const index = sortSource === props.result ? sortIndex.value : null
+  if (index !== null && !buildSortKeys(props.result, index, rowTotal.value)) {
+    // The view keeps the order it has until the keys of every row are built,
+    // and the next slice runs after the main thread had its turn.
+    sortProgress.value = sortKeys.length / rowTotal.value
+    sortKeysTimer = setTimeout(updateOrder, 0)
+    return
+  }
+  sortProgress.value = null
+  orderedCount = base.length
   if (index === null) {
     // The keys weigh as much as one column of the result, so they go with
     // the sort. A sort of the same column later builds them again.
@@ -661,7 +772,7 @@ function updateOrder(): void {
   }
   const start = performance.now()
   const direction = sortDescending.value ? -1 : 1
-  const keys = sortKeysFor(props.result, index, rowTotal.value)
+  const keys = sortKeys
   sortedOrder.value = [...base].sort(
     (left, right) => compareSortKeys(keys[left] ?? null, keys[right] ?? null) * direction,
   )
@@ -881,10 +992,8 @@ function onGridKeyDown(event: KeyboardEvent): void {
 
   switch (event.key) {
     case 'ArrowDown':
-      focusCellAt(row + 1, column)
-      break
     case 'ArrowUp':
-      focusCellAt(row - 1, column)
+      moveRow(event, row + (event.key === 'ArrowDown' ? 1 : -1), column)
       break
     case 'ArrowRight':
       focusCellAt(row, column + 1)
@@ -934,6 +1043,21 @@ function onGridKeyDown(event: KeyboardEvent): void {
   event.preventDefault()
 }
 
+/**
+ * Moves the tab stop one row up or down. With Shift the move also takes the
+ * rows from the anchor to the new row, as a click with Shift does. The row
+ * the move starts on becomes the anchor when there is none.
+ */
+function moveRow(event: KeyboardEvent, target: number, column: number): void {
+  if (event.shiftKey && anchorPosition() === null) {
+    anchor.value = focusedSourceRow() ?? null
+  }
+  focusCellAt(target, column)
+  if (event.shiftKey) {
+    selectRange(focusedRow.value)
+  }
+}
+
 /** The place in the result of the row the tab stop stands on. */
 function focusedSourceRow(): number | undefined {
   return sortedOrder.value[focusedRow.value]
@@ -942,7 +1066,7 @@ function focusedSourceRow(): number | undefined {
 /** Takes every row of the view, as the filter leaves them. */
 function selectAllRows(): void {
   selected.value = new Set(sortedOrder.value)
-  anchor.value = 0
+  anchor.value = sortedOrder.value[0] ?? null
 }
 
 /**
@@ -997,7 +1121,7 @@ function toggleFocusedRow(event: KeyboardEvent): void {
     } else {
       selected.value = new Set([row])
     }
-    anchor.value = focusedRow.value
+    anchor.value = row
   }
 }
 
@@ -1007,8 +1131,7 @@ function toggleFocusedRow(event: KeyboardEvent): void {
  * alone, so the question is asked when the pointer or the focus arrives, and
  * not while the row is drawn.
  */
-function revealFullValue(event: Event, row: number, column: number): void {
-  const cell = event.currentTarget as HTMLElement
+function revealFullValue(cell: HTMLElement, row: number, column: number): void {
   const text = cell.querySelector('.cell-text')
   if (!text || text.scrollWidth <= text.clientWidth) {
     cell.removeAttribute('title')
@@ -1018,9 +1141,44 @@ function revealFullValue(event: Event, row: number, column: number): void {
   cell.title = source === undefined ? '' : formatCell(props.result.cell(source, column))
 }
 
-function onCellFocus(event: Event, row: number, column: number): void {
-  focusCellAt(row, column, false)
-  revealFullValue(event, row, column)
+/** The cell an event of the body reached, with its place in the view. */
+function eventCell(event: Event): { cell: HTMLElement; row: number; column: number } | null {
+  const cell = (event.target as Element | null)?.closest<HTMLElement>('td[data-col]')
+  if (!cell) {
+    return null
+  }
+  return { cell, row: Number(cell.dataset.row), column: Number(cell.dataset.col) }
+}
+
+function onBodyFocus(event: FocusEvent): void {
+  const hit = eventCell(event)
+  if (hit) {
+    focusCellAt(hit.row, hit.column, false)
+    revealFullValue(hit.cell, hit.row, hit.column)
+  }
+}
+
+function onBodyHover(event: MouseEvent): void {
+  const hit = eventCell(event)
+  if (hit) {
+    revealFullValue(hit.cell, hit.row, hit.column)
+  }
+}
+
+function onBodyDoubleClick(event: MouseEvent): void {
+  const hit = eventCell(event)
+  const value = hit ? cellAt(hit.row, hit.column) : undefined
+  if (hit && value !== undefined) {
+    inspect(value, columnName(hit.column))
+  }
+}
+
+function onBodyMenu(event: MouseEvent): void {
+  const hit = eventCell(event)
+  if (hit) {
+    event.preventDefault()
+    openCellMenu(event, hit.row, hit.column)
+  }
 }
 
 /**
@@ -1029,14 +1187,7 @@ function onCellFocus(event: Event, row: number, column: number): void {
  * every row between the last plain click and this one.
  */
 function onRowClick(position: number, sourceIndex: number, event: MouseEvent): void {
-  if (event.shiftKey && anchor.value !== null) {
-    const from = Math.min(anchor.value, position)
-    const to = Math.max(anchor.value, position)
-    const next = new Set(selected.value)
-    for (const source of sortedOrder.value.slice(from, to + 1)) {
-      next.add(source)
-    }
-    selected.value = next
+  if (event.shiftKey && selectRange(position)) {
     return
   }
   if (event.ctrlKey || event.metaKey) {
@@ -1047,11 +1198,11 @@ function onRowClick(position: number, sourceIndex: number, event: MouseEvent): v
       next.add(sourceIndex)
     }
     selected.value = next
-    anchor.value = position
+    anchor.value = sourceIndex
     return
   }
   selected.value = new Set([sourceIndex])
-  anchor.value = position
+  anchor.value = sourceIndex
 }
 function clearSelection(): void {
   selected.value = new Set()
@@ -1085,10 +1236,22 @@ function inspect(cell: CellValue, name: string): void {
   inspecting.value = true
 }
 
+/**
+ * Puts a text on the clipboard. The grid reports the copy only when the
+ * clipboard took it, and reports a failure when there is no clipboard or
+ * the system refused the write.
+ */
 async function copyText(text: string): Promise<void> {
   const clipboard = globalThis.navigator?.clipboard
-  if (clipboard) {
+  if (!clipboard) {
+    emit('copy-failed', "This window can't reach the clipboard.")
+    return
+  }
+  try {
     await clipboard.writeText(text)
+  } catch (error) {
+    emit('copy-failed', error instanceof Error ? error.message : String(error))
+    return
   }
   emit('copied', text)
 }
@@ -1186,22 +1349,83 @@ function inspectCellOfMenu(): void {
 
 /**
  * The width the user gave each column, by the place of the column. A column
- * that the user never dragged holds no width and takes the width of its
- * content.
+ * that the user never dragged has no width here and takes its measured width.
  */
 const columnWidths = ref<Record<number, number>>({})
 /** The narrowest a column can become. */
 const MIN_COLUMN_WIDTH = 56
+/** The number of rows that the measure of the columns reads. */
+const MEASURED_ROWS = 200
+/** The widest that the measure makes a column. The user can drag it wider. */
+const MAX_MEASURED_WIDTH = 420
+/** The padding at the two sides of a cell. */
+const CELL_PADDING = 20
+/** The space of the gap before the type and of the sort arrow in a header. */
+const HEADER_EXTRA = 24
+/**
+ * The width of each column from the text of its header and of the first rows.
+ * The measure runs once for each result, when its first rows arrive, so the
+ * widths do not change while the rows stream or while the user scrolls.
+ */
+const measuredWidths = shallowRef<number[]>([])
+/** The result and the row count that the last measure read. */
+let measuredFrom: { table: ResultTable; rows: number } | null = null
+
+/** The width of the widest text of one column, from the count of its letters. */
+function measureColumn(table: ResultTable, index: number, rows: number): number {
+  const column = table.columns[index]!
+  let letters = 0
+  for (let row = 0; row < rows; row += 1) {
+    letters = Math.max(letters, formatCell(table.cell(row, index)).length)
+  }
+  const cells = Math.min(letters, CELL_LIMIT) * FALLBACK_CHAR_WIDTH
+  const header = (column.name.length + column.typeName.length) * FALLBACK_CHAR_WIDTH + HEADER_EXTRA
+  const width = Math.max(cells, header) + CELL_PADDING
+  return Math.min(MAX_MEASURED_WIDTH, Math.max(MIN_COLUMN_WIDTH, width))
+}
+
+/**
+ * Measures the columns of a new result, and measures them again when the
+ * first rows of a result that started empty arrive. The watch below reads
+ * the result and the row count, and it writes only the measured widths.
+ */
+function measureWidths(): void {
+  const table = props.result
+  const rows = Math.min(rowTotal.value, MEASURED_ROWS)
+  if (measuredFrom?.table === table && (measuredFrom.rows > 0 || rows === 0)) {
+    return
+  }
+  measuredFrom = { table, rows }
+  measuredWidths.value = table.columns.map((_column, index) => measureColumn(table, index, rows))
+}
+watch([() => props.result, rowTotal], measureWidths, { immediate: true })
+
+/**
+ * The width of one column: the width the user gave it, or the measured one.
+ * The watch of the measure runs before each render, so every column of the
+ * result on screen has a measured width.
+ */
+function widthFor(index: number): number {
+  return columnWidths.value[index] ?? measuredWidths.value[index]!
+}
+
+/** The width of the column of row numbers, from the digits of the row count. */
+const rowNumberWidth = computed(
+  () => String(rowTotal.value).length * FALLBACK_CHAR_WIDTH + CELL_PADDING,
+)
+
+/** The width of the whole table, which the fixed layout needs. */
+const tableWidth = computed(() =>
+  props.result.columns.reduce((sum, _column, index) => sum + widthFor(index), rowNumberWidth.value),
+)
 /** The step of a change of the width from the keyboard. */
 const WIDTH_STEP = 16
 /** The drag that runs, when one runs. */
 let resizing: { column: number; startX: number; startWidth: number } | null = null
 
 function headerStyle(index: number): Record<string, string> {
-  const width = columnWidths.value[index]
-  return width === undefined
-    ? {}
-    : { width: `${width}px`, minWidth: `${width}px`, maxWidth: `${width}px` }
+  const width = widthFor(index)
+  return { width: `${width}px`, minWidth: `${width}px`, maxWidth: `${width}px` }
 }
 
 function cellStyle(index: number): Record<string, string> {
@@ -1214,16 +1438,11 @@ function setWidth(index: number, width: number): void {
   columnWidths.value = { ...columnWidths.value, [index]: Math.max(MIN_COLUMN_WIDTH, width) }
 }
 
-/** Lets a column take the width of its content again. */
+/** Gives a column its measured width again. */
 function clearWidth(index: number): void {
   const next = { ...columnWidths.value }
   delete next[index]
   columnWidths.value = next
-}
-
-/** The width one column holds now, from the record or from the element. */
-function widthOf(index: number, element: HTMLElement | null): number {
-  return columnWidths.value[index] ?? element?.getBoundingClientRect().width ?? MIN_COLUMN_WIDTH
 }
 
 /** Follows the pointer while it drags the grip of a column. */
@@ -1238,29 +1457,31 @@ function endResize(): void {
   resizing = null
   globalThis.removeEventListener('pointermove', onResizeMove)
   globalThis.removeEventListener('pointerup', endResize)
+  globalThis.removeEventListener('pointercancel', endResize)
 }
 
 /** Starts the drag of the grip of one column. */
 function startResize(event: PointerEvent, index: number): void {
-  const header = (event.target as HTMLElement | null)?.parentElement ?? null
-  resizing = { column: index, startX: event.clientX, startWidth: widthOf(index, header) }
+  resizing = { column: index, startX: event.clientX, startWidth: widthFor(index) }
   globalThis.addEventListener('pointermove', onResizeMove)
   globalThis.addEventListener('pointerup', endResize)
+  // The system can take the pointer away, for example for a gesture, and
+  // then sends no pointerup.
+  globalThis.addEventListener('pointercancel', endResize)
   event.preventDefault()
 }
 
 /**
  * The keys of the grip of a column. The arrows change the width by one step,
- * and Enter lets the column take the width of its content again.
+ * and Enter gives the column its measured width again.
  */
 function onGripKeyDown(event: KeyboardEvent, index: number): void {
-  const header = (event.target as HTMLElement | null)?.parentElement ?? null
   switch (event.key) {
     case 'ArrowRight':
-      setWidth(index, widthOf(index, header) + WIDTH_STEP)
+      setWidth(index, widthFor(index) + WIDTH_STEP)
       break
     case 'ArrowLeft':
-      setWidth(index, widthOf(index, header) - WIDTH_STEP)
+      setWidth(index, widthFor(index) - WIDTH_STEP)
       break
     case 'Enter':
       clearWidth(index)
@@ -1270,12 +1491,6 @@ function onGripKeyDown(event: KeyboardEvent, index: number): void {
   }
   event.preventDefault()
 }
-
-// A sort or a filter moves the rows in the view, so the anchor of a click
-// with Shift no longer points at the row the user last clicked.
-watch([sortIndex, sortDescending, appliedSearch], () => {
-  anchor.value = null
-})
 
 // A new result starts at the top with no sort and no filter.
 watch(
@@ -1346,7 +1561,7 @@ watch(
 .grid-table {
   border-collapse: separate;
   border-spacing: 0;
-  width: max-content;
+  table-layout: fixed;
   min-width: 100%;
   font-size: var(--app-text-md);
 }
@@ -1394,6 +1609,7 @@ watch(
   font: inherit;
   text-align: left;
   white-space: nowrap;
+  text-overflow: ellipsis;
   cursor: pointer;
   user-select: none;
 }
@@ -1444,7 +1660,10 @@ watch(
    weight as each other. The order is therefore what decides: a stripe covers
    the plain cell, the gutter of row numbers covers the stripe, and the mark of
    a chosen row covers both. */
-.grid-table tbody tr:nth-child(even) td {
+/* The stripe follows the place of the row in the result. A count of the
+   table rows would include the spacer row above the drawn rows, so every
+   stripe would flip as that row comes and goes during a scroll. */
+.grid-table tbody tr.stripe td {
   background: rgb(var(--v-theme-grid-stripe));
 }
 
@@ -1459,10 +1678,18 @@ watch(
   background: rgba(var(--v-theme-primary), 0.16);
 }
 
+/* The row number stays in place above the cells that scroll sideways, so the
+   mark of a chosen row lies over an opaque layer and the cells stay hidden. */
+.grid-table tbody tr.selected td.row-number {
+  background:
+    linear-gradient(rgba(var(--v-theme-primary), 0.16), rgba(var(--v-theme-primary), 0.16)),
+    rgb(var(--v-theme-grid-header));
+}
+
 .row-number {
   color: rgb(var(--v-theme-on-grid-header));
   text-align: right;
-  width: 1%;
+  overflow: hidden;
   position: sticky;
   left: 0;
 }

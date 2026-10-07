@@ -37,7 +37,23 @@ pub fn select_statement(dialect: Dialect, name: &str, columns: &[AppColumn]) -> 
 /// Builds `INSERT`, with one column on each line and one value for each
 /// column. Each value is a mark that the user replaces, and the comment
 /// beside it names the column and its type.
+///
+/// A column that the server fills itself is left out, because the server
+/// refuses a value for it. A relation whose every column the server fills
+/// gets a row of default values.
 pub fn insert_statement(dialect: Dialect, name: &str, columns: &[AppColumn]) -> String {
+    let columns: Vec<AppColumn> = columns
+        .iter()
+        .filter(|column| !column.is_generated)
+        .cloned()
+        .collect();
+    if columns.is_empty() {
+        return match dialect {
+            Dialect::MySql => format!("INSERT INTO {name} () VALUES ();"),
+            _ => format!("INSERT INTO {name} DEFAULT VALUES;"),
+        };
+    }
+    let columns = columns.as_slice();
     let names = columns
         .iter()
         .map(|column| format!("    {}", dialect.quote_identifier(&column.name)))
@@ -62,6 +78,10 @@ pub fn insert_statement(dialect: Dialect, name: &str, columns: &[AppColumn]) -> 
 /// A relation with no primary key gets a WHERE clause that matches no row,
 /// so a statement that ran by mistake changes nothing.
 ///
+/// A column that the server fills itself stays out of the SET clause,
+/// because the server refuses a value for it. It can still stand in the
+/// WHERE clause.
+///
 /// The semicolon stands in front of the comment on the last line, because a
 /// `--` comment hides all text after it on the same line.
 pub fn update_statement(dialect: Dialect, name: &str, columns: &[AppColumn]) -> String {
@@ -69,12 +89,21 @@ pub fn update_statement(dialect: Dialect, name: &str, columns: &[AppColumn]) -> 
         .iter()
         .filter(|column| column.is_primary_key)
         .collect();
-    let rest: Vec<AppColumn> = columns
+    let settable: Vec<AppColumn> = columns
+        .iter()
+        .filter(|column| !column.is_generated)
+        .cloned()
+        .collect();
+    let rest: Vec<AppColumn> = settable
         .iter()
         .filter(|column| !column.is_primary_key)
         .cloned()
         .collect();
-    let assigned = if rest.is_empty() { columns } else { &rest };
+    let assigned = match (rest.is_empty(), settable.is_empty()) {
+        (false, _) => &rest,
+        (true, false) => &settable,
+        (true, true) => columns,
+    };
 
     let sets = join_lines(assigned, |column, last| {
         format!(
@@ -177,6 +206,7 @@ mod tests {
             data_type: data_type.to_string(),
             nullable,
             is_primary_key: key,
+            is_generated: false,
         }
     }
 
@@ -265,6 +295,58 @@ mod tests {
         let text = update_statement(Dialect::Sqlite, "\"t\"", &columns);
         assert!(text.contains("SET\n    \"id\" = NULL -- int"));
         assert!(text.ends_with("WHERE\n    \"id\" = NULL; -- int"));
+    }
+
+    fn generated(name: &str, key: bool) -> AppColumn {
+        AppColumn {
+            is_generated: true,
+            ..column(name, "int", false, key)
+        }
+    }
+
+    #[test]
+    fn an_insert_leaves_out_the_columns_that_the_server_fills() {
+        let mut columns = two_columns();
+        columns[0].is_generated = true;
+        columns.push(generated("total", false));
+        let text = insert_statement(Dialect::Postgres, "\"t\"", &columns);
+        assert_eq!(
+            text,
+            "INSERT INTO \"t\" (\n    \"name\"\n)\nVALUES (\n    NULL -- name: nvarchar(50)\n);"
+        );
+    }
+
+    #[test]
+    fn an_insert_of_filled_columns_alone_gives_a_row_of_defaults() {
+        let columns = vec![generated("id", true)];
+        assert_eq!(
+            insert_statement(Dialect::MsSql, "[t]", &columns),
+            "INSERT INTO [t] DEFAULT VALUES;"
+        );
+        assert_eq!(
+            insert_statement(Dialect::MySql, "`t`", &columns),
+            "INSERT INTO `t` () VALUES ();"
+        );
+    }
+
+    #[test]
+    fn an_update_leaves_the_filled_columns_out_of_the_set_clause() {
+        let mut columns = two_columns();
+        columns[0].is_generated = true;
+        columns.push(generated("total", false));
+        let text = update_statement(Dialect::Postgres, "\"t\"", &columns);
+        assert_eq!(
+            text,
+            "UPDATE \"t\"\nSET\n    \"name\" = NULL -- nvarchar(50)\nWHERE\n    \"id\" = NULL; -- int"
+        );
+
+        let keyed = vec![column("id", "int", false, true), generated("total", false)];
+        let text = update_statement(Dialect::Postgres, "\"t\"", &keyed);
+        assert!(text.contains("SET\n    \"id\" = NULL -- int\nWHERE"));
+
+        let filled = vec![generated("id", true)];
+        let text = update_statement(Dialect::Postgres, "\"t\"", &filled);
+        assert!(text.contains("SET\n    \"id\" = NULL -- int\nWHERE"));
     }
 
     #[test]

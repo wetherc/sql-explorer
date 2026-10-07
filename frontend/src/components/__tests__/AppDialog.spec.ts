@@ -107,4 +107,15 @@ describe('AppDialog and the focus of the user', () => {
 
     expect(document.activeElement).toBe(document.body)
   })
+
+  it('takes the width of its size, and a width of its own before that', () => {
+    const sized = mountWithPlugins(AppDialog, { props: { modelValue: false, size: 'large' } })
+    expect(sized.findComponent({ name: 'VDialog' }).props('maxWidth')).toBe(900)
+    const plain = mountWithPlugins(AppDialog, {
+      props: { modelValue: false, size: 'small', maxWidth: '300' },
+    })
+    expect(plain.findComponent({ name: 'VDialog' }).props('maxWidth')).toBe('300')
+    const none = mountWithPlugins(AppDialog, { props: { modelValue: false } })
+    expect(none.findComponent({ name: 'VDialog' }).props('maxWidth')).toBeUndefined()
+  })
 })

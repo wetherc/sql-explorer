@@ -219,6 +219,7 @@ describe('ConnectionManager', () => {
     duplicate.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     await settle()
     expect(document.body.textContent).toContain('New connection')
+    expect(wrapper.findComponent({ name: 'ConnectionForm' }).props('isCopy')).toBe(true)
   })
 
   it('asks before it removes a record and then removes it', async () => {
@@ -233,12 +234,69 @@ describe('ConnectionManager', () => {
     await settle()
 
     expect(document.body.textContent).toContain('Delete this connection?')
+    apiStub.getConnections.mockResolvedValue([])
     const confirm = document.querySelector('[data-test="confirm-accept"]') as HTMLElement
     confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     await settle()
 
     expect(apiStub.deleteConnection).toHaveBeenCalledWith('c1')
     expect(useExplorerStore().roots).toHaveLength(0)
+  })
+
+  it('keeps the tree of a record that could not be deleted', async () => {
+    apiStub.deleteConnection.mockRejectedValue(new Error('locked'))
+    const wrapper = await mountManager()
+    useExplorerStore().addRoot('c1')
+    await wrapper.find('[data-test="connection-menu"]').trigger('click')
+    await settle()
+    ;(document.querySelector('[data-test="delete-connection"]') as HTMLElement).click()
+    await settle()
+    ;(document.querySelector('[data-test="confirm-accept"]') as HTMLElement).click()
+    await settle()
+    expect(useExplorerStore().roots).toHaveLength(1)
+  })
+
+  it('says which statements a delete stops', async () => {
+    const wrapper = await mountManager()
+    vi.spyOn(useQueryStore(), 'runningOn').mockReturnValue(2)
+    await wrapper.find('[data-test="connection-menu"]').trigger('click')
+    await settle()
+    ;(document.querySelector('[data-test="delete-connection"]') as HTMLElement).click()
+    await settle()
+    expect(document.querySelector('[data-test="delete-running"]')?.textContent).toContain(
+      '2 statements are running',
+    )
+  })
+
+  it('names the state of each connection in words', async () => {
+    const wrapper = await mountManager()
+    const connections = useConnectionsStore()
+    const name = () => wrapper.find('[data-test="connection-name"]')
+    const dot = () => wrapper.find('[data-test="health-dot"] .v-badge__badge')
+    expect(name().text()).toContain('Not connected')
+    expect(name().attributes('title')).toBe(name().text().split(',')[0])
+    expect(dot().exists() && (dot().element as HTMLElement).style.display !== 'none').toBe(false)
+
+    connections.health = { c1: ConnectionHealth.Connected }
+    await wrapper.vm.$nextTick()
+    expect(name().text()).toContain('Connected')
+
+    connections.health = { c1: ConnectionHealth.Reconnecting }
+    await wrapper.vm.$nextTick()
+    expect(name().text()).toContain('Reconnecting')
+
+    connections.health = {}
+    ;(connections as unknown as { lastError: Record<string, string> }).lastError = {
+      c1: 'Login failed.',
+    }
+    await wrapper.vm.$nextTick()
+    expect(name().text()).toContain('Connection failed')
+    const tooltip = wrapper.findAllComponents({ name: 'VTooltip' })[1]!
+    expect(tooltip.props('text')).toBe('Connection failed: Login failed.')
+
+    connections.health = { c1: ConnectionHealth.Connected }
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findAllComponents({ name: 'VTooltip' })[1]!.props('text')).toBe('Connected')
   })
 
   it('removes nothing when no record is waiting', async () => {

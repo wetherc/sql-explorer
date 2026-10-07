@@ -8,7 +8,10 @@ order: 4
 
 To open a tab, click **+** in the tab row or press `Ctrl`/`Cmd` + `T` or
 `Ctrl`/`Cmd` + `N`. Each tab keeps its own statement, connection and parameter
-values.
+values, and its own server session with its temporary tables and `SET` options.
+A session that stays idle for 60 minutes closes. When a connection reaches its
+session limit, a new tab can also close a session that has been idle for at
+least 5 minutes. The **Connections** page of this guide describes both cases.
 
 Your operating system's **File** menu has four file commands: new query, open a
 query from a file, open a folder of queries, and save the current query. Each
@@ -38,8 +41,8 @@ even when that entry's text alone is larger.
 
 ## Files
 
-Click **Save** or press `Ctrl`/`Cmd` + `S` to write the tab's statement to a
-file. A tab that came from a file saves back to the same file. Saving a tab that
+Click **Save** or press `Ctrl`/`Cmd` + `S` (**Save to file** in the palette and
+the **File** menu) to write the tab's statement to a file. A tab that came from a file saves back to the same file. Saving a tab that
 has no file opens your operating system's save dialog, which starts in the files
 panel's first folder, and the tab then takes the file's name and keeps it.
 
@@ -49,13 +52,39 @@ it, open the folder from the **File** menu. The panel doesn't show hidden
 entries, and the application neither reads nor writes them inside an open
 folder.
 
-The files panel doesn't watch the disk. If another program writes a file, the
-tab keeps its old text, and saving from the tab overwrites the whole file.
+The files panel doesn't watch the disk. A folder reads its entries again each
+time you expand it, and the **Refresh** button at the top of the panel reads each
+top folder again. If another program writes a file, the tab keeps its old
+text, and saving from the tab overwrites the whole file. When a folder can't be
+read, the panel shows the reason with a **Retry** button.
+
+### Encodings
+
+A file keeps its encoding when you save it. The application reads UTF-8, UTF-8
+with a byte order mark, UTF-16 with a byte order mark, and Windows-1252, which
+is how many older Windows tools save scripts. A file that isn't valid UTF-8 and
+has no byte order mark opens as Windows-1252. If you then type a character that
+Windows-1252 can't store, such as an emoji or a Greek letter, the save writes
+UTF-8 with a byte order mark instead, so no character is lost, and a warning
+tells you.
+
+The application doesn't open a file that looks binary, such as an image. A file
+counts as binary when its first 8 KB contain a zero byte, except UTF-16 text
+with a byte order mark.
 
 ## Saved statements
 
-The button beside **Save** keeps the tab's statement in the library, under a
-name and folder that you choose. The library sits in the history panel, and
-clicking an entry opens its statement in a new tab.
+The **Save query…** button beside **Save** keeps the tab's statement in the
+library, under a name and folder that you choose. The library is the **Saved
+queries** list in the history panel, and clicking an entry opens its statement
+in a new tab.
 
 Both the history and the library persist across restarts.
+
+## Damaged settings files
+
+The application keeps its connections, history, saved queries, open tabs and
+files-panel folders in JSON files. When one of those files can't be read, the application renames it to
+`<name>.corrupt-<number>` beside the original, starts with an empty file in
+its place, and shows a notice that names the kept copy. You can open the copy
+in a text editor to recover what it contains.

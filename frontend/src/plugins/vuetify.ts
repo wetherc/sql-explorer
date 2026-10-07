@@ -16,10 +16,14 @@ export const sqlExplorerDark = {
     'surface-variant': '#39404d',
     'on-surface-variant': '#c9d1de',
     primary: '#6aa9ff',
+    // White text on the light blue and the light red of this theme has a
+    // contrast of about 2.4 to 1, so the text on them is a dark ink.
+    'on-primary': '#0d1726',
     'primary-darken-1': '#3d7fd6',
     secondary: '#8b9bb4',
     accent: '#c792ea',
     error: '#ff6b7a',
+    'on-error': '#1a0508',
     info: '#5cc8ff',
     success: '#5ad19a',
     warning: '#f2c14e',
@@ -30,7 +34,9 @@ export const sqlExplorerDark = {
     // surfaces of the grid name the text that stands on them.
     'on-grid-header': '#c9d1de',
     'on-grid-stripe': '#c9d1de',
-    'null-value': '#7f8a9b',
+    // A NULL keeps a contrast of 4.5 to 1 or more on the plain row, on the
+    // striped row and on a selected row.
+    'null-value': '#a3adbb',
   },
 } as const
 
@@ -64,7 +70,7 @@ export const sqlExplorerLight = {
     'grid-stripe': '#f1f4f8',
     'on-grid-header': '#333c49',
     'on-grid-stripe': '#333c49',
-    'null-value': '#636c77',
+    'null-value': '#555d68',
   },
 } as const
 

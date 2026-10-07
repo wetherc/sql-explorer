@@ -1,5 +1,10 @@
 <template>
-  <v-dialog v-bind="$attrs" :model-value="modelValue" @update:model-value="onChange">
+  <v-dialog
+    :max-width="size ? DIALOG_WIDTHS[size] : undefined"
+    v-bind="$attrs"
+    :model-value="modelValue"
+    @update:model-value="onChange"
+  >
     <slot />
   </v-dialog>
 </template>
@@ -21,7 +26,13 @@ import { useUiStore } from '@/stores/ui'
 // also land on it as the attributes of this component.
 defineOptions({ inheritAttrs: false })
 
-const props = defineProps<{ modelValue: boolean }>()
+/**
+ * The three widths of the dialogs: a question, a form, and a dialog with a
+ * table or a document. A `max-width` that a caller gives itself still applies.
+ */
+const DIALOG_WIDTHS = { small: 460, medium: 620, large: 900 } as const
+
+const props = defineProps<{ modelValue: boolean; size?: keyof typeof DIALOG_WIDTHS }>()
 const emit = defineEmits<{ (event: 'update:modelValue', value: boolean): void }>()
 
 const ui = useUiStore()

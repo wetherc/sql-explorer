@@ -155,22 +155,34 @@ function compareDecimals(left: DecimalKey, right: DecimalKey): number {
  * The decimal key of a key that holds a number, or null. A number that is
  * not finite has no decimal form.
  */
-function asDecimal(key: SortKey): DecimalKey | null {
+function asDecimal(key: number | DecimalKey): DecimalKey | null {
   if (typeof key === 'number') {
     return Number.isFinite(key) ? decimalKey(String(key)) : null
   }
-  return typeof key === 'object' ? key : null
+  return key
 }
 
-/** The text of a key, for a comparison as text. */
-function keyText(key: Exclude<SortKey, null>): string {
-  return typeof key === 'object' ? key.text : String(key)
+/** The value of a key that contains a number. */
+function numberOf(key: number | DecimalKey): number {
+  return typeof key === 'number' ? key : Number(key.text)
+}
+
+/** Compares two numbers, with NaN after every other number. */
+function compareNumbers(left: number, right: number): number {
+  const leftNaN = Number.isNaN(left)
+  const rightNaN = Number.isNaN(right)
+  if (leftNaN || rightNaN) {
+    return Number(leftNaN) - Number(rightNaN)
+  }
+  return left < right ? -1 : left > right ? 1 : 0
 }
 
 /**
- * Compares two sort keys. Keys without a value go to the end, two numbers
- * compare as numbers, a number and a decimal key compare by value, and every
- * other pair compares as text.
+ * Compares two sort keys. Keys without a value go to the end, and keys that
+ * contain numbers go in front of texts. Two numbers compare as numbers, a
+ * number and a decimal key compare by value, and two texts compare as text.
+ * A comparison of a number with a text as text would give an order that
+ * depends on the pairs the sort compares, as in `10 < 9a < 9` with 9 < 10.
  */
 export function compareSortKeys(left: SortKey, right: SortKey): number {
   if (left === null && right === null) {
@@ -182,15 +194,24 @@ export function compareSortKeys(left: SortKey, right: SortKey): number {
   if (right === null) {
     return -1
   }
+  const leftText = typeof left === 'string'
+  const rightText = typeof right === 'string'
+  if (leftText && rightText) {
+    return collator.compare(left, right)
+  }
+  if (leftText || rightText) {
+    return leftText ? 1 : -1
+  }
   if (typeof left === 'number' && typeof right === 'number') {
-    return left - right
+    return compareNumbers(left, right)
   }
   const leftDecimal = asDecimal(left)
   const rightDecimal = asDecimal(right)
   if (leftDecimal && rightDecimal) {
     return compareDecimals(leftDecimal, rightDecimal)
   }
-  return collator.compare(keyText(left), keyText(right))
+  // A number that is not finite has no decimal key.
+  return compareNumbers(numberOf(left), numberOf(right))
 }
 
 /**

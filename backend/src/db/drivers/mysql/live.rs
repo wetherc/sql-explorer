@@ -202,3 +202,51 @@ async fn live_mysql_create_text_runs_again_after_a_drop() {
 async fn live_mariadb_create_text_runs_again_after_a_drop() {
     scripts_round_trip("SQLX_LIVE_MARIADB", "maria_scripts").await;
 }
+
+/// Reads the generated columns and the place of a syntax error on one
+/// server.
+async fn generated_columns_and_error_lines(variable: &str, tag: &str) {
+    let Some((scratch, mut driver, _server)) = Scratch::open(variable, tag).await else {
+        return;
+    };
+    live::run(
+        driver.as_mut(),
+        "CREATE TABLE gen (id INT AUTO_INCREMENT PRIMARY KEY, a INT, \
+         b INT AS (a * 2) VIRTUAL, c INT AS (a + 1) STORED, \
+         d DATETIME DEFAULT CURRENT_TIMESTAMP)",
+    )
+    .await;
+    let columns = driver
+        .list_columns(&scratch.name, None, "gen")
+        .await
+        .unwrap();
+    let generated: Vec<bool> = columns.iter().map(|column| column.is_generated).collect();
+    assert_eq!(generated, vec![true, false, true, true, false]);
+
+    let error = driver
+        .execute_query(
+            "SELECT 1;\nSELECT\n  1 FROM FROM",
+            None,
+            &crate::db::ExecOptions::default(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, crate::error::Error::Located { line: 3, .. }),
+        "{error:?}"
+    );
+
+    scratch.remove().await;
+}
+
+#[tokio::test]
+#[ignore = "needs a live MySQL server"]
+async fn live_mysql_marks_generated_columns_and_error_lines() {
+    generated_columns_and_error_lines("SQLX_LIVE_MYSQL", "my_gen").await;
+}
+
+#[tokio::test]
+#[ignore = "needs a live MariaDB server"]
+async fn live_mariadb_marks_generated_columns_and_error_lines() {
+    generated_columns_and_error_lines("SQLX_LIVE_MARIADB", "maria_gen").await;
+}

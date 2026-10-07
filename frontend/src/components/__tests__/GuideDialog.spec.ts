@@ -69,4 +69,15 @@ describe('GuideDialog', () => {
 
     expect(wrapper.emitted('update:open')?.[0]).toEqual([false])
   })
+
+  it('starts a new topic at its top', async () => {
+    await mountGuide()
+    const body = document.querySelector('[data-test="guide-content"]') as HTMLElement
+    Object.defineProperty(body, 'scrollTop', { value: 300, writable: true })
+    expect(body.scrollTop).toBe(300)
+    const last = GUIDE_TOPICS[GUIDE_TOPICS.length - 1]!
+    ;(document.querySelector(`[data-test="guide-topic-${last.id}"]`) as HTMLElement).click()
+    await settle()
+    expect(body.scrollTop).toBe(0)
+  })
 })

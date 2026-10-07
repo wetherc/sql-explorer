@@ -592,7 +592,7 @@ describe('DbExplorer', () => {
     expect(useUiStore().notices.some((notice) => notice.level === 'success')).toBe(true)
   })
 
-  it('copies even when the host offers no clipboard', async () => {
+  it('warns when the host offers no clipboard', async () => {
     Object.defineProperty(globalThis.navigator, 'clipboard', {
       configurable: true,
       value: undefined,
@@ -618,7 +618,55 @@ describe('DbExplorer', () => {
     await settle()
     menuItem('menu-copy-name')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     await settle()
-    expect(useUiStore().notices.some((notice) => notice.level === 'success')).toBe(true)
+    const notices = useUiStore().notices
+    expect(notices.some((notice) => notice.level === 'success')).toBe(false)
+    expect(notices.some((notice) => notice.message.includes("wasn't copied"))).toBe(true)
+  })
+
+  it('reads a failed branch again from the Retry row', async () => {
+    const wrapper = await mountExplorer()
+    const explorer = useExplorerStore()
+    explorer.addRoot('c1')
+    await wrapper.vm.$nextTick()
+    const spy = vi.spyOn(explorer, 'expand').mockResolvedValue(undefined)
+    const root = explorer.roots[0]!
+    wrapper.findComponent({ name: 'ExplorerTree' }).vm.$emit('retry', root)
+    await settle()
+    expect(spy).toHaveBeenCalledWith(root)
+  })
+
+  it('moves the focus into the menu and back to the row', async () => {
+    const wrapper = await mountExplorer()
+    useExplorerStore().addRoot('c1')
+    await wrapper.vm.$nextTick()
+
+    await openMenu(wrapper, 0)
+    await settle()
+    const first = document
+      .querySelector('[data-test="menu-new-query"]')!
+      .closest('.v-list')!
+      .querySelector('.v-list-item')
+    expect(document.activeElement).toBe(first)
+
+    ;(document.activeElement as HTMLElement).blur()
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await settle()
+    await settle()
+    expect(document.activeElement).toBe(wrapper.find('[data-test="tree-row"]').element)
+  })
+
+  it('leaves the focus alone when the menu shuts into another element', async () => {
+    const wrapper = await mountExplorer()
+    useExplorerStore().addRoot('c1')
+    await wrapper.vm.$nextTick()
+    await openMenu(wrapper, 0)
+    await settle()
+    const filter = wrapper.find('input').element as HTMLInputElement
+    filter.focus()
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await settle()
+    await settle()
+    expect(document.activeElement).toBe(filter)
   })
 
   it('reports a failure to quote a name', async () => {

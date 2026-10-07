@@ -35,7 +35,7 @@ describe('StatusBar', () => {
     tabs.add({ connectionId: 'c1' })
     await wrapper.vm.$nextTick()
 
-    expect(wrapper.find('[data-test="status-connection"]').text()).toBe('Server')
+    expect(wrapper.find('[data-test="status-connection"]').text()).toBe('Server, connected')
     expect(wrapper.find('[data-test="status-dialect"]').text()).toBe('T-SQL')
   })
 
@@ -43,7 +43,9 @@ describe('StatusBar', () => {
     const wrapper = mountWithPlugins(StatusBar)
     useTabsStore().add({ connectionId: 'ghost' })
     await wrapper.vm.$nextTick()
-    expect(wrapper.find('[data-test="status-connection"]').text()).toBe('Deleted connection')
+    expect(wrapper.find('[data-test="status-connection"]').text()).toBe(
+      'Deleted connection, not connected',
+    )
     expect(wrapper.find('[data-test="status-dialect"]').text()).toBe('SQL')
   })
 
@@ -73,10 +75,22 @@ describe('StatusBar', () => {
     useTabsStore().add({ connectionId: 'c1' })
     await wrapper.vm.$nextTick()
     expect(wrapper.find('[data-test="status-connection"] .mdi-lan-connect').exists()).toBe(true)
+    expect(wrapper.find('[data-test="status-health-text"]').text()).toBe(', connected')
 
     connections.health = { c1: ConnectionHealth.Reconnecting }
     await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-test="status-connection"] .mdi-lan-pending').exists()).toBe(true)
+    expect(wrapper.find('[data-test="status-health-text"]').text()).toBe(', reconnecting')
+
+    connections.health = {}
+    await wrapper.vm.$nextTick()
     expect(wrapper.find('[data-test="status-connection"] .mdi-lan-disconnect').exists()).toBe(true)
+    expect(wrapper.find('[data-test="status-health-text"]').text()).toBe(', not connected')
+  })
+
+  it('gives no health text when no connection is chosen', () => {
+    const wrapper = mountWithPlugins(StatusBar)
+    expect(wrapper.find('[data-test="status-health-text"]').exists()).toBe(false)
   })
 
   it('reports a statement that runs', async () => {
@@ -134,7 +148,31 @@ describe('StatusBar', () => {
       detail: null,
     }
     await wrapper.vm.$nextTick()
-    expect(wrapper.find('[data-test="status-state"]').text()).toBe('Failed: database')
+    expect(wrapper.find('[data-test="status-state"]').text()).toBe('Failed: database error')
+    expect(wrapper.find('[data-test="status-state"]').attributes('title')).toBe('no such column')
+  })
+
+  it('names a category in words and keeps an unknown one as it came', async () => {
+    const wrapper = mountWithPlugins(StatusBar)
+    const tab = useTabsStore().add({ connectionId: 'c1' })
+    const state = useQueryStore().stateFor(tab.id)
+    state.error = { category: 'notConnected', message: 'gone', detail: null }
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-test="status-state"]').text()).toBe('Failed: not connected')
+
+    state.error = { category: 'novel' as never, message: 'odd', detail: null }
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-test="status-state"]').text()).toBe('Failed: novel')
+  })
+
+  it('reports a stop that the user asked for', async () => {
+    const wrapper = mountWithPlugins(StatusBar)
+    const tab = useTabsStore().add({ connectionId: 'c1' })
+    const state = useQueryStore().stateFor(tab.id)
+    state.running = true
+    ;(state as unknown as { stopping: boolean }).stopping = true
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-test="status-state"]').text()).toBe('Stopping…')
   })
 
   it('reports the rows, the time and the changes of a statement that ended', async () => {
@@ -265,6 +303,20 @@ describe('StatusBar', () => {
     expect(wrapper.find('[data-test="status-session-cost"]').text()).toBe('$5.00 this session')
   })
 
+  it('says in the tooltip of the scan that a reused result cost nothing', async () => {
+    const wrapper = mountWithPlugins(StatusBar)
+    const tab = useTabsStore().add({ connectionId: 'c1' })
+    const state = useQueryStore().stateFor(tab.id)
+    state.panes = []
+    state.stats = { scannedBytes: 0, engineMs: 1, queueMs: 1, resultReused: true }
+    await wrapper.vm.$nextTick()
+
+    const tooltip = wrapper
+      .findAllComponents({ name: 'VTooltip' })
+      .find((item) => String(item.props('text')).startsWith('Estimated cost.'))
+    expect(tooltip?.props('text')).toContain('Athena reused an earlier result')
+  })
+
   it('says nothing about a scan for an engine that reports none', async () => {
     const wrapper = mountWithPlugins(StatusBar)
     useTabsStore().add({ connectionId: 'c1' })
@@ -278,7 +330,7 @@ describe('StatusBar', () => {
     await connections.load()
     connections.select('c1')
     await wrapper.vm.$nextTick()
-    expect(wrapper.find('[data-test="status-connection"]').text()).toBe('Server')
+    expect(wrapper.find('[data-test="status-connection"]').text()).toMatch(/^Server, /)
   })
 })
 

@@ -1,15 +1,25 @@
 <template>
   <footer class="status-bar d-flex align-center ga-3 px-3">
     <div class="d-flex align-center ga-1" data-test="status-connection">
-      <v-icon size="x-small" :color="healthColor">{{ healthIcon }}</v-icon>
+      <v-icon size="x-small" :color="healthColor" aria-hidden="true">{{ healthIcon }}</v-icon>
       <span>{{ connectionLabel }}</span>
+      <span v-if="healthText" class="app-visually-hidden" data-test="status-health-text">{{
+        healthText
+      }}</span>
     </div>
 
     <v-divider vertical />
 
     <!-- The state of a run changes with no other sign, so a reader is told of
          each change as it comes. -->
-    <div role="status" aria-live="polite" data-test="status-state">{{ stateLabel }}</div>
+    <div
+      role="status"
+      aria-live="polite"
+      data-test="status-state"
+      :title="state?.error && !state.running ? state.error.message : undefined"
+    >
+      {{ stateLabel }}
+    </div>
 
     <!-- While the statement runs, the time that has passed stands in the
          place the final time takes later, so a reader watches one figure. -->
@@ -57,7 +67,7 @@ import { useQueryStore } from '@/stores/query'
 import { useSettingsStore } from '@/stores/settings'
 import { useTabsStore } from '@/stores/tabs'
 import { panesOfLastRun } from '@/stores/query'
-import { ConnectionHealth, Dialect } from '@/types/api'
+import { ConnectionHealth, Dialect, type ErrorCategory } from '@/types/api'
 
 const connections = useConnectionsStore()
 const tabs = useTabsStore()
@@ -98,9 +108,48 @@ const healthColor = computed(() => {
   }
 })
 
-const healthIcon = computed(() =>
-  health.value === ConnectionHealth.Connected ? 'mdi-lan-connect' : 'mdi-lan-disconnect',
-)
+const healthIcon = computed(() => {
+  switch (health.value) {
+    case ConnectionHealth.Connected:
+      return 'mdi-lan-connect'
+    case ConnectionHealth.Reconnecting:
+      return 'mdi-lan-pending'
+    default:
+      return 'mdi-lan-disconnect'
+  }
+})
+
+/** The health of the connection in words, for a reader who cannot see the icon. */
+const healthText = computed(() => {
+  if (!connectionId.value) {
+    return ''
+  }
+  switch (health.value) {
+    case ConnectionHealth.Connected:
+      return ', connected'
+    case ConnectionHealth.Reconnecting:
+      return ', reconnecting'
+    default:
+      return ', not connected'
+  }
+})
+
+/** Short names for the categories of a failure, as the status bar shows them. */
+const CATEGORY_LABELS: Record<ErrorCategory, string> = {
+  notConnected: 'not connected',
+  connection: 'connection problem',
+  timeout: 'timed out',
+  cancelled: 'stopped',
+  database: 'database error',
+  configuration: 'settings problem',
+  authentication: 'sign-in problem',
+  io: 'file problem',
+  storage: 'storage problem',
+  secret: 'keychain problem',
+  unsupported: 'not supported',
+  invalid: 'invalid input',
+  internal: 'internal error',
+}
 
 const connectionLabel = computed(() => {
   const id = connectionId.value
@@ -115,10 +164,10 @@ const stateLabel = computed(() => {
     return 'Ready'
   }
   if (state.value.running) {
-    return 'Running…'
+    return state.value.stopping ? 'Stopping…' : 'Running…'
   }
   if (state.value.error) {
-    return `Failed: ${state.value.error.category}`
+    return `Failed: ${CATEGORY_LABELS[state.value.error.category] ?? state.value.error.category}`
   }
   return 'Ready'
 })

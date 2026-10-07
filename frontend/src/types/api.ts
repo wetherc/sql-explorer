@@ -205,10 +205,30 @@ export interface MenuCommandState {
   enabled: boolean
 }
 
+/** The text encoding of a file on the disk. */
+export type TextEncoding = 'utf8' | 'utf8bom' | 'utf16le' | 'utf16be' | 'windows1252'
+
+/** The encodings that the backend reads and writes. */
+export const TEXT_ENCODINGS: readonly TextEncoding[] = [
+  'utf8',
+  'utf8bom',
+  'utf16le',
+  'utf16be',
+  'windows1252',
+]
+
+/** The text of one file and the encoding it had on the disk. */
+export interface TextFile {
+  contents: string
+  encoding: TextEncoding
+}
+
 /** One file that the user opened through the dialog. */
 export interface OpenedFile {
   path: string
   contents: string
+  /** The encoding the file had on the disk. */
+  encoding?: TextEncoding
 }
 
 /** What an export to a file needs to know. */
@@ -235,6 +255,13 @@ export interface ExportSummary {
   truncated: boolean
   /** The file the export wrote. */
   path: string
+  /** True when the sheet of an xlsx file was full and rows were left out. */
+  sheetFull: boolean
+  /** The number of text cells of an xlsx file that were cut at the size
+   *  limit of a cell. */
+  cutCells: number
+  /** A warning for the user about the content of the file, or null. */
+  warning: string | null
 }
 
 /** What a request to save one file carries. The backend asks the user for
@@ -254,10 +281,18 @@ export interface SaveFileRequest {
 export interface SaveStatementRequest {
   /** The file name that the save dialog suggests. */
   defaultName: string
-  /** The folder the dialog opens in, when the panel holds one. */
+  /** The folder the dialog opens in, when the panel contains one. */
   defaultFolder: string | null
   /** The text of the statement. */
   contents: string
+  /** The encoding to write. A request without one writes UTF-8. */
+  encoding?: TextEncoding
+}
+
+/** The file that a save of a statement wrote, and its encoding. */
+export interface SavedStatement {
+  path: string
+  encoding: TextEncoding
 }
 
 export interface ExecOptions {
@@ -470,6 +505,8 @@ export interface ColumnRef {
   dataType: string
   nullable: boolean
   isPrimaryKey: boolean
+  /** True when the server fills the column itself, so INSERT and UPDATE leave it out. */
+  isGenerated: boolean
 }
 
 export const ConnectionHealth = {
@@ -518,6 +555,7 @@ export const ErrorCategory = {
   Storage: 'storage',
   Secret: 'secret',
   Unsupported: 'unsupported',
+  Invalid: 'invalid',
   Internal: 'internal',
 } as const
 export type ErrorCategory = (typeof ErrorCategory)[keyof typeof ErrorCategory]
@@ -527,6 +565,10 @@ export interface ErrorPayload {
   category: ErrorCategory
   message: string
   detail: string | null
+  /** The line of the failure, from 1, in the text that was sent. */
+  line?: number | null
+  /** The column of the failure, from 1, on that line. */
+  column?: number | null
 }
 
 /** Builds the options that a new connection starts with. */

@@ -329,7 +329,7 @@ describe('ResultsGrid', () => {
     )
   })
 
-  it('copies even when the host offers no clipboard', async () => {
+  it('reports a failed copy when the host offers no clipboard', async () => {
     Object.defineProperty(globalThis.navigator, 'clipboard', {
       configurable: true,
       value: undefined,
@@ -339,7 +339,26 @@ describe('ResultsGrid', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     click('[data-test="grid-copy-with-names"]')
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(wrapper.emitted('copied')).toBeTruthy()
+    expect(wrapper.emitted('copied')).toBeFalsy()
+    expect(wrapper.emitted('copy-failed')).toEqual([["This window can't reach the clipboard."]])
+  })
+
+  it('reports a copy that the system refused', async () => {
+    for (const reason of [new Error('denied'), 'blocked']) {
+      Object.defineProperty(globalThis.navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: vi.fn().mockRejectedValue(reason) },
+      })
+      const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+      await wrapper.find('[data-test="grid-copy"]').trigger('click')
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      click('[data-test="grid-copy-without-names"]')
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(wrapper.emitted('copied')).toBeFalsy()
+      expect(wrapper.emitted('copy-failed')?.[0]).toEqual([
+        reason instanceof Error ? 'denied' : 'blocked',
+      ])
+    }
   })
 
   it('copies one cell and one row from the menu of the cells', async () => {
@@ -385,14 +404,17 @@ describe('ResultsGrid', () => {
     const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
     const grip = wrapper.findAll('[data-test="grid-column-grip"]')[0]!
     const header = () => wrapper.findAll('[data-test="grid-header-cell"]')[0]!
+    // The column "id int" starts with the measured width of its header:
+    // 5 letters of 7 pixels, 24 for the gap and the arrow, 20 of padding.
+    expect(header().attributes('style')).toContain('width: 79px')
 
-    // The drag of the grip gives the column the width it reaches.
+    // The drag of the grip adds the distance of the pointer to the width.
     await grip.trigger('pointerdown', { clientX: 100 })
     globalThis.dispatchEvent(
       Object.assign(new Event('pointermove'), { clientX: 300 }) as PointerEvent,
     )
     await wrapper.vm.$nextTick()
-    expect(header().attributes('style')).toContain('width: 200px')
+    expect(header().attributes('style')).toContain('width: 279px')
 
     // The drag ends, so a later move of the pointer changes nothing.
     globalThis.dispatchEvent(new Event('pointerup'))
@@ -400,30 +422,54 @@ describe('ResultsGrid', () => {
       Object.assign(new Event('pointermove'), { clientX: 500 }) as PointerEvent,
     )
     await wrapper.vm.$nextTick()
-    expect(header().attributes('style')).toContain('width: 200px')
+    expect(header().attributes('style')).toContain('width: 279px')
 
-    // The arrows change the width by one step, and the limit holds it.
+    // The arrows change the width by one step, and the limit stops it.
     await grip.trigger('keydown', { key: 'ArrowRight' })
-    expect(header().attributes('style')).toContain('width: 216px')
+    expect(header().attributes('style')).toContain('width: 295px')
     await grip.trigger('keydown', { key: 'ArrowLeft' })
-    expect(header().attributes('style')).toContain('width: 200px')
+    expect(header().attributes('style')).toContain('width: 279px')
     for (let step = 0; step < 20; step += 1) {
       await grip.trigger('keydown', { key: 'ArrowLeft' })
     }
     expect(header().attributes('style')).toContain('width: 56px')
 
-    // A key the grip does not hold changes nothing, and Enter gives the
-    // column the width of its content again.
+    // A key the grip does not use changes nothing, and Enter gives the
+    // column its measured width again.
     await grip.trigger('keydown', { key: 'a' })
     expect(header().attributes('style')).toContain('width: 56px')
     await grip.trigger('keydown', { key: 'Enter' })
-    expect(header().attributes('style')).toBeUndefined()
+    expect(header().attributes('style')).toContain('width: 79px')
 
-    // A new result starts with the width of the content of each column.
+    // A new result starts with the measured width of each column.
     await grip.trigger('keydown', { key: 'ArrowLeft' })
-    expect(header().attributes('style')).toContain('width')
+    expect(header().attributes('style')).toContain('width: 63px')
     await wrapper.setProps({ result: result() })
-    expect(header().attributes('style')).toBeUndefined()
+    expect(header().attributes('style')).toContain('width: 79px')
+  })
+
+  it('tells the width of a column and ends a drag that the system cancels', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    const grip = () => wrapper.findAll('[data-test="grid-column-grip"]')[0]!
+    const header = () => wrapper.findAll('[data-test="grid-header-cell"]')[0]!
+    expect(grip().attributes('aria-valuenow')).toBe('79')
+    expect(grip().attributes('aria-valuetext')).toBe('79 pixels')
+    expect(grip().attributes('aria-valuemin')).toBe('56')
+
+    await grip().trigger('pointerdown', { clientX: 100 })
+    globalThis.dispatchEvent(
+      Object.assign(new Event('pointermove'), { clientX: 221 }) as PointerEvent,
+    )
+    await wrapper.vm.$nextTick()
+    expect(grip().attributes('aria-valuenow')).toBe('200')
+    expect(grip().attributes('aria-valuetext')).toBe('200 pixels')
+
+    globalThis.dispatchEvent(new Event('pointercancel'))
+    globalThis.dispatchEvent(
+      Object.assign(new Event('pointermove'), { clientX: 500 }) as PointerEvent,
+    )
+    await wrapper.vm.$nextTick()
+    expect(header().attributes('style')).toContain('width: 200px')
   })
 
   it('changes the width of a column that the double click reaches', async () => {
@@ -431,9 +477,56 @@ describe('ResultsGrid', () => {
     const grip = wrapper.findAll('[data-test="grid-column-grip"]')[0]!
     await grip.trigger('keydown', { key: 'ArrowRight' })
     await grip.trigger('dblclick')
-    expect(
-      wrapper.findAll('[data-test="grid-header-cell"]')[0]!.attributes('style'),
-    ).toBeUndefined()
+    expect(wrapper.findAll('[data-test="grid-header-cell"]')[0]!.attributes('style')).toContain(
+      'width: 79px',
+    )
+  })
+
+  it('measures the columns from the header and the first rows', async () => {
+    const long = 'x'.repeat(30)
+    const wrapper = mountWithPlugins(ResultsGrid, {
+      props: {
+        result: result({
+          columns: [
+            { name: 'id', typeName: 'int' },
+            { name: 'note', typeName: 'text' },
+            { name: 'body', typeName: 'text' },
+          ],
+          rows: [
+            [1, long, 'y'.repeat(500)],
+            [2, null, 'z'],
+          ],
+        }),
+      },
+    })
+    const widths = () =>
+      wrapper.findAll('[data-test="grid-col"]').map((col) => col.attributes('style'))
+    // A long value sets the width, and a very long value stops at 420 pixels.
+    expect(widths()).toEqual(['width: 79px;', `width: ${30 * 7 + 20}px;`, 'width: 420px;'])
+    // The table gives the column of row numbers room for one digit.
+    expect(wrapper.find('table').attributes('style')).toBe(`width: ${27 + 79 + 230 + 420}px;`)
+  })
+
+  it('measures a streaming result once, when its first rows arrive', async () => {
+    const table = new ResultTable([{ name: 'v', typeName: 'text' }])
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: table, rows: 0 } })
+    const width = () => wrapper.find('[data-test="grid-col"]').attributes('style')
+    // With no row, the header alone sets the width: 5 letters, 24, and 20.
+    expect(width()).toBe('width: 79px;')
+
+    // The rows of an empty segment read as null, so the spy gives each row
+    // a text of its own length.
+    vi.spyOn(table, 'cell').mockImplementation((row) =>
+      row === 0 ? 'a'.repeat(40) : 'b'.repeat(50),
+    )
+    table.addSegment([], 1)
+    await wrapper.setProps({ rows: 1 })
+    expect(width()).toBe(`width: ${40 * 7 + 20}px;`)
+
+    // Later rows do not change the width, so the columns stay still.
+    table.addSegment([], 1)
+    await wrapper.setProps({ rows: 2 })
+    expect(width()).toBe(`width: ${40 * 7 + 20}px;`)
   })
 
   it('reports the scroll position so that only the visible rows are drawn', async () => {
@@ -571,6 +664,17 @@ describe('ResultsGrid', () => {
     expect(cut.emitted('export-all')).toEqual([['csv'], ['json'], ['xlsx']])
   })
 
+  it('refuses a second whole export while one runs', async () => {
+    const cut = mountWithPlugins(ResultsGrid, {
+      props: { result: result({ truncated: true }), exporting: true },
+    })
+    await cut.find('[data-test="grid-export"]').trigger('click')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const item = document.querySelector('[data-test="grid-export-all-csv"]')
+    expect(item?.textContent).toContain('An export is already running.')
+    expect(item?.classList.contains('v-list-item--disabled')).toBe(true)
+  })
+
   it('names the export after the selection once rows are selected', async () => {
     const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
     await wrapper.findAll('[data-test="grid-row"]')[0]!.trigger('click')
@@ -601,6 +705,95 @@ describe('ResultsGrid', () => {
     // Shift reaches from the row of the last click that set the anchor.
     await rows()[0]!.trigger('click', { shiftKey: true })
     expect(rows().every((row) => row.classes().includes('selected'))).toBe(true)
+  })
+
+  it('reaches a run of rows from the anchor after a sort moved it', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    const rows = () => wrapper.findAll('[data-test="grid-row"]')
+    // The anchor is the row of Ada, the first row before the sort.
+    await rows()[0]!.trigger('click')
+    await wrapper.findAll('[data-test="grid-header"]')[0]!.trigger('click')
+    await wrapper.findAll('[data-test="grid-header"]')[0]!.trigger('click')
+    const before = rows().findIndex((row) => row.classes().includes('selected'))
+    await rows()[before === 0 ? 2 : 0]!.trigger('click', { shiftKey: true })
+    const marked = rows().filter((row) => row.classes().includes('selected')).length
+    expect(marked).toBeGreaterThan(1)
+  })
+
+  it('takes a plain click when the anchor left the view', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    await wrapper.findAll('[data-test="grid-row"]')[0]!.trigger('click')
+    await wrapper.setProps({
+      result: result({
+        rows: [
+          [9, 'Nine'],
+          [8, 'Eight'],
+        ],
+      }),
+    })
+    await wrapper.findAll('[data-test="grid-row"]')[1]!.trigger('click', { shiftKey: true })
+    expect(wrapper.find('[data-test="grid-count"]').text()).toContain('1 selected')
+  })
+
+  it('extends the selection with Shift and the arrow keys', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    const table = wrapper.find('table')
+    await table.trigger('keydown', { key: 'ArrowDown', shiftKey: true })
+    expect(wrapper.find('[data-test="grid-count"]').text()).toContain('2 selected')
+    await table.trigger('keydown', { key: 'ArrowDown', shiftKey: true })
+    expect(wrapper.find('[data-test="grid-count"]').text()).toContain('3 selected')
+    // A plain arrow moves the tab stop and keeps the rows.
+    await table.trigger('keydown', { key: 'ArrowUp' })
+    expect(wrapper.find('[data-test="grid-count"]').text()).toContain('3 selected')
+  })
+
+  it('stripes the rows by their place in the result', () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    const stripes = wrapper.findAll('[data-test="grid-row"]').map((row) => row.classes('stripe'))
+    expect(stripes).toEqual([false, true, false])
+  })
+
+  it('names the column and its type under the pointer', () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
+    const header = wrapper.findAll('[data-test="grid-header"]')[0]!
+    expect(header.attributes('title')).toMatch(/^\w+ \(.+\)$/)
+  })
+
+  it('builds the sort keys of a large result in slices and keeps the old order', async () => {
+    const many = ResultTable.fromRows(
+      [{ name: 'n', typeName: 'int' }],
+      Array.from({ length: 12000 }, (_unused, index) => [index]),
+    )
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: many } })
+    await wrapper.findAll('[data-test="grid-header"]')[0]!.trigger('click')
+    await wrapper.findAll('[data-test="grid-header"]')[0]!.trigger('click')
+    // The keys are not all built, so the rows keep the order of the result.
+    expect(wrapper.find('[data-test="grid-sorting"]').exists()).toBe(true)
+    expect(wrapper.findAll('[data-test="grid-row"]')[0]!.text()).toContain('1')
+
+    for (let turn = 0; turn < 10 && wrapper.find('[data-test="grid-sorting"]').exists(); turn++) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await wrapper.vm.$nextTick()
+    }
+    expect(wrapper.find('[data-test="grid-sorting"]').exists()).toBe(false)
+    expect(wrapper.findAll('[data-test="grid-row"]')[0]!.text()).toContain('11999')
+
+    // An unmount during a build stops it.
+    const other = mountWithPlugins(ResultsGrid, { props: { result: many } })
+    await other.findAll('[data-test="grid-header"]')[0]!.trigger('click')
+    expect(other.find('[data-test="grid-sorting"]').exists()).toBe(true)
+    other.unmount()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  })
+
+  it('ignores an event of the body that reached no cell', async () => {
+    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result({ rows: [] }) } })
+    const empty = wrapper.find('[data-test="grid-empty"]')
+    for (const name of ['focusin', 'mouseover', 'dblclick', 'contextmenu']) {
+      await empty.trigger(name)
+    }
+    expect(wrapper.find('[data-test="grid-cell-menu"]').exists()).toBe(false)
+    expect(document.querySelector('.app-code-block')).toBeNull()
   })
 
   it('holds the selection through a sort', async () => {
@@ -979,7 +1172,7 @@ describe('ResultsGrid as a grid a reader can follow', () => {
     const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
     const cells = wrapper.findAll('[data-test="grid-row"]')[1]!.findAll('[data-test="grid-cell"]')
 
-    await cells[1]!.trigger('focus')
+    await cells[1]!.trigger('focusin')
 
     expect(tabStop(wrapper)).toEqual([1, 1])
   })
@@ -1024,10 +1217,10 @@ describe('ResultsGrid as a grid a reader can follow', () => {
     setCellWidth(cells[1]!, 420, 900)
     setCellWidth(cells[0]!, 420, 100)
 
-    await cells[1]!.trigger('mouseenter')
+    await cells[1]!.trigger('mouseover')
     expect(cells[1]!.attributes('title')).toBe(long)
 
-    await cells[0]!.trigger('mouseenter')
+    await cells[0]!.trigger('mouseover')
     expect(cells[0]!.attributes('title')).toBeUndefined()
   })
 
@@ -1039,11 +1232,11 @@ describe('ResultsGrid as a grid a reader can follow', () => {
     const cell = wrapper.findAll('[data-test="grid-cell"]')[1]!
 
     setCellWidth(cell, 420, 900)
-    await cell.trigger('mouseenter')
+    await cell.trigger('mouseover')
     expect(cell.attributes('title')).toBe(long)
 
     setCellWidth(cell, 900, 900)
-    await cell.trigger('mouseenter')
+    await cell.trigger('mouseover')
     expect(cell.attributes('title')).toBeUndefined()
   })
 
@@ -1179,7 +1372,7 @@ describe('ResultsGrid as a grid a reader can follow', () => {
     const cell = wrapper.findAll('[data-test="grid-cell"]')[1]!
 
     setCellWidth(cell, 420, 900)
-    await cell.trigger('focus')
+    await cell.trigger('focusin')
 
     expect(cell.attributes('title')).toBe(long)
     expect(tabStop(wrapper)).toEqual([0, 1])

@@ -22,11 +22,25 @@ stored password. If the keychain isn't reachable (on Linux without a Secret
 Service, for example), the form tells you, and the password stays in memory only
 until the application closes.
 
+A stored password belongs to one server and login. If you change the engine,
+host, port, user, named instance or connection string of a saved record and
+leave the password box empty, the application drops the stored password when
+you save, so the password never goes to another server. The form asks you to
+type the password again in that case. An Athena record drops its stored
+secret access key when its AWS region or access key ID changes, and also when
+its credentials stop coming from an access key. **Duplicate** copies a record
+without its password, so you enter the password again for the copy.
+
 For an option that the form doesn't show, enter a **Connection string** in the
 form's **Advanced** section. The string replaces the host, the port and the
 database. The form's user, password and connection time limit still apply when
 the string doesn't give them, and on PostgreSQL and MySQL the form's transport
-mode also applies when the string names no mode. The settings file keeps the
+mode also applies when the string names no mode. On MS SQL Server, the form's
+transport mode applies when the string has no `Encrypt` key, the form's
+certificate setting applies when the string has no `TrustServerCertificate`
+key, and the form's application name applies when the string names none. The
+form's authentication method, such as Windows Authentication or the Azure CLI,
+applies when the string gives no user, password or integrated security key. The settings file keeps the
 string as plain text, so the application refuses to save a string that contains
 a password. Type the password in the **Password** box instead.
 
@@ -61,7 +75,9 @@ on each engine:
 ## MS SQL Server
 
 A named instance finds its port through the SQL Browser service. Enter the
-instance name in **Named instance**, in the form's **Advanced** section.
+instance name in **Named instance**, in the form's **Advanced** section. While a
+named instance is set, the form disables the **Port** box and the connection
+ignores any port in it, because the SQL Browser service gives the port.
 
 You can authenticate in four ways:
 
@@ -91,6 +107,17 @@ Each tab has its own server session, so statements in two tabs run at the same
 time. A tab's temporary tables, `SET` options and transactions stay with that
 tab's session. The connection's **Max sessions** option caps the number of
 sessions on one server, and it defaults to six.
+
+A tab's session stays open while the tab is idle. After 60 minutes without a
+statement, the application closes the session, unless the session is inside an
+open transaction. When a new tab needs a session and the connection is already
+at its cap, the application closes the session that went unused the longest,
+but only if that session has been idle for at least 5 minutes. It skips a
+session that is running a statement, waiting to run one, or inside a
+transaction. A closed session loses its temporary tables and `SET` options, and
+the tab opens a fresh session on its next run. If no session can close, the new
+tab's run fails with a message that suggests closing a tab or raising
+**Max sessions**.
 
 When a connection stops answering, the application opens it again. The colour
 beside each connection shows its state.

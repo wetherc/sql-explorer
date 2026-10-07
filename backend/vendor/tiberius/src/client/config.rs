@@ -195,6 +195,11 @@ impl Config {
         }
     }
 
+    /// Get the name of the instance, when the configuration names one.
+    pub fn get_instance_name(&self) -> Option<&str> {
+        self.instance_name.as_deref()
+    }
+
     /// Get the host address including port
     pub fn get_addr(&self) -> String {
         format!("{}:{}", self.get_host(), self.get_port())

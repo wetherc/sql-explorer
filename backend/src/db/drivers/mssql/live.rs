@@ -299,3 +299,72 @@ async fn live_the_triggers_of_a_relation_leave_out_a_trigger_of_the_database() {
     };
     live::with_cleanup(body, scratch.remove()).await;
 }
+
+#[tokio::test]
+#[ignore = "needs a live MS SQL Server"]
+async fn live_identity_computed_and_rowversion_columns_are_marked() {
+    let Some((scratch, mut driver, _)) = Scratch::open("ms_generated").await else {
+        return;
+    };
+    let database = scratch.name();
+    let body = async move {
+        live::run(
+            driver.as_mut(),
+            "CREATE TABLE dbo.Filled (\
+                 a int IDENTITY PRIMARY KEY, \
+                 c int, \
+                 d AS (c * 2), \
+                 v rowversion)",
+        )
+        .await;
+        let columns = driver
+            .list_columns(&database, Some("dbo"), "Filled")
+            .await
+            .unwrap();
+        let marks: Vec<bool> = columns.iter().map(|column| column.is_generated).collect();
+        assert_eq!(marks, [true, false, true, true]);
+    };
+    live::with_cleanup(body, scratch.remove()).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a live MS SQL Server"]
+async fn live_the_column_types_name_the_digits_of_their_fraction_and_a_short_float() {
+    let Some((scratch, mut driver, _)) = Scratch::open("ms_types").await else {
+        return;
+    };
+    let database = scratch.name();
+    let body = async move {
+        live::run(
+            driver.as_mut(),
+            "CREATE TABLE dbo.Timed (\
+                 a datetime2(3), \
+                 b time(0), \
+                 c datetimeoffset, \
+                 d float(10), \
+                 e float, \
+                 f datetime)",
+        )
+        .await;
+        let columns = driver
+            .list_columns(&database, Some("dbo"), "Timed")
+            .await
+            .unwrap();
+        let types: Vec<&str> = columns
+            .iter()
+            .map(|column| column.data_type.as_str())
+            .collect();
+        assert_eq!(
+            types,
+            [
+                "datetime2(3)",
+                "time(0)",
+                "datetimeoffset(7)",
+                "real",
+                "float",
+                "datetime"
+            ]
+        );
+    };
+    live::with_cleanup(body, scratch.remove()).await;
+}

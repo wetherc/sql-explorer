@@ -25,10 +25,18 @@ semicolons and all.
 
 **Format** lays the statement out by its dialect's rules.
 
+## Running and failed tabs
+
+While a statement runs, its tab shows a spinner, so you can see which tabs are
+busy from any tab. When a tab's last run failed, the tab shows a red dot until
+the next run starts.
+
 ## Stopping a statement
 
-While a statement runs, a **Stop** button appears beside **Run**. The
-connection's time limit also stops a statement that runs too long.
+While a statement runs, a **Stop** button appears beside **Run**, and
+`Ctrl`/`Cmd` + `Shift` + `C` does the same. After you press it, the button reads
+**Stopping…** until the run ends. The connection's time limit
+also stops a statement that runs too long.
 
 Changing the tab's connection or closing the tab also stops the statement, and
 the application asks you before either one. On some engines a stop opens a new
@@ -37,8 +45,21 @@ session, which discards the old session's temporary tables and `SET` options.
 ## Messages
 
 The **Messages** tab lists what the server sent, with each message's severity,
-code, line and procedure. A failed statement's error appears there as well as in
-the corner.
+code, line and procedure. Messages appear while the script runs, so you can
+follow a long script's `PRINT` or `RAISE NOTICE` output without waiting for the
+whole script to finish.
+
+When a statement fails, the results panel switches to **Messages**, where the
+error appears with the server's detail and any advice. The error also appears
+in the corner.
+
+## Error locations
+
+When the server names the place of an error, the editor underlines it, and the
+error in **Messages** has a **Go to line** button that moves the cursor there.
+The line counts from the top of the editor, also when you ran a selection or
+the statement under the cursor. The mark goes away as soon as you edit the text
+or run again.
 
 ## Plans
 

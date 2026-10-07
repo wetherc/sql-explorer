@@ -6,6 +6,7 @@ const FRAME_BEGIN_SET = 1
 const FRAME_CHUNK = 2
 const FRAME_END_SET = 3
 const FRAME_END = 4
+const FRAME_MESSAGE = 5
 
 /**
  * A writer of the frames, which holds the same form as the writer of the
@@ -154,6 +155,10 @@ describe('parseJsonCell', () => {
       '[1.00000000000000000001]',
       '[1e400]',
     ]) {
+      expect(parseJsonCell(text)).toBe(text)
+    }
+    // A number whose zeros a JavaScript number drops keeps its text.
+    for (const text of ['[1.0]', '{"price": 10.50}', '[-0]']) {
       expect(parseJsonCell(text)).toBe(text)
     }
     // A quote inside a string does not end the string.
@@ -489,6 +494,32 @@ describe('the reader of the chunks', () => {
     expect(ends[0]?.rowsAffected).toBe(3)
     expect(ends[0]?.elapsedMs).toBe(8)
     expect(ends[0]?.messages[0]?.text).toBe('1 row returned.')
+  })
+
+  it('reports each message as it arrives', () => {
+    const writer = new Writer()
+    writer.u8(FRAME_MESSAGE).text(JSON.stringify({ level: 'info', text: 'step 1', detail: null }))
+    writer.u8(FRAME_MESSAGE).text(JSON.stringify({ level: 'warning', text: 'step 2', detail: 'x' }))
+
+    const received: string[] = []
+    const stream = new ResultStream({
+      onMessage: (message) => received.push(message.text),
+      onSet: () => {},
+      onEnd: () => {},
+    })
+    stream.feed(writer.buffer())
+    expect(received).toEqual(['step 1', 'step 2'])
+
+    // A reader with no message handler skips the frame and goes on.
+    const { stream: quiet, ends } = collect()
+    const both = new Writer()
+    both.u8(FRAME_MESSAGE).text(JSON.stringify({ level: 'info', text: 'a', detail: null }))
+    both
+      .u8(FRAME_END)
+      .text(JSON.stringify({ messages: [], rowsAffected: null, elapsedMs: 1, stats: null }))
+    quiet.feed(both.buffer())
+    expect(ends).toHaveLength(1)
+    expect(quiet.failure).toBeNull()
   })
 
   it('refuses a frame and a form that it does not know', () => {

@@ -4,9 +4,12 @@
     class="explorer-scroll"
     role="tree"
     aria-label="Database objects"
+    :aria-busy="anyLoading"
+    :tabindex="activeDrawn ? -1 : 0"
     :style="{ '--tree-row-height': `${ROW_HEIGHT}px` }"
     @keydown="onKeyDown"
     @scroll="onScroll"
+    @focus.self="onAreaFocus"
   >
     <!-- The tree scrolls in the element above, and it draws only the rows
          around the visible part. Two empty blocks hold the space of the rows
@@ -67,7 +70,37 @@
           <span v-if="row.node.hint" class="node-hint">{{ row.node.hint }}</span>
         </div>
 
-        <div v-else class="empty-branch" :style="{ paddingLeft: labelIndent(row.depth) }">
+        <div
+          v-else-if="row.rowType === 'error'"
+          class="empty-branch error-branch"
+          :style="{ paddingLeft: labelIndent(row.depth) }"
+          role="treeitem"
+          :aria-level="row.depth + 1"
+          aria-disabled="true"
+          tabindex="-1"
+          data-test="tree-error"
+        >
+          <span class="error-text" :title="row.message">Couldn't load: {{ row.message }}</span>
+          <v-btn
+            size="x-small"
+            variant="text"
+            color="primary"
+            text="Retry"
+            data-test="tree-retry"
+            @click.stop="emit('retry', row.node)"
+          />
+        </div>
+
+        <div
+          v-else
+          class="empty-branch"
+          :style="{ paddingLeft: labelIndent(row.depth) }"
+          role="treeitem"
+          :aria-level="row.depth + 1"
+          aria-disabled="true"
+          tabindex="-1"
+          data-test="tree-empty"
+        >
           Nothing here
         </div>
       </template>
@@ -126,10 +159,11 @@ const emit = defineEmits<{
   (event: 'activate', node: ExplorerNode): void
   (event: 'expand', node: ExplorerNode): void
   (event: 'collapse', node: ExplorerNode): void
+  (event: 'retry', node: ExplorerNode): void
   (event: 'context', payload: { x: number; y: number; node: ExplorerNode }): void
 }>()
 
-/** One line of the tree: either a node, or the note of a branch with none. */
+/** One line of the tree: a node, the note of a branch with none, or the note of a failed read. */
 type Row =
   | {
       rowType: 'node'
@@ -142,6 +176,7 @@ type Row =
       expanded: boolean
     }
   | { rowType: 'empty'; key: string; depth: number }
+  | { rowType: 'error'; key: string; depth: number; node: ExplorerNode; message: string }
 
 /** The row that holds the focus, which is the one row the Tab key reaches. */
 const focusedKey = ref<string | null>(null)
@@ -203,8 +238,17 @@ const rows = computed<Row[]>(() => {
         return
       }
       const children = node.children ?? []
+      const failure = node.loading ? null : (node.error ?? null)
       if (children.length > 0) {
         walk(children, depth + 1)
+      } else if (failure) {
+        out.push({
+          rowType: 'error',
+          key: `${node.key} error`,
+          depth: depth + 1,
+          node,
+          message: failure,
+        })
       } else if (node.loaded) {
         out.push({ rowType: 'empty', key: `${node.key} empty`, depth: depth + 1 })
       }
@@ -266,7 +310,7 @@ const treeWidth = computed(() => {
   return Math.ceil(widest)
 })
 
-/** The rows a key can reach, which leaves out the note of an empty branch. */
+/** The rows a key can reach, which leaves out the notes of empty and failed branches. */
 const nodeRows = computed(() => rows.value.filter((row) => row.rowType === 'node'))
 
 /** The first row of the window, counted from the first row of the tree. */
@@ -332,6 +376,23 @@ const activeKey = computed(() => {
   }
   return keys[0] ?? null
 })
+
+/** True while a branch of the tree reads its children. */
+const anyLoading = computed(() => nodeRows.value.some((row) => row.node.loading))
+
+/** True when the row with the tab stop is among the drawn rows. */
+const activeDrawn = computed(() => windowRows.value.some((row) => row.key === activeKey.value))
+
+/**
+ * Gives the focus to the row with the tab stop. The tree itself takes the
+ * tab stop when that row is scrolled out of the drawn rows, so the Tab key
+ * still reaches the tree.
+ */
+function onAreaFocus(): void {
+  if (activeKey.value !== null) {
+    focusRow(activeKey.value)
+  }
+}
 
 function keepRow(key: string, element: Element | ComponentPublicInstance | null): void {
   if (element === null) {
@@ -602,5 +663,15 @@ defineExpose({ focusRow })
   font-size: var(--app-text-sm);
   font-style: italic;
   color: rgb(var(--v-theme-on-surface-variant));
+}
+
+.error-branch {
+  gap: 4px;
+  font-style: normal;
+  color: rgb(var(--v-theme-error));
+}
+
+.error-text {
+  white-space: nowrap;
 }
 </style>

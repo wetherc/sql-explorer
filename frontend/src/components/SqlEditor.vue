@@ -6,8 +6,19 @@
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { monaco, registerMonacoThemes, registerSqlParameters } from '@/plugins/monaco'
 import { clearCompletionSource, installSqlCompletions, setCompletionSource } from '@/lib/completion'
-import { emptySchemaIndex, formatSql, statementAt, type SchemaIndex } from '@/lib/sql'
+import { emptySchemaIndex, formatSql, statementRunAt, type SchemaIndex } from '@/lib/sql'
 import { Dialect } from '@/types/api'
+import { keepViewState, modelFor } from './editorModels'
+
+/** A place in the text where the last run failed, with the reason. */
+export interface ErrorMarker {
+  line: number
+  column: number
+  message: string
+}
+
+/** The owner of the markers this editor sets on its model. */
+const MARKER_OWNER = 'sql-explorer'
 
 const props = withDefaults(
   defineProps<{
@@ -19,6 +30,13 @@ const props = withDefaults(
     schemaIndex?: SchemaIndex
     dialect?: Dialect
     readOnly?: boolean
+    /**
+     * The tab this editor belongs to. An editor with a key keeps its model
+     * and view state after unmount, so undo and the cursor come back.
+     */
+    modelKey?: string
+    /** The place of the last failure, which the editor marks. */
+    errorMarker?: ErrorMarker | null
   }>(),
   {
     theme: 'sql-explorer-dark',
@@ -28,6 +46,8 @@ const props = withDefaults(
     schemaIndex: undefined,
     dialect: Dialect.MsSql,
     readOnly: false,
+    modelKey: undefined,
+    errorMarker: null,
   },
 )
 
@@ -37,12 +57,16 @@ const emit = defineEmits<{
   (event: 'show-keys'): void
   (event: 'run-statement'): void
   (event: 'run-all'): void
+  /** The user changed the text while the mark of a failure was shown. */
+  (event: 'marker-cleared'): void
 }>()
 
 const host = ref<HTMLElement | null>(null)
 let editor: monaco.editor.IStandaloneCodeEditor | null = null
 /** The address of the model of this editor, which keys its own names. */
 let modelUri: string | null = null
+/** True while the model shows the mark of a failure. */
+let markerShown = false
 /** True while the editor writes into the model itself. */
 let applyingExternalValue = false
 
@@ -51,20 +75,42 @@ let applyingExternalValue = false
  * the statement that holds the cursor.
  */
 function currentStatement(): string {
-  if (!editor) {
-    return props.modelValue
+  return currentRun().text
+}
+
+/**
+ * The text to run and the place in the editor where it begins, so the store
+ * can move the place of a failure into the coordinates of the editor. The
+ * place is missing when the script has no statement, and when a MySQL
+ * statement under a DELIMITER command starts inside a line.
+ */
+function currentRun(): { text: string; start?: { line: number; column: number } } {
+  const model = editor?.getModel()
+  if (!editor || !model) {
+    return { text: props.modelValue }
   }
-  const model = editor.getModel()
   const selection = editor.getSelection()
-  if (model && selection && !selection.isEmpty()) {
-    return model.getValueInRange(selection)
-  }
-  if (!model) {
-    return props.modelValue
+  if (selection && !selection.isEmpty()) {
+    return {
+      text: model.getValueInRange(selection),
+      start: { line: selection.startLineNumber, column: selection.startColumn },
+    }
   }
   const position = editor.getPosition()
   const offset = position ? model.getOffsetAt(position) : 0
-  return statementAt(model.getValue(), offset, props.dialect)
+  const { text, start, wrapped } = statementRunAt(model.getValue(), offset, props.dialect)
+  if (text === '') {
+    return { text }
+  }
+  const at = model.getPositionAt(start)
+  if (!wrapped) {
+    return { text, start: { line: at.lineNumber, column: at.column } }
+  }
+  // The sent text has a DELIMITER line in front of the statement. The line
+  // above the statement stands for it, so the lines that follow match. A
+  // statement that starts inside a line gets no place, because its columns
+  // would not match.
+  return at.column === 1 ? { text, start: { line: at.lineNumber - 1, column: 1 } } : { text }
 }
 
 /**
@@ -145,9 +191,9 @@ onMounted(() => {
   // The template above always draws the host element, so it is present by
   // the time this runs.
   const element = host.value as HTMLElement
+  const keptEntry = props.modelKey ? modelFor(props.modelKey, props.modelValue) : null
   const instance = monaco.editor.create(element, {
-    value: props.modelValue,
-    language: 'sql',
+    ...(keptEntry ? { model: keptEntry.model } : { value: props.modelValue, language: 'sql' }),
     theme: props.theme,
     fontSize: props.fontSize,
     wordWrap: props.wordWrap ? 'on' : 'off',
@@ -164,12 +210,25 @@ onMounted(() => {
     wordBasedSuggestions: 'off',
   })
   editor = instance
+  if (keptEntry) {
+    if (keptEntry.viewState) {
+      instance.restoreViewState(keptEntry.viewState)
+    }
+    // The store can change the text while the view is away, for example
+    // when the user opens a file into the tab.
+    applyExternalValue(instance, props.modelValue)
+  }
 
   instance.onDidChangeModelContent(() => {
     // The editor also reports the writes this component makes itself, and
     // those must not travel back out as a change by the user.
     if (applyingExternalValue) {
       return
+    }
+    // The place of an old failure means nothing after an edit.
+    if (markerShown) {
+      setMarker(null)
+      emit('marker-cleared')
     }
     emit('update:modelValue', instance.getValue())
   })
@@ -215,7 +274,48 @@ onMounted(() => {
   )
 
   registerCompletions()
+
+  watch(
+    () => props.errorMarker,
+    (marker) => setMarker(marker),
+    { immediate: true },
+  )
 })
+
+/** Draws the mark of a failure on the model, or clears it. */
+function setMarker(marker: ErrorMarker | null): void {
+  const model = editor?.getModel()
+  if (!model) {
+    return
+  }
+  // The text can change after the run, so a place past the end of the text
+  // gets no mark, and a column past the end of its line moves to that end.
+  const shown = marker !== null && marker.line <= model.getLineCount()
+  const markers = shown
+    ? [
+        {
+          severity: monaco.MarkerSeverity.Error,
+          message: marker.message,
+          startLineNumber: marker.line,
+          startColumn: Math.min(marker.column, model.getLineMaxColumn(marker.line)),
+          endLineNumber: marker.line,
+          endColumn: model.getLineMaxColumn(marker.line),
+        },
+      ]
+    : []
+  monaco.editor.setModelMarkers(model, MARKER_OWNER, markers)
+  markerShown = shown
+}
+
+/** Moves the cursor to a place in the text and shows it. */
+function reveal(line: number, column: number): void {
+  if (!editor) {
+    return
+  }
+  editor.setPosition({ lineNumber: line, column })
+  editor.revealLineInCenter(line)
+  editor.focus()
+}
 
 watch(
   () => props.theme,
@@ -239,6 +339,10 @@ onBeforeUnmount(() => {
     clearCompletionSource(modelUri)
     modelUri = null
   }
+  if (props.modelKey && editor) {
+    keepViewState(props.modelKey, editor.saveViewState())
+  }
+  // An editor does not dispose a model it was given, so a kept model stays.
   editor?.dispose()
   editor = null
 })
@@ -246,7 +350,9 @@ onBeforeUnmount(() => {
 defineExpose({
   focus: () => editor?.focus(),
   currentStatement,
+  currentRun,
   format: formatText,
+  reveal,
   insert: (text: string) => {
     const selection = editor?.getSelection()
     if (editor && selection) {

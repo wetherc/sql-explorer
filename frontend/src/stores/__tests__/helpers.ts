@@ -54,6 +54,7 @@ export function makeApiStub() {
     exportQuery: vi.fn(),
     supportedEngines: vi.fn(),
     passwordsPersist: vi.fn(),
+    storageProblems: vi.fn().mockResolvedValue([]),
     onConnectionStatus: vi.fn(),
     onMenuCommand: vi.fn(),
     setMenuCommands: vi.fn(),

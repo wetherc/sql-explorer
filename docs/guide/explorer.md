@@ -92,6 +92,12 @@ The filter box keeps the path down to each match, so you can still reach a name
 deep in the tree. A match keeps all of its children, so expanding a match shows
 everything inside it. A name wider than the panel scrolls sideways.
 
+## Load errors
+
+When a branch can't load, for example because the server stopped answering or
+your login can't read that catalog, the branch shows the error in place of its
+children, with a **Retry** button that reads it again.
+
 ## The tree's connection
 
 The tree, completion and the menu's drafts read the catalog on a second

@@ -78,7 +78,15 @@ vi.mock('@/plugins/monaco', () => {
           executeEdits: vi.fn(),
           focus: vi.fn(),
           dispose: vi.fn(),
+          saveViewState: vi.fn(() => null),
+          restoreViewState: vi.fn(),
         })),
+        createModel: vi.fn((value: string) => ({
+          value,
+          getValue: () => value,
+          dispose: vi.fn(),
+        })),
+        setModelMarkers: vi.fn(),
         defineTheme: vi.fn(),
         setTheme: vi.fn(),
       },
@@ -93,6 +101,7 @@ vi.mock('@/plugins/monaco', () => {
         },
       },
       // The real values, so that two shortcuts never fold onto one key.
+      MarkerSeverity: { Error: 8 },
       KeyMod: { CtrlCmd: 2048, Shift: 1024, Alt: 512 },
       KeyCode: { Enter: 3, KeyF: 36, F1: 59 },
     },

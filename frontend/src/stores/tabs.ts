@@ -1,11 +1,13 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { api } from '@/lib/api'
+import { fullErrorText, toErrorPayload } from '@/lib/errors'
 import { parseParamValues } from '@/lib/params'
-import type { ParamValue } from '@/types/api'
+import { TEXT_ENCODINGS, type ParamValue, type TextEncoding } from '@/types/api'
 import { useConnectionsStore } from './connections'
 import { createId } from './connections'
 import { useQueryStore } from './query'
+import { useUiStore } from './ui'
 
 export interface QueryTab {
   id: string
@@ -20,16 +22,14 @@ export interface QueryTab {
   params: ParamValue[]
   /** The file on the disk this tab came from, when it came from one. */
   filePath: string | null
+  /** The encoding of that file, so a save writes the file as it was. A tab
+   *  without one writes UTF-8. */
+  encoding?: TextEncoding
 }
 
-/** The shape the open tabs take in the workspace file. */
+/** The open tabs as the workspace file keeps them. */
 export interface Workspace {
-  tabs: Array<
-    Pick<
-      QueryTab,
-      'id' | 'title' | 'query' | 'connectionId' | 'dirty' | 'savedQueryId' | 'params' | 'filePath'
-    >
-  >
+  tabs: QueryTab[]
   activeTabId: string | null
 }
 
@@ -55,6 +55,9 @@ export function parseWorkspace(value: unknown): Workspace {
       savedQueryId: typeof tab.savedQueryId === 'string' ? tab.savedQueryId : null,
       params: parseParamValues(tab.params),
       filePath: typeof tab.filePath === 'string' && tab.filePath !== '' ? tab.filePath : null,
+      encoding: TEXT_ENCODINGS.includes(tab.encoding as TextEncoding)
+        ? (tab.encoding as TextEncoding)
+        : 'utf8',
     }))
   const activeTabId =
     typeof record.activeTabId === 'string' && tabs.some((tab) => tab.id === record.activeTabId)
@@ -82,6 +85,13 @@ export const useTabsStore = defineStore('tabs', () => {
    * after each change, because the text it came from is unknown.
    */
   const cleanText = new Map<string, string>()
+  /** True after a write of the workspace failed, until one succeeds, so the
+   *  failure gives one notice and not one for each change. */
+  let persistFailed = false
+  /** True when the workspace of the last session could not be read. The
+   *  file then stays as it is until the user opens a tab, so a restart
+   *  can try it again. */
+  let restoreFailed = false
 
   /** Records that the workspace record changed. */
   function changed(): void {
@@ -102,6 +112,8 @@ export const useTabsStore = defineStore('tabs', () => {
       query?: string
       title?: string
       filePath?: string | null
+      savedQueryId?: string | null
+      encoding?: TextEncoding
     } = {},
   ): QueryTab {
     const tab: QueryTab = {
@@ -110,9 +122,10 @@ export const useTabsStore = defineStore('tabs', () => {
       query: options.query ?? '',
       connectionId: options.connectionId ?? connections.selectedId,
       dirty: false,
-      savedQueryId: null,
+      savedQueryId: options.savedQueryId ?? null,
       params: [],
       filePath: options.filePath ?? null,
+      encoding: options.encoding ?? 'utf8',
     }
     cleanText.set(tab.id, tab.query)
     tabs.value = [...tabs.value, tab]
@@ -219,6 +232,25 @@ export const useTabsStore = defineStore('tabs', () => {
     }
   }
 
+  /** Links a tab to the saved query it was saved as, so the next save
+   *  replaces that entry. */
+  function setSavedQuery(id: string, savedQueryId: string | null): void {
+    const tab = tabs.value.find((item) => item.id === id)
+    if (tab) {
+      tab.savedQueryId = savedQueryId
+      changed()
+    }
+  }
+
+  /** Records the encoding that the file of a tab has on the disk. */
+  function setEncoding(id: string, encoding: TextEncoding): void {
+    const tab = tabs.value.find((item) => item.id === id)
+    if (tab) {
+      tab.encoding = encoding
+      changed()
+    }
+  }
+
   /** Builds the record that the workspace file holds. */
   function snapshot(): Workspace {
     return {
@@ -231,17 +263,30 @@ export const useTabsStore = defineStore('tabs', () => {
         savedQueryId: tab.savedQueryId,
         params: tab.params,
         filePath: tab.filePath,
+        encoding: tab.encoding,
       })),
       activeTabId: activeTabId.value,
     }
   }
 
   async function persist(): Promise<void> {
+    if (restoreFailed && tabs.value.length === 0) {
+      return
+    }
     try {
       await api.saveWorkspace(snapshot())
-    } catch {
-      // A workspace that cannot be written is not worth an alarm; the tabs
-      // stay open for this session.
+      persistFailed = false
+      restoreFailed = false
+    } catch (error) {
+      if (!persistFailed) {
+        persistFailed = true
+        const payload = toErrorPayload(error)
+        useUiStore().reportError({
+          ...payload,
+          message: "Couldn't save the open tabs. They may not open again after a restart.",
+          detail: fullErrorText(payload),
+        })
+      }
     }
   }
 
@@ -258,7 +303,8 @@ export const useTabsStore = defineStore('tabs', () => {
           return
         }
         try {
-          const text = await api.readTextFile(tab.filePath)
+          const { contents: text, encoding } = await api.readTextFile(tab.filePath)
+          tab.encoding = encoding
           cleanText.set(tab.id, text)
           tab.dirty = text !== tab.query
         } catch {
@@ -288,9 +334,16 @@ export const useTabsStore = defineStore('tabs', () => {
         const match = /^Query (\d+)$/.exec(tab.title)
         return match ? Math.max(highest, Number(match[1])) : highest
       }, tabs.value.length)
-    } catch {
+    } catch (error) {
+      restoreFailed = true
       tabs.value = []
       activeTabId.value = null
+      const payload = toErrorPayload(error)
+      useUiStore().reportError({
+        ...payload,
+        message: "Couldn't open the tabs of the last session.",
+        detail: fullErrorText(payload),
+      })
       changed()
       return
     }
@@ -318,6 +371,8 @@ export const useTabsStore = defineStore('tabs', () => {
     activeTab,
     hasTabs,
     setFilePath,
+    setSavedQuery,
+    setEncoding,
     tabForFile,
     add,
     close,

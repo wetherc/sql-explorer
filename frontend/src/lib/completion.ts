@@ -97,6 +97,9 @@ export function suggestionsFor(
   )
 
   return {
+    // A full list may leave out names that a longer prefix finds, so the
+    // editor asks again on the next keystroke.
+    incomplete: items.length >= MAX_SUGGESTIONS,
     suggestions: items.map((item) => ({
       label: item.label,
       detail: item.detail,

@@ -1,0 +1,3 @@
+# Build and test output that tools write.
+coverage
+dist

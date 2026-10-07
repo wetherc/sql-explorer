@@ -114,6 +114,8 @@ export interface Command {
   run: () => void
   /** True when the command can run now. A command with no test always can. */
   enabled?: () => boolean
+  /** The text that says why a disabled command can't run. */
+  disabledReason?: () => string
 }
 
 /** True when the command can run now. */

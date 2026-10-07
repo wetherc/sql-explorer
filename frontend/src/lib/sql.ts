@@ -160,27 +160,49 @@ export function quoteIfNeeded(name: string, dialect: Dialect): string {
  * bounds.
  */
 export function statementAt(script: string, offset: number, dialect?: Dialect): string {
+  return statementRunAt(script, offset, dialect).text
+}
+
+/**
+ * The statement that `statementAt` finds, with the place where it begins in
+ * the script. The `start` is the offset of the first character of the
+ * statement after the blank text in front of it. When `wrapped` is true, the
+ * text has a `DELIMITER` line in front of the statement, which is not in the
+ * script at that place.
+ */
+export interface StatementRun {
+  text: string
+  start: number
+  wrapped: boolean
+}
+
+/** Finds the statement around a position, as `statementAt` does, and its place. */
+export function statementRunAt(script: string, offset: number, dialect?: Dialect): StatementRun {
   const position = Math.max(0, Math.min(offset, script.length))
   const parts = statementSpans(script, dialect, true)
-    .map(({ start, end, delimiter }) => ({
-      start,
-      end,
-      text: withDelimiter(script.slice(start, end).trim(), delimiter),
-    }))
-    .filter((part) => part.text !== '')
+    // A span of only comments and blank text is not a statement, so a cursor
+    // in a comment after the last statement runs that statement.
+    .filter((part) => part.code)
   const first = parts[0]
   if (!first) {
-    return ''
-  }
-  const covering = parts.find((part) => position >= part.start && position <= part.end)
-  if (covering) {
-    return covering.text
+    return { text: '', start: 0, wrapped: false }
   }
   // The position stands in the empty space that follows a semicolon. The
   // statement in front of that space is the one the user means, so a cursor
   // after the last semicolon of a script runs the last statement alone.
   const before = parts.filter((part) => part.start <= position)
-  return (before[before.length - 1] ?? first).text
+  const part =
+    parts.find((item) => position >= item.start && position <= item.end) ??
+    before[before.length - 1] ??
+    first
+  const raw = script.slice(part.start, part.end)
+  const body = raw.trim()
+  const text = withDelimiter(body, part.delimiter)
+  return {
+    text,
+    start: part.start + raw.length - raw.trimStart().length,
+    wrapped: text !== body,
+  }
 }
 
 /**
@@ -313,8 +335,9 @@ function splitRules(dialect?: Dialect): SplitRules {
     backslashEscapes: dialect === Dialect.MySql,
     prefixedEscapes: dialect === Dialect.Postgres,
     hashComments: dialect === Dialect.MySql,
-    bracketQuotes: dialect === Dialect.MsSql,
-    backtickQuotes: dialect === Dialect.MySql || dialect === undefined,
+    bracketQuotes: dialect === Dialect.MsSql || dialect === Dialect.Sqlite,
+    backtickQuotes:
+      dialect === Dialect.MySql || dialect === Dialect.Sqlite || dialect === undefined,
     dollarQuotes: dialect === Dialect.Postgres,
     nestedBlockComments: dialect === Dialect.MsSql || dialect === Dialect.Postgres,
     batchSeparator: dialect === Dialect.MsSql,
@@ -328,19 +351,30 @@ function splitRules(dialect?: Dialect): SplitRules {
 const BARE_WORD = /[\p{L}\p{N}_$]+/uy
 
 /**
- * Follows the words of one PostgreSQL statement to find a routine body in
- * the form `BEGIN ATOMIC ... END`. The body can hold `CASE ... END`, so each
- * `CASE` inside the body also waits for an `END`. The backend splitter
- * follows the same words.
+ * Follows the words of one statement to find a body that contains semicolons:
+ * a PostgreSQL routine body in the form `BEGIN ATOMIC ... END`, or the
+ * `BEGIN ... END` body of a SQLite trigger. The body can contain `CASE ... END`,
+ * so each `CASE` inside the body also waits for an `END`. The backend
+ * splitter follows the same words.
  */
 class BodyWords {
-  /** The number of `BEGIN ATOMIC` and `CASE` words that have no `END` yet. */
+  /** The number of body and `CASE` words that have no `END` yet. */
   depth = 0
+  private count = 0
   private first = ''
   private previous = ''
+  /** True when the statement creates a SQLite trigger. */
+  private trigger = false
+
+  private readonly rules: SplitRules
+
+  constructor(rules: SplitRules) {
+    this.rules = rules
+  }
 
   /** Reads the next bare word of the statement, in small letters. */
   read(word: string): void {
+    this.count += 1
     if (this.first === '') {
       this.first = word
     }
@@ -348,8 +382,19 @@ class BodyWords {
       this.depth += 1
     } else if (this.depth > 0 && word === 'end') {
       this.depth -= 1
-    } else if (word === 'atomic' && this.previous === 'begin' && this.first === 'create') {
+    } else if (
+      this.rules.atomicBodies &&
+      word === 'atomic' &&
+      this.previous === 'begin' &&
+      this.first === 'create'
+    ) {
       this.depth += 1
+    } else if (this.trigger && word === 'begin') {
+      this.depth += 1
+    }
+    // The word TRIGGER follows CREATE, TEMP or TEMPORARY at the start.
+    if (this.rules.triggerBodies && this.first === 'create' && word === 'trigger') {
+      this.trigger ||= this.count === 2 || /^temp(orary)?$/.test(this.previous)
     }
     this.previous = word
   }
@@ -510,15 +555,8 @@ interface StatementSpan {
   start: number
   end: number
   delimiter: string
-}
-
-/**
- * True when the text starts a SQLite trigger whose body has no `END` yet.
- * A semicolon inside that body ends nothing, and the backend joins the same
- * fragments before it sends the trigger.
- */
-function insideTriggerBody(text: string): boolean {
-  return /^\s*CREATE\s+(TEMP\s+|TEMPORARY\s+)?TRIGGER\b/i.test(text) && !/\bEND\s*$/i.test(text)
+  /** False when the span contains only comments and blank text. */
+  code: boolean
 }
 
 /**
@@ -537,7 +575,7 @@ function statementSpans(script: string, dialect?: Dialect, whole = false): State
   // comments. A comment above a DELIMITER line, as in a dump file, does not
   // hide the command.
   let codeSeen = false
-  let words = new BodyWords()
+  let words = new BodyWords(rules)
 
   while (index < script.length) {
     const character = script[index]
@@ -558,7 +596,7 @@ function statementSpans(script: string, dialect?: Dialect, whole = false): State
     if (rules.batchSeparator && atLineStart) {
       const after = batchSeparatorAt(script, index)
       if (after >= 0) {
-        bounds.push({ start, end: index, delimiter })
+        bounds.push({ start, end: index, delimiter, code: codeSeen })
         start = after
         index = after
         codeSeen = false
@@ -579,7 +617,8 @@ function statementSpans(script: string, dialect?: Dialect, whole = false): State
       index = endOfBlockComment(script, index, rules.nestedBlockComments)
       continue
     }
-    if (script.charAt(index).trim() !== '') {
+    // A terminator alone is no code, so `-- note;` is not a statement.
+    if (script.charAt(index).trim() !== '' && !script.startsWith(delimiter, index)) {
       codeSeen = true
     }
     if (character === "'" || character === '"' || (character === '`' && rules.backtickQuotes)) {
@@ -599,7 +638,7 @@ function statementSpans(script: string, dialect?: Dialect, whole = false): State
       }
     }
     if (
-      rules.atomicBodies &&
+      (rules.atomicBodies || rules.triggerBodies) &&
       /[\p{L}\p{N}_]/u.test(script.charAt(index)) &&
       !inAWord(script[index - 1])
     ) {
@@ -610,27 +649,28 @@ function statementSpans(script: string, dialect?: Dialect, whole = false): State
       index += word.length
       continue
     }
+    // Without `whole`, a SQLite trigger splits at each semicolon of its body,
+    // as the backend splitter does before it joins the parts again.
     if (
-      words.depth === 0 &&
+      (words.depth === 0 || (!whole && rules.triggerBodies)) &&
       !(whole && rules.batchSeparator) &&
-      script.startsWith(delimiter, index) &&
-      !(whole && rules.triggerBodies && insideTriggerBody(script.slice(start, index)))
+      script.startsWith(delimiter, index)
     ) {
-      bounds.push({ start, end: index, delimiter })
+      bounds.push({ start, end: index, delimiter, code: codeSeen })
       index += delimiter.length
       start = index
       codeSeen = false
-      words = new BodyWords()
+      words = new BodyWords(rules)
       continue
     }
     index += 1
   }
 
   if (start < script.length) {
-    bounds.push({ start, end: script.length, delimiter })
+    bounds.push({ start, end: script.length, delimiter, code: codeSeen })
   }
   if (bounds.length === 0) {
-    bounds.push({ start: 0, end: script.length, delimiter })
+    bounds.push({ start: 0, end: script.length, delimiter, code: false })
   }
   return bounds
 }
@@ -713,75 +753,96 @@ interface Token {
   quoted: boolean
 }
 
+/** A bare word, a name or a variable such as `#temp` or `@id`. */
+const TOKEN_WORD = /[\p{L}\p{N}_$#@]+/uy
+
 /**
  * Splits a statement into words, names and single characters. The reader
- * steps over the comments and over the string literals, and it removes the
- * quotes of a name, so the caller reads a name as the user wrote it.
+ * steps over the comments and over the string literals with the rules of the
+ * splitter, and it removes the quotes of a name, so the caller reads a name
+ * as the user wrote it.
  */
 function tokenize(statement: string, dialect: Dialect): Token[] {
+  const rules = splitRules(dialect)
   const tokens: Token[] = []
-  const chars = [...statement]
   let index = 0
 
-  const closingFor = (open: string): string => (open === '[' ? ']' : open)
+  while (index < statement.length) {
+    const character = statement[index] as string
 
-  while (index < chars.length) {
-    const character = chars[index] as string
-    const next = chars[index + 1]
-
-    if (opensDashComment(chars, index, dialect)) {
-      while (index < chars.length && chars[index] !== '\n') {
-        index += 1
-      }
+    if (opensDashComment(statement, index, dialect) || (rules.hashComments && character === '#')) {
+      index = endOfLine(statement, index)
       continue
     }
-    if (character === '/' && next === '*') {
-      index += 2
-      while (index < chars.length && !(chars[index] === '*' && chars[index + 1] === '/')) {
-        index += 1
-      }
-      index += 2
+    if (character === '/' && statement[index + 1] === '*') {
+      index = endOfBlockComment(statement, index, rules.nestedBlockComments)
       continue
     }
     if (character === "'") {
-      index += 1
-      while (index < chars.length && chars[index] !== "'") {
-        index += 1
-      }
-      index += 1
+      index = endOfQuoted(statement, index, character, escapesAt(statement, index, rules))
       continue
     }
-    if (
-      character === '"' ||
-      character === '`' ||
-      (character === '[' && dialect === Dialect.MsSql)
-    ) {
-      const closing = closingFor(character)
-      index += 1
-      let name = ''
-      while (index < chars.length && chars[index] !== closing) {
-        name += chars[index]
-        index += 1
+    if (character === '$' && rules.dollarQuotes && !inAWord(statement[index - 1])) {
+      const after = endOfDollarQuoted(statement, index)
+      if (after >= 0) {
+        index = after
+        continue
       }
-      index += 1
-      tokens.push({ text: name, quoted: true })
+    }
+    if (character === '"' || character === '`' || (character === '[' && rules.bracketQuotes)) {
+      const name = readQuotedName(statement, index, escapesAt(statement, index, rules))
+      tokens.push({ text: name.text, quoted: true })
+      index = name.end
       continue
     }
-    if (/[A-Za-z0-9_$#@]/.test(character)) {
-      let word = ''
-      while (index < chars.length && /[A-Za-z0-9_$#@]/.test(chars[index] as string)) {
-        word += chars[index]
-        index += 1
-      }
+    TOKEN_WORD.lastIndex = index
+    const word = TOKEN_WORD.exec(statement)?.[0]
+    if (word !== undefined) {
       tokens.push({ text: word, quoted: false })
+      index += word.length
       continue
     }
-    if (!/\s/.test(character)) {
-      tokens.push({ text: character, quoted: false })
+    // One character, which can take two code units of the text.
+    const single = String.fromCodePoint(statement.codePointAt(index) as number)
+    if (!/\s/.test(single)) {
+      tokens.push({ text: single, quoted: false })
     }
-    index += 1
+    index += single.length
   }
   return tokens
+}
+
+/**
+ * Reads a name in quotes that starts at the given position. A doubled closing
+ * quote stands for one quote in the name. Returns the name and the position
+ * after it.
+ */
+function readQuotedName(
+  statement: string,
+  index: number,
+  backslashEscapes: boolean,
+): { text: string; end: number } {
+  const open = statement[index] as string
+  const closing = open === '[' ? ']' : open
+  let text = ''
+  let cursor = index + 1
+  while (cursor < statement.length) {
+    const character = statement[cursor] as string
+    if (backslashEscapes && character === '\\') {
+      text += statement.charAt(cursor + 1)
+      cursor += 2
+      continue
+    }
+    if (character === closing) {
+      if (statement[cursor + 1] !== closing) {
+        return { text, end: cursor + 1 }
+      }
+      cursor += 1
+    }
+    text += character
+    cursor += 1
+  }
+  return { text, end: cursor }
 }
 
 /** True when a token ends the name of a relation. */
@@ -885,7 +946,7 @@ export function tableAliases(statement: string, dialect: Dialect): Map<string, s
       }
       // An alias is a name. A sign such as the = of `UPDATE a = 1` in the
       // ON DUPLICATE KEY clause of MySQL is not one.
-      if (alias && !endsTheName(alias) && (alias.quoted || /^[A-Za-z_#@]/.test(alias.text))) {
+      if (alias && !endsTheName(alias) && (alias.quoted || /^[\p{L}_#@]/u.test(alias.text))) {
         aliases.set(alias.text.toLowerCase(), relation)
         cursor += 1
       }
@@ -1096,5 +1157,5 @@ export function wordBefore(text: string, offset: number): string {
   const position = Math.max(0, Math.min(offset, text.length))
   const head = text.slice(0, position)
   // The pattern matches an empty run, so the search always finds a start.
-  return head.slice(head.search(/[A-Za-z0-9_]*$/))
+  return head.slice(head.search(/[\p{L}\p{N}_]*$/u))
 }

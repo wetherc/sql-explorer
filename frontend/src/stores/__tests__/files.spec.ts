@@ -129,7 +129,7 @@ describe('files store', () => {
     expect(files.rows.map((row) => row.name)).toEqual(['data', 'reports'])
   })
 
-  it('reads the entries of a folder once', async () => {
+  it('reads the entries of a folder again each time it opens', async () => {
     const files = useFilesStore()
     apiStub.fileRoots.mockResolvedValue(['/data'])
     await files.restoreRoots()
@@ -137,11 +137,42 @@ describe('files store', () => {
     await files.expand('/data')
     files.collapse('/data')
     await files.expand('/data')
-    expect(apiStub.listFolder).toHaveBeenCalledTimes(1)
+    expect(apiStub.listFolder).toHaveBeenCalledTimes(2)
 
     // A refresh reads them again.
     await files.refresh('/data')
-    expect(apiStub.listFolder).toHaveBeenCalledTimes(2)
+    expect(apiStub.listFolder).toHaveBeenCalledTimes(3)
+
+    // An open while a read runs starts no second read.
+    let answer: (value: unknown) => void = () => {}
+    apiStub.listFolder.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          answer = resolve
+        }),
+    )
+    const reading = files.refresh('/data')
+    await files.expand('/data')
+    answer([])
+    await reading
+    expect(apiStub.listFolder).toHaveBeenCalledTimes(4)
+  })
+
+  it('keeps the failure of a folder read and clears it on the next read', async () => {
+    const files = useFilesStore()
+    apiStub.fileRoots.mockResolvedValue(['/data'])
+    await files.restoreRoots()
+    apiStub.listFolder.mockRejectedValueOnce({ category: 'io', message: 'denied', detail: null })
+    await files.expand('/data')
+    const root = files.roots[0]!
+    expect(root.error).toBe('denied')
+    expect(root.loaded).toBe(false)
+    expect(useUiStore().notices[0]?.level).toBe('error')
+
+    apiStub.listFolder.mockResolvedValue([])
+    await files.refresh('/data')
+    expect(files.roots[0]!.error).toBeNull()
+    expect(files.roots[0]!.loaded).toBe(true)
   })
 
   it('reads the open folders below a refreshed folder again', async () => {
@@ -232,7 +263,7 @@ describe('files store', () => {
   })
 
   it('opens a file in a tab and brings that tab forward a second time', async () => {
-    apiStub.readTextFile.mockResolvedValue('SELECT 1')
+    apiStub.readTextFile.mockResolvedValue({ contents: 'SELECT 1', encoding: 'utf8' })
     const files = useFilesStore()
     const tabs = useTabsStore()
     const other = tabs.add()
@@ -251,6 +282,44 @@ describe('files store', () => {
     expect(tabs.tabs).toHaveLength(2)
     expect(tabs.activeTab?.filePath).toBe('/data/a.sql')
     expect(apiStub.readTextFile).toHaveBeenCalledTimes(1)
+  })
+
+  it('opens one tab for two quick opens of one file, in its encoding', async () => {
+    let answer: (value: unknown) => void = () => {}
+    apiStub.readTextFile.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          answer = resolve
+        }),
+    )
+    const files = useFilesStore()
+    const tabs = useTabsStore()
+    const first = files.openFile('/data/a.sql')
+    const second = files.openFile('/data/a.sql')
+    answer({ contents: 'SELECT 1', encoding: 'utf16le' })
+    await Promise.all([first, second])
+    expect(tabs.tabs).toHaveLength(1)
+    expect(tabs.tabs[0]?.encoding).toBe('utf16le')
+    expect(apiStub.readTextFile).toHaveBeenCalledTimes(1)
+  })
+
+  it('brings forward a tab that opened the file during the read', async () => {
+    let answer: (value: unknown) => void = () => {}
+    apiStub.readTextFile.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          answer = resolve
+        }),
+    )
+    const files = useFilesStore()
+    const tabs = useTabsStore()
+    const reading = files.openFile('/data/a.sql')
+    const held = tabs.add({ filePath: '/data/a.sql' })
+    tabs.add()
+    answer({ contents: 'SELECT 1', encoding: 'utf8' })
+    await reading
+    expect(tabs.tabs).toHaveLength(2)
+    expect(tabs.activeTabId).toBe(held.id)
   })
 
   it('reports a file that cannot be read', async () => {

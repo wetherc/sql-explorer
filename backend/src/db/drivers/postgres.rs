@@ -7,9 +7,9 @@
 
 use crate::db::drivers::{
     add_constraint_column, add_included_column, add_index_column, add_snapshot_column,
-    bytes_to_json, constraint_type, f32_to_json, f64_to_json, number_out_of_range, number_value,
-    prefixed_plan, routine_type, rows_affected_message, rows_returned_message, size_text,
-    system_roots, CancelHandle, DatabaseDriver, NumberValue,
+    bytes_to_json, connect_within, constraint_type, f32_to_json, f64_to_json, hex_text,
+    number_out_of_range, number_value, prefixed_plan, routine_type, rows_affected_message,
+    rows_returned_message, size_text, system_roots, CancelHandle, DatabaseDriver, NumberValue,
 };
 use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{
@@ -18,7 +18,7 @@ use crate::db::{
     QueryResponse, RelationType, Routine, Schema, SchemaSnapshot, SnapshotColumn, Table, TableFact,
     Trigger, TriggerEvent, TriggerTiming,
 };
-use crate::error::{Error, Result};
+use crate::error::{offset_place, place_of_byte_offset, place_of_char_position, Error, Result};
 use crate::sql::{leading_keyword, only_reads, split_statements, Dialect};
 use crate::storage::{SavedConnection, TlsMode};
 use async_trait::async_trait;
@@ -32,9 +32,10 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 use serde_json::Value as JsonValue;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio_postgres::error::{DbError, SqlState};
+use tokio_postgres::error::{DbError, ErrorPosition, SqlState};
 use tokio_postgres::{AsyncMessage, Client, Config as PgConfig, Row, SimpleQueryMessage};
 
 pub struct PostgresDriver {
@@ -227,7 +228,14 @@ pub fn build_tls_config(connection: &SavedConnection) -> Result<ClientConfig> {
         .filter(|value| !value.trim().is_empty())
     {
         let bytes = std::fs::read(path)?;
-        for certificate in rustls_pemfile_certs(&bytes) {
+        let certificates = rustls_pemfile_certs(&bytes);
+        if certificates.is_empty() {
+            return Err(Error::Configuration(format!(
+                "The CA certificate file {path} has no certificate that can be read. Use a file \
+                 with PEM or DER certificates."
+            )));
+        }
+        for certificate in certificates {
             roots
                 .add(certificate)
                 .map_err(|error| Error::Configuration(error.to_string()))?;
@@ -291,35 +299,9 @@ impl PostgresDriver {
         let limit = Duration::from_secs(connection.options.connect_timeout_secs.max(1));
 
         let tls = tokio_postgres_rustls::MakeRustlsConnect::new(build_tls_config(connection)?);
-        let (client, mut io) = tokio::time::timeout(limit, config.connect(tls.clone()))
-            .await
-            .map_err(|_| Error::Timeout(limit.as_secs()))??;
+        let (client, io) = connect_within(limit.as_secs(), config.connect(tls.clone())).await??;
 
-        // The notices of the server arrive on the connection object and not
-        // with the result of a statement, so the task that drives the socket
-        // is a stream of messages and not a future. Each notice goes into a
-        // buffer that the driver drains into the answer of the next run.
-        let notices: NoticeBuffer = Arc::new(Mutex::new(Vec::new()));
-        let held = notices.clone();
-        let mut stream = stream::poll_fn(move |context| io.poll_message(context));
-        tokio::spawn(async move {
-            while let Some(message) = stream.next().await {
-                match message {
-                    Ok(AsyncMessage::Notice(notice)) => {
-                        if let Ok(mut buffer) = held.lock() {
-                            buffer.push(notice_message(&notice));
-                        }
-                    }
-                    // A notification comes from LISTEN, which this
-                    // application does not use.
-                    Ok(_) => {}
-                    Err(error) => {
-                        log::warn!("The PostgreSQL connection closed: {error}");
-                        break;
-                    }
-                }
-            }
-        });
+        let notices = drive_connection(io);
 
         let stop: Arc<dyn CancelHandle> = Arc::new(PostgresCancel {
             token: client.cancel_token(),
@@ -332,6 +314,13 @@ impl PostgresDriver {
         }))
     }
 
+    /// Sends the notices that arrived since the last call to the sink.
+    fn pass_notices(&self, sink: &mut dyn RowSink) {
+        for notice in self.take_notices() {
+            sink.message(notice);
+        }
+    }
+
     /// Takes the notices that arrived since the last run.
     fn take_notices(&self) -> Vec<Message> {
         match self.notices.lock() {
@@ -341,6 +330,42 @@ impl PostgresDriver {
             Err(_) => Vec::new(),
         }
     }
+}
+
+/// Drives the socket of a connection on a task of its own and gives the
+/// buffer of its notices.
+///
+/// The notices of the server arrive on the connection object and not with
+/// the result of a statement, so the task that drives the socket is a stream
+/// of messages and not a future. Each notice goes into a buffer that the
+/// driver drains into the sink after each statement.
+fn drive_connection<S, T>(mut io: tokio_postgres::Connection<S, T>) -> NoticeBuffer
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let notices: NoticeBuffer = Arc::new(Mutex::new(Vec::new()));
+    let held = notices.clone();
+    let mut stream = stream::poll_fn(move |context| io.poll_message(context));
+    tokio::spawn(async move {
+        while let Some(message) = stream.next().await {
+            match message {
+                Ok(AsyncMessage::Notice(notice)) => {
+                    if let Ok(mut buffer) = held.lock() {
+                        buffer.push(notice_message(&notice));
+                    }
+                }
+                // A notification comes from LISTEN, which this
+                // application does not use.
+                Ok(_) => {}
+                Err(error) => {
+                    log::warn!("The PostgreSQL connection closed: {error}");
+                    break;
+                }
+            }
+        }
+    });
+    notices
 }
 
 /// The notices that wait for the next answer.
@@ -453,8 +478,8 @@ impl DatabaseDriver for PostgresDriver {
     /// through the simple protocol, which carries the whole script in one
     /// exchange and streams the messages of that exchange one at a time.
     ///
-    /// The notices of the server reach the sink after the run, in their
-    /// arrival order.
+    /// The notices of the server reach the sink after each statement, in
+    /// their arrival order, and also when the run fails.
     async fn execute_stream(
         &mut self,
         query: &str,
@@ -471,21 +496,10 @@ impl DatabaseDriver for PostgresDriver {
             None => self.stream_simple(query, options, sink).await,
         };
 
-        let notices = self.take_notices();
-        let rows_affected = match outcome {
-            Ok(rows_affected) => rows_affected,
-            Err(error) => {
-                // A run that failed carries the error and no answer, so the
-                // notices of that run reach the log alone.
-                for notice in &notices {
-                    log::info!("The PostgreSQL server said: {}", notice.text);
-                }
-                return Err(error);
-            }
-        };
-        for notice in notices {
-            sink.message(notice);
-        }
+        // The notices of a failed statement go to the sink before the error,
+        // because a RAISE NOTICE often tells why the statement failed.
+        self.pass_notices(sink);
+        let rows_affected = outcome?;
         Ok(RunSummary {
             rows_affected,
             elapsed_ms: started.elapsed().as_millis() as u64,
@@ -559,7 +573,8 @@ impl DatabaseDriver for PostgresDriver {
                 "SELECT a.attname, \
                         format_type(a.atttypid, a.atttypmod), \
                         NOT a.attnotnull, \
-                        COALESCE(i.indisprimary, false) \
+                        COALESCE(i.indisprimary, false), \
+                        a.attidentity <> '' OR a.attgenerated <> '' \
                  FROM pg_catalog.pg_attribute AS a \
                  JOIN pg_catalog.pg_class AS c ON c.oid = a.attrelid \
                  JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace \
@@ -578,6 +593,7 @@ impl DatabaseDriver for PostgresDriver {
                 data_type: row.get(1),
                 nullable: row.get(2),
                 is_primary_key: row.get(3),
+                is_generated: row.get(4),
             })
             .collect())
     }
@@ -936,7 +952,7 @@ impl PostgresDriver {
     /// change of the block. A probe that fails, for example in a block that
     /// is already aborted, gives false.
     async fn may_cancel(&self, statement: &str) -> bool {
-        if !only_reads(statement, Dialect::Postgres) {
+        if !reads_rows(statement) {
             return false;
         }
         self.outside_a_block().await.unwrap_or(false)
@@ -954,7 +970,7 @@ impl PostgresDriver {
     /// prepare aborts the block, and the simple query would only report
     /// the aborted block. The error of the prepare then ends the run.
     async fn describe_read(&self, statement: &str) -> Result<(Option<Vec<String>>, bool)> {
-        if !only_reads(statement, Dialect::Postgres) {
+        if !reads_rows(statement) {
             return Ok((None, false));
         }
         let (prepared, outside) =
@@ -1067,16 +1083,30 @@ impl PostgresDriver {
         sink: &mut dyn RowSink,
     ) -> Result<Option<u64>> {
         let (statements, mut prepared) = if options.one_statement {
-            let statement = self.client.prepare(query).await?;
+            let statement = self
+                .client
+                .prepare(query)
+                .await
+                .map_err(|error| locate_error(error, query, query, 0, 0))?;
             (vec![query.to_string()], Some(type_names(&statement)))
         } else {
             (split_statements(query, Dialect::Postgres), None)
         };
         let mut rows_affected: Option<u64> = None;
+        // The end of the last statement found in the text, so that a
+        // statement that stands twice is found at its own place.
+        let mut cursor = 0;
         for statement in &statements {
-            let (affected, stopped) = self
+            let start = query[cursor..]
+                .find(statement.as_str())
+                .map_or(cursor, |at| cursor + at);
+            cursor = (start + statement.len()).min(query.len());
+            let outcome = self
                 .stream_statement(statement, prepared.take(), options, sink)
-                .await?;
+                .await;
+            self.pass_notices(sink);
+            let (affected, stopped) =
+                outcome.map_err(|failure| failure.locate(query, statement, start))?;
             if let Some(affected) = affected {
                 rows_affected = Some(rows_affected.unwrap_or(0) + affected);
             }
@@ -1093,7 +1123,12 @@ impl PostgresDriver {
     /// message at a time. Gives the count of the changed rows, and true when
     /// the sink took no more rows.
     ///
-    /// A statement that [`Self::may_cancel`] accepts ends at the row limit:
+    /// A statement that [`reads_through_a_cursor`] accepts goes through
+    /// [`Self::stream_cursor`] when the session is outside a transaction
+    /// block.
+    ///
+    /// Any other statement that [`Self::may_cancel`] accepts, such as `SHOW`,
+    /// ends at the row limit:
     /// the driver sends a cancel request on a second socket, and the server
     /// stops the statement instead of sending the rest of the result. The
     /// server answers the cancel with the error 57014, which the walk reads
@@ -1117,12 +1152,17 @@ impl PostgresDriver {
         prepared: Option<Vec<String>>,
         options: &ExecOptions,
         sink: &mut dyn RowSink,
-    ) -> Result<(Option<u64>, bool)> {
+    ) -> std::result::Result<(Option<u64>, bool), Failure> {
         refuse_client_copy(statement)?;
         let (prepared, alone) = match prepared {
             Some(names) => (Some(names), self.may_cancel(statement).await),
             None => self.describe_read(statement).await?,
         };
+        if alone && reads_through_a_cursor(statement) {
+            return self
+                .stream_cursor(statement, prepared.as_deref(), options, sink)
+                .await;
+        }
         let stop = self.stop.clone();
         let messages = self.client.simple_query_raw(statement).await?;
         pin_mut!(messages);
@@ -1191,14 +1231,16 @@ impl PostgresDriver {
                     }
                     count += 1;
                 }
-                SimpleQueryMessage::CommandComplete(affected) => {
+                SimpleQueryMessage::CommandTag { tag, rows } => {
                     if open {
                         sink.message(rows_returned_message(count, truncated));
                         sink.end_set(truncated)?;
                         open = false;
+                    } else if tag_counts_rows(&tag) {
+                        rows_affected = Some(rows_affected.unwrap_or(0) + rows);
+                        sink.message(rows_affected_message(rows));
                     } else {
-                        rows_affected = Some(rows_affected.unwrap_or(0) + affected);
-                        sink.message(rows_affected_message(affected));
+                        sink.message(Message::info(tag));
                     }
                 }
                 _ => {}
@@ -1214,9 +1256,80 @@ impl PostgresDriver {
         Ok((rows_affected, stopped))
     }
 
+    /// Reads a statement through a cursor, in a transaction of its own. One
+    /// text opens the transaction, declares the cursor and fetches the first
+    /// rows. Further fetches follow while the set needs more rows, and a
+    /// `COMMIT` ends the read and closes the cursor.
+    ///
+    /// The fetches stop one row past the row limit, so the server computes
+    /// no row that the window does not show. A cancel at the row limit would
+    /// roll back the work of the statement, for example the rows that a
+    /// function of the `SELECT` inserts. The `COMMIT` keeps that work. A
+    /// `SELECT` that calls such a function once per row keeps the work of
+    /// the rows that the fetches read.
+    ///
+    /// The simple protocol keeps the text form of the values. Any error,
+    /// and a stop of the user, rolls the transaction back. A read that ends
+    /// before the end of its transaction, for example on a time limit, rolls
+    /// it back through [`OpenBlock`].
+    async fn stream_cursor(
+        &self,
+        statement: &str,
+        prepared: Option<&[String]>,
+        options: &ExecOptions,
+        sink: &mut dyn RowSink,
+    ) -> std::result::Result<(Option<u64>, bool), Failure> {
+        let name = format!(
+            "sql_explorer_read_{}",
+            NEXT_CURSOR.fetch_add(1, Ordering::Relaxed)
+        );
+        let prefix = format!("BEGIN; DECLARE {name} NO SCROLL CURSOR FOR ");
+        let need = options.max_rows.saturating_add(1);
+        let mut block = OpenBlock {
+            client: &self.client,
+            done: false,
+        };
+        let mut read = CursorRead::default();
+        let mut asked = need.min(FETCH_BATCH);
+        // The line break ends a comment at the end of the statement.
+        let mut text = format!("{prefix}{statement}\n; FETCH {asked} FROM {name}");
+        let mut shift = prefix.chars().count() as u32;
+        loop {
+            let fetched = match read
+                .fetch(&self.client, &text, prepared, options, sink)
+                .await
+            {
+                Ok(fetched) => fetched,
+                Err(error) => {
+                    block.roll_back().await;
+                    return Err(Failure { error, shift });
+                }
+            };
+            read.fetched += fetched;
+            if fetched < asked as u64 || read.fetched >= need as u64 || read.stopped {
+                break;
+            }
+            asked = (need - read.fetched as usize).min(FETCH_BATCH);
+            text = format!("FETCH {asked} FROM {name}");
+            shift = 0;
+        }
+        block.done = true;
+        if let Err(error) = self.client.simple_query("COMMIT").await {
+            return Err(error.into());
+        }
+        if read.open {
+            sink.message(rows_returned_message(read.count, read.truncated));
+            sink.end_set(read.truncated)?;
+        }
+        Ok((None, read.stopped))
+    }
+
     /// Runs one statement with bound parameters through the extended
-    /// protocol and streams the rows into the sink one at a time. When
-    /// [`Self::may_cancel`] accepts the statement, a stop cancels it on the
+    /// protocol and streams the rows into the sink one at a time. A
+    /// statement that [`reads_through_a_cursor`] accepts goes through
+    /// [`Self::stream_portal`] when the session is outside a transaction
+    /// block. When [`Self::may_cancel`] accepts any other statement, a stop
+    /// cancels it on the
     /// server and drops the stream, so the rows past the stop do not cross
     /// the wire. Any other statement runs to its end, and the walk drops the
     /// rows past the stop. A fault that the server reports after those rows
@@ -1241,7 +1354,11 @@ impl PostgresDriver {
         let bound = bind_params(params)?;
         let may_cancel = self.may_cancel(query).await;
 
-        let statement = self.client.prepare(query).await?;
+        let statement = self
+            .client
+            .prepare(query)
+            .await
+            .map_err(|error| locate_error(error, query, query, 0, 0))?;
         let columns: Vec<ColumnInfo> = statement
             .columns()
             .iter()
@@ -1260,6 +1377,12 @@ impl PostgresDriver {
         }
         if needs(&Type::MONEY) {
             settings.money_digits = self.money_digits().await;
+        }
+
+        if may_cancel && reads_through_a_cursor(query) {
+            return self
+                .stream_portal(&statement, &bound, columns, &settings, options, sink)
+                .await;
         }
 
         let rows = self.client.query_raw(&statement, &bound).await?;
@@ -1304,6 +1427,255 @@ impl PostgresDriver {
         sink.message(rows_affected_message(affected));
         Ok(Some(affected))
     }
+
+    /// Reads a statement with bound parameters through a portal, in a
+    /// transaction of its own. Each execute of the portal asks for a count
+    /// of rows, and the reads stop one row past the row limit, as in
+    /// [`Self::stream_cursor`]. A `COMMIT` then keeps the work of the
+    /// statement, where a cancel would roll it back. An error, and a read
+    /// that ends early, drop the transaction, and the drop sends a
+    /// `ROLLBACK`.
+    async fn stream_portal(
+        &mut self,
+        statement: &tokio_postgres::Statement,
+        bound: &[TextParam],
+        columns: Vec<ColumnInfo>,
+        settings: &Settings,
+        options: &ExecOptions,
+        sink: &mut dyn RowSink,
+    ) -> Result<Option<u64>> {
+        let returns_rows = !columns.is_empty();
+        let need = options.max_rows.saturating_add(1);
+        let transaction = self.client.transaction().await?;
+        let portal = transaction.bind_raw(statement, bound).await?;
+        if returns_rows {
+            sink.begin_set(columns)?;
+        }
+        let mut fetched = 0usize;
+        let mut count = 0usize;
+        let mut truncated = false;
+        loop {
+            let asked = (need - fetched).min(FETCH_BATCH);
+            let rows = transaction.query_portal_raw(&portal, asked as i32).await?;
+            pin_mut!(rows);
+            while let Some(row) = rows.try_next().await? {
+                fetched += 1;
+                if truncated {
+                    continue;
+                }
+                if count >= options.max_rows
+                    || sink.row(row_to_json(&row, settings))? == SinkControl::Stop
+                {
+                    truncated = true;
+                    continue;
+                }
+                count += 1;
+            }
+            // A portal that gave all its rows ends with its tag. A portal
+            // that stops at the count of the execute gives no tag.
+            if rows.rows_affected().is_some() || fetched >= need || truncated {
+                break;
+            }
+        }
+        drop(portal);
+        transaction.commit().await?;
+        if returns_rows {
+            sink.message(rows_returned_message(count, truncated));
+            sink.end_set(truncated)?;
+        }
+        Ok(None)
+    }
+}
+
+/// The count that names each cursor of [`PostgresDriver::stream_cursor`]. A
+/// cursor that the user declared `WITH HOLD` keeps its name past the end of
+/// its transaction, so each read takes a name of its own.
+static NEXT_CURSOR: AtomicU64 = AtomicU64::new(0);
+
+/// The most rows that one fetch of [`PostgresDriver::stream_cursor`] asks
+/// for. A run with a high row limit, such as an export, then reads in
+/// steps, and a sink that takes no more rows ends the read at the next step.
+const FETCH_BATCH: usize = 100_000;
+
+/// True for a statement that only reads rows. [`only_reads`] accepts
+/// `SELECT`, `WITH` and `SHOW`. `VALUES` and `TABLE` also give rows, and a
+/// statement that starts with either word cannot change data.
+fn reads_rows(statement: &str) -> bool {
+    only_reads(statement, Dialect::Postgres)
+        || matches!(
+            leading_keyword(statement, Dialect::Postgres).as_str(),
+            "values" | "table"
+        )
+}
+
+/// True for a statement that [`reads_rows`] accepts and that a cursor can
+/// read. `SHOW` cannot stand in a `DECLARE`.
+fn reads_through_a_cursor(statement: &str) -> bool {
+    reads_rows(statement) && leading_keyword(statement, Dialect::Postgres) != "show"
+}
+
+/// An error of one statement, with the count of the characters that went to
+/// the server in front of the statement. See [`locate_error`].
+struct Failure {
+    error: Error,
+    shift: u32,
+}
+
+impl Failure {
+    /// Marks a server error with its place in the whole text.
+    fn locate(self, query: &str, statement: &str, start: usize) -> Error {
+        match self.error {
+            Error::Postgres(error) => locate_error(error, query, statement, start, self.shift),
+            other => other,
+        }
+    }
+}
+
+impl From<Error> for Failure {
+    fn from(error: Error) -> Self {
+        Failure { error, shift: 0 }
+    }
+}
+
+impl From<tokio_postgres::Error> for Failure {
+    fn from(error: tokio_postgres::Error) -> Self {
+        Error::from(error).into()
+    }
+}
+
+/// The transaction of [`PostgresDriver::stream_cursor`]. A read that stops
+/// before `done` is set, for example when the caller drops it at a time
+/// limit, sends a `ROLLBACK` as it ends. The session then does not stay
+/// inside the transaction for the statements that follow.
+struct OpenBlock<'a> {
+    client: &'a Client,
+    done: bool,
+}
+
+impl OpenBlock<'_> {
+    /// Rolls the transaction back and waits for the answer. A rollback that
+    /// fails leaves nothing to do, because the connection is then closed.
+    async fn roll_back(&mut self) {
+        self.done = true;
+        if let Err(error) = self.client.simple_query("ROLLBACK").await {
+            log::warn!("The rollback of a read failed: {error}");
+        }
+    }
+}
+
+impl Drop for OpenBlock<'_> {
+    fn drop(&mut self) {
+        if !self.done {
+            self.client.__private_api_rollback(None);
+        }
+    }
+}
+
+/// The state of one set that [`PostgresDriver::stream_cursor`] reads.
+#[derive(Default)]
+struct CursorRead {
+    /// True after the first fetch named the columns.
+    open: bool,
+    /// The rows that the sink took.
+    count: usize,
+    /// The rows that all fetches gave.
+    fetched: u64,
+    truncated: bool,
+    /// True when the sink took no more rows.
+    stopped: bool,
+}
+
+impl CursorRead {
+    /// Runs one text that fetches rows and feeds them to the sink. Gives the
+    /// count of the rows that the fetch gave. The tags of `BEGIN` and
+    /// `DECLARE` give no message.
+    async fn fetch(
+        &mut self,
+        client: &Client,
+        text: &str,
+        prepared: Option<&[String]>,
+        options: &ExecOptions,
+        sink: &mut dyn RowSink,
+    ) -> Result<u64> {
+        let messages = client.simple_query_raw(text).await?;
+        pin_mut!(messages);
+        let mut fetched = 0;
+        while let Some(message) = messages.try_next().await? {
+            match message {
+                SimpleQueryMessage::RowDescription(columns) if !self.open => {
+                    let columns: Vec<(&str, u32)> = columns
+                        .iter()
+                        .map(|column| (column.name(), column.type_oid()))
+                        .collect();
+                    sink.begin_set(simple_columns(prepared, &columns))?;
+                    self.open = true;
+                }
+                SimpleQueryMessage::Row(row) => {
+                    if self.stopped {
+                        continue;
+                    }
+                    if self.count >= options.max_rows {
+                        self.truncated = true;
+                        continue;
+                    }
+                    let values = (0..row.len())
+                        .map(|index| match row.get(index) {
+                            Some(value) => JsonValue::String(value.to_string()),
+                            None => JsonValue::Null,
+                        })
+                        .collect();
+                    if sink.row(values)? == SinkControl::Stop {
+                        self.truncated = true;
+                        self.stopped = true;
+                        continue;
+                    }
+                    self.count += 1;
+                }
+                SimpleQueryMessage::CommandTag { tag, rows } if tag.starts_with("FETCH") => {
+                    fetched = rows;
+                }
+                _ => {}
+            }
+        }
+        Ok(fetched)
+    }
+}
+
+/// True for the tag of a statement whose number counts rows. Any other tag,
+/// such as `CREATE TABLE` or `SET`, names its statement and counts nothing.
+fn tag_counts_rows(tag: &str) -> bool {
+    let word = tag.split(' ').next().unwrap_or_default();
+    matches!(
+        word,
+        "INSERT" | "UPDATE" | "DELETE" | "MERGE" | "SELECT" | "COPY" | "FETCH" | "MOVE"
+    )
+}
+
+/// Marks a server error with its place in the whole text. The server gives
+/// the place as a 1-based character position inside `statement`, and
+/// `start` is the byte offset of the statement in `query`. An error without
+/// a position marks the start of the statement.
+///
+/// A statement that goes to the server behind a prefix, such as the
+/// `DECLARE` of a cursor, gives the length of that prefix in characters as
+/// `shift`. A position inside the prefix marks the start of the statement.
+fn locate_error(
+    error: tokio_postgres::Error,
+    query: &str,
+    statement: &str,
+    start: usize,
+    shift: u32,
+) -> Error {
+    let base = place_of_byte_offset(query, start);
+    let position = match error.as_db_error().and_then(DbError::position) {
+        Some(ErrorPosition::Original(position)) if *position > shift => Some(*position - shift),
+        _ => None,
+    };
+    let (line, column) = match position {
+        Some(position) => offset_place(base, place_of_char_position(statement, position)),
+        None => base,
+    };
+    Error::from(error).at(line, column)
 }
 
 /// Lists the relations of one schema. A partition shows below its parent in
@@ -1798,8 +2170,16 @@ fn decode_scalar(column_type: &Type, bytes: &[u8], settings: &Settings) -> JsonV
         Type::UUID => scalar(column_type, bytes, |value: uuid::Uuid| {
             JsonValue::String(value.to_string())
         }),
-        Type::JSON | Type::JSONB => scalar(column_type, bytes, |value: JsonValue| value),
-        Type::BYTEA => JsonValue::String(base64_text(bytes)),
+        // The text of a JSON value stays as the server wrote it, as on the
+        // simple protocol. A parse into a JSON tree would lose the order of
+        // the keys of `json` and the digits of a long number. The binary
+        // form of `jsonb` starts with the byte of its version.
+        Type::JSON => text_or_bytes(bytes),
+        Type::JSONB => match bytes.split_first() {
+            Some((1, text)) => text_or_bytes(text),
+            _ => text_or_bytes(bytes),
+        },
+        Type::BYTEA => bytea_text(bytes),
         Type::DATE => endless(
             Reader::new(bytes).i32().map(i64::from),
             i32::MAX as i64,
@@ -2327,6 +2707,15 @@ fn text_or_bytes(bytes: &[u8]) -> JsonValue {
     }
 }
 
+/// Writes a `bytea` value in the hex form that the server gives on the
+/// simple protocol, such as `\x6869`.
+fn bytea_text(bytes: &[u8]) -> JsonValue {
+    let mut text = String::with_capacity(2 + bytes.len() * 2);
+    text.push_str("\\x");
+    hex_text(&mut text, bytes, false);
+    JsonValue::String(text)
+}
+
 /// Writes bytes in base64, in the form that the grid shows for a blob.
 fn base64_text(bytes: &[u8]) -> String {
     match bytes_to_json(bytes) {
@@ -2411,12 +2800,12 @@ fn range_text(element: &Type, reader: &mut Reader<'_>, settings: &Settings) -> O
     let lower = if flags & RANGE_LOWER_OPEN_END != 0 {
         String::new()
     } else {
-        render(&reader.value(element, settings)?)
+        render(&reader.value(element, settings)?, true)
     };
     let upper = if flags & RANGE_UPPER_OPEN_END != 0 {
         String::new()
     } else {
-        render(&reader.value(element, settings)?)
+        render(&reader.value(element, settings)?, true)
     };
     let open = if flags & RANGE_LOWER_CLOSED != 0 {
         '['
@@ -2470,19 +2859,42 @@ fn decode_composite(fields: &[Field], bytes: &[u8], settings: &Settings) -> Json
         else {
             return text_or_bytes(bytes);
         };
-        parts.push(render(&value));
+        parts.push(render(&value, false));
     }
     JsonValue::String(format!("({})", parts.join(",")))
 }
 
 /// Writes one JSON value as the text that a value inside a range, a
-/// multirange, or a composite shows.
-fn render(value: &JsonValue) -> String {
-    match value {
-        JsonValue::Null => String::new(),
+/// multirange, or a composite shows. The server puts a value in double
+/// quotes when it is empty or contains a quote, a backslash, a parenthesis, a
+/// comma or blank space, and a range also quotes a square bracket. Inside
+/// the quotes each quote and each backslash is written twice. A NULL field
+/// of a composite stays empty and without quotes.
+fn render(value: &JsonValue, range: bool) -> String {
+    let text = match value {
+        JsonValue::Null => return String::new(),
         JsonValue::String(text) => text.clone(),
         other => other.to_string(),
+    };
+    let needs_quotes = text.is_empty()
+        || text.chars().any(|c| {
+            matches!(c, '"' | '\\' | '(' | ')' | ',')
+                || c.is_whitespace()
+                || (range && matches!(c, '[' | ']'))
+        });
+    if !needs_quotes {
+        return text;
     }
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('"');
+    for c in text.chars() {
+        if matches!(c, '"' | '\\') {
+            quoted.push(c);
+        }
+        quoted.push(c);
+    }
+    quoted.push('"');
+    quoted
 }
 
 /// Writes a money value as a number. The server sends the amount in the
@@ -3121,10 +3533,9 @@ mod tests {
             .connect_raw(client_end, tokio_postgres::NoTls)
             .await
             .unwrap();
-        tokio::spawn(connection);
         PostgresDriver {
             client,
-            notices: Arc::new(Mutex::new(Vec::new())),
+            notices: drive_connection(connection),
             stop,
         }
     }
@@ -3136,6 +3547,73 @@ mod tests {
         let mut answer: Vec<u8> = messages.concat();
         answer.extend_from_slice(&ready_for_query());
         server.write_all(&answer).await.unwrap();
+    }
+
+    /// Reads the text that opens a read through a cursor, checks the
+    /// statement and the count of the first fetch, and gives the name of
+    /// the cursor back.
+    async fn read_cursor_open(server: &mut DuplexStream, statement: &str, asked: usize) -> String {
+        let text = read_query(server).await;
+        let rest = text.strip_prefix("BEGIN; DECLARE ").unwrap();
+        let (name, rest) = rest.split_once(" NO SCROLL CURSOR FOR ").unwrap();
+        assert_eq!(rest, format!("{statement}\n; FETCH {asked} FROM {name}"));
+        name.to_string()
+    }
+
+    /// The answer of the server to a fetch, with one row for each list of
+    /// values. The tag counts the rows.
+    fn fetched(columns: &[&str], rows: &[&[Option<&str>]]) -> Vec<u8> {
+        let mut out = row_description(columns);
+        for row in rows {
+            out.extend_from_slice(&data_row(row));
+        }
+        out.extend_from_slice(&command_complete(&format!("FETCH {}", rows.len())));
+        out
+    }
+
+    /// The tags that open the transaction and declare the cursor.
+    fn opened() -> Vec<u8> {
+        let mut out = command_complete("BEGIN");
+        out.extend_from_slice(&command_complete("DECLARE CURSOR"));
+        out
+    }
+
+    /// Answers a read through a cursor whose first fetch gives all its rows,
+    /// and then the `COMMIT` that ends it.
+    async fn answer_cursor(
+        server: &mut DuplexStream,
+        statement: &str,
+        asked: usize,
+        columns: &[&str],
+        rows: &[&[Option<&str>]],
+    ) {
+        read_cursor_open(server, statement, asked).await;
+        let mut answer = opened();
+        answer.extend_from_slice(&fetched(columns, rows));
+        answer.extend_from_slice(&ready_for_query());
+        server.write_all(&answer).await.unwrap();
+        answer_query(server, "COMMIT", &[command_complete("COMMIT")]).await;
+    }
+
+    /// Answers a read through a portal: the `BEGIN`, the bind, one execute
+    /// for each answer given, the close of the portal and the `COMMIT`.
+    async fn answer_portal(server: &mut DuplexStream, executes: &[Vec<u8>]) {
+        answer_query(server, "START TRANSACTION", &[command_complete("BEGIN")]).await;
+        read_until_sync(server).await;
+        let mut bound = message(b'2', &[]);
+        bound.extend_from_slice(&ready_for_query());
+        server.write_all(&bound).await.unwrap();
+        for answer in executes {
+            read_until_sync(server).await;
+            let mut answer = answer.clone();
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
+        }
+        read_until_sync(server).await;
+        let mut closed = message(b'3', &[]);
+        closed.extend_from_slice(&ready_for_query());
+        server.write_all(&closed).await.unwrap();
+        answer_query(server, "COMMIT", &[command_complete("COMMIT")]).await;
     }
 
     fn no_limit() -> ExecOptions {
@@ -3152,15 +3630,12 @@ mod tests {
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
             answer_described(&mut server, &[("id", 23)], true).await;
-            answer_query(
+            answer_cursor(
                 &mut server,
                 "SELECT 1",
-                &[
-                    row_description(&["id", "name"]),
-                    data_row(&[Some("1"), Some("Ada")]),
-                    data_row(&[Some("2"), None]),
-                    command_complete("SELECT 2"),
-                ],
+                101,
+                &["id", "name"],
+                &[&[Some("1"), Some("Ada")], &[Some("2"), None]],
             )
             .await;
             // A statement that writes gets no probe.
@@ -3171,16 +3646,7 @@ mod tests {
             )
             .await;
             answer_described(&mut server, &[("id", 23)], true).await;
-            answer_query(
-                &mut server,
-                "SELECT 7",
-                &[
-                    row_description(&["n"]),
-                    data_row(&[Some("7")]),
-                    command_complete("SELECT 1"),
-                ],
-            )
-            .await;
+            answer_cursor(&mut server, "SELECT 7", 101, &["n"], &[&[Some("7")]]).await;
         });
 
         let mut driver = driver_on(client_end).await;
@@ -3214,7 +3680,7 @@ mod tests {
             answer_described(&mut server, &[("id", 23)], true).await;
             answer_query(
                 &mut server,
-                "SELECT 1",
+                "SHOW ALL",
                 &[
                     row_description(&["a"]),
                     data_row(&[Some("1")]),
@@ -3229,7 +3695,7 @@ mod tests {
         let options = no_limit();
         let mut sink = BufferSink::new(options.max_rows);
         driver
-            .stream_simple("SELECT 1", &options, &mut sink)
+            .stream_simple("SHOW ALL", &options, &mut sink)
             .await
             .unwrap();
         let response = sink.into_response(RunSummary::default());
@@ -3277,6 +3743,161 @@ mod tests {
         assert!(outcome.is_err());
         drop(driver);
         task.await.unwrap();
+    }
+
+    /// A notice of the server, with the text it gives.
+    fn notice_response(text: &str) -> Vec<u8> {
+        let mut body = Vec::new();
+        for (field, value) in [(b'S', "NOTICE"), (b'C', "00000"), (b'M', text)] {
+            body.push(field);
+            body.extend_from_slice(value.as_bytes());
+            body.push(0);
+        }
+        body.push(0);
+        message(b'N', &body)
+    }
+
+    /// An error of the server that names the character where it happened.
+    fn positioned_error(text: &str, position: u32) -> Vec<u8> {
+        let mut body = Vec::new();
+        let position = position.to_string();
+        for (field, value) in [
+            (b'S', "ERROR"),
+            (b'C', "42703"),
+            (b'M', text),
+            (b'P', position.as_str()),
+        ] {
+            body.push(field);
+            body.extend_from_slice(value.as_bytes());
+            body.push(0);
+        }
+        body.push(0);
+        message(b'E', &body)
+    }
+
+    #[tokio::test]
+    async fn the_notices_of_each_statement_and_of_a_failed_one_reach_the_sink() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            answer_query(
+                &mut server,
+                "DELETE FROM a",
+                &[notice_response("first"), command_complete("DELETE 2")],
+            )
+            .await;
+            answer_query(
+                &mut server,
+                "DELETE FROM b\nWHERE nope = 1",
+                &[
+                    notice_response("second"),
+                    positioned_error("column \"nope\" does not exist", 21),
+                ],
+            )
+            .await;
+        });
+
+        let mut driver = driver_on(client_end).await;
+        let options = no_limit();
+        let mut sink = BufferSink::new(options.max_rows);
+        let error = driver
+            .execute_stream(
+                "DELETE FROM a;\n  DELETE FROM b\nWHERE nope = 1",
+                None,
+                &options,
+                &mut sink,
+            )
+            .await
+            .unwrap_err();
+
+        let texts: Vec<String> = sink
+            .into_response(RunSummary {
+                rows_affected: None,
+                elapsed_ms: 0,
+                stats: None,
+            })
+            .messages
+            .into_iter()
+            .map(|message| message.text)
+            .collect();
+        assert_eq!(texts, ["2 rows affected.", "first", "second"]);
+        let payload = error.to_payload();
+        assert_eq!((payload.line, payload.column), (Some(3), Some(7)));
+        drop(driver);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_statement_whose_tag_counts_no_rows_reports_its_tag() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            answer_query(
+                &mut server,
+                "CREATE TABLE t (a int)",
+                &[command_complete("CREATE TABLE")],
+            )
+            .await;
+            answer_query(
+                &mut server,
+                "INSERT INTO t VALUES (1)",
+                &[command_complete("INSERT 0 1")],
+            )
+            .await;
+        });
+
+        let mut driver = driver_on(client_end).await;
+        let options = no_limit();
+        let mut sink = BufferSink::new(options.max_rows);
+        let rows_affected = driver
+            .stream_simple(
+                "CREATE TABLE t (a int); INSERT INTO t VALUES (1); -- nothing",
+                &options,
+                &mut sink,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(rows_affected, Some(1));
+        let texts: Vec<String> = sink
+            .into_response(RunSummary {
+                rows_affected: None,
+                elapsed_ms: 0,
+                stats: None,
+            })
+            .messages
+            .into_iter()
+            .map(|message| message.text)
+            .collect();
+        assert_eq!(texts, ["CREATE TABLE", "1 row affected."]);
+        drop(driver);
+        task.await.unwrap();
+    }
+
+    #[test]
+    fn only_the_tags_of_statements_that_touch_rows_count_rows() {
+        for tag in [
+            "INSERT 0 2",
+            "UPDATE 1",
+            "DELETE 0",
+            "MERGE 3",
+            "SELECT 4",
+            "COPY 5",
+            "FETCH 6",
+            "MOVE 7",
+        ] {
+            assert!(tag_counts_rows(tag), "{tag}");
+        }
+        for tag in ["CREATE TABLE", "SET", "VACUUM", "BEGIN", ""] {
+            assert!(!tag_counts_rows(tag), "{tag}");
+        }
+    }
+
+    #[test]
+    fn an_error_without_a_position_marks_the_start_of_its_statement() {
+        let error = tokio_postgres::Error::__private_api_timeout();
+        let payload = locate_error(error, "SELECT 1;\n  SELECT 2", "SELECT 2", 12, 0).to_payload();
+        assert_eq!((payload.line, payload.column), (Some(2), Some(3)));
     }
 
     #[tokio::test]
@@ -3340,7 +3961,7 @@ mod tests {
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
             answer_described(&mut server, &[("id", 23)], true).await;
-            assert_eq!(read_query(&mut server).await, "SELECT id FROM t");
+            assert_eq!(read_query(&mut server).await, "SHOW ALL");
             let mut answer = row_description(&["id"]);
             answer.extend_from_slice(&data_row(&[Some("1")]));
             answer.extend_from_slice(&data_row(&[Some("2")]));
@@ -3365,7 +3986,7 @@ mod tests {
         };
         let mut sink = BufferSink::new(options.max_rows);
         let rows_affected = driver
-            .stream_simple("SELECT id FROM t; DELETE FROM t", &options, &mut sink)
+            .stream_simple("SHOW ALL; DELETE FROM t", &options, &mut sink)
             .await
             .unwrap();
 
@@ -3421,7 +4042,7 @@ mod tests {
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
             answer_described(&mut server, &[("id", 23)], true).await;
-            read_query(&mut server).await;
+            assert_eq!(read_query(&mut server).await, "SHOW ALL");
 
             let mut answer = row_description(&["id"]);
             for value in ["1", "2", "3"] {
@@ -3444,7 +4065,7 @@ mod tests {
         };
         let mut sink = BufferSink::new(options.max_rows);
         driver
-            .stream_simple("SELECT id FROM t", &options, &mut sink)
+            .stream_simple("SHOW ALL", &options, &mut sink)
             .await
             .unwrap();
         let response = sink.into_response(RunSummary::default());
@@ -3476,12 +4097,14 @@ mod tests {
             server.write_all(&closed).await.unwrap();
 
             answer_probe(&mut server, true).await;
-            assert_eq!(read_query(&mut server).await, "SELECT id FROM t");
-            let mut answer = row_description(&["id"]);
-            answer.extend_from_slice(&data_row(&[Some("1")]));
-            answer.extend_from_slice(&command_complete("SELECT 1"));
-            answer.extend_from_slice(&ready_for_query());
-            server.write_all(&answer).await.unwrap();
+            answer_cursor(
+                &mut server,
+                "SELECT id FROM t",
+                101,
+                &["id"],
+                &[&[Some("1")]],
+            )
+            .await;
         });
 
         let mut driver = driver_on(client_end).await;
@@ -3540,7 +4163,9 @@ mod tests {
 
         assert!(matches!(
             error,
-            Error::Postgres(ref error) if error.code() == Some(&SqlState::SYNTAX_ERROR)
+            Error::Located { ref inner, line: 1, column: 1 }
+                if matches!(**inner, Error::Postgres(ref error)
+                    if error.code() == Some(&SqlState::SYNTAX_ERROR))
         ));
         drop(driver);
         task.await.unwrap();
@@ -3553,7 +4178,7 @@ mod tests {
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
             answer_described(&mut server, &[("id", 23)], true).await;
-            read_query(&mut server).await;
+            assert_eq!(read_query(&mut server).await, "SHOW ALL");
 
             let mut answer = row_description(&["id"]);
             for value in ["1", "2", "3"] {
@@ -3572,7 +4197,7 @@ mod tests {
         };
         let mut sink = BufferSink::new(options.max_rows);
         driver
-            .stream_simple("SELECT id FROM t", &options, &mut sink)
+            .stream_simple("SHOW ALL", &options, &mut sink)
             .await
             .unwrap();
         let response = sink.into_response(RunSummary::default());
@@ -3594,7 +4219,7 @@ mod tests {
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
             answer_described(&mut server, &[("id", 23)], true).await;
-            read_query(&mut server).await;
+            assert_eq!(read_query(&mut server).await, "SHOW ALL");
 
             let mut answer = row_description(&["id"]);
             for value in ["1", "2"] {
@@ -3615,9 +4240,7 @@ mod tests {
             one_statement: false,
         };
         let mut sink = BufferSink::new(options.max_rows);
-        let outcome = driver
-            .stream_simple("SELECT id FROM t", &options, &mut sink)
-            .await;
+        let outcome = driver.stream_simple("SHOW ALL", &options, &mut sink).await;
 
         assert!(outcome.is_err());
 
@@ -3632,7 +4255,7 @@ mod tests {
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
             answer_described(&mut server, &[("id", 23)], true).await;
-            read_query(&mut server).await;
+            assert_eq!(read_query(&mut server).await, "SHOW ALL");
 
             let mut answer = row_description(&["id"]);
             for value in ["1", "2", "3"] {
@@ -3655,7 +4278,7 @@ mod tests {
         // The sink holds one row and asks the walk to stop after it.
         let mut sink = BufferSink::new(1);
         driver
-            .stream_simple("SELECT id FROM t", &options, &mut sink)
+            .stream_simple("SHOW ALL", &options, &mut sink)
             .await
             .unwrap();
         let response = sink.into_response(RunSummary::default());
@@ -3679,13 +4302,11 @@ mod tests {
                 .await
                 .unwrap();
 
-            read_until_sync(&mut server).await;
-            let mut answer = message(b'2', &[]);
+            let mut answer = Vec::new();
             answer.extend_from_slice(&binary_data_row(&[Some(&7i32.to_be_bytes()), Some(b"Ada")]));
             answer.extend_from_slice(&binary_data_row(&[None, None]));
             answer.extend_from_slice(&command_complete("SELECT 2"));
-            answer.extend_from_slice(&ready_for_query());
-            server.write_all(&answer).await.unwrap();
+            answer_portal(&mut server, &[answer]).await;
         });
 
         let mut driver = driver_on(client_end).await;
@@ -3738,12 +4359,10 @@ mod tests {
             zone.extend_from_slice(&command_complete("SHOW"));
             answer_query(&mut server, "SHOW TimeZone", &[zone]).await;
 
-            read_until_sync(&mut server).await;
-            let mut answer = message(b'2', &[]);
+            let mut answer = Vec::new();
             answer.extend_from_slice(&binary_data_row(&[Some(&0i64.to_be_bytes())]));
             answer.extend_from_slice(&command_complete("SELECT 1"));
-            answer.extend_from_slice(&ready_for_query());
-            server.write_all(&answer).await.unwrap();
+            answer_portal(&mut server, &[answer]).await;
         });
 
         let mut driver = driver_on(client_end).await;
@@ -3784,12 +4403,10 @@ mod tests {
             digits.extend_from_slice(&command_complete("SELECT 1"));
             answer_query(&mut server, MONEY_DIGITS, &[digits]).await;
 
-            read_until_sync(&mut server).await;
-            let mut answer = message(b'2', &[]);
+            let mut answer = Vec::new();
             answer.extend_from_slice(&binary_data_row(&[Some(&123456i64.to_be_bytes())]));
             answer.extend_from_slice(&command_complete("SELECT 1"));
-            answer.extend_from_slice(&ready_for_query());
-            server.write_all(&answer).await.unwrap();
+            answer_portal(&mut server, &[answer]).await;
         });
 
         let mut driver = driver_on(client_end).await;
@@ -3869,11 +4486,9 @@ mod tests {
                 .await
                 .unwrap();
 
-            read_until_sync(&mut server).await;
-            let mut answer = message(b'2', &[]);
+            let mut answer = Vec::new();
             answer.extend_from_slice(&command_complete("SELECT 0"));
-            answer.extend_from_slice(&ready_for_query());
-            server.write_all(&answer).await.unwrap();
+            answer_portal(&mut server, &[answer]).await;
         });
 
         let mut driver = driver_on(client_end).await;
@@ -3957,28 +4572,20 @@ mod tests {
                 .await
                 .unwrap();
 
-            read_until_sync(&mut server).await;
-            let mut answer = message(b'2', &[]);
-            for value in 0..3i32 {
-                answer.extend_from_slice(&binary_data_row(&[Some(&value.to_be_bytes())]));
-            }
-            answer.extend_from_slice(&command_complete("SELECT 3"));
-            answer.extend_from_slice(&ready_for_query());
-            server.write_all(&answer).await.unwrap();
-
-            // The statement ended before the cancel stopped it, so the
-            // probe follows. A fault of the probe goes to the log alone.
-            answer_query(
-                &mut server,
-                CANCEL_PROBE,
-                &[error_response("XX000", "internal error")],
-            )
-            .await;
+            // Each execute stops at its count, so no tag ends it. The second
+            // execute asks only for the rows that the first one left.
+            let row = |value: i32| binary_data_row(&[Some(&value.to_be_bytes())]);
+            let mut first = row(0);
+            first.extend_from_slice(&message(b's', &[]));
+            let mut second = row(1);
+            second.extend_from_slice(&row(2));
+            second.extend_from_slice(&message(b's', &[]));
+            answer_portal(&mut server, &[first, second]).await;
         });
 
         let mut driver = driver_with_stop(client_end, stop).await;
         let options = ExecOptions {
-            max_rows: 1,
+            max_rows: 2,
             timeout_secs: 30,
             one_statement: false,
         };
@@ -3994,8 +4601,10 @@ mod tests {
             .unwrap();
         let response = sink.into_response(RunSummary::default());
 
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(response.results[0].rows.len(), 1);
+        // The portal ends the read, and the COMMIT keeps the work of the
+        // statement, so no cancel went out.
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(response.results[0].rows.len(), 2);
         assert!(response.results[0].truncated);
 
         task.await.unwrap();
@@ -4053,12 +4662,7 @@ mod tests {
         };
         let mut sink = BufferSink::new(options.max_rows);
         driver
-            .stream_with_params(
-                "SELECT id FROM t WHERE id > $1",
-                &one_param(),
-                &options,
-                &mut sink,
-            )
+            .stream_with_params("SHOW ALL", &one_param(), &options, &mut sink)
             .await
             .unwrap();
         let response = sink.into_response(RunSummary::default());
@@ -4096,7 +4700,7 @@ mod tests {
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
             answer_described(&mut server, &[("id", 23)], true).await;
-            assert_eq!(read_query(&mut server).await, "SELECT id FROM t");
+            assert_eq!(read_query(&mut server).await, "SHOW ALL");
             let mut answer = row_description(&["id"]);
             answer.extend_from_slice(&data_row(&[Some("1")]));
             answer.extend_from_slice(&data_row(&[Some("2")]));
@@ -4133,7 +4737,7 @@ mod tests {
         };
         let mut sink = BufferSink::new(options.max_rows);
         let rows_affected = driver
-            .stream_simple("SELECT id FROM t; DELETE FROM t", &options, &mut sink)
+            .stream_simple("SHOW ALL; DELETE FROM t", &options, &mut sink)
             .await
             .unwrap();
 
@@ -4335,14 +4939,12 @@ mod tests {
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
             answer_described(&mut server, &[("id", 23), ("at", 1184)], true).await;
-            answer_query(
+            answer_cursor(
                 &mut server,
                 "SELECT id, at FROM t",
-                &[
-                    simple_row_description(&[("id", 25), ("at", 25)]),
-                    data_row(&[Some("1"), None]),
-                    command_complete("SELECT 1"),
-                ],
+                101,
+                &["id", "at"],
+                &[&[Some("1"), None]],
             )
             .await;
         });
@@ -4365,16 +4967,14 @@ mod tests {
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
             refuse_described(&mut server, true).await;
-            answer_query(
-                &mut server,
-                "SELECT id, mood FROM t",
-                &[
-                    simple_row_description(&[("id", 23), ("mood", 16423)]),
-                    data_row(&[Some("1"), Some("happy")]),
-                    command_complete("SELECT 1"),
-                ],
-            )
-            .await;
+            read_cursor_open(&mut server, "SELECT id, mood FROM t", 101).await;
+            let mut answer = opened();
+            answer.extend_from_slice(&simple_row_description(&[("id", 23), ("mood", 16423)]));
+            answer.extend_from_slice(&data_row(&[Some("1"), Some("happy")]));
+            answer.extend_from_slice(&command_complete("FETCH 1"));
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
+            answer_query(&mut server, "COMMIT", &[command_complete("COMMIT")]).await;
         });
 
         let mut driver = driver_on(client_end).await;
@@ -4410,7 +5010,9 @@ mod tests {
 
         assert!(matches!(
             error,
-            Error::Postgres(ref error) if error.code() == Some(&SqlState::UNDEFINED_TABLE)
+            Error::Located { ref inner, line: 1, column: 1 }
+                if matches!(**inner, Error::Postgres(ref error)
+                    if error.code() == Some(&SqlState::UNDEFINED_TABLE))
         ));
         drop(driver);
         task.await.unwrap();
@@ -4520,12 +5122,7 @@ mod tests {
         };
         let mut sink = BufferSink::new(options.max_rows);
         driver
-            .stream_with_params(
-                "SELECT id FROM t WHERE id > $1",
-                &one_param(),
-                &options,
-                &mut sink,
-            )
+            .stream_with_params("SHOW ALL", &one_param(), &options, &mut sink)
             .await
             .unwrap();
         let response = sink.into_response(RunSummary::default());
@@ -4536,6 +5133,289 @@ mod tests {
         assert_eq!(response.results[0].rows.len(), 1);
         assert!(response.results[0].truncated);
 
+        task.await.unwrap();
+    }
+
+    #[test]
+    fn the_reads_of_rows_and_the_reads_through_a_cursor_are_found() {
+        for statement in [
+            "SELECT 1",
+            "WITH a AS (SELECT 1) TABLE a",
+            "VALUES (1)",
+            "TABLE t",
+        ] {
+            assert!(reads_rows(statement), "{statement}");
+            assert!(reads_through_a_cursor(statement), "{statement}");
+        }
+        assert!(reads_rows("SHOW ALL"));
+        assert!(!reads_through_a_cursor("SHOW ALL"));
+        for statement in ["DELETE FROM t", "SELECT 1 INTO t", "EXPLAIN SELECT 1"] {
+            assert!(!reads_rows(statement), "{statement}");
+            assert!(!reads_through_a_cursor(statement), "{statement}");
+        }
+    }
+
+    #[test]
+    fn an_error_that_is_not_one_of_the_server_keeps_its_own_form() {
+        let failure = Failure::from(Error::Invalid("bad".into()));
+        assert!(matches!(
+            failure.locate("q", "q", 0),
+            Error::Invalid(ref text) if text == "bad"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_read_through_a_cursor_fetches_in_steps_up_to_the_row_limit() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let (stop, calls, _signal) = test_stop(true);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            answer_described(&mut server, &[("n", 23)], true).await;
+            let name = read_cursor_open(&mut server, "VALUES (1)", FETCH_BATCH).await;
+            // The tag says the fetch filled its count, so a second fetch
+            // asks for the rest of the rows up to one past the limit.
+            let mut answer = opened();
+            answer.extend_from_slice(&row_description(&["n"]));
+            answer.extend_from_slice(&data_row(&[Some("1")]));
+            answer.extend_from_slice(&command_complete(&format!("FETCH {FETCH_BATCH}")));
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
+            answer_query(
+                &mut server,
+                &format!("FETCH 50001 FROM {name}"),
+                &[fetched(&["n"], &[&[Some("2")]])],
+            )
+            .await;
+            answer_query(&mut server, "COMMIT", &[command_complete("COMMIT")]).await;
+        });
+
+        let mut driver = driver_with_stop(client_end, stop).await;
+        let options = ExecOptions {
+            max_rows: 150_000,
+            ..no_limit()
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        let rows_affected = driver
+            .stream_simple("VALUES (1)", &options, &mut sink)
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(rows_affected, None);
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].columns[0].type_name, "int4");
+        assert_eq!(response.results[0].rows.len(), 2);
+        assert!(!response.results[0].truncated);
+        // The tags of BEGIN, DECLARE and FETCH give no message.
+        let texts: Vec<&str> = response.messages.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_read_through_a_cursor_cuts_the_set_at_the_row_limit_and_commits() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let (stop, calls, _signal) = test_stop(true);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            answer_described(&mut server, &[("id", 23)], true).await;
+            answer_cursor(
+                &mut server,
+                "SELECT f()",
+                3,
+                &["id"],
+                &[&[Some("1")], &[Some("2")], &[Some("3")]],
+            )
+            .await;
+        });
+
+        let mut driver = driver_with_stop(client_end, stop).await;
+        let options = ExecOptions {
+            max_rows: 2,
+            ..no_limit()
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        driver
+            .stream_simple("SELECT f()", &options, &mut sink)
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(response.results[0].rows.len(), 2);
+        assert!(response.results[0].truncated);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_sink_that_takes_no_more_rows_ends_a_read_through_a_cursor() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            answer_described(&mut server, &[("id", 23)], true).await;
+            read_cursor_open(&mut server, "TABLE t", FETCH_BATCH).await;
+            let mut answer = opened();
+            answer.extend_from_slice(&row_description(&["id"]));
+            answer.extend_from_slice(&data_row(&[Some("1")]));
+            answer.extend_from_slice(&data_row(&[Some("2")]));
+            answer.extend_from_slice(&command_complete(&format!("FETCH {FETCH_BATCH}")));
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
+            // No second fetch comes.
+            answer_query(&mut server, "COMMIT", &[command_complete("COMMIT")]).await;
+        });
+
+        let mut driver = driver_on(client_end).await;
+        let options = ExecOptions {
+            max_rows: 150_000,
+            ..no_limit()
+        };
+        let mut sink = BufferSink::new(1);
+        driver
+            .stream_simple("TABLE t", &options, &mut sink)
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        assert_eq!(response.results[0].rows.len(), 1);
+        assert!(response.results[0].truncated);
+        task.await.unwrap();
+    }
+
+    /// Runs a read whose `DECLARE` fails at the position that `at` gives
+    /// from the text of the open, and gives the line and the column of the
+    /// error. The test server checks the ROLLBACK that follows.
+    async fn declare_error_place(at: fn(&str) -> u32) -> (Option<u32>, Option<u32>) {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            answer_described(&mut server, &[("id", 23)], true).await;
+            let text = read_query(&mut server).await;
+            let mut answer = command_complete("BEGIN");
+            answer.extend_from_slice(&positioned_error("no column", at(&text)));
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
+            answer_query(&mut server, "ROLLBACK", &[command_complete("ROLLBACK")]).await;
+        });
+        let mut driver = driver_on(client_end).await;
+        let mut sink = BufferSink::new(10);
+        let error = driver
+            .stream_simple("\n  SELECT\n nope", &no_limit(), &mut sink)
+            .await
+            .unwrap_err();
+        task.await.unwrap();
+        let payload = error.to_payload();
+        (payload.line, payload.column)
+    }
+
+    #[tokio::test]
+    async fn an_error_of_the_declare_rolls_back_and_marks_its_place_in_the_statement() {
+        // The server counts the position in the whole text of the open.
+        let place = declare_error_place(|text| text.find("nope").unwrap() as u32 + 1).await;
+        assert_eq!(place, (Some(3), Some(2)));
+        // A position inside the prefix marks the start of the statement.
+        assert_eq!(declare_error_place(|_| 1).await, (Some(2), Some(3)));
+    }
+
+    #[tokio::test]
+    async fn a_stop_during_a_read_through_a_cursor_rolls_it_back() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            answer_described(&mut server, &[("id", 23)], true).await;
+            read_cursor_open(&mut server, "SELECT pg_sleep(9)", 101).await;
+            let mut answer = opened();
+            answer.extend_from_slice(&error_response(
+                "57014",
+                "canceling statement due to user request",
+            ));
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
+            answer_query(&mut server, "ROLLBACK", &[command_complete("ROLLBACK")]).await;
+        });
+
+        let mut driver = driver_on(client_end).await;
+        let mut sink = BufferSink::new(10);
+        let error = driver
+            .stream_simple("SELECT pg_sleep(9)", &no_limit(), &mut sink)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::Located { ref inner, .. }
+                if matches!(**inner, Error::Postgres(ref error) if is_query_cancelled(error))
+        ));
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_read_through_a_cursor_that_is_dropped_rolls_back() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let (opened_text, wait_open) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            answer_described(&mut server, &[("id", 23)], true).await;
+            read_cursor_open(&mut server, "SELECT pg_sleep(9)", 101).await;
+            opened_text.send(()).unwrap();
+            // The server answers the open only after the drop.
+            assert_eq!(read_query(&mut server).await, "ROLLBACK");
+        });
+
+        let mut driver = driver_on(client_end).await;
+        let mut sink = BufferSink::new(10);
+        let options = no_limit();
+        tokio::select! {
+            _ = driver.stream_simple("SELECT pg_sleep(9)", &options, &mut sink) => {
+                panic!("the read ended")
+            }
+            _ = wait_open => {}
+        }
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_error_of_a_parameterised_read_through_a_portal_rolls_back() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            answer_probe(&mut server, true).await;
+            read_until_sync(&mut server).await;
+            server
+                .write_all(&prepared(Some(&[("id", 23)])))
+                .await
+                .unwrap();
+            answer_query(
+                &mut server,
+                "START TRANSACTION",
+                &[command_complete("BEGIN")],
+            )
+            .await;
+            read_until_sync(&mut server).await;
+            let mut bound = message(b'2', &[]);
+            bound.extend_from_slice(&ready_for_query());
+            server.write_all(&bound).await.unwrap();
+            read_until_sync(&mut server).await;
+            let mut answer = error_response("22012", "division by zero");
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
+            // The portal closes, and the drop of the transaction sends a
+            // ROLLBACK.
+            read_until_sync(&mut server).await;
+            let mut closed = message(b'3', &[]);
+            closed.extend_from_slice(&ready_for_query());
+            server.write_all(&closed).await.unwrap();
+            assert_eq!(read_query(&mut server).await, "ROLLBACK");
+        });
+
+        let mut driver = driver_on(client_end).await;
+        let mut sink = BufferSink::new(10);
+        let outcome = driver
+            .stream_with_params("SELECT 1 / $1", &one_param(), &no_limit(), &mut sink)
+            .await;
+
+        assert!(outcome.is_err());
         task.await.unwrap();
     }
 
@@ -4675,8 +5555,8 @@ mod tests {
             JsonValue::String("<a/>".into())
         );
         assert_eq!(
-            decoded(&Type::BYTEA, b"hi"),
-            JsonValue::String("aGk=".into())
+            decoded(&Type::BYTEA, b"hi\xff"),
+            JsonValue::String("\\x6869ff".into())
         );
     }
 
@@ -4903,15 +5783,40 @@ mod tests {
     }
 
     #[test]
+    fn a_part_of_a_composite_or_a_range_takes_quotes_as_postgresql_writes_them() {
+        assert_eq!(render(&JsonValue::Null, false), "");
+        assert_eq!(render(&serde_json::json!(5), false), "5");
+        assert_eq!(render(&JsonValue::String("plain".into()), false), "plain");
+        assert_eq!(render(&JsonValue::String(String::new()), false), "\"\"");
+        assert_eq!(
+            render(&JsonValue::String("a \"b\" c\\d".into()), false),
+            "\"a \"\"b\"\" c\\\\d\""
+        );
+        assert_eq!(
+            render(&JsonValue::String("(1,2)".into()), false),
+            "\"(1,2)\""
+        );
+        assert_eq!(render(&JsonValue::String("[x]".into()), false), "[x]");
+        assert_eq!(render(&JsonValue::String("[x]".into()), true), "\"[x]\"");
+    }
+
+    #[test]
     fn a_uuid_and_a_json_value_are_read() {
         assert_eq!(
             decoded(&Type::UUID, &[0x11; 16]),
             JsonValue::String("11111111-1111-1111-1111-111111111111".into())
         );
-        assert_eq!(decoded(&Type::JSON, b"[1]"), serde_json::json!([1]));
+        assert_eq!(
+            decoded(&Type::JSON, br#"{"b": 1, "a": 12345678901234567890}"#),
+            JsonValue::String(r#"{"b": 1, "a": 12345678901234567890}"#.into())
+        );
         let mut jsonb = vec![1u8];
         jsonb.extend_from_slice(b"[1]");
-        assert_eq!(decoded(&Type::JSONB, &jsonb), serde_json::json!([1]));
+        assert_eq!(
+            decoded(&Type::JSONB, &jsonb),
+            JsonValue::String("[1]".into())
+        );
+        assert_eq!(decoded(&Type::JSONB, b""), JsonValue::String(String::new()));
     }
 
     #[test]
@@ -6097,6 +7002,21 @@ mod tests {
 
         input.options.ca_cert_path = Some("   ".into());
         assert!(build_tls_config(&input).is_ok());
+    }
+
+    #[test]
+    fn a_certificate_authority_file_without_a_readable_certificate_gives_an_error() {
+        let path = std::env::temp_dir().join(format!("pg-ca-{}.pem", std::process::id()));
+        std::fs::write(
+            &path,
+            "-----BEGIN CERTIFICATE-----\n!!!\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        let mut input = connection();
+        input.options.ca_cert_path = Some(path.to_string_lossy().into_owned());
+        let error = build_tls_config(&input).unwrap_err();
+        std::fs::remove_file(&path).unwrap();
+        assert!(matches!(error, Error::Configuration(ref text) if text.contains("no certificate")));
     }
 
     #[test]

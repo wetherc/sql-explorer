@@ -79,6 +79,7 @@ pub fn escape_xml(text: &str) -> String {
 
 /// Drops the characters that XML 1.0 forbids. A database can hold such a
 /// character, and a spreadsheet refuses to open a file that carries one.
+#[cfg(test)]
 pub fn strip_forbidden_xml(text: &str) -> String {
     text.chars()
         .filter(|character| {
@@ -144,6 +145,7 @@ fn excel_number(text: &str) -> Option<String> {
 }
 
 /// Cuts a text to the number of characters that one cell accepts.
+#[cfg(test)]
 fn cell_text(text: &str) -> &str {
     let mut units = 0;
     for (at, character) in text.char_indices() {
@@ -155,11 +157,84 @@ fn cell_text(text: &str) -> &str {
     text
 }
 
+/// True for a character that XML 1.0 forbids.
+fn forbidden_in_xml(character: char) -> bool {
+    matches!(
+        character,
+        '\u{0}'..='\u{8}' | '\u{B}' | '\u{C}' | '\u{E}'..='\u{1F}' | '\u{FFFE}' | '\u{FFFF}'
+    )
+}
+
+/// Adds a text cell to `out` in one pass over the text: the pass drops the
+/// characters that XML forbids, escapes the reserved characters and stops at
+/// the bound of a cell. Returns true when the text was cut at that bound.
+fn push_text_cell(out: &mut String, reference: &str, text: &str) -> bool {
+    out.push_str("<c r=\"");
+    out.push_str(reference);
+    out.push_str("\" t=\"inlineStr\"><is><t xml:space=\"preserve\">");
+    let mut units = 0;
+    let mut cut = false;
+    for character in text
+        .chars()
+        .filter(|character| !forbidden_in_xml(*character))
+    {
+        units += character.len_utf16();
+        if units > MAX_CELL_UNITS {
+            cut = true;
+            break;
+        }
+        match character {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            other => out.push(other),
+        }
+    }
+    out.push_str("</t></is></c>");
+    cut
+}
+
 /// Writes a cell that holds a text.
 fn text_cell(reference: &str, text: &str) -> String {
-    let text = escape_xml(cell_text(&strip_forbidden_xml(text)));
-    format!(
-        "<c r=\"{reference}\" t=\"inlineStr\"><is><t xml:space=\"preserve\">{text}</t></is></c>"
+    let mut out = String::new();
+    push_text_cell(&mut out, reference, text);
+    out
+}
+
+/// True when a column of this type contains numbers, so that a text value of
+/// the column can go in as a number cell. The test reads the first word of
+/// the type name, without a length or a precision, so `decimal(10,2)`,
+/// `double precision` and `int unsigned` all count as numeric.
+pub fn is_numeric_type(type_name: &str) -> bool {
+    let lower = type_name.trim().to_ascii_lowercase();
+    let word = lower
+        .split(|character: char| character == '(' || character.is_whitespace())
+        .next()
+        .unwrap_or("");
+    matches!(
+        word,
+        "tinyint"
+            | "smallint"
+            | "mediumint"
+            | "int"
+            | "integer"
+            | "bigint"
+            | "int2"
+            | "int4"
+            | "int8"
+            | "decimal"
+            | "dec"
+            | "numeric"
+            | "number"
+            | "float"
+            | "float4"
+            | "float8"
+            | "double"
+            | "real"
+            | "money"
+            | "smallmoney"
     )
 }
 
@@ -231,33 +306,59 @@ fn workbook_xml(sheet: &str) -> String {
 /// A number, and a text that holds only a number, go in as a number when
 /// Excel can keep the value exactly, so that `SUM` reads a DECIMAL column
 /// and every PostgreSQL column of the simple protocol. Any other number goes
-/// in as text.
+/// in as text. This form reads each column as a numeric column.
+#[cfg(test)]
 pub fn cell_xml(reference: &str, value: &JsonValue) -> String {
-    let text = match value {
-        JsonValue::Null => return String::new(),
-        JsonValue::Bool(flag) => {
-            let digit = u8::from(*flag);
-            return format!("<c r=\"{reference}\" t=\"b\"><v>{digit}</v></c>");
-        }
-        JsonValue::String(text) => text.clone(),
-        other => other.to_string(),
-    };
-    if matches!(value, JsonValue::Number(_) | JsonValue::String(_)) {
-        if let Some(number) = excel_number(&text) {
-            return format!("<c r=\"{reference}\"><v>{number}</v></c>");
-        }
-    }
-    text_cell(reference, &text)
+    let mut out = String::new();
+    push_cell(&mut out, reference, value, true);
+    out
 }
 
-/// Writes one row of the sheet, at the given number of the row.
+/// Adds one cell to `out`. A text value goes in as a number only when
+/// `numeric` is true, so a text column keeps a code such as `+1555` or
+/// `12E3` as text. A JSON number goes in as a number in each column. Returns
+/// true when a text was cut at the bound of a cell.
+fn push_cell(out: &mut String, reference: &str, value: &JsonValue, numeric: bool) -> bool {
+    let owned;
+    let text = match value {
+        JsonValue::Null => return false,
+        JsonValue::Bool(flag) => {
+            let digit = u8::from(*flag);
+            out.push_str(&format!("<c r=\"{reference}\" t=\"b\"><v>{digit}</v></c>"));
+            return false;
+        }
+        JsonValue::String(text) => text.as_str(),
+        other => {
+            owned = other.to_string();
+            owned.as_str()
+        }
+    };
+    let as_number = match value {
+        JsonValue::Number(_) => true,
+        JsonValue::String(_) => numeric,
+        _ => false,
+    };
+    if as_number {
+        if let Some(number) = excel_number(text) {
+            out.push_str(&format!("<c r=\"{reference}\"><v>{number}</v></c>"));
+            return false;
+        }
+    }
+    push_text_cell(out, reference, text)
+}
+
+/// Writes one row of the sheet, at the given number of the row. This form
+/// reads each column as a numeric column.
+#[cfg(test)]
 pub fn row_xml(values: &[JsonValue], number: usize) -> String {
     let mut out = format!("<row r=\"{number}\">");
     for (index, value) in values.iter().enumerate() {
-        out.push_str(&cell_xml(
+        push_cell(
+            &mut out,
             &format!("{}{number}", column_name(index + 1)),
             value,
-        ));
+            true,
+        );
     }
     out.push_str("</row>");
     out
@@ -283,15 +384,40 @@ pub struct SheetWriter<W: Write + Seek> {
     zip: ZipWriter<W>,
     /// The number of rows written, the header row among them.
     rows: usize,
+    /// The letters of each column, made once for the whole sheet.
+    letters: Vec<String>,
+    /// For each column, true when a text value can go in as a number.
+    numeric: Vec<bool>,
+    /// The buffer of one row, used again for each row.
+    line: String,
+    /// The number of text cells cut at the bound of a cell.
+    cut_cells: u64,
+    /// True when a row arrived after the sheet was full.
+    full: bool,
 }
 
 impl<W: Write + Seek> SheetWriter<W> {
+    /// Starts the container and writes the header row of the sheet. Each
+    /// column counts as numeric, so a text that contains a number goes in as a
+    /// number. `create_typed` takes the numeric flag of each column.
+    #[cfg(test)]
+    pub fn create(writer: W, sheet: &str, columns: &[String]) -> Result<Self> {
+        Self::create_typed(writer, sheet, columns, vec![true; columns.len()])
+    }
+
     /// Starts the container and writes the header row of the sheet.
+    /// `numeric` gives, for each column, whether a text value can go in as a
+    /// number cell. A column without a flag counts as a text column.
     ///
     /// A result with more columns than a sheet holds gives an error. Excel
     /// repairs a file with a column past XFD, and a cut of the columns would
     /// drop data with no sign of it in the file.
-    pub fn create(writer: W, sheet: &str, columns: &[String]) -> Result<Self> {
+    pub fn create_typed(
+        writer: W,
+        sheet: &str,
+        columns: &[String],
+        numeric: Vec<bool>,
+    ) -> Result<Self> {
         if columns.len() > MAX_SHEET_COLUMNS {
             return Err(crate::error::Error::Unsupported(format!(
                 "Excel sheets allow at most {MAX_SHEET_COLUMNS} columns, but this result has {}. Export it as CSV or JSON instead.",
@@ -313,7 +439,10 @@ impl<W: Write + Seek> SheetWriter<W> {
             zip.write_all(body.as_bytes())?;
         }
 
-        zip.start_file(SHEET_PART, options).map_err(zip_fault)?;
+        // A full sheet can pass 4 GB, and a ZIP entry above that size needs
+        // the ZIP64 fields, which the writer adds only when it is told first.
+        zip.start_file(SHEET_PART, options.large_file(true))
+            .map_err(zip_fault)?;
         zip.write_all(
             concat!(
                 r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
@@ -324,17 +453,36 @@ impl<W: Write + Seek> SheetWriter<W> {
         )?;
 
         zip.write_all(header_xml(columns).as_bytes())?;
-        Ok(Self { zip, rows: 1 })
+        Ok(Self {
+            zip,
+            rows: 1,
+            letters: (1..=columns.len()).map(column_name).collect(),
+            numeric,
+            line: String::new(),
+            cut_cells: 0,
+            full: false,
+        })
     }
 
     /// Writes one row of data. Returns false when the sheet is full, and
     /// the row is then left out.
     pub fn row(&mut self, values: &[JsonValue]) -> Result<bool> {
         if self.rows >= MAX_SHEET_ROWS {
+            self.full = true;
             return Ok(false);
         }
         self.write_row(values)?;
         Ok(true)
+    }
+
+    /// The number of text cells that were cut at the bound of a cell.
+    pub fn cut_cells(&self) -> u64 {
+        self.cut_cells
+    }
+
+    /// True when the sheet was full and a row was left out.
+    pub fn sheet_full(&self) -> bool {
+        self.full
     }
 
     /// Sets the count of the rows, so that a test reaches the bound of a
@@ -345,8 +493,26 @@ impl<W: Write + Seek> SheetWriter<W> {
     }
 
     fn write_row(&mut self, values: &[JsonValue]) -> Result<()> {
+        use std::fmt::Write as _;
         let number = self.rows + 1;
-        self.zip.write_all(row_xml(values, number).as_bytes())?;
+        let line = &mut self.line;
+        line.clear();
+        let _ = write!(line, "<row r=\"{number}\">");
+        let mut reference = String::new();
+        for (index, value) in values.iter().enumerate() {
+            reference.clear();
+            match self.letters.get(index) {
+                Some(letters) => reference.push_str(letters),
+                None => reference.push_str(&column_name(index + 1)),
+            }
+            let _ = write!(reference, "{number}");
+            let numeric = self.numeric.get(index).copied().unwrap_or(false);
+            if push_cell(line, &reference, value, numeric) {
+                self.cut_cells += 1;
+            }
+        }
+        line.push_str("</row>");
+        self.zip.write_all(line.as_bytes())?;
         self.rows += 1;
         Ok(())
     }
@@ -571,5 +737,70 @@ mod tests {
         let sheet = part_of(writer.finish().unwrap().into_inner(), SHEET_PART);
         assert!(sheet.contains(&format!("<row r=\"{MAX_SHEET_ROWS}\">")));
         assert!(!sheet.contains(&format!("<row r=\"{}\">", MAX_SHEET_ROWS + 1)));
+    }
+
+    #[test]
+    fn a_text_column_keeps_a_text_that_looks_like_a_number_as_text() {
+        let names = vec!["phone".to_string(), "amount".to_string(), "n".to_string()];
+        let mut writer =
+            SheetWriter::create_typed(Cursor::new(Vec::new()), "Result", &names, vec![false, true])
+                .unwrap();
+        assert!(writer
+            .row(&[json!("+1555"), json!("1.50"), json!("12E3")])
+            .unwrap());
+        assert!(writer.row(&[json!(7), json!(2), json!(3)]).unwrap());
+        let sheet = part_of(writer.finish().unwrap().into_inner(), SHEET_PART);
+        assert!(sheet.contains(
+            "<c r=\"A2\" t=\"inlineStr\"><is><t xml:space=\"preserve\">+1555</t></is></c>"
+        ));
+        assert!(sheet.contains("<c r=\"B2\"><v>1.5</v></c>"));
+        // A column past the flags counts as a text column.
+        assert!(sheet.contains("<c r=\"C2\" t=\"inlineStr\">"));
+        // A JSON number stays a number in a text column.
+        assert!(sheet.contains("<c r=\"A3\"><v>7</v></c>"));
+    }
+
+    #[test]
+    fn the_writer_counts_the_cut_cells_and_marks_a_full_sheet() {
+        let mut writer =
+            SheetWriter::create(Cursor::new(Vec::new()), "Result", &["t".to_string()]).unwrap();
+        let long = "\u{1}".to_string() + &"<".repeat(MAX_CELL_UNITS + 1);
+        assert!(writer.row(&[json!(long)]).unwrap());
+        assert!(writer.row(&[json!("short")]).unwrap());
+        assert_eq!(writer.cut_cells(), 1);
+        assert!(!writer.sheet_full());
+        writer.set_rows(MAX_SHEET_ROWS);
+        assert!(!writer.row(&[json!(1)]).unwrap());
+        assert!(writer.sheet_full());
+        let sheet = part_of(writer.finish().unwrap().into_inner(), SHEET_PART);
+        assert!(sheet.contains(&"&lt;".repeat(MAX_CELL_UNITS)));
+        assert!(!sheet.contains(&"&lt;".repeat(MAX_CELL_UNITS + 1)));
+        assert!(!sheet.contains('\u{1}'));
+    }
+
+    #[test]
+    fn a_row_wider_than_the_header_still_names_each_cell() {
+        let mut writer =
+            SheetWriter::create(Cursor::new(Vec::new()), "Result", &["a".to_string()]).unwrap();
+        assert!(writer.row(&[json!(1), json!("x")]).unwrap());
+        let sheet = part_of(writer.finish().unwrap().into_inner(), SHEET_PART);
+        assert!(sheet.contains("<c r=\"B2\" t=\"inlineStr\">"));
+    }
+
+    #[test]
+    fn a_numeric_type_is_found_from_the_first_word_of_its_name() {
+        for name in [
+            "int",
+            "DECIMAL(10,2)",
+            "double precision",
+            "int unsigned",
+            "float8",
+            "money",
+        ] {
+            assert!(is_numeric_type(name), "{name}");
+        }
+        for name in ["varchar", "text", "any", "date", "bit", ""] {
+            assert!(!is_numeric_type(name), "{name}");
+        }
     }
 }

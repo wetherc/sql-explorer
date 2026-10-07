@@ -349,9 +349,6 @@ pub fn bytes_to_json(bytes: &[u8]) -> JsonValue {
     JsonValue::String(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
-/// Builds a JSON number from a floating point value. A value that is not a
-/// number, such as infinity, becomes text so that the result stays valid
-/// JSON.
 /// Turns a four-byte float into JSON with the digits that the float shows.
 ///
 /// A widening cast gives the double nearest to the float, and that double
@@ -361,11 +358,69 @@ pub fn f32_to_json(value: f32) -> JsonValue {
     f64_to_json(value.to_string().parse().unwrap_or(f64::from(value)))
 }
 
+/// Builds a JSON number from a floating point value. A value that is not a
+/// number, such as infinity, becomes text so that the result stays valid
+/// JSON.
 pub fn f64_to_json(value: f64) -> JsonValue {
     match serde_json::Number::from_f64(value) {
         Some(number) => JsonValue::Number(number),
-        None => JsonValue::String(value.to_string()),
+        None => JsonValue::String(float_text(value)),
     }
+}
+
+/// Writes a floating point value as text. The special values use the words
+/// that the database engines print (`NaN`, `Infinity`, `-Infinity`), where
+/// Rust prints `inf`.
+pub fn float_text(value: f64) -> String {
+    if value.is_nan() {
+        "NaN".to_owned()
+    } else if value.is_infinite() {
+        if value > 0.0 { "Infinity" } else { "-Infinity" }.to_owned()
+    } else {
+        value.to_string()
+    }
+}
+
+/// Adds bytes to `out` as hexadecimal digits, two digits for each byte.
+pub fn hex_text(out: &mut String, bytes: &[u8], upper: bool) {
+    const LOWER: &[u8; 16] = b"0123456789abcdef";
+    const UPPER: &[u8; 16] = b"0123456789ABCDEF";
+    let digits = if upper { UPPER } else { LOWER };
+    out.reserve(bytes.len() * 2);
+    for byte in bytes {
+        out.push(char::from(digits[usize::from(byte >> 4)]));
+        out.push(char::from(digits[usize::from(byte & 0x0F)]));
+    }
+}
+
+/// Reports the count of rows of the open result set and ends the set.
+pub fn finish_set(sink: &mut dyn RowSink, count: usize, truncated: bool) -> Result<()> {
+    sink.message(rows_returned_message(count, truncated));
+    sink.end_set(truncated)
+}
+
+/// Runs a step of the opening of a connection under the time limit. A step
+/// that does not finish reports the connection and not the statement, because
+/// the advice for a slow statement does not fit a server that never answered.
+pub async fn connect_within<F: std::future::Future>(
+    limit_secs: u64,
+    future: F,
+) -> Result<F::Output> {
+    tokio::time::timeout(std::time::Duration::from_secs(limit_secs), future)
+        .await
+        .map_err(|_| {
+            Error::Connection(format!(
+                "The server didn't finish opening the connection within {limit_secs} seconds."
+            ))
+        })
+}
+
+/// Returns the trimmed text when it contains something other than blank space.
+pub fn non_empty(value: &Option<String>) -> Option<&str> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
 }
 
 /// Writes a size in bytes in the largest unit that keeps it above one, so a
@@ -488,8 +543,10 @@ pub fn add_snapshot_relation(
 }
 
 /// Reads the word of `INFORMATION_SCHEMA` that names the type of a relation.
+/// MySQL names the views of its own schemas `SYSTEM VIEW`.
 pub fn relation_type(word: &str) -> RelationType {
-    if word.trim().eq_ignore_ascii_case("VIEW") {
+    let word = word.trim();
+    if word.eq_ignore_ascii_case("VIEW") || word.eq_ignore_ascii_case("SYSTEM VIEW") {
         RelationType::View
     } else {
         RelationType::Table
@@ -536,7 +593,9 @@ fn index_entry(
     unique: bool,
     primary: bool,
 ) -> &mut IndexInfo {
-    match indexes.iter().position(|index| index.name == name) {
+    // The rows of one record come together, so the search starts at the
+    // last record and a row of the current record costs one comparison.
+    match indexes.iter().rposition(|index| index.name == name) {
         Some(position) => &mut indexes[position],
         None => {
             indexes.push(IndexInfo {
@@ -563,6 +622,7 @@ pub fn add_constraint_column(
 ) {
     let entry = match constraints
         .iter_mut()
+        .rev()
         .find(|constraint| constraint.name == name)
     {
         Some(entry) => entry,
@@ -607,7 +667,11 @@ pub fn add_trigger_event(
     enabled: bool,
     event: Option<TriggerEvent>,
 ) {
-    let entry = match triggers.iter_mut().find(|trigger| trigger.name == name) {
+    let entry = match triggers
+        .iter_mut()
+        .rev()
+        .find(|trigger| trigger.name == name)
+    {
         Some(entry) => entry,
         None => {
             triggers.push(Trigger {
@@ -753,6 +817,56 @@ mod tests {
         // The largest unit holds, however big the figure is.
         assert_eq!(size_text(2048_u64 * 1024 * 1024 * 1024 * 1024), "2048.0 TB");
     }
+
+    #[test]
+    fn a_float_that_is_not_a_number_uses_the_engine_words() {
+        assert_eq!(float_text(f64::NAN), "NaN");
+        assert_eq!(float_text(f64::INFINITY), "Infinity");
+        assert_eq!(float_text(f64::NEG_INFINITY), "-Infinity");
+        assert_eq!(float_text(1.5), "1.5");
+        assert_eq!(f64_to_json(f64::INFINITY), JsonValue::from("Infinity"));
+        assert_eq!(f64_to_json(2.5), serde_json::json!(2.5));
+    }
+
+    #[test]
+    fn hex_text_writes_two_digits_for_each_byte() {
+        let mut out = String::from("0x");
+        hex_text(&mut out, &[0x00, 0xAB, 0x0F], true);
+        assert_eq!(out, "0x00AB0F");
+        let mut lower = String::new();
+        hex_text(&mut lower, &[0xAB, 0xCD], false);
+        assert_eq!(lower, "abcd");
+    }
+
+    #[test]
+    fn finish_set_reports_the_count_and_ends_the_set() {
+        let mut sink = BufferSink::new(10);
+        sink.begin_set(vec![]).unwrap();
+        finish_set(&mut sink, 3, true).unwrap();
+        let response = sink.into_response(RunSummary {
+            rows_affected: None,
+            elapsed_ms: 0,
+            stats: None,
+        });
+        assert!(response.results[0].truncated);
+        assert_eq!(response.messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn connect_within_reports_a_slow_server_as_a_connection_error() {
+        let late = connect_within(0, std::future::pending::<()>())
+            .await
+            .unwrap_err();
+        assert!(matches!(late, Error::Connection(ref text) if text.contains("within 0 seconds")));
+        assert_eq!(connect_within(5, async { 7 }).await.unwrap(), 7);
+    }
+
+    #[test]
+    fn non_empty_trims_and_drops_blank_text() {
+        assert_eq!(non_empty(&Some("  db ".into())), Some("db"));
+        assert_eq!(non_empty(&Some("   ".into())), None);
+        assert_eq!(non_empty(&None), None);
+    }
     use crate::db::MessageLevel;
 
     #[test]
@@ -882,6 +996,8 @@ mod tests {
     #[test]
     fn the_word_of_the_catalog_names_a_view() {
         assert_eq!(relation_type("VIEW"), RelationType::View);
+        assert_eq!(relation_type("SYSTEM VIEW"), RelationType::View);
+        assert_eq!(relation_type("view"), RelationType::View);
         assert_eq!(relation_type("BASE TABLE"), RelationType::Table);
     }
 
@@ -1045,7 +1161,7 @@ mod tests {
     fn a_value_that_is_not_a_number_becomes_text() {
         assert_eq!(
             f64_to_json(f64::INFINITY),
-            JsonValue::String("inf".to_string())
+            JsonValue::String("Infinity".to_string())
         );
         assert!(f64_to_json(f64::NAN).is_string());
     }

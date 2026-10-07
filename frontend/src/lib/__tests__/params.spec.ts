@@ -70,6 +70,14 @@ describe('paramProblem', () => {
     expect(paramProblem({ name: 'a', valueType: ParamType.Number, text: 'two' })).toBe(
       'Enter a number.',
     )
+    // JavaScript reads these as numbers, and no SQL engine does.
+    for (const text of ['0x10', '0b11', '0o7', 'Infinity', '1_000']) {
+      expect(paramProblem({ name: 'a', valueType: ParamType.Number, text })).toBe('Enter a number.')
+      expect(jsonOfParam({ name: 'a', valueType: ParamType.Number, text })).toBe(text)
+    }
+    for (const text of ['-1.5', '+2', '.5', '3.', '1e3', '2.5E-2']) {
+      expect(paramProblem({ name: 'a', valueType: ParamType.Number, text })).toBeNull()
+    }
   })
 
   it('names a text that the true or false form refuses', () => {

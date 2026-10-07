@@ -8,7 +8,7 @@
       <template #switch>
         <v-btn-toggle v-model="mode" density="compact" mandatory divided>
           <v-btn value="history" size="small" text="History" data-test="mode-history" />
-          <v-btn value="saved" size="small" text="Saved" data-test="mode-saved" />
+          <v-btn value="saved" size="small" text="Saved queries" data-test="mode-saved" />
         </v-btn-toggle>
       </template>
       <template #actions>
@@ -19,6 +19,7 @@
               icon="mdi-delete-sweep-outline"
               size="small"
               aria-label="Clear history"
+              :disabled="history.entries.length === 0"
               data-test="clear-history"
               @click="clearing = true"
             />
@@ -43,22 +44,41 @@
                   <v-icon
                     size="small"
                     :color="entry.succeeded ? 'success' : 'error'"
-                    :aria-label="entry.succeeded ? 'succeeded' : 'failed'"
+                    aria-hidden="true"
                   >
                     {{ entry.succeeded ? 'mdi-check' : 'mdi-alert-circle-outline' }}
                   </v-icon>
                 </template>
-                <v-list-item-title class="query-line">
+                <v-list-item-title class="query-line" :title="entryTip(entry)">
+                  <span class="d-sr-only">{{ entry.succeeded ? 'Succeeded: ' : 'Failed: ' }}</span>
                   {{ summariseQuery(entry.query) }}
                 </v-list-item-title>
-                <v-list-item-subtitle>
+                <v-list-item-subtitle v-if="entry.succeeded">
                   {{ entry.connectionName }} · {{ formatTimestamp(entry.ranAt) }} ·
                   {{ formatDuration(entry.elapsedMs) }} · {{ formatRowCount(entry.rowCount) }}
+                </v-list-item-subtitle>
+                <v-list-item-subtitle v-else class="failed-line" data-test="history-error">
+                  {{ entry.connectionName }} · {{ formatTimestamp(entry.ranAt) }} ·
+                  {{ entry.error || 'Failed' }}
                 </v-list-item-subtitle>
               </v-list-item>
             </template>
           </v-virtual-scroll>
         </v-list>
+        <EmptyState
+          v-else-if="history.entries.length > 0"
+          icon="mdi-magnify"
+          title="No matches"
+          hint="No statement in the history matches the filter."
+        >
+          <v-btn
+            size="small"
+            variant="tonal"
+            text="Clear filter"
+            data-test="history-clear-filter"
+            @click="history.filter = ''"
+          />
+        </EmptyState>
         <EmptyState
           v-else
           icon="mdi-history"
@@ -84,24 +104,43 @@
                   {{ summariseQuery(query.query) }}
                 </v-list-item-subtitle>
                 <template #append>
-                  <v-btn
-                    icon="mdi-delete"
-                    size="x-small"
-                    color="error"
-                    aria-label="Delete saved statement"
-                    data-test="delete-saved"
-                    @click.stop="pendingDelete = query"
-                  />
+                  <v-tooltip location="bottom" text="Delete saved query">
+                    <template #activator="{ props: tip }">
+                      <v-btn
+                        v-bind="tip"
+                        icon="mdi-delete-outline"
+                        size="x-small"
+                        class="row-action"
+                        aria-label="Delete saved query"
+                        data-test="delete-saved"
+                        @click.stop="pendingDelete = query"
+                      />
+                    </template>
+                  </v-tooltip>
                 </template>
               </v-list-item>
             </template>
           </v-virtual-scroll>
         </v-list>
         <EmptyState
+          v-else-if="history.savedQueries.length > 0"
+          icon="mdi-magnify"
+          title="No matches"
+          hint="No saved query matches the filter."
+        >
+          <v-btn
+            size="small"
+            variant="tonal"
+            text="Clear filter"
+            data-test="saved-clear-filter"
+            @click="history.filter = ''"
+          />
+        </EmptyState>
+        <EmptyState
           v-else
           icon="mdi-bookmark-outline"
-          title="No saved statements"
-          hint="Save a statement from its tab to reopen it later."
+          title="No saved queries"
+          hint="Save a query from its tab to reopen it later."
         />
       </template>
     </div>
@@ -109,7 +148,7 @@
     <ConfirmDialog
       :open="clearing"
       title="Clear history?"
-      message="This removes every statement from the history. Saved statements are kept."
+      message="This removes every statement from the history. Saved queries are kept."
       confirm-text="Clear"
       danger
       @confirm="confirmClear"
@@ -118,8 +157,8 @@
 
     <ConfirmDialog
       :open="pendingDelete !== null"
-      title="Delete this saved statement?"
-      :message="`This deletes the saved statement ${pendingDelete?.name ?? ''}.`"
+      title="Delete this saved query?"
+      :message="`This deletes the saved query ${pendingDelete?.name ?? ''}.`"
       confirm-text="Delete"
       danger
       @confirm="confirmDelete"
@@ -192,6 +231,11 @@ function confirmDelete(): void {
   }
 }
 
+/** The full text of one entry, with the reason of a failure. */
+function entryTip(entry: HistoryEntry): string {
+  return entry.succeeded ? entry.query : `${entry.query}\n\n${entry.error || 'Failed'}`
+}
+
 /** Opens a past statement in a new tab, on the connection it ran against. */
 function openEntry(entry: HistoryEntry): void {
   const connectionId = connections.isActive(entry.connectionId)
@@ -222,6 +266,22 @@ function openSaved(query: SavedQuery): void {
   /* The list of the rows scrolls itself, so this element does not. */
   overflow: hidden;
   min-height: 0;
+}
+
+.failed-line {
+  color: rgb(var(--v-theme-error));
+}
+
+/* The delete button of a row shows while the pointer or the focus is on the
+   row, so a list of saved queries is not a column of red buttons. */
+.row-action {
+  opacity: 0;
+}
+
+:deep(.v-list-item:hover) .row-action,
+:deep(.v-list-item:focus-within) .row-action,
+.row-action:focus-visible {
+  opacity: 1;
 }
 
 .query-line {

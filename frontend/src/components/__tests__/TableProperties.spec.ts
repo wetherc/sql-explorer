@@ -71,6 +71,8 @@ describe('TableProperties', () => {
     expect(indexes[1]?.textContent).toContain('unique')
     expect(indexes[2]?.textContent).toContain('id, note')
     expect(overlayAll('property-constraint')).toHaveLength(1)
+    expect(overlayText()).toContain('Constraints')
+    expect(document.querySelectorAll('th').length).toBeGreaterThanOrEqual(7)
     void wrapper
   })
 
@@ -93,6 +95,9 @@ describe('TableProperties', () => {
     expect(overlayAll('no-facts')).toHaveLength(1)
     expect(overlayAll('no-indexes')).toHaveLength(1)
     expect(overlayAll('no-constraints')).toHaveLength(1)
+    expect(overlayAll('no-columns')).toHaveLength(1)
+    expect(overlayText()).toContain('No constraints.')
+    expect(overlayText()).not.toContain('Columns' + 'Rule')
     expect(overlayText()).toContain('orders')
     void wrapper
   })

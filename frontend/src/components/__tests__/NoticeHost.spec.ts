@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import NoticeHost from '@/components/NoticeHost.vue'
 import { mountWithPlugins, settle } from './mount'
 import { useUiStore } from '@/stores/ui'
@@ -57,10 +57,114 @@ describe('NoticeHost', () => {
   it('removes a notice when it runs out of time', async () => {
     const wrapper = mountWithPlugins(NoticeHost)
     const ui = useUiStore()
-    ui.success('gone soon')
+    vi.useFakeTimers()
+    try {
+      ui.success('gone soon')
+      ui.reportError(new Error('stays'))
+      await wrapper.vm.$nextTick()
+      vi.advanceTimersByTime(3000)
+      expect(ui.notices.map((notice) => notice.message)).toEqual(['stays'])
+    } finally {
+      vi.useRealTimers()
+    }
+    wrapper.unmount()
+  })
+
+  it('stops the timer of a notice that the user took away', async () => {
+    const wrapper = mountWithPlugins(NoticeHost)
+    const ui = useUiStore()
+    vi.useFakeTimers()
+    try {
+      const first = ui.info('first')
+      await wrapper.vm.$nextTick()
+      ui.dismiss(first.id)
+      await wrapper.vm.$nextTick()
+      const dismiss = vi.spyOn(ui, 'dismiss')
+      vi.advanceTimersByTime(5000)
+      expect(dismiss).not.toHaveBeenCalled()
+      ui.info('second')
+      await wrapper.vm.$nextTick()
+      wrapper.unmount()
+      vi.advanceTimersByTime(5000)
+      expect(dismiss).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stacks the notices in one column with the newest at the top', async () => {
+    const wrapper = mountWithPlugins(NoticeHost)
+    const ui = useUiStore()
+    ui.warn('older')
+    ui.warn('newer')
     await settle()
-    await wrapper.findComponent({ name: 'VSnackbar' }).vm.$emit('update:modelValue', false)
-    expect(ui.notices).toHaveLength(0)
+    const texts = wrapper.findAll('[data-test="notice"]').map((notice) => notice.text())
+    expect(texts[0]).toContain('newer')
+    expect(texts[1]).toContain('older')
+    expect(wrapper.find('[data-test="notice"] .notice-text').attributes('title')).toBe('newer')
+    wrapper.unmount()
+  })
+})
+
+describe('NoticeHost details', () => {
+  it('offers details for an error that has no detail of its own', async () => {
+    const wrapper = mountWithPlugins(NoticeHost)
+    const ui = useUiStore()
+    ui.reportError({ category: ErrorCategory.Database, message: 'plain failure', detail: null })
+    await settle()
+    expect(ui.notices[0]!.detail).toBeNull()
+    await wrapper.find('[data-test="notice-details"]').trigger('click')
+    await settle()
+    expect(document.querySelector('[data-test="notice-detail-body"]')).toBeNull()
+    expect(document.body.textContent).toContain('plain failure')
+    wrapper.unmount()
+  })
+
+  it('copies the message and the detail', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(globalThis.navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const wrapper = mountWithPlugins(NoticeHost)
+    const ui = useUiStore()
+    ui.reportError({ category: ErrorCategory.Database, message: 'no', detail: 'why' })
+    ui.openNotice(ui.notices[0]!)
+    await settle()
+    ;(document.querySelector('[data-test="notice-copy"]') as HTMLElement).click()
+    await settle()
+    expect(writeText).toHaveBeenCalledWith(expect.stringMatching(/^no\n\n.*why/s))
+    expect(ui.notices.some((notice) => notice.level === 'success')).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('reports a copy that the clipboard refused', async () => {
+    Object.defineProperty(globalThis.navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn().mockRejectedValue(new Error('denied')) },
+    })
+    const wrapper = mountWithPlugins(NoticeHost)
+    const ui = useUiStore()
+    ui.openNotice(ui.warn('a note', 'more'))
+    await settle()
+    ;(document.querySelector('[data-test="notice-copy"]') as HTMLElement).click()
+    await settle()
+    expect(ui.notices.some((notice) => notice.message === 'denied')).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('warns when there is no clipboard', async () => {
+    Object.defineProperty(globalThis.navigator, 'clipboard', {
+      configurable: true,
+      value: undefined,
+    })
+    const wrapper = mountWithPlugins(NoticeHost)
+    const ui = useUiStore()
+    ui.openNotice(ui.warn('a note'))
+    await settle()
+    ;(document.querySelector('[data-test="notice-copy"]') as HTMLElement).click()
+    await settle()
+    expect(ui.notices.some((notice) => notice.message.includes("wasn't copied"))).toBe(true)
     wrapper.unmount()
   })
 })
@@ -105,6 +209,15 @@ describe('NoticeHost dialog', () => {
 })
 
 describe('NoticeHost as a part a reader can follow', () => {
+  it('puts no live region inside another one', async () => {
+    const wrapper = mountWithPlugins(NoticeHost)
+    useUiStore().reportError(new Error('It failed'))
+    await settle()
+    const alert = document.querySelector('[role="alert"]')!
+    expect(alert.parentElement?.closest('[aria-live], [role="status"], [role="alert"]')).toBeNull()
+    wrapper.unmount()
+  })
+
   it('breaks in for an error and waits its turn for anything else', async () => {
     const wrapper = mountWithPlugins(NoticeHost)
     const ui = useUiStore()

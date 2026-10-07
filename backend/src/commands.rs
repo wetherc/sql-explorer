@@ -14,14 +14,14 @@ use crate::error::{Error, Result};
 use crate::files;
 use crate::history::{HistoryEntry, SavedQuery};
 use crate::script::{self, ScriptStatement};
-use crate::secrets;
+use crate::secrets::{self, SecretStore};
 use crate::session::{Session, DEFAULT_SESSION};
 use crate::sql::ParamValues;
 use crate::state::{
     AppState, ConnectionHealth, ConnectionInfo, ConnectionStatusEvent, OpenConnection,
     CONNECTION_STATUS_EVENT,
 };
-use crate::storage::{DbType, SavedConnection};
+use crate::storage::{AwsCredentialSource, DbType, SavedConnection};
 use crate::store;
 use std::sync::Arc;
 use tauri::ipc::{Channel, InvokeResponseBody};
@@ -57,21 +57,84 @@ fn announce<R: Runtime>(
     }
 }
 
+/// The text of an error for a change of the state of a connection: the
+/// message, and the detail of the server on a line of its own.
+fn announcement_text(error: &Error) -> String {
+    let payload = error.to_payload();
+    match payload.detail {
+        Some(detail) if !detail.is_empty() => format!("{}\n{detail}", payload.message),
+        _ => payload.message,
+    }
+}
+
+/// Ends a reopen of one session that failed.
+///
+/// The session goes. When it was the last session of the connection, the
+/// connection goes too and the window hears that it is disconnected. When
+/// other sessions remain, the connection stays open, so the window hears
+/// that it is connected, with the reason the one session closed. A
+/// connection that a connect or a disconnect replaced in the meantime is
+/// left alone, because that command sent its own state.
+async fn reopen_failed<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    connection_id: &str,
+    open: &OpenConnection,
+    session_key: &str,
+    reason: String,
+) {
+    let current = state.connection(connection_id).await;
+    if !current.is_ok_and(|current| Arc::ptr_eq(&current.sessions, &open.sessions)) {
+        return;
+    }
+    open.sessions.release(session_key).await;
+    let health = if open.sessions.is_empty().await
+        && state.remove_if_same(connection_id, &open.sessions).await
+    {
+        ConnectionHealth::Disconnected
+    } else {
+        ConnectionHealth::Connected
+    };
+    announce(app, connection_id, health, Some(reason));
+}
+
+/// Runs work on the secret store on a blocking thread. A call to the
+/// keychain can wait for a prompt of the operating system, and on an async
+/// thread that wait would stop the other commands.
+async fn with_store<T, F>(state: &AppState, work: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&dyn SecretStore) -> Result<T> + Send + 'static,
+{
+    let store = Arc::clone(&state.secrets);
+    off_thread(move || work(store.as_ref())).await
+}
+
 /// Fills the secrets of a record from the secret store, unless the caller
 /// already gave them. A connection holds a password and, for Athena, a
 /// secret access key and a session token.
-fn with_secrets(state: &AppState, mut connection: SavedConnection) -> Result<SavedConnection> {
+async fn with_secrets(state: &AppState, connection: SavedConnection) -> Result<SavedConnection> {
+    with_store(state, move |store| fill_secrets(store, connection)).await
+}
+
+/// Reads the secrets that a record does not give out of one store.
+fn fill_secrets(
+    store: &dyn SecretStore,
+    mut connection: SavedConnection,
+) -> Result<SavedConnection> {
     if connection.password.is_none() {
-        connection.password = state.secrets.get(&connection.id)?;
+        connection.password = store.get(&connection.id)?;
+    }
+    // Only Athena uses the keys of AWS, so other engines skip two reads of
+    // the keychain.
+    if connection.db_type != DbType::Athena {
+        return Ok(connection);
     }
     if connection.aws_secret_access_key.is_none() {
-        connection.aws_secret_access_key = state
-            .secrets
-            .get(&secrets::aws_secret_key(&connection.id))?;
+        connection.aws_secret_access_key = store.get(&secrets::aws_secret_key(&connection.id))?;
     }
     if connection.aws_session_token.is_none() {
-        connection.aws_session_token =
-            state.secrets.get(&secrets::aws_token_key(&connection.id))?;
+        connection.aws_session_token = store.get(&secrets::aws_token_key(&connection.id))?;
     }
     Ok(connection)
 }
@@ -83,17 +146,17 @@ fn with_secrets(state: &AppState, mut connection: SavedConnection) -> Result<Sav
 /// form sends an absent field when the user did not touch it, so a saved
 /// secret survives an edit of the other fields. Returns true when the store
 /// holds the secret after the call.
-fn store_secret(state: &AppState, key: &str, value: Option<&str>) -> Result<bool> {
+fn store_secret(store: &dyn SecretStore, key: &str, value: Option<&str>) -> Result<bool> {
     match value {
         Some(text) if !text.is_empty() => {
-            state.secrets.set(key, text)?;
+            store.set(key, text)?;
             Ok(true)
         }
         Some(_) => {
-            state.secrets.delete(key)?;
+            store.delete(key)?;
             Ok(false)
         }
-        None => Ok(state.secrets.get(key)?.is_some()),
+        None => Ok(store.get(key)?.is_some()),
     }
 }
 
@@ -147,21 +210,31 @@ pub async fn connect<R: Runtime>(
             "No saved connection has the ID '{id}'."
         )));
     };
-    let full = with_secrets(&state, record)?;
+    let full = with_secrets(&state, record).await?;
 
     match open_driver(&full).await {
         Ok(driver) => {
+            // A connection that is still open under the identifier goes
+            // first, with its statements and its background driver.
+            if state.remove(&id).await {
+                stop_requests(state.take_requests_of(&id).await).await;
+            }
             let info = state.insert(&id, OpenConnection::new(full, driver)).await;
             announce(&app, &id, ConnectionHealth::Connected, None);
             log::info!("The connection '{id}' is open.");
             Ok(info)
         }
         Err(error) => {
+            // The window shows the connection as closed, so an older
+            // connection under the identifier goes too.
+            if state.remove(&id).await {
+                stop_requests(state.take_requests_of(&id).await).await;
+            }
             announce(
                 &app,
                 &id,
                 ConnectionHealth::Disconnected,
-                Some(error.to_string()),
+                Some(announcement_text(&error)),
             );
             Err(error)
         }
@@ -176,7 +249,7 @@ pub async fn connect<R: Runtime>(
 /// the record still matches the saved record. A record that names another
 /// server must carry its own secrets, and the message asks the user for
 /// them.
-fn with_secrets_for_test<R: Runtime>(
+async fn with_secrets_for_test<R: Runtime>(
     app: &AppHandle<R>,
     state: &AppState,
     connection: SavedConnection,
@@ -185,7 +258,7 @@ fn with_secrets_for_test<R: Runtime>(
         return Ok(connection);
     };
     if saved.without_secrets() == connection.without_secrets() {
-        return with_secrets(state, connection);
+        return with_secrets(state, connection).await;
     }
     let held = [
         (
@@ -204,14 +277,21 @@ fn with_secrets_for_test<R: Runtime>(
             "session token",
         ),
     ];
-    for (absent, key, name) in held {
-        if absent && state.secrets.get(&key)?.is_some() {
-            return Err(Error::Configuration(format!(
-                "These settings differ from the saved connection, so the stored {name} can't be used. Enter the {name} to test your changes."
-            )));
+    let stored = with_store(state, move |store| {
+        for (absent, key, name) in held {
+            if absent && store.get(&key)?.is_some() {
+                return Ok(Some(name));
+            }
         }
+        Ok(None)
+    })
+    .await?;
+    match stored {
+        Some(name) => Err(Error::Configuration(format!(
+            "These settings differ from the saved connection, so the stored {name} can't be used. Enter the {name} to test your changes."
+        ))),
+        None => Ok(connection),
     }
-    Ok(connection)
 }
 
 /// Opens a connection, confirms that it answers, and closes it again.
@@ -221,7 +301,7 @@ pub async fn test_connection<R: Runtime>(
     connection: SavedConnection,
     state: tauri::State<'_, AppState>,
 ) -> Result<String> {
-    let full = with_secrets_for_test(&app, &state, connection)?;
+    let full = with_secrets_for_test(&app, &state, connection).await?;
     let mut driver = open_driver(&full).await?;
     driver.ping().await?;
     Ok("Connection successful.".to_string())
@@ -281,43 +361,70 @@ pub async fn list_active_connections(
 /// A tab that already holds a session gets it back after a health check. A
 /// tab without a session gets a new one, up to the cap of the pool. At the
 /// cap, the sessions that other tabs left idle go first.
+///
+/// A Stop ends only the waits and the open of a new driver. A dropped open
+/// leaves no session behind. A ping or a probe of a transaction always runs
+/// to its end, because a drop in the middle of the exchange would leave a
+/// session in the pool that reads the wrong answer next.
 async fn session_for<R: Runtime>(
     app: &AppHandle<R>,
     state: &AppState,
     connection_id: &str,
     tab_id: Option<&str>,
+    token: &CancellationToken,
 ) -> Result<(OpenConnection, Arc<Session>, String)> {
     let open = state.connection(connection_id).await?;
     let key = open.session_key(tab_id);
 
     if let Some(session) = open.sessions.get(&key).await {
         let session =
-            ensure_session_healthy(app, state, connection_id, &open, &key, session).await?;
+            ensure_session_healthy(app, state, connection_id, &open, &key, session, token).await?;
+        session.touch().await;
         return Ok((open, session, key));
     }
 
     // One session opens at a time, so the count against the cap stays exact
     // and two requests of one tab open one session, not two.
     let pool = open.sessions.clone();
-    let _opening = pool.begin_open().await;
+    let _opening = unless_stopped(async { Ok(pool.begin_open().await) }, token).await?;
     if let Some(session) = pool.get(&key).await {
+        session.touch().await;
         return Ok((open, session, key));
     }
     if key != DEFAULT_SESSION && pool.at_cap().await {
-        pool.reap_idle().await;
+        pool.evict_least_recent().await;
     }
     if key != DEFAULT_SESSION && pool.at_cap().await {
-        return Err(Error::Configuration(format!(
+        return Err(Error::Invalid(format!(
             "This connection is already using {} sessions. Close a tab or raise Max sessions \
              in the connection settings.",
             pool.cap()
         )));
     }
 
-    let full = with_secrets(state, open.descriptor.clone())?;
-    let driver = open_driver(&full).await?;
+    let driver = open_until_stopped(state, &open, token).await?;
     let session = pool.insert(&key, Session::new(driver)).await;
     Ok((open, session, key))
+}
+
+/// Opens a new driver for a connection until the user presses Stop. An open
+/// can wait for the full connect time of a server that does not answer, and
+/// the Stop then ends the wait.
+async fn open_until_stopped(
+    state: &AppState,
+    open: &OpenConnection,
+    token: &CancellationToken,
+) -> Result<Box<dyn DatabaseDriver>> {
+    // The box stops the nesting of the future type here. Without it, the
+    // layout of `session_for` passes the query depth limit of the compiler.
+    unless_stopped(
+        Box::pin(async {
+            let full = with_secrets(state, open.descriptor.clone()).await?;
+            open_driver(&full).await
+        }),
+        token,
+    )
+    .await
 }
 
 /// Confirms that a session that stood idle still answers, and opens a new
@@ -329,6 +436,7 @@ async fn ensure_session_healthy<R: Runtime>(
     open: &OpenConnection,
     key: &str,
     session: Arc<Session>,
+    token: &CancellationToken,
 ) -> Result<Arc<Session>> {
     if !session.needs_ping || !session.needs_check().await {
         return Ok(session);
@@ -348,8 +456,10 @@ async fn ensure_session_healthy<R: Runtime>(
         return Ok(session);
     }
 
+    // A Stop ends the wait for the driver, and the ping then runs to its
+    // end.
     let healthy = {
-        let mut driver = session.driver.lock().await;
+        let mut driver = unless_stopped(async { Ok(session.driver.lock().await) }, token).await?;
         driver.ping().await.is_ok()
     };
     if healthy {
@@ -360,8 +470,10 @@ async fn ensure_session_healthy<R: Runtime>(
     announce(app, connection_id, ConnectionHealth::Reconnecting, None);
     log::warn!("A session of '{connection_id}' stopped answering. Opening it again.");
 
-    let full = with_secrets(state, open.descriptor.clone())?;
-    match open_driver(&full).await {
+    match open_until_stopped(state, open, token).await {
+        // The session that does not answer stays in its slot, so the next
+        // request checks it again.
+        Err(Error::Cancelled) => Err(Error::Cancelled),
         Ok(driver) => {
             let replacement = open.sessions.insert(key, Session::new(driver)).await;
             // The background driver shares the fate of the session that
@@ -371,30 +483,33 @@ async fn ensure_session_healthy<R: Runtime>(
             Ok(replacement)
         }
         Err(error) => {
-            open.sessions.release(key).await;
-            if open.sessions.is_empty().await {
-                state.remove(connection_id).await;
-            }
-            announce(
+            reopen_failed(
                 app,
+                state,
                 connection_id,
-                ConnectionHealth::Disconnected,
-                Some(error.to_string()),
-            );
+                open,
+                key,
+                announcement_text(&error),
+            )
+            .await;
             Err(error)
         }
     }
 }
 
-/// Confirms that the default session of a connection still answers. The
-/// commands that read metadata call this before they lend a driver out.
+/// Gives the open connection for a read of the metadata.
+///
+/// The read sends no ping on the default session. A read of the catalog
+/// runs on the background driver, which has a check of its own. A
+/// connection with one session alone is a SQLite database in memory, which
+/// has no network to lose, and a ping there waits behind the statement that
+/// keeps the driver, with no limit.
 async fn ensure_healthy<R: Runtime>(
-    app: &AppHandle<R>,
+    _app: &AppHandle<R>,
     state: &AppState,
     connection_id: &str,
 ) -> Result<OpenConnection> {
-    let (open, _session, _key) = session_for(app, state, connection_id, None).await?;
-    Ok(open)
+    state.connection(connection_id).await
 }
 
 /// Starts a metadata read. The read goes to a second connection when one can
@@ -567,6 +682,19 @@ async fn stopped_by_the_user(token: &CancellationToken, grace: std::time::Durati
     }
 }
 
+/// Runs the work before a statement, such as the open of a session, until
+/// the user presses Stop. An open of a session can wait for the full connect
+/// time of a server that does not answer, and the Stop then ends the wait.
+async fn unless_stopped<T>(
+    work: impl std::future::Future<Output = Result<T>>,
+    token: &CancellationToken,
+) -> Result<T> {
+    tokio::select! {
+        result = work => result,
+        () = token.cancelled() => Err(Error::Cancelled),
+    }
+}
+
 /// Takes the driver of a session for one request, and then gives the
 /// request the handle that stops its statement.
 ///
@@ -616,9 +744,34 @@ where
     F: std::future::Future<Output = Result<T>>,
 {
     tokio::select! {
-        result = work => Bounded::Answered(result),
+        result = work => Bounded::Answered(stopped_answer(result, token)),
         () = stopped_by_the_user(token, grace) => Bounded::Stopped(Error::Cancelled),
         () = until_the_limit(timeout_secs) => Bounded::Stopped(Error::Timeout(timeout_secs)),
+    }
+}
+
+/// Gives the error of a statement that the user stopped as `Cancelled`.
+///
+/// The server reports a stop as an error of its own, for example PostgreSQL
+/// SQLSTATE 57014. The same codes also come from a `statement_timeout` or a
+/// `KILL` of another user, so the code alone cannot tell a stop from a failure.
+/// The token of the request can, because only the Stop button sets it.
+///
+/// Only the reply of the engine to a stop, or a loss of the connection,
+/// becomes `Cancelled`. A different failure that came at the same moment,
+/// such as a syntax error or a deadlock, stays as it is, so the user sees
+/// the real reason.
+fn stopped_answer<T>(result: Result<T>, token: &CancellationToken) -> Result<T> {
+    match result {
+        Err(error)
+            if token.is_cancelled()
+                && !matches!(error, Error::Cancelled)
+                && error.is_stop_reply() =>
+        {
+            log::debug!("The stopped statement ended with: {error}");
+            Err(Error::Cancelled)
+        }
+        other => other,
     }
 }
 
@@ -638,7 +791,7 @@ fn limit_reason(error: &Error) -> String {
 /// so a value never becomes part of the statement. Athena binds no value, so
 /// its parameters reach the service as literals of SQL.
 ///
-/// A statement that holds no name is left as it stands and carries no
+/// A statement that contains no name is left as it stands and gets no
 /// parameter, which keeps a script of more than one statement working.
 pub fn prepare_parameters(
     query: &str,
@@ -672,10 +825,46 @@ pub fn prepare_parameters(
     Ok((prepared.sql, Some(bound)))
 }
 
+/// Moves the place of an error in the text that ran into the text that the
+/// window sent.
+///
+/// The rewrite of the parameters changes a name such as `:id` into a
+/// placeholder such as `$1`, so a column after a parameter does not match the
+/// text of the user. The rewrite keeps the lines, so the line stays. The
+/// column stays when the line is the same in both texts up to the column, and
+/// is 1 otherwise.
+fn in_sent_text<T>(outcome: Bounded<T>, sent: &str, ran: &str) -> Bounded<T> {
+    let Bounded::Answered(Err(Error::Located {
+        inner,
+        line,
+        column,
+    })) = outcome
+    else {
+        return outcome;
+    };
+    let before = |text: &str| -> Option<String> {
+        let line = text.lines().nth(line.checked_sub(1)? as usize)?;
+        Some(
+            line.chars()
+                .take(column.saturating_sub(1) as usize)
+                .collect(),
+        )
+    };
+    let column = match sent == ran || before(sent) == before(ran) {
+        true => column,
+        false => 1,
+    };
+    Bounded::Answered(Err(Error::Located {
+        inner,
+        line,
+        column,
+    }))
+}
+
 /// The message for a parameter that the statement names and the request left
 /// out.
 fn missing_parameter(name: &str) -> Error {
-    Error::Configuration(format!("Parameter ':{name}' needs a value."))
+    Error::Invalid(format!("Parameter ':{name}' needs a value."))
 }
 
 /// Lists the names of the parameters of a statement. The interface asks for a
@@ -704,7 +893,7 @@ pub struct ExecuteRequest {
 
 /// Runs a script and sends its rows to the window as binary chunks.
 ///
-/// The rows travel on the channel while the read runs, so neither side holds
+/// The rows travel on the channel while the read runs, so neither side keeps
 /// the whole answer. The command itself gives no rows back: the last frame of
 /// the channel carries the messages of the server and the numbers of the run.
 #[tauri::command]
@@ -728,13 +917,13 @@ pub async fn execute_query<R: Runtime>(
     let token = state.start_request(&request_id, &connection_id).await;
     let prepared = async {
         let (open, session, key) =
-            session_for(&app, &state, &connection_id, tab_id.as_deref()).await?;
+            session_for(&app, &state, &connection_id, tab_id.as_deref(), &token).await?;
         let options = options.unwrap_or_else(|| open.descriptor.exec_options());
         let (query, bound) = prepare_parameters(&query, open.dialect, query_params.as_ref())?;
         Ok::<_, Error>((open, session, key, options, query, bound))
     }
     .await;
-    let (open, session, key, options, query, bound) = match prepared {
+    let (open, session, key, options, ran, bound) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => {
             state.end_request(&request_id).await;
@@ -749,7 +938,7 @@ pub async fn execute_query<R: Runtime>(
     let outcome = match driver_for_request(&state, &request_id, &session, &token).await {
         Ok(mut guard) => {
             run_bounded(
-                guard.execute_stream(&query, bound.as_ref(), &options, &mut sink),
+                guard.execute_stream(&ran, bound.as_ref(), &options, &mut sink),
                 &token,
                 options.timeout_secs,
                 stop_grace(&session),
@@ -758,6 +947,7 @@ pub async fn execute_query<R: Runtime>(
         }
         Err(error) => Bounded::Answered(Err(error)),
     };
+    let outcome = in_sent_text(outcome, &query, &ran);
 
     state.end_request(&request_id).await;
     match finish_run(&app, &state, &connection_id, &open, &key, &session, outcome).await {
@@ -809,15 +999,15 @@ pub async fn explain_query<R: Runtime>(
     let token = state.start_request(&request_id, &connection_id).await;
     let prepared = async {
         let (open, session, key) =
-            session_for(&app, &state, &connection_id, tab_id.as_deref()).await?;
+            session_for(&app, &state, &connection_id, tab_id.as_deref(), &token).await?;
         let options = options.unwrap_or_else(|| open.descriptor.exec_options());
         // A plan needs the values of the parameters, because the plan of a
-        // statement depends on the values it holds.
+        // statement depends on the values it contains.
         let (query, bound) = prepare_parameters(&query, open.dialect, query_params.as_ref())?;
         Ok::<_, Error>((open, session, key, options, query, bound))
     }
     .await;
-    let (open, session, key, options, query, bound) = match prepared {
+    let (open, session, key, options, ran, bound) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => {
             state.end_request(&request_id).await;
@@ -828,7 +1018,7 @@ pub async fn explain_query<R: Runtime>(
     let outcome = match driver_for_request(&state, &request_id, &session, &token).await {
         Ok(mut guard) => {
             run_bounded(
-                guard.explain(&query, bound.as_ref(), mode, &options),
+                guard.explain(&ran, bound.as_ref(), mode, &options),
                 &token,
                 options.timeout_secs,
                 stop_grace(&session),
@@ -837,6 +1027,7 @@ pub async fn explain_query<R: Runtime>(
         }
         Err(error) => Bounded::Answered(Err(error)),
     };
+    let outcome = in_sent_text(outcome, &query, &ran);
 
     state.end_request(&request_id).await;
     finish_run(&app, &state, &connection_id, &open, &key, &session, outcome).await
@@ -923,22 +1114,15 @@ async fn reopen_after_stop<R: Runtime>(
 ) {
     announce(app, connection_id, ConnectionHealth::Reconnecting, None);
 
-    let full = match with_secrets(state, open.descriptor.clone()) {
-        Ok(full) => full,
+    let opened = match with_secrets(state, open.descriptor.clone()).await {
+        Ok(full) => open_driver(&full).await,
         Err(secret_error) => {
             log::warn!("The password of '{connection_id}' could not be read: {secret_error}");
-            state.remove(connection_id).await;
-            announce(
-                app,
-                connection_id,
-                ConnectionHealth::Disconnected,
-                Some(limit_reason(error)),
-            );
-            return;
+            Err(secret_error)
         }
     };
 
-    match open_driver(&full).await {
+    match opened {
         Ok(driver) => {
             open.sessions
                 .insert(session_key, Session::new(driver))
@@ -947,16 +1131,12 @@ async fn reopen_after_stop<R: Runtime>(
             log::info!("A session of '{connection_id}' was opened again after a stop.");
         }
         Err(open_error) => {
-            open.sessions.release(session_key).await;
-            if open.sessions.is_empty().await {
-                state.remove(connection_id).await;
-            }
-            announce(
-                app,
-                connection_id,
-                ConnectionHealth::Disconnected,
-                Some(open_error.to_string()),
+            let reason = format!(
+                "{}\n{}",
+                limit_reason(error),
+                announcement_text(&open_error)
             );
+            reopen_failed(app, state, connection_id, open, session_key, reason).await;
         }
     }
 }
@@ -1274,7 +1454,7 @@ async fn background_session(
         );
         state.clear_background(connection_id).await;
     }
-    let full = match with_secrets(state, open.descriptor.clone()) {
+    let full = match with_secrets(state, open.descriptor.clone()).await {
         Ok(full) => full,
         Err(error) => {
             log::warn!("The password of '{connection_id}' could not be read: {error}");
@@ -1421,12 +1601,12 @@ async fn object_script(
     statement: ScriptStatement,
 ) -> Result<String> {
     if statement != ScriptStatement::Create {
-        return Err(Error::Configuration(
+        return Err(Error::Invalid(
             "Triggers and events can only be scripted as CREATE.".to_string(),
         ));
     }
     let no_text = || {
-        Error::Configuration(format!(
+        Error::Invalid(format!(
             "The database returned no CREATE script for '{}'.",
             place.name
         ))
@@ -1465,7 +1645,7 @@ fn script_text(
     if columns.is_empty() {
         // The other forms are built from the columns, and a relation that
         // reports none gives no statement at all.
-        return Err(Error::Configuration(
+        return Err(Error::Invalid(
             "The object has no columns, so the statement can't be generated.".to_string(),
         ));
     }
@@ -1570,19 +1750,75 @@ pub async fn save_connection<R: Runtime>(
     connection.validate().map_err(Error::Configuration)?;
     refuse_password_in_string(&connection)?;
 
-    store_secret(&state, &connection.id, connection.password.as_deref())?;
-    store_secret(
-        &state,
-        &secrets::aws_secret_key(&connection.id),
-        connection.aws_secret_access_key.as_deref(),
-    )?;
-    store_secret(
-        &state,
-        &secrets::aws_token_key(&connection.id),
-        connection.aws_session_token.as_deref(),
-    )?;
+    // A stored secret belongs to the server it was saved for. When the
+    // record names another server and gives no new secret, the old secret
+    // goes, so a changed host cannot receive the password of the old one.
+    let moved = saved_record(&app, &connection.id)?
+        .is_some_and(|saved| target_changed(&saved, &connection));
+    let no_keys = connection.options.aws_credential_source != AwsCredentialSource::Keys;
+    let writes = [
+        (
+            connection.id.clone(),
+            kept(connection.password.as_deref(), moved).map(str::to_string),
+        ),
+        (
+            secrets::aws_secret_key(&connection.id),
+            kept(
+                connection.aws_secret_access_key.as_deref(),
+                moved || no_keys,
+            )
+            .map(str::to_string),
+        ),
+        (
+            secrets::aws_token_key(&connection.id),
+            kept(connection.aws_session_token.as_deref(), moved || no_keys).map(str::to_string),
+        ),
+    ];
+    with_store(&state, move |store| {
+        for (key, value) in &writes {
+            store_secret(store, key, value.as_deref())?;
+        }
+        Ok(())
+    })
+    .await?;
 
     store::write_connection(&app, &connection.without_secrets())
+}
+
+/// The secret to store: the new one, or an empty text that takes the stored
+/// one away when `drop` is set and the record gives no new secret.
+fn kept(value: Option<&str>, drop: bool) -> Option<&str> {
+    match value {
+        None if drop => Some(""),
+        value => value,
+    }
+}
+
+/// True when a record names another server than the saved record, so a
+/// secret of the saved record does not belong to it.
+///
+/// The fields compare without the spaces at their ends, and a blank field is
+/// the same as a missing one, so a field that the form cleared names no new
+/// server.
+fn target_changed(saved: &SavedConnection, record: &SavedConnection) -> bool {
+    use crate::db::drivers::non_empty;
+    let target = |connection: &SavedConnection| {
+        let options = &connection.options;
+        (
+            connection.db_type,
+            connection.port,
+            [
+                non_empty(&connection.host).map(str::to_owned),
+                non_empty(&connection.user).map(str::to_owned),
+                non_empty(&options.instance_name).map(str::to_owned),
+                non_empty(&options.connection_url).map(str::to_owned),
+                non_empty(&options.file_path).map(str::to_owned),
+                non_empty(&options.aws_region).map(str::to_owned),
+                non_empty(&options.aws_access_key_id).map(str::to_owned),
+            ],
+        )
+    };
+    target(saved) != target(record)
 }
 
 #[tauri::command]
@@ -1591,52 +1827,107 @@ pub async fn delete_connection<R: Runtime>(
     id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<()> {
-    state.remove(&id).await;
-    // Every key of the connection goes, or a removed connection leaves its
-    // secrets in the keychain.
-    let _ = state.secrets.delete(&id);
-    let _ = state.secrets.delete(&secrets::aws_secret_key(&id));
-    let _ = state.secrets.delete(&secrets::aws_token_key(&id));
+    close_deleted_connection(&app, &state, &id).await;
     store::delete_connection(&app, &id)
+}
+
+/// Closes a connection that the user deletes: its statements stop, the
+/// window hears that it is closed, and every key of it leaves the keychain.
+/// A secret that stays in the keychain is written to the log, because the
+/// delete of the record itself still goes ahead.
+async fn close_deleted_connection<R: Runtime>(app: &AppHandle<R>, state: &AppState, id: &str) {
+    if state.remove(id).await {
+        stop_requests(state.take_requests_of(id).await).await;
+        announce(app, id, ConnectionHealth::Disconnected, None);
+    }
+    let keys = [
+        id.to_string(),
+        secrets::aws_secret_key(id),
+        secrets::aws_token_key(id),
+    ];
+    let failures = with_store(state, move |store| {
+        Ok(keys
+            .iter()
+            .filter_map(|key| store.delete(key).err())
+            .collect::<Vec<_>>())
+    })
+    .await
+    .unwrap_or_else(|error| vec![error]);
+    for error in failures {
+        log::warn!("A secret of the deleted connection '{id}' stayed in the keychain: {error}");
+    }
+}
+
+/// Runs blocking work on a thread of its own, so a slow disk or keychain
+/// does not stop the async threads that serve the other commands.
+///
+/// A test runs the work in place, because each test thread has a folder of
+/// settings of its own.
+#[cfg(not(test))]
+async fn off_thread<T, F>(work: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|error| Error::Storage(format!("The work on the settings stopped: {error}")))?
+}
+
+#[cfg(test)]
+async fn off_thread<T, F>(work: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    work()
+}
+
+/// Reads the files of the settings and gives each problem found in them,
+/// such as a damaged file that was moved aside. The window shows each one
+/// once at start.
+#[tauri::command]
+pub async fn storage_problems<R: Runtime>(app: AppHandle<R>) -> Result<Vec<String>> {
+    off_thread(move || Ok(store::storage_problems(&app))).await
 }
 
 // --- The query history and the saved queries ---
 
 #[tauri::command]
 pub async fn get_history<R: Runtime>(app: AppHandle<R>) -> Result<Vec<HistoryEntry>> {
-    store::read_history(&app)
+    off_thread(move || store::read_history(&app)).await
 }
 
 #[tauri::command]
 pub async fn add_history_entry<R: Runtime>(app: AppHandle<R>, entry: HistoryEntry) -> Result<()> {
-    store::add_history(&app, entry)
+    off_thread(move || store::add_history(&app, entry)).await
 }
 
 #[tauri::command]
 pub async fn clear_history<R: Runtime>(app: AppHandle<R>) -> Result<()> {
-    store::clear_history(&app)
+    off_thread(move || store::clear_history(&app)).await
 }
 
 #[tauri::command]
 pub async fn get_saved_queries<R: Runtime>(app: AppHandle<R>) -> Result<Vec<SavedQuery>> {
-    store::read_saved_queries(&app)
+    off_thread(move || store::read_saved_queries(&app)).await
 }
 
 #[tauri::command]
 pub async fn save_query<R: Runtime>(app: AppHandle<R>, query: SavedQuery) -> Result<()> {
-    store::write_saved_query(&app, &query)
+    off_thread(move || store::write_saved_query(&app, &query)).await
 }
 
 #[tauri::command]
 pub async fn delete_saved_query<R: Runtime>(app: AppHandle<R>, id: String) -> Result<()> {
-    store::delete_saved_query(&app, &id)
+    off_thread(move || store::delete_saved_query(&app, &id)).await
 }
 
 // --- The open tabs ---
 
 #[tauri::command]
 pub async fn get_workspace<R: Runtime>(app: AppHandle<R>) -> Result<serde_json::Value> {
-    store::read_workspace(&app)
+    off_thread(move || store::read_workspace(&app)).await
 }
 
 #[tauri::command]
@@ -1644,7 +1935,7 @@ pub async fn save_workspace<R: Runtime>(
     app: AppHandle<R>,
     workspace: serde_json::Value,
 ) -> Result<()> {
-    store::write_workspace(&app, workspace)
+    off_thread(move || store::write_workspace(&app, workspace)).await
 }
 
 /// The form a file export takes.
@@ -1687,6 +1978,26 @@ pub struct ExportSummary {
     pub truncated: bool,
     /// The file the export wrote.
     pub path: String,
+    /// True when the sheet of an xlsx file was full and rows were left out.
+    pub sheet_full: bool,
+    /// The number of text cells of an xlsx file that were cut at the bound
+    /// of a cell.
+    pub cut_cells: u64,
+    /// A warning for the user about the content of the file.
+    pub warning: Option<String>,
+}
+
+/// The warning for the text cells that an xlsx file cut.
+fn cut_cells_warning(cut_cells: u64) -> Option<String> {
+    match cut_cells {
+        0 => None,
+        1 => Some(
+            "1 cell had more than 32,767 characters, the Excel limit for one cell, so its text was cut.".to_string(),
+        ),
+        count => Some(format!(
+            "{count} cells had more than 32,767 characters, the Excel limit for one cell, so their text was cut."
+        )),
+    }
 }
 
 /// Asks the user for the path of a new file. Returns `None` when the user
@@ -1740,6 +2051,7 @@ fn path_names(roots: &[std::path::PathBuf]) -> Vec<String> {
 /// A record that cannot be written costs the next session the folder alone,
 /// so the dialog goes on.
 async fn accept_folder<R: Runtime>(app: &AppHandle<R>, state: &AppState, root: std::path::PathBuf) {
+    let _record = state.files_record.lock().await;
     state.add_file_root(root).await;
     let names = path_names(&state.file_roots().await);
     if let Err(error) = store::write_file_roots(app, &names) {
@@ -1758,6 +2070,7 @@ async fn accept_file<R: Runtime>(app: &AppHandle<R>, state: &AppState, path: &st
     let Some(file) = files::grant_for(path) else {
         return;
     };
+    let _record = state.files_record.lock().await;
     state.add_file_grant(file).await;
     let names = path_names(&state.file_grants().await);
     if let Err(error) = store::write_file_grants(app, &names) {
@@ -1831,6 +2144,16 @@ pub async fn set_menu_commands<R: Runtime>(
 pub struct OpenedFile {
     pub path: String,
     pub contents: String,
+    /// The encoding of the file, which a later save of the tab keeps.
+    pub encoding: files::TextEncoding,
+}
+
+/// The text of one file and the encoding of the file.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextFile {
+    pub contents: String,
+    pub encoding: files::TextEncoding,
 }
 
 /// Asks the user for one statement file and reads it.
@@ -1861,13 +2184,14 @@ pub async fn open_statement_file<R: Runtime>(
         return Ok(None);
     };
 
-    let contents = files::read_text(&path)?;
+    let (contents, encoding) = files::read_text_file(&path)?;
     accept_file(&app, &state, &path).await;
     let opened = path.to_string_lossy().to_string();
     log::info!("Opened the file '{opened}'.");
     Ok(Some(OpenedFile {
         path: opened,
         contents,
+        encoding,
     }))
 }
 
@@ -1887,6 +2211,7 @@ pub async fn file_roots<R: Runtime>(
 }
 
 async fn file_roots_for<R: Runtime>(app: &AppHandle<R>, state: &AppState) -> Result<Vec<String>> {
+    let _record = state.files_record.lock().await;
     let recorded = store::read_file_roots(app)?;
     let kept: Vec<std::path::PathBuf> = recorded
         .iter()
@@ -1928,6 +2253,7 @@ async fn close_folder_for<R: Runtime>(
     path: &str,
     state: &AppState,
 ) -> Result<()> {
+    let _record = state.files_record.lock().await;
     state.remove_file_root(std::path::Path::new(path)).await;
     let names = path_names(&state.file_roots().await);
     store::write_file_roots(app, &names)?;
@@ -1954,23 +2280,33 @@ async fn accepted_path(path: &str, state: &AppState) -> Result<std::path::PathBu
     files::path_accepted(std::path::Path::new(path), &roots, &grants)
 }
 
-/// Reads the text of one file that is a grant or inside the roots.
+/// Reads the text of one file that is a grant or inside the roots, and the
+/// encoding of the file.
 #[tauri::command]
-pub async fn read_text_file(path: String, state: tauri::State<'_, AppState>) -> Result<String> {
-    files::read_text(&accepted_path(&path, &state).await?)
+pub async fn read_text_file(path: String, state: tauri::State<'_, AppState>) -> Result<TextFile> {
+    let target = accepted_path(&path, &state).await?;
+    let (contents, encoding) = off_thread(move || files::read_text_file(&target)).await?;
+    Ok(TextFile { contents, encoding })
 }
 
-/// Writes the text of one file that is a grant or inside the roots.
+/// Writes the text of one file that is a grant or inside the roots, in the
+/// encoding the window names, and gives the encoding it used. A request
+/// without an encoding writes UTF-8.
 #[tauri::command]
 pub async fn write_text_file(
     path: String,
     contents: String,
+    encoding: Option<files::TextEncoding>,
     state: tauri::State<'_, AppState>,
-) -> Result<()> {
+) -> Result<files::TextEncoding> {
     let target = accepted_path(&path, &state).await?;
-    files::write_text(&target, &contents)?;
-    log::info!("Wrote the file '{}'.", target.display());
-    Ok(())
+    let encoding = encoding.unwrap_or(files::TextEncoding::Utf8);
+    off_thread(move || {
+        let used = files::write_text_as(&target, &contents, encoding)?;
+        log::info!("Wrote the file '{}'.", target.display());
+        Ok(used)
+    })
+    .await
 }
 
 /// What a request to save the statement of a tab carries.
@@ -1982,29 +2318,55 @@ pub struct SaveStatementRequest {
     /// The folder the dialog opens in, when the interface knows one.
     pub default_folder: Option<String>,
     pub contents: String,
+    /// The encoding to write. A request without one writes UTF-8.
+    #[serde(default)]
+    pub encoding: Option<files::TextEncoding>,
+}
+
+/// The file that a save of a statement wrote.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedStatement {
+    pub path: String,
+    /// The encoding of the file. Text that the requested encoding cannot
+    /// store is written as UTF-8 with a byte order mark.
+    pub encoding: files::TextEncoding,
 }
 
 /// Asks the user for a path and writes the statement of a tab there.
 ///
 /// The file becomes a grant, so the next save of the same tab reaches it
-/// through `write_text_file`. Returns the path, or `None` when the user
-/// closed the dialog.
+/// through `write_text_file`. Returns the path and the encoding of the file,
+/// or `None` when the user closed the dialog.
 #[tauri::command]
 pub async fn save_statement_file<R: Runtime>(
     app: AppHandle<R>,
     request: SaveStatementRequest,
     state: tauri::State<'_, AppState>,
-) -> Result<Option<String>> {
+) -> Result<Option<SavedStatement>> {
     let start_folder = request.default_folder.as_deref().map(std::path::Path::new);
     let Some(path) = ask_save_path(&app, &request.default_name, "SQL", "sql", start_folder).await
     else {
         return Ok(None);
     };
-    files::write_text(&path, &request.contents)?;
+    let saved = write_statement(&path, &request.contents, request.encoding)?;
     accept_file(&app, &state, &path).await;
-    let written = path.to_string_lossy().to_string();
-    log::info!("Wrote the file '{written}'.");
-    Ok(Some(written))
+    log::info!("Wrote the file '{}'.", saved.path);
+    Ok(Some(saved))
+}
+
+/// Writes the statement of a tab to a path that the user chose.
+fn write_statement(
+    path: &std::path::Path,
+    contents: &str,
+    encoding: Option<files::TextEncoding>,
+) -> Result<SavedStatement> {
+    let encoding = encoding.unwrap_or(files::TextEncoding::Utf8);
+    let used = files::write_text_as(path, contents, encoding)?;
+    Ok(SavedStatement {
+        path: path.to_string_lossy().to_string(),
+        encoding: used,
+    })
 }
 
 /// What a request to save one file carries. The content is text, or base64
@@ -2076,7 +2438,7 @@ fn decode_base64(text: &str) -> Result<Vec<u8>> {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD
         .decode(text.as_bytes())
-        .map_err(|error| Error::Configuration(format!("The file content is corrupt: {error}")))
+        .map_err(|error| Error::Invalid(format!("The file content is corrupt: {error}")))
 }
 
 /// Runs a statement again with a higher row limit and writes the rows
@@ -2107,6 +2469,10 @@ pub async fn export_query<R: Runtime>(
         ExportFormat::Json => ("JSON", "json"),
         ExportFormat::Xlsx => ("Excel", "xlsx"),
     };
+    // The check comes before the dialog, so the user does not pick a file
+    // for an export that cannot run.
+    let dialect = state.connection(&connection_id).await?.dialect;
+    refuse_export_of_writes(&query, dialect)?;
     let Some(path) = ask_save_path(&app, &default_name, label, extension, None).await else {
         return Ok(None);
     };
@@ -2114,13 +2480,7 @@ pub async fn export_query<R: Runtime>(
     let token = state.start_request(&request_id, &connection_id).await;
     let prepared = async {
         let (open, session, key) =
-            session_for(&app, &state, &connection_id, tab_id.as_deref()).await?;
-        if !crate::sql::only_reads(&query, open.dialect) {
-            return Err(Error::Unsupported(
-                "Exporting to a file runs the statement again, so only read-only statements can be exported."
-                    .to_string(),
-            ));
-        }
+            session_for(&app, &state, &connection_id, tab_id.as_deref(), &token).await?;
         let options = ExecOptions {
             max_rows,
             timeout_secs: open.descriptor.exec_options().timeout_secs,
@@ -2134,7 +2494,7 @@ pub async fn export_query<R: Runtime>(
         Ok::<_, Error>((open, session, key, options, query, bound, sink))
     }
     .await;
-    let (open, session, key, options, query, bound, mut sink) = match prepared {
+    let (open, session, key, options, ran, bound, mut sink) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => {
             state.end_request(&request_id).await;
@@ -2144,7 +2504,7 @@ pub async fn export_query<R: Runtime>(
     let outcome = match driver_for_request(&state, &request_id, &session, &token).await {
         Ok(mut guard) => {
             run_bounded(
-                guard.execute_stream(&query, bound.as_ref(), &options, &mut sink),
+                guard.execute_stream(&ran, bound.as_ref(), &options, &mut sink),
                 &token,
                 options.timeout_secs,
                 stop_grace(&session),
@@ -2153,6 +2513,7 @@ pub async fn export_query<R: Runtime>(
         }
         Err(error) => Bounded::Answered(Err(error)),
     };
+    let outcome = in_sent_text(outcome, &query, &ran);
     state.end_request(&request_id).await;
     finish_run(&app, &state, &connection_id, &open, &key, &session, outcome).await?;
 
@@ -2168,6 +2529,18 @@ pub async fn export_query<R: Runtime>(
         summary.path
     );
     Ok(Some(summary))
+}
+
+/// Refuses an export of a statement that changes data. The export runs the
+/// statement again, so a change would happen twice.
+fn refuse_export_of_writes(query: &str, dialect: crate::sql::Dialect) -> Result<()> {
+    if crate::sql::only_reads(query, dialect) {
+        return Ok(());
+    }
+    Err(Error::Unsupported(
+        "Exporting to a file runs the statement again, so only read-only statements can be exported."
+            .to_string(),
+    ))
 }
 
 /// A sink that writes the rows of the first result set to a file as they
@@ -2234,6 +2607,8 @@ impl FileSink {
     /// Closes the file and renames it onto the path the user chose.
     fn finish(mut self) -> Result<ExportSummary> {
         use std::io::Write;
+        let mut cut_cells = 0;
+        let mut sheet_full = false;
         if self.saw_set {
             match self.format {
                 ExportFormat::Json => {
@@ -2249,6 +2624,8 @@ impl FileSink {
                 // the container gives the file back.
                 ExportFormat::Xlsx => {
                     if let Some(sheet) = self.sheet.take() {
+                        cut_cells = sheet.cut_cells();
+                        sheet_full = sheet.sheet_full();
                         self.out = Some(sheet.finish()?);
                     }
                 }
@@ -2264,10 +2641,17 @@ impl FileSink {
         std::fs::rename(&self.temp_path, &self.final_path)?;
         files::sync_folder_of(&self.final_path);
         self.finished = true;
+        let warning = cut_cells_warning(cut_cells);
+        if let Some(text) = &warning {
+            log::warn!("{text}");
+        }
         Ok(ExportSummary {
             rows: self.rows,
             truncated: self.truncated,
             path: self.final_path.to_string_lossy().to_string(),
+            sheet_full,
+            cut_cells,
+            warning,
         })
     }
 }
@@ -2308,14 +2692,19 @@ impl crate::db::sink::RowSink for FileSink {
             }
             ExportFormat::Xlsx => {
                 let names = crate::db::unique_column_names(&columns);
+                let numeric = columns
+                    .iter()
+                    .map(|column| crate::xlsx::is_numeric_type(&column.type_name))
+                    .collect();
                 let file = self
                     .out
                     .take()
                     .ok_or_else(|| Error::Anyhow(anyhow::anyhow!("The export file is closed.")))?;
-                self.sheet = Some(crate::xlsx::SheetWriter::create(
+                self.sheet = Some(crate::xlsx::SheetWriter::create_typed(
                     file,
                     &self.sheet_title,
                     &names,
+                    numeric,
                 )?);
             }
         }
@@ -2639,14 +3028,11 @@ mod tests {
     #[test]
     fn a_parameter_without_a_value_stops_the_run() {
         let error = prepare_parameters("SELECT :id", Dialect::MsSql, None).unwrap_err();
-        assert_eq!(error.category(), crate::error::ErrorCategory::Configuration);
+        assert_eq!(error.category(), crate::error::ErrorCategory::Invalid);
         assert!(error.to_string().contains("':id'"));
 
         let athena = prepare_parameters("SELECT :id", Dialect::Athena, None).unwrap_err();
-        assert_eq!(
-            athena.category(),
-            crate::error::ErrorCategory::Configuration
-        );
+        assert_eq!(athena.category(), crate::error::ErrorCategory::Invalid);
     }
 
     #[test]
@@ -2705,6 +3091,59 @@ mod tests {
         .await;
 
         assert!(matches!(outcome, Bounded::Answered(Err(Error::Cancelled))));
+    }
+
+    #[tokio::test]
+    async fn a_server_error_after_a_stop_is_a_cancel() {
+        let interrupted = || {
+            Error::MySql(mysql_async::Error::Server(mysql_async::ServerError {
+                code: 1317,
+                state: "70100".to_string(),
+                message: "Query execution was interrupted".to_string(),
+            }))
+        };
+        let token = CancellationToken::new();
+        let failed: Bounded<u8> =
+            run_bounded(async { Err(interrupted()) }, &token, 30, STOP_GRACE).await;
+        // Without a stop the error of the server stays as it is.
+        assert!(matches!(failed, Bounded::Answered(Err(Error::MySql(_)))));
+
+        token.cancel();
+        let stopped: Bounded<u8> =
+            run_bounded(async { Err(interrupted()) }, &token, 30, STOP_GRACE).await;
+        assert!(matches!(stopped, Bounded::Answered(Err(Error::Cancelled))));
+        let answered: Bounded<u8> = run_bounded(async { Ok(1) }, &token, 30, STOP_GRACE).await;
+        assert!(matches!(answered, Bounded::Answered(Ok(1))));
+    }
+
+    #[tokio::test]
+    async fn another_failure_after_a_stop_keeps_its_reason() {
+        let token = CancellationToken::new();
+        token.cancel();
+        let deadlock: Bounded<u8> = run_bounded(
+            async {
+                Err(Error::MySql(mysql_async::Error::Server(
+                    mysql_async::ServerError {
+                        code: 1213,
+                        state: "40001".to_string(),
+                        message: "Deadlock found".to_string(),
+                    },
+                )))
+            },
+            &token,
+            30,
+            STOP_GRACE,
+        )
+        .await;
+        assert!(matches!(deadlock, Bounded::Answered(Err(Error::MySql(_)))));
+        let syntax: Bounded<u8> = run_bounded(
+            async { Err(Error::Athena("syntax error".into())) },
+            &token,
+            30,
+            STOP_GRACE,
+        )
+        .await;
+        assert!(matches!(syntax, Bounded::Answered(Err(Error::Athena(_)))));
     }
 
     #[tokio::test]
@@ -2768,6 +3207,7 @@ mod tests {
             data_type: "int".into(),
             nullable: false,
             is_primary_key: true,
+            is_generated: false,
         }]
     }
 
@@ -2927,6 +3367,7 @@ mod tests {
         .await
         .unwrap_err();
         assert!(select.to_string().contains("only be scripted as CREATE"));
+        assert_eq!(select.category(), crate::error::ErrorCategory::Invalid);
 
         // A trigger that is gone gives no text, and SQLite has no event.
         for (name, object_type) in [
@@ -2944,11 +3385,12 @@ mod tests {
             assert!(error
                 .to_string()
                 .contains(&format!("no CREATE script for '{name}'")));
+            assert_eq!(error.category(), crate::error::ErrorCategory::Invalid);
         }
     }
 
     fn state() -> AppState {
-        AppState::new(Box::new(MemoryStore::default()))
+        AppState::new(Arc::new(MemoryStore::default()))
     }
 
     fn sqlite_connection(path: &str) -> SavedConnection {
@@ -3031,19 +3473,23 @@ mod tests {
         let state = state();
         state.secrets.set("s1", "from-the-store").unwrap();
 
-        let filled = with_secrets(&state, sqlite_connection("/tmp/a.db")).unwrap();
+        let filled = with_secrets(&state, sqlite_connection("/tmp/a.db"))
+            .await
+            .unwrap();
         assert_eq!(filled.password.as_deref(), Some("from-the-store"));
 
         let mut given = sqlite_connection("/tmp/a.db");
         given.password = Some("typed".into());
-        let kept = with_secrets(&state, given).unwrap();
+        let kept = with_secrets(&state, given).await.unwrap();
         assert_eq!(kept.password.as_deref(), Some("typed"));
     }
 
     #[tokio::test]
     async fn a_password_that_is_absent_stays_absent() {
         let state = state();
-        let filled = with_secrets(&state, sqlite_connection("/tmp/a.db")).unwrap();
+        let filled = with_secrets(&state, sqlite_connection("/tmp/a.db"))
+            .await
+            .unwrap();
         assert_eq!(filled.password, None);
     }
 
@@ -3059,15 +3505,18 @@ mod tests {
             .set(&secrets::aws_token_key("s1"), "the-token")
             .unwrap();
 
-        let filled = with_secrets(&state, sqlite_connection("/tmp/a.db")).unwrap();
+        let mut athena = sqlite_connection("/tmp/a.db");
+        athena.db_type = DbType::Athena;
+        let filled = with_secrets(&state, athena).await.unwrap();
         assert_eq!(filled.aws_secret_access_key.as_deref(), Some("the-secret"));
         assert_eq!(filled.aws_session_token.as_deref(), Some("the-token"));
 
         // A key that the caller gave stays as it is.
         let mut given = sqlite_connection("/tmp/a.db");
+        given.db_type = DbType::Athena;
         given.aws_secret_access_key = Some("typed".into());
         given.aws_session_token = Some("typed-token".into());
-        let kept = with_secrets(&state, given).unwrap();
+        let kept = with_secrets(&state, given).await.unwrap();
         assert_eq!(kept.aws_secret_access_key.as_deref(), Some("typed"));
         assert_eq!(kept.aws_session_token.as_deref(), Some("typed-token"));
     }
@@ -3077,19 +3526,19 @@ mod tests {
         let state = state();
 
         // A text writes the secret, and the store then holds it.
-        assert!(store_secret(&state, "k1", Some("first")).unwrap());
+        assert!(store_secret(state.secrets.as_ref(), "k1", Some("first")).unwrap());
         assert_eq!(state.secrets.get("k1").unwrap().as_deref(), Some("first"));
 
         // An absent field leaves the store as it stands.
-        assert!(store_secret(&state, "k1", None).unwrap());
+        assert!(store_secret(state.secrets.as_ref(), "k1", None).unwrap());
         assert_eq!(state.secrets.get("k1").unwrap().as_deref(), Some("first"));
 
         // An empty text takes the secret away.
-        assert!(!store_secret(&state, "k1", Some("")).unwrap());
+        assert!(!store_secret(state.secrets.as_ref(), "k1", Some("")).unwrap());
         assert_eq!(state.secrets.get("k1").unwrap(), None);
 
         // An absent field over an empty store reports no secret.
-        assert!(!store_secret(&state, "k1", None).unwrap());
+        assert!(!store_secret(state.secrets.as_ref(), "k1", None).unwrap());
     }
     /// True when no temporary file of a write is left in a folder.
     fn no_temporary_file(folder: &std::path::Path) -> bool {
@@ -3106,7 +3555,6 @@ mod tests {
     /// the files of the settings answer.
     fn app_with_store() -> tauri::App<tauri::test::MockRuntime> {
         tauri::test::mock_builder()
-            .plugin(tauri_plugin_store::Builder::default().build())
             .build(tauri::generate_context!())
             .unwrap()
     }
@@ -3133,7 +3581,7 @@ mod tests {
 
         // A new session reads the record of the backend and holds the same
         // folder against every path.
-        let next = AppState::new(Box::new(MemoryStore::default()));
+        let next = AppState::new(Arc::new(MemoryStore::default()));
         let names = file_roots_for(app.handle(), &next).await.unwrap();
         assert_eq!(names, path_names(std::slice::from_ref(&root)));
         assert_eq!(next.file_roots().await, vec![root.clone()]);
@@ -3198,7 +3646,7 @@ mod tests {
 
         // A new session reads the grant back, and the file beside it stays
         // out of reach.
-        let next = AppState::new(Box::new(MemoryStore::default()));
+        let next = AppState::new(Arc::new(MemoryStore::default()));
         file_roots_for(app.handle(), &next).await.unwrap();
         assert_eq!(next.file_grants().await, vec![resolved]);
         assert!(accepted_path(&file.to_string_lossy(), &next).await.is_ok());
@@ -3231,7 +3679,9 @@ mod tests {
         store::write_connection(app.handle(), &saved).unwrap();
         state.secrets.set(&saved.id, "from-the-store").unwrap();
 
-        let filled = with_secrets_for_test(app.handle(), &state, saved).unwrap();
+        let filled = with_secrets_for_test(app.handle(), &state, saved)
+            .await
+            .unwrap();
         assert_eq!(filled.password.as_deref(), Some("from-the-store"));
     }
 
@@ -3248,6 +3698,7 @@ mod tests {
         let mut changed = saved.clone();
         changed.options.file_path = Some("/tmp/elsewhere.db".into());
         let error = with_secrets_for_test(app.handle(), &state, changed.clone())
+            .await
             .err()
             .unwrap();
         assert_eq!(error.category(), crate::error::ErrorCategory::Configuration);
@@ -3257,7 +3708,9 @@ mod tests {
         // the store gives nothing to it.
         let mut typed = changed.clone();
         typed.password = Some("typed".into());
-        let kept = with_secrets_for_test(app.handle(), &state, typed).unwrap();
+        let kept = with_secrets_for_test(app.handle(), &state, typed)
+            .await
+            .unwrap();
         assert_eq!(kept.password.as_deref(), Some("typed"));
     }
 
@@ -3279,18 +3732,22 @@ mod tests {
         let mut changed = saved.clone();
         changed.host = Some("elsewhere".into());
         let error = with_secrets_for_test(app.handle(), &state, changed.clone())
+            .await
             .err()
             .unwrap();
         assert!(error.to_string().contains("secret access key"));
 
         changed.aws_secret_access_key = Some("typed".into());
         let error = with_secrets_for_test(app.handle(), &state, changed.clone())
+            .await
             .err()
             .unwrap();
         assert!(error.to_string().contains("session token"));
 
         changed.aws_session_token = Some("typed-token".into());
-        let kept = with_secrets_for_test(app.handle(), &state, changed).unwrap();
+        let kept = with_secrets_for_test(app.handle(), &state, changed)
+            .await
+            .unwrap();
         assert_eq!(kept.aws_secret_access_key.as_deref(), Some("typed"));
     }
 
@@ -3301,7 +3758,9 @@ mod tests {
         let mut given = sqlite_connection("/tmp/a.db");
         given.password = Some("typed".into());
 
-        let kept = with_secrets_for_test(app.handle(), &state, given).unwrap();
+        let kept = with_secrets_for_test(app.handle(), &state, given)
+            .await
+            .unwrap();
         assert_eq!(kept.password.as_deref(), Some("typed"));
     }
 
@@ -3316,7 +3775,7 @@ mod tests {
         // "PK" is the mark that a ZIP container starts with.
         assert_eq!(decode_base64("UEs=").unwrap(), b"PK");
         let error = decode_base64("not base64!").err().unwrap();
-        assert_eq!(error.category(), crate::error::ErrorCategory::Configuration);
+        assert_eq!(error.category(), crate::error::ErrorCategory::Invalid);
     }
     #[test]
     fn a_field_of_a_comma_separated_file_is_quoted_when_it_needs_it() {
@@ -3485,7 +3944,61 @@ mod tests {
 
         let summary = sink.finish().unwrap();
         assert!(summary.truncated);
+        assert!(summary.sheet_full);
+        assert_eq!(summary.cut_cells, 0);
+        assert_eq!(summary.warning, None);
         assert!(path.exists());
+    }
+
+    #[test]
+    fn an_excel_export_counts_the_cells_it_cut() {
+        use crate::db::sink::RowSink;
+        use crate::db::ColumnInfo;
+        use std::io::Read;
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("long.xlsx");
+        let mut sink = FileSink::create(&path, ExportFormat::Xlsx).unwrap();
+        sink.begin_set(vec![
+            ColumnInfo::new("note", "text"),
+            ColumnInfo::new("code", "varchar"),
+        ])
+        .unwrap();
+        let long = "x".repeat(40_000);
+        sink.row(vec![serde_json::json!(long), serde_json::json!("007")])
+            .unwrap();
+        sink.end_set(false).unwrap();
+        let summary = sink.finish().unwrap();
+        assert!(!summary.sheet_full);
+        assert_eq!(summary.cut_cells, 1);
+        assert!(summary.warning.unwrap().starts_with("1 cell had more"));
+
+        // A text column keeps a text that looks like a number as text.
+        let file = std::fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut sheet = String::new();
+        archive
+            .by_name("xl/worksheets/sheet1.xml")
+            .unwrap()
+            .read_to_string(&mut sheet)
+            .unwrap();
+        assert!(sheet.contains("007</t>"), "{sheet}");
+    }
+
+    #[test]
+    fn the_warning_for_cut_cells_counts_them() {
+        assert_eq!(cut_cells_warning(0), None);
+        assert!(cut_cells_warning(3).unwrap().starts_with("3 cells had"));
+        let value = serde_json::to_value(ExportSummary {
+            rows: 1,
+            truncated: false,
+            path: "p".into(),
+            sheet_full: true,
+            cut_cells: 2,
+            warning: None,
+        })
+        .unwrap();
+        assert_eq!(value["sheetFull"], true);
+        assert_eq!(value["cutCells"], 2);
     }
 
     #[test]
@@ -3583,7 +4096,7 @@ mod tests {
     ) -> (tauri::App<tauri::test::MockRuntime>, AppState) {
         let app = tauri::test::mock_app();
         let driver = open_driver(&descriptor).await.unwrap();
-        let state = AppState::new(Box::new(MemoryStore::default()));
+        let state = AppState::new(Arc::new(MemoryStore::default()));
         let id = descriptor.id.clone();
         state
             .insert(&id, OpenConnection::new(descriptor, driver))
@@ -3656,7 +4169,8 @@ mod tests {
         .await
         .err()
         .unwrap();
-        assert!(!error.to_string().is_empty());
+        assert!(matches!(&error, Error::NotConnected(id) if id == "missing"));
+        assert_eq!(error.category(), crate::error::ErrorCategory::NotConnected);
         assert_eq!(*frame_types.lock().unwrap(), vec![FRAME_END]);
     }
 
@@ -3665,21 +4179,39 @@ mod tests {
         let (_dir, descriptor) = temp_sqlite();
         let (app, state) = state_with_sqlite(descriptor).await;
 
-        let (open, first, key_one) = session_for(app.handle(), &state, "s1", Some("t1"))
-            .await
-            .unwrap();
-        let (_, second, key_two) = session_for(app.handle(), &state, "s1", Some("t2"))
-            .await
-            .unwrap();
+        let (open, first, key_one) = session_for(
+            app.handle(),
+            &state,
+            "s1",
+            Some("t1"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let (_, second, key_two) = session_for(
+            app.handle(),
+            &state,
+            "s1",
+            Some("t2"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(key_one, "t1");
         assert_eq!(key_two, "t2");
         assert!(!Arc::ptr_eq(&first, &second));
         assert_eq!(open.sessions.tab_count().await, 2);
 
         // The tab keeps its session from one run to the next.
-        let (_, again, _) = session_for(app.handle(), &state, "s1", Some("t1"))
-            .await
-            .unwrap();
+        let (_, again, _) = session_for(
+            app.handle(),
+            &state,
+            "s1",
+            Some("t1"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert!(Arc::ptr_eq(&first, &again));
     }
 
@@ -3688,7 +4220,10 @@ mod tests {
         let (_dir, descriptor) = temp_sqlite();
         let (app, state) = state_with_sqlite(descriptor).await;
 
-        let (open, session, key) = session_for(app.handle(), &state, "s1", None).await.unwrap();
+        let (open, session, key) =
+            session_for(app.handle(), &state, "s1", None, &CancellationToken::new())
+                .await
+                .unwrap();
         assert_eq!(key, DEFAULT_SESSION);
         let default = open.default_session().await.unwrap();
         assert!(Arc::ptr_eq(&session, &default));
@@ -3701,22 +4236,47 @@ mod tests {
         descriptor.options.max_sessions = 1;
         let (app, state) = state_with_sqlite(descriptor).await;
 
-        session_for(app.handle(), &state, "s1", Some("t1"))
-            .await
-            .unwrap();
-        let error = session_for(app.handle(), &state, "s1", Some("t2"))
-            .await
-            .err()
-            .unwrap();
-        assert_eq!(error.category(), crate::error::ErrorCategory::Configuration);
+        let (_, first, _) = session_for(
+            app.handle(),
+            &state,
+            "s1",
+            Some("t1"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        // A session that runs a statement cannot close to make room.
+        let busy = first.driver.lock().await;
+        let error = session_for(
+            app.handle(),
+            &state,
+            "s1",
+            Some("t2"),
+            &CancellationToken::new(),
+        )
+        .await
+        .err()
+        .unwrap();
+        drop(busy);
+        assert_eq!(error.category(), crate::error::ErrorCategory::Invalid);
         assert!(error.to_string().contains("Max sessions"));
 
         // The tab that holds a session keeps it, and the default session
         // stays outside the cap.
-        assert!(session_for(app.handle(), &state, "s1", Some("t1"))
-            .await
-            .is_ok());
-        assert!(session_for(app.handle(), &state, "s1", None).await.is_ok());
+        assert!(session_for(
+            app.handle(),
+            &state,
+            "s1",
+            Some("t1"),
+            &CancellationToken::new()
+        )
+        .await
+        .is_ok());
+        assert!(
+            session_for(app.handle(), &state, "s1", None, &CancellationToken::new())
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -3725,13 +4285,27 @@ mod tests {
         descriptor.options.max_sessions = 1;
         let (app, state) = state_with_sqlite(descriptor).await;
 
-        let (open, first, _) = session_for(app.handle(), &state, "s1", Some("t1"))
-            .await
-            .unwrap();
-        first.age(crate::session::SESSION_IDLE_REAP).await;
-        session_for(app.handle(), &state, "s1", Some("t2"))
-            .await
-            .unwrap();
+        let (open, first, _) = session_for(
+            app.handle(),
+            &state,
+            "s1",
+            Some("t1"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        // The request that took the session has ended.
+        first.age(crate::session::EVICT_IDLE_AFTER).await;
+        drop(first);
+        session_for(
+            app.handle(),
+            &state,
+            "s1",
+            Some("t2"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert!(open.sessions.get("t1").await.is_none());
     }
 
@@ -3741,9 +4315,15 @@ mod tests {
         descriptor.options.max_sessions = 1;
         let (app, state) = state_with_sqlite(descriptor).await;
 
-        let (open, first, _) = session_for(app.handle(), &state, "s1", Some("t1"))
-            .await
-            .unwrap();
+        let (open, first, _) = session_for(
+            app.handle(),
+            &state,
+            "s1",
+            Some("t1"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         first
             .driver
             .lock()
@@ -3752,9 +4332,15 @@ mod tests {
             .await
             .unwrap();
         first.age(crate::session::SESSION_IDLE_REAP).await;
-        assert!(session_for(app.handle(), &state, "s1", Some("t2"))
-            .await
-            .is_err());
+        assert!(session_for(
+            app.handle(),
+            &state,
+            "s1",
+            Some("t2"),
+            &CancellationToken::new()
+        )
+        .await
+        .is_err());
         let kept = open.sessions.get("t1").await.unwrap();
         assert!(Arc::ptr_eq(&kept, &first));
     }
@@ -3764,9 +4350,15 @@ mod tests {
         let descriptor = sqlite_connection(":memory:");
         let (app, state) = state_with_sqlite(descriptor).await;
 
-        let (open, session, key) = session_for(app.handle(), &state, "s1", Some("t1"))
-            .await
-            .unwrap();
+        let (open, session, key) = session_for(
+            app.handle(),
+            &state,
+            "s1",
+            Some("t1"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert!(open.single_session);
         assert_eq!(key, DEFAULT_SESSION);
         let default = open.default_session().await.unwrap();
@@ -3802,9 +4394,15 @@ mod tests {
         use tauri::Manager;
         let (_dir, descriptor) = temp_sqlite();
         let (app, state) = state_with_sqlite(descriptor).await;
-        session_for(app.handle(), &state, "s1", Some("t1"))
-            .await
-            .unwrap();
+        session_for(
+            app.handle(),
+            &state,
+            "s1",
+            Some("t1"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
 
         app.manage(state);
         let managed: tauri::State<'_, AppState> = app.state();
@@ -3883,6 +4481,466 @@ mod tests {
         assert!(!Arc::ptr_eq(&frail, &replaced));
         let default_after = open.default_session().await.unwrap();
         assert!(Arc::ptr_eq(&default_before, &default_after));
+    }
+
+    #[test]
+    fn a_saved_statement_gives_its_path_and_its_encoding() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.sql");
+        let saved = write_statement(&path, "SELECT 1", None).unwrap();
+        assert_eq!(saved.encoding, files::TextEncoding::Utf8);
+        assert_eq!(saved.path, path.to_string_lossy());
+        assert_eq!(std::fs::read(&path).unwrap(), b"SELECT 1");
+        assert_eq!(
+            serde_json::to_value(&saved).unwrap()["encoding"],
+            serde_json::json!("utf8")
+        );
+
+        // Text that Windows-1252 cannot store goes out as UTF-8 with a mark.
+        let kept =
+            write_statement(&path, "SELECT 'é'", Some(files::TextEncoding::Windows1252)).unwrap();
+        assert_eq!(kept.encoding, files::TextEncoding::Windows1252);
+        let moved =
+            write_statement(&path, "SELECT '😀'", Some(files::TextEncoding::Windows1252)).unwrap();
+        assert_eq!(moved.encoding, files::TextEncoding::Utf8Bom);
+
+        let request: SaveStatementRequest = serde_json::from_value(serde_json::json!({
+            "defaultName": "a.sql",
+            "defaultFolder": null,
+            "contents": "",
+        }))
+        .unwrap();
+        assert_eq!(request.encoding, None);
+    }
+
+    #[test]
+    fn the_place_of_an_error_moves_into_the_sent_text() {
+        let sent = "SELECT 1\nWHERE a = :alpha AND b = c\n  AND d = e";
+        let ran = "SELECT 1\nWHERE a = $1 AND b = c\n  AND d = e";
+        let place = |outcome: Bounded<()>| match outcome {
+            Bounded::Answered(Err(Error::Located { line, column, .. })) => (line, column),
+            _ => panic!("the error has no place"),
+        };
+        let failed =
+            |line, column| Bounded::Answered(Err(Error::Invalid("bad".into()).at(line, column)));
+
+        // A column after the parameter on its line moves to 1.
+        assert_eq!(place(in_sent_text(failed(2, 22), sent, ran)), (2, 1));
+        // A column before the parameter, or on a line without one, stays.
+        assert_eq!(place(in_sent_text(failed(2, 7), sent, ran)), (2, 7));
+        assert_eq!(place(in_sent_text(failed(3, 5), sent, ran)), (3, 5));
+        // A text that the rewrite did not change keeps every place.
+        assert_eq!(place(in_sent_text(failed(2, 22), sent, sent)), (2, 22));
+        // A place outside the text stays as it is.
+        assert_eq!(place(in_sent_text(failed(9, 4), sent, ran)), (9, 4));
+        assert_eq!(place(in_sent_text(failed(0, 4), sent, ran)), (0, 4));
+
+        // An answer without a place passes through.
+        assert!(matches!(
+            in_sent_text(Bounded::Answered(Ok(())), sent, ran),
+            Bounded::Answered(Ok(()))
+        ));
+        assert!(matches!(
+            in_sent_text::<()>(Bounded::Stopped(Error::Cancelled), sent, ran),
+            Bounded::Stopped(Error::Cancelled)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_stop_lets_the_ping_of_a_session_end() {
+        use tokio::sync::Notify;
+
+        /// A driver whose ping waits for the test.
+        struct GatedDriver {
+            started: Arc<Notify>,
+            go: Arc<Notify>,
+        }
+
+        #[async_trait::async_trait]
+        impl DatabaseDriver for GatedDriver {
+            fn capabilities(&self) -> crate::db::DriverCapabilities {
+                crate::db::DriverCapabilities::default()
+            }
+            fn dialect(&self) -> Dialect {
+                Dialect::Sqlite
+            }
+            async fn ping(&mut self) -> Result<()> {
+                self.started.notify_one();
+                self.go.notified().await;
+                Ok(())
+            }
+            async fn list_databases(&mut self) -> Result<Vec<Database>> {
+                Ok(Vec::new())
+            }
+            async fn list_schemas(&mut self, _database: &str) -> Result<Vec<Schema>> {
+                Ok(Vec::new())
+            }
+            async fn list_tables(
+                &mut self,
+                _database: &str,
+                _schema: Option<&str>,
+            ) -> Result<Vec<Table>> {
+                Ok(Vec::new())
+            }
+            async fn list_columns(
+                &mut self,
+                _database: &str,
+                _schema: Option<&str>,
+                _table: &str,
+            ) -> Result<Vec<AppColumn>> {
+                Ok(Vec::new())
+            }
+        }
+
+        let (_dir, descriptor) = temp_sqlite();
+        let (app, state) = state_with_sqlite(descriptor).await;
+        let open = state.connection("s1").await.unwrap();
+        let started = Arc::new(Notify::new());
+        let go = Arc::new(Notify::new());
+        let gated = open
+            .sessions
+            .insert(
+                "t1",
+                Session::new(Box::new(GatedDriver {
+                    started: started.clone(),
+                    go: go.clone(),
+                })),
+            )
+            .await;
+        gated.age(crate::state::HEALTH_CHECK_AFTER).await;
+
+        let state = Arc::new(state);
+        let token = CancellationToken::new();
+        let request = tokio::spawn({
+            let state = state.clone();
+            let token = token.clone();
+            let handle = app.handle().clone();
+            async move {
+                session_for(&handle, &state, "s1", Some("t1"), &token)
+                    .await
+                    .map(|(_, session, _)| session)
+            }
+        });
+        started.notified().await;
+        token.cancel();
+        tokio::task::yield_now().await;
+        assert!(!request.is_finished());
+        go.notify_one();
+
+        // The ping ends, so the session stays in its slot and answered.
+        let session = request.await.unwrap().unwrap();
+        assert!(Arc::ptr_eq(&session, &gated));
+        assert!(!gated.needs_check().await);
+        let kept = open.sessions.get("t1").await.unwrap();
+        assert!(Arc::ptr_eq(&kept, &gated));
+    }
+
+    #[tokio::test]
+    async fn a_stop_ends_the_wait_for_a_session() {
+        let token = CancellationToken::new();
+        assert!(matches!(
+            unless_stopped(async { Ok(1) }, &token).await,
+            Ok(1)
+        ));
+        token.cancel();
+        let waited: Result<u8> = unless_stopped(std::future::pending(), &token).await;
+        assert!(matches!(waited, Err(Error::Cancelled)));
+    }
+
+    #[test]
+    fn an_export_of_a_change_is_refused_before_the_dialog() {
+        assert!(refuse_export_of_writes("SELECT 1", Dialect::Postgres).is_ok());
+        let error = refuse_export_of_writes("DELETE FROM t", Dialect::Postgres).unwrap_err();
+        assert!(error.to_string().contains("read-only"));
+    }
+
+    #[test]
+    fn a_secret_goes_when_the_record_names_another_server() {
+        let saved = sqlite_connection("/a.db");
+        assert!(!target_changed(&saved, &saved.clone()));
+        let mut other = saved.clone();
+        other.name = "Renamed".into();
+        assert!(!target_changed(&saved, &other));
+        for change in [
+            |c: &mut SavedConnection| c.host = Some("evil".into()),
+            |c: &mut SavedConnection| c.port = Some(1),
+            |c: &mut SavedConnection| c.user = Some("x".into()),
+            |c: &mut SavedConnection| c.db_type = DbType::Postgres,
+            |c: &mut SavedConnection| c.options.file_path = Some("/b.db".into()),
+            |c: &mut SavedConnection| c.options.aws_region = Some("eu".into()),
+            |c: &mut SavedConnection| c.options.instance_name = Some("SQL2".into()),
+            |c: &mut SavedConnection| c.options.connection_url = Some("pg://h".into()),
+            |c: &mut SavedConnection| c.options.aws_access_key_id = Some("AK".into()),
+        ] {
+            let mut moved = saved.clone();
+            change(&mut moved);
+            assert!(target_changed(&saved, &moved));
+        }
+
+        // A field that is missing, empty, or only spaces names no server,
+        // and the spaces at the ends of a value do not count.
+        for blank in [None, Some(String::new()), Some("  ".to_string())] {
+            let mut cleared = saved.clone();
+            cleared.host = blank.clone();
+            cleared.user = blank.clone();
+            cleared.options.instance_name = blank;
+            assert!(!target_changed(&saved, &cleared));
+            assert!(!target_changed(&cleared, &saved));
+        }
+        let mut spaced = saved.clone();
+        spaced.options.file_path = Some(" /a.db ".into());
+        assert!(!target_changed(&saved, &spaced));
+        assert_eq!(kept(None, true), Some(""));
+        assert_eq!(kept(None, false), None);
+        assert_eq!(kept(Some("new"), true), Some("new"));
+    }
+
+    #[tokio::test]
+    async fn only_athena_reads_the_keys_of_aws() {
+        let state = state();
+        state.secrets.set("c1", "pw").unwrap();
+        state
+            .secrets
+            .set(&secrets::aws_secret_key("c1"), "key")
+            .unwrap();
+        let mut record = sqlite_connection("/a.db");
+        record.id = "c1".into();
+        let full = with_secrets(&state, record.clone()).await.unwrap();
+        assert_eq!(full.password.as_deref(), Some("pw"));
+        assert_eq!(full.aws_secret_access_key, None);
+        record.db_type = DbType::Athena;
+        let full = with_secrets(&state, record).await.unwrap();
+        assert_eq!(full.aws_secret_access_key.as_deref(), Some("key"));
+    }
+
+    /// A store whose every call fails, as a keychain that refuses access.
+    struct RefusingStore;
+
+    impl SecretStore for RefusingStore {
+        fn set(&self, _id: &str, _password: &str) -> Result<()> {
+            Err(keyring::Error::NoStorageAccess("refused".into()).into())
+        }
+        fn get(&self, _id: &str) -> Result<Option<String>> {
+            Err(keyring::Error::NoStorageAccess("refused".into()).into())
+        }
+        fn delete(&self, _id: &str) -> Result<()> {
+            Err(keyring::Error::NoStorageAccess("refused".into()).into())
+        }
+    }
+
+    #[tokio::test]
+    async fn an_error_of_the_keychain_comes_back_unchanged() {
+        let state = AppState::new(Arc::new(RefusingStore));
+        let error = with_secrets(&state, sqlite_connection("/tmp/a.db"))
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(
+            error,
+            Error::Keyring(keyring::Error::NoStorageAccess(_))
+        ));
+        let error = with_store(&state, |store| store_secret(store, "k1", Some("new")))
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(error, Error::Keyring(_)));
+        assert!(RefusingStore.set("k1", "new").is_err());
+
+        // A delete that the keychain refuses goes to the log, and the
+        // delete of the record still goes ahead.
+        let app = app_with_store();
+        close_deleted_connection(app.handle(), &state, "s1").await;
+    }
+
+    #[tokio::test]
+    async fn a_deleted_connection_closes_and_leaves_the_keychain() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (app, state) = state_with_sqlite(descriptor).await;
+        state.secrets.set("s1", "pw").unwrap();
+        state
+            .secrets
+            .set(&secrets::aws_token_key("s1"), "t")
+            .unwrap();
+        let token = state.start_request("r1", "s1").await;
+
+        close_deleted_connection(app.handle(), &state, "s1").await;
+
+        assert!(state.connection("s1").await.is_err());
+        assert!(token.is_cancelled());
+        assert_eq!(state.secrets.get("s1").unwrap(), None);
+        assert_eq!(
+            state.secrets.get(&secrets::aws_token_key("s1")).unwrap(),
+            None
+        );
+        // A second delete finds nothing open and still works.
+        close_deleted_connection(app.handle(), &state, "s1").await;
+    }
+
+    #[tokio::test]
+    async fn a_metadata_read_does_not_wait_behind_the_default_session() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (app, state) = state_with_sqlite(descriptor).await;
+        let open = state.connection("s1").await.unwrap();
+        let default = open.default_session().await.unwrap();
+        default.age(crate::state::HEALTH_CHECK_AFTER).await;
+        let _busy = default.driver.lock().await;
+        let found = tokio::time::timeout(SHORT, ensure_healthy(app.handle(), &state, "s1")).await;
+        assert!(found.unwrap().is_ok());
+        assert!(ensure_healthy(app.handle(), &state, "none").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn one_change_of_the_files_record_runs_at_a_time() {
+        let app = app_with_store();
+        let state = state();
+        let folder = tempfile::tempdir().unwrap();
+        let held = state.files_record.lock().await;
+        let root = folder.path().to_path_buf();
+        let waiting =
+            tokio::time::timeout(SHORT, accept_folder(app.handle(), &state, root.clone()));
+        assert!(waiting.await.is_err());
+        let file = folder.path().join("a.sql");
+        std::fs::write(&file, "SELECT 1").unwrap();
+        assert!(
+            tokio::time::timeout(SHORT, accept_file(app.handle(), &state, &file))
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(SHORT, file_roots_for(app.handle(), &state))
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(SHORT, close_folder_for(app.handle(), "/x", &state))
+                .await
+                .is_err()
+        );
+        drop(held);
+        accept_folder(app.handle(), &state, root).await;
+        assert_eq!(state.file_roots().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_session_that_stopped_answering_and_cannot_reopen_goes() {
+        let broken = sqlite_connection("/no/such/folder/x.db");
+        let driver = Box::new(PingDriver {
+            pings: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            answers: true,
+        });
+        let state = state();
+        state
+            .insert("s1", OpenConnection::new(broken, driver))
+            .await;
+        let app = tauri::test::mock_app();
+        let open = state.connection("s1").await.unwrap();
+        let pings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let frail = open
+            .sessions
+            .insert(
+                "t1",
+                Session::new(Box::new(PingDriver {
+                    pings: pings.clone(),
+                    answers: false,
+                })),
+            )
+            .await;
+        frail.age(crate::state::HEALTH_CHECK_AFTER).await;
+
+        let failed = session_for(
+            app.handle(),
+            &state,
+            "s1",
+            Some("t1"),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(failed.is_err());
+        assert_eq!(pings.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // The tab session goes, and the connection stays for its default
+        // session.
+        assert!(open.sessions.get("t1").await.is_none());
+        assert!(state.connection("s1").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_failed_reopen_keeps_a_connection_with_other_sessions() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (app, state) = state_with_sqlite(descriptor).await;
+        let (open, _, _) = session_for(
+            app.handle(),
+            &state,
+            "s1",
+            Some("t1"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        reopen_failed(app.handle(), &state, "s1", &open, "t1", "gone".into()).await;
+        assert!(open.sessions.get("t1").await.is_none());
+        assert!(state.connection("s1").await.is_ok());
+
+        // The last session goes, and the connection with it.
+        reopen_failed(
+            app.handle(),
+            &state,
+            "s1",
+            &open,
+            DEFAULT_SESSION,
+            "gone".into(),
+        )
+        .await;
+        assert!(state.connection("s1").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_failed_reopen_leaves_a_connection_that_a_connect_replaced() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (app, state) = state_with_sqlite(descriptor.clone()).await;
+        let stale = state.connection("s1").await.unwrap();
+        let driver = open_driver(&descriptor).await.unwrap();
+        state
+            .insert("s1", OpenConnection::new(descriptor, driver))
+            .await;
+
+        reopen_failed(
+            app.handle(),
+            &state,
+            "s1",
+            &stale,
+            DEFAULT_SESSION,
+            "gone".into(),
+        )
+        .await;
+        let current = state.connection("s1").await.unwrap();
+        assert!(!Arc::ptr_eq(&current.sessions, &stale.sessions));
+        assert!(!state.remove_if_same("s1", &stale.sessions).await);
+        assert!(state.remove_if_same("s1", &current.sessions).await);
+
+        // A connection that is gone is left alone too.
+        reopen_failed(
+            app.handle(),
+            &state,
+            "s1",
+            &stale,
+            DEFAULT_SESSION,
+            "gone".into(),
+        )
+        .await;
+        assert!(stale.sessions.get(DEFAULT_SESSION).await.is_some());
+    }
+
+    #[test]
+    fn an_announcement_gives_the_message_and_the_detail() {
+        assert_eq!(
+            announcement_text(&Error::Connection("refused".into())),
+            "refused"
+        );
+        let error = Error::Anyhow(anyhow::anyhow!("no route").context("refused"));
+        let text = announcement_text(&error);
+        assert!(text.starts_with("refused\n"), "{text}");
+        assert!(text.contains("no route"), "{text}");
     }
 
     /// A driver for the tests of the background connection. It counts the
@@ -3992,9 +5050,15 @@ mod tests {
     async fn a_stop_keeps_the_session_of_a_driver_that_survives_it() {
         let (_dir, descriptor) = temp_sqlite();
         let (app, state) = state_with_sqlite(descriptor).await;
-        let (open, session, key) = session_for(app.handle(), &state, "s1", Some("t1"))
-            .await
-            .unwrap();
+        let (open, session, key) = session_for(
+            app.handle(),
+            &state,
+            "s1",
+            Some("t1"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
 
         // SQLite aborts a statement cleanly, so the session stays.
         let outcome: Bounded<()> = Bounded::Stopped(Error::Cancelled);

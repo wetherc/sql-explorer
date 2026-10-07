@@ -121,6 +121,23 @@ describe('compareCells', () => {
   })
 })
 
+describe('compareSortKeys with numbers and texts', () => {
+  it('puts numbers in front of texts, so the order is the same for each pair', () => {
+    const cells = ['9a', 10, '9', 'b', '-1', Number.NaN, Number.POSITIVE_INFINITY]
+    const sorted = [...cells].sort((left, right) => compareSortKeys(sortKey(left), sortKey(right)))
+    expect(sorted).toEqual(['-1', '9', 10, Number.POSITIVE_INFINITY, Number.NaN, '9a', 'b'])
+    expect(compareSortKeys('9a', 10)).toBeGreaterThan(0)
+    expect(compareSortKeys(10, '9a')).toBeLessThan(0)
+  })
+
+  it('compares a number that is not finite with a decimal key by value', () => {
+    expect(compareSortKeys(Number.NEGATIVE_INFINITY, sortKey('-1e300'))).toBeLessThan(0)
+    expect(compareSortKeys(sortKey('5'), Number.NaN)).toBeLessThan(0)
+    expect(compareSortKeys(Number.NaN, Number.NaN)).toBe(0)
+    expect(compareSortKeys(3, 3)).toBe(0)
+  })
+})
+
 describe('exactAsNumber', () => {
   it('tells whether a double keeps every digit of a decimal text', () => {
     for (const text of ['1', '-2.50', '1e21', '100000000000000000000', '0.1', '9007199254740991']) {

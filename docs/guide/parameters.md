@@ -49,6 +49,15 @@ On MS SQL Server, a statement with a parameter runs inside `sp_executesql`, so a
 parameter is also sent whole rather than one statement at a time, because the
 placeholder numbers belong to the whole text.
 
+MS SQL Server receives a text value as `nvarchar`. When you compare it with a
+`varchar` column, the server converts the column rather than the value, so it often
+can't seek an index on that column and scans the whole table instead. Cast
+the parameter to the column's type to keep the index in use:
+
+```sql
+SELECT * FROM orders WHERE code = CAST(:code AS varchar(20))
+```
+
 On PostgreSQL, a statement with a parameter has to stand alone, because the
 server refuses a script of two statements when either one contains a parameter.
 MySQL and SQLite run such a script one statement at a time, and each statement

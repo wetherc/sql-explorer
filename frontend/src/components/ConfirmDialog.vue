@@ -1,5 +1,5 @@
 <template>
-  <AppDialog :model-value="open" max-width="460" @update:model-value="cancel">
+  <AppDialog :model-value="open" size="small" @update:model-value="cancel">
     <v-card>
       <v-card-title class="text-subtitle-1">{{ title }}</v-card-title>
       <v-card-text>

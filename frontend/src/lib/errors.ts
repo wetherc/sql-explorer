@@ -94,6 +94,8 @@ export function errorAdvice(payload: ErrorPayload): string {
       return "Check the connection's authentication method and credentials."
     case ErrorCategory.Secret:
       return 'The system keychain rejected the password. Enter it again and save.'
+    case ErrorCategory.Io:
+      return 'Check that the file exists and that you have permission to use it.'
     default:
       return ''
   }

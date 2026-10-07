@@ -6,8 +6,8 @@
 
 use crate::db::drivers::{
     add_index_column, bytes_to_json, f64_to_json, next_values, number_out_of_range, number_value,
-    prefixed_plan, rows_affected_message, rows_returned_message, CancelHandle, DatabaseDriver,
-    NumberValue,
+    prefixed_plan, relation_type, rows_affected_message, rows_returned_message, CancelHandle,
+    DatabaseDriver, NumberValue,
 };
 use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{
@@ -51,11 +51,22 @@ fn join_trigger_bodies(fragments: Vec<String>) -> Vec<String> {
     let mut statements: Vec<String> = Vec::new();
     let mut open: Option<String> = None;
     for fragment in fragments {
+        // A fragment can end in a `--` comment, and a semicolon on the same
+        // line would fall inside that comment. The semicolon then goes on a
+        // line of its own.
         let text = match open.take() {
-            Some(head) => format!("{head}; {fragment}"),
+            Some(head) => {
+                let last_line = head.rsplit('\n').next().unwrap_or("");
+                let joint = if last_line.contains("--") {
+                    "\n; "
+                } else {
+                    "; "
+                };
+                format!("{head}{joint}{fragment}")
+            }
             None => fragment,
         };
-        if is_complete(&format!("{text};")) {
+        if is_complete(&format!("{text}\n;")) {
             statements.push(text);
         } else {
             open = Some(text);
@@ -349,8 +360,8 @@ impl DatabaseDriver for SqliteDriver {
             ))?;
             let rows = statement.query_map([], |row| {
                 let name: String = row.get(0)?;
-                let relation_type: String = row.get(1)?;
-                Ok(if relation_type == "view" {
+                let word: String = row.get(1)?;
+                Ok(if relation_type(&word).is_view() {
                     Table::view(name)
                 } else {
                     Table::table(name)
@@ -373,13 +384,19 @@ impl DatabaseDriver for SqliteDriver {
     ) -> Result<Vec<AppColumn>> {
         let place = [table.to_string(), schema_or_main(schema).to_string()];
         self.with_connection(move |connection| {
-            let mut statement = connection
-                .prepare("SELECT name, type, \"notnull\", pk FROM pragma_table_info(?1, ?2)")?;
+            let mut statement = connection.prepare(
+                "SELECT name, type, \"notnull\", pk, hidden FROM pragma_table_xinfo(?1, ?2) \
+                     WHERE hidden <> 1",
+            )?;
             let rows = statement.query_map([&place[0], &place[1]], |row| {
                 let name: String = row.get(0)?;
                 let data_type: String = row.get(1)?;
                 let not_null: i64 = row.get(2)?;
                 let primary_key: i64 = row.get(3)?;
+                // A hidden value of 2 or 3 marks a generated column. An
+                // INTEGER PRIMARY KEY names the rowid and takes a value from
+                // an INSERT, so it is not generated.
+                let hidden: i64 = row.get(4)?;
                 Ok(AppColumn {
                     name,
                     data_type: if data_type.is_empty() {
@@ -389,6 +406,7 @@ impl DatabaseDriver for SqliteDriver {
                     },
                     nullable: not_null == 0,
                     is_primary_key: primary_key > 0,
+                    is_generated: matches!(hidden, 2 | 3),
                 })
             })?;
             let mut columns = Vec::new();
@@ -1044,6 +1062,17 @@ mod tests {
             ]),
             vec!["CREATE TRIGGER t BEGIN SELECT 1; SELECT 2".to_string()]
         );
+        // A fragment that ends in a comment keeps the next fragments out of
+        // that comment.
+        let commented = "CREATE TRIGGER t AFTER INSERT ON a BEGIN INSERT INTO b VALUES(1) -- one\n\
+                         ; DELETE FROM c; END; SELECT 1";
+        let joined = join_trigger_bodies(split_statements(commented, Dialect::Sqlite));
+        assert_eq!(joined.len(), 2, "{joined:?}");
+        assert!(
+            joined[0].ends_with("-- one\n; DELETE FROM c; END"),
+            "{joined:?}"
+        );
+        assert_eq!(joined[1], "SELECT 1");
         // A NUL in the text ends the join.
         assert_eq!(
             join_trigger_bodies(vec!["SELECT '\0".into(), "SELECT 2".into()]),
@@ -1240,7 +1269,7 @@ mod tests {
         let result = SqliteDriver::connect(&connection_for("/does/not/exist/a.db")).await;
         assert_eq!(
             result.err().unwrap().category(),
-            crate::error::ErrorCategory::Database
+            crate::error::ErrorCategory::Io
         );
     }
 
@@ -1715,6 +1744,28 @@ mod tests {
         assert!(columns[1].nullable);
 
         driver.ping().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_generated_column_is_marked_and_the_rowid_alias_is_not() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("gen.db");
+        let mut driver = SqliteDriver::connect(&connection_for(&path.to_string_lossy()))
+            .await
+            .unwrap();
+        driver
+            .execute_query(
+                "CREATE TABLE g (id INTEGER PRIMARY KEY, a INT, \
+                 b INT GENERATED ALWAYS AS (a * 2) VIRTUAL, \
+                 c INT GENERATED ALWAYS AS (a + 1) STORED);",
+                None,
+                &ExecOptions::default(),
+            )
+            .await
+            .unwrap();
+        let columns = driver.list_columns("gen.db", None, "g").await.unwrap();
+        let generated: Vec<bool> = columns.iter().map(|column| column.is_generated).collect();
+        assert_eq!(generated, vec![false, false, true, true]);
     }
 
     #[tokio::test]

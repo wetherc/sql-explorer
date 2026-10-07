@@ -89,6 +89,14 @@ describe('settings store', () => {
     settings.load(null)
     expect(settings.settings).toEqual(defaultSettings())
     settings.persist(null)
+    // A storage that is full keeps the values for the session.
+    expect(() =>
+      settings.persist({
+        setItem: () => {
+          throw new Error('QuotaExceededError')
+        },
+      }),
+    ).not.toThrow()
   })
 
   it('changes one field and keeps the rest', () => {

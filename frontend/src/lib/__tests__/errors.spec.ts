@@ -115,10 +115,14 @@ describe('errorAdvice', () => {
     expect(advise(ErrorCategory.Timeout)).toContain('timeout')
     expect(advise(ErrorCategory.Configuration)).toContain('Fix')
     expect(advise(ErrorCategory.Secret)).toContain('keychain')
+    expect(advise(ErrorCategory.Io)).toContain('permission')
   })
 
   it('gives no advice when the message is enough', () => {
     expect(advise(ErrorCategory.Database)).toBe('')
+    // A value the user typed is wrong, and the message says which one, so
+    // the connection details are not the cause.
+    expect(advise(ErrorCategory.Invalid)).toBe('')
   })
 })
 

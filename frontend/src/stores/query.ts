@@ -6,7 +6,7 @@ import { useConnectionsStore } from './connections'
 import { useHistoryStore } from './history'
 import { useSettingsStore } from './settings'
 import { useUiStore } from './ui'
-import { toErrorPayload } from '@/lib/errors'
+import { isCancellation, toErrorPayload } from '@/lib/errors'
 import { scanCost } from '@/lib/format'
 import { ResultTable, type ResultStreamHandlers } from '@/lib/results'
 import { PlanMode } from '@/types/api'
@@ -53,8 +53,27 @@ export interface PaneRun {
   params?: Record<string, unknown>
 }
 
+/** A place in the text of the editor. Both numbers count from 1. */
+export interface EditorPosition {
+  line: number
+  column: number
+}
+
+/** An export of all rows that runs for one tab, so the user can stop it. */
+export interface RunningExport {
+  connectionId: string
+  requestId: string
+  stopping: boolean
+}
+
 export interface QueryState {
   running: boolean
+  /** True when the last run failed. The next run clears it. */
+  failed: boolean
+  /** True after the user pressed Stop and until the run ends. */
+  stopping: boolean
+  /** The place of the last failure in the editor, when the server named one. */
+  errorLocation: EditorPosition | null
   /** The identifier the backend uses to stop this statement. */
   requestId: string | null
   /** The connection the running statement was sent to. A stop must reach
@@ -74,12 +93,18 @@ export interface QueryState {
   lastRunAt: number | null
   /** What the execution cost, for an engine that reports it. */
   stats: QueryStats | null
+  /** The export of all rows that is running. The store keeps it, so a view
+   *  that mounts again sees it and can't start a second export. */
+  exporting: RunningExport | null
 }
 
 /** Builds the state a tab starts with. */
 export function newQueryState(): QueryState {
   return {
     running: false,
+    failed: false,
+    stopping: false,
+    errorLocation: null,
     requestId: null,
     requestConnectionId: null,
     error: null,
@@ -91,6 +116,7 @@ export function newQueryState(): QueryState {
     activePaneId: null,
     lastRunAt: null,
     stats: null,
+    exporting: null,
   }
 }
 
@@ -104,6 +130,28 @@ export function runRowLimit(settingsLimit: number, connectionLimit: number | und
   return connectionLimit !== undefined && connectionLimit > 0
     ? Math.min(settingsLimit, connectionLimit)
     : settingsLimit
+}
+
+/**
+ * Moves a place in the text that the window sent into the editor. The
+ * `start` is the place in the editor where the sent text begins, before
+ * the store trims it, and `sent` is that text as the user gave it.
+ */
+export function editorPosition(
+  sent: string,
+  start: EditorPosition,
+  line: number,
+  column: number,
+): EditorPosition {
+  // The backend counts from the first character of the trimmed text.
+  const leading = sent.slice(0, sent.length - sent.trimStart().length).split('\n')
+  const lead = leading.length - 1
+  const firstColumn = lead === 0 ? start.column : 1
+  const textLine = start.line + lead
+  const textColumn = firstColumn + leading[lead]!.length
+  return line === 1
+    ? { line: textLine, column: textColumn + column - 1 }
+    : { line: textLine + line - 1, column }
 }
 
 /** Counts the rows of every result set of one execution. */
@@ -214,6 +262,7 @@ export const useQueryStore = defineStore('query', () => {
     ) => Promise<void>,
     label?: string,
     queryParams?: Record<string, unknown>,
+    origin?: { sent: string; start: EditorPosition },
   ): Promise<boolean> {
     const trimmed = query.trim()
     if (trimmed === '') {
@@ -229,6 +278,9 @@ export const useQueryStore = defineStore('query', () => {
 
     const requestId = createId()
     state.running = true
+    state.failed = false
+    state.stopping = false
+    state.errorLocation = null
     state.requestId = requestId
     state.requestConnectionId = connectionId
     state.error = null
@@ -305,8 +357,12 @@ export const useQueryStore = defineStore('query', () => {
               openPane(table)
             }
           },
+          onMessage: (message) => {
+            state.messages = [...state.messages, message]
+          },
           onEnd: (end) => {
-            state.messages = end.messages
+            // The end gives the messages that did not stream before it.
+            state.messages = [...state.messages, ...end.messages]
             state.rowsAffected = end.rowsAffected
             state.elapsedMs = end.elapsedMs
             state.stats = end.stats
@@ -325,12 +381,28 @@ export const useQueryStore = defineStore('query', () => {
       // so that failure gives no notice.
       failure = run.abandoned ? toErrorPayload(error) : ui.reportError(error, { kept: true })
       state.error = failure
+      // A stop that the user asked for is not a failure, so the tab keeps
+      // its view and shows no failed mark.
+      if (!run.abandoned && !isCancellation(failure)) {
+        state.failed = true
+        // The messages show the failure, so the view moves to them.
+        state.activePaneId = null
+        if (origin && typeof failure.line === 'number') {
+          state.errorLocation = editorPosition(
+            origin.sent,
+            origin.start,
+            failure.line,
+            failure.column ?? 1,
+          )
+        }
+      }
       state.elapsedMs = Date.now() - (state.startedAt ?? Date.now())
     } finally {
       if (!run.abandoned) {
         runs.delete(tabId)
       }
       state.running = false
+      state.stopping = false
       state.requestId = null
       state.requestConnectionId = null
       state.startedAt = null
@@ -354,12 +426,17 @@ export const useQueryStore = defineStore('query', () => {
     return succeeded
   }
 
-  /** Runs a statement for one tab. */
+  /**
+   * Runs a statement for one tab. The `start` is the place in the editor
+   * where `query` begins, so the store can give the place of a failure in
+   * the editor.
+   */
   function execute(
     tabId: string,
     connectionId: string,
     query: string,
     queryParams?: Record<string, unknown>,
+    start?: EditorPosition,
   ): Promise<boolean> {
     const text = query.trim()
     return runRequest(
@@ -373,12 +450,15 @@ export const useQueryStore = defineStore('query', () => {
         ),
       undefined,
       queryParams,
+      start ? { sent: query, start } : undefined,
     )
   }
 
   /**
    * Reads the plan of one statement and shows it as a result. The actual plan
    * runs the statement, and the caller asks the user before it calls this.
+   * The backend measures the place of a failure in the text with the plan
+   * keyword in front, so a plan failure gives no place in the editor.
    */
   function explain(
     tabId: string,
@@ -415,6 +495,7 @@ export const useQueryStore = defineStore('query', () => {
         })
       },
       mode === PlanMode.Actual ? 'Actual plan' : 'Estimated plan',
+      queryParams,
     )
   }
 
@@ -445,14 +526,24 @@ export const useQueryStore = defineStore('query', () => {
    */
   async function cancel(tabId: string): Promise<void> {
     const state = stateFor(tabId)
-    if (!state.running || !state.requestId || !state.requestConnectionId) {
+    if (!state.running || state.stopping || !state.requestId || !state.requestConnectionId) {
       return
     }
+    state.stopping = true
     try {
       await api.cancelQuery(state.requestConnectionId, state.requestId)
     } catch (error) {
       const payload = toErrorPayload(error)
-      ui.warn(payload.message)
+      state.stopping = false
+      ui.warn("Couldn't stop the statement. It may still be running.", payload.message)
+    }
+  }
+
+  /** Removes the error marker of one tab, for example after an edit. */
+  function clearErrorLocation(tabId: string): void {
+    const state = peekState(tabId)
+    if (state) {
+      state.errorLocation = null
     }
   }
 
@@ -510,6 +601,7 @@ export const useQueryStore = defineStore('query', () => {
     execute,
     explain,
     cancel,
+    clearErrorLocation,
     selectPane,
     togglePin,
     closePane,

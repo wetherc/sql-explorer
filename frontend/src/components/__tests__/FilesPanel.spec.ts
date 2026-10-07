@@ -68,7 +68,7 @@ describe('FilesPanel', () => {
 
   it('opens a file in a tab, from a click and from the Enter key', async () => {
     apiStub.listFolder.mockResolvedValue([entry('a.sql'), entry('b.sql')])
-    apiStub.readTextFile.mockResolvedValue('SELECT 1')
+    apiStub.readTextFile.mockResolvedValue({ contents: 'SELECT 1', encoding: 'utf8' })
     const wrapper = await mountWithRoot()
     const tabs = useTabsStore()
 
@@ -214,5 +214,62 @@ describe('FilesPanel', () => {
     // A file reports no state of its own, because it never opens.
     const file = wrapper.findAll('[data-test="file-row"]')[1]!
     expect(file.attributes('aria-expanded')).toBeUndefined()
+  })
+})
+
+describe('FilesPanel notes and refresh', () => {
+  beforeEach(() => {
+    Object.values(apiStub).forEach((fn) => fn.mockReset())
+    apiStub.listFolder.mockResolvedValue([])
+  })
+
+  it('says when an open folder has no entries', async () => {
+    const wrapper = await mountWithRoot()
+    await wrapper.find('[data-test="file-row"]').trigger('click')
+    await settle()
+    expect(wrapper.find('[data-test="file-empty"]').text()).toBe('Empty folder')
+  })
+
+  it('shows a failed read with a Retry button that reads the folder again', async () => {
+    apiStub.listFolder.mockRejectedValue({ category: 'io', message: 'Permission denied.' })
+    const wrapper = await mountWithRoot()
+    await wrapper.find('[data-test="file-row"]').trigger('click')
+    await settle()
+    expect(wrapper.find('[data-test="file-error"]').text()).toContain('Permission denied.')
+
+    apiStub.listFolder.mockResolvedValue([entry('a.sql')])
+    await wrapper.find('[data-test="file-retry"]').trigger('click')
+    await settle()
+    expect(wrapper.find('[data-test="file-error"]').exists()).toBe(false)
+    expect(wrapper.findAll('[data-test="file-row"]')).toHaveLength(2)
+  })
+
+  it('reads every folder again from the Refresh button', async () => {
+    const wrapper = await mountWithRoot()
+    await wrapper.find('[data-test="file-row"]').trigger('click')
+    await settle()
+    apiStub.listFolder.mockClear()
+    apiStub.listFolder.mockResolvedValue([entry('new.sql')])
+    await wrapper.find('[data-test="files-refresh"]').trigger('click')
+    await settle()
+    expect(apiStub.listFolder).toHaveBeenCalledWith('/data')
+    expect(wrapper.text()).toContain('new.sql')
+  })
+
+  it('moves the focus to the next folder when Delete takes one away', async () => {
+    const wrapper = mountWithPlugins(FilesPanel)
+    apiStub.fileRoots.mockResolvedValue(['/one', '/two'])
+    await useFilesStore().restoreRoots()
+    await settle()
+    const rootRow = (name: string) =>
+      wrapper.findAll('[data-test="file-row"]').find((row) => row.text() === name)!
+
+    await rootRow('one').trigger('keydown', { key: 'Delete' })
+    await settle()
+    expect(document.activeElement?.textContent).toContain('two')
+
+    await rootRow('two').trigger('keydown', { key: 'Delete' })
+    await settle()
+    expect(wrapper.findAll('[data-test="file-row"]')).toHaveLength(0)
   })
 })

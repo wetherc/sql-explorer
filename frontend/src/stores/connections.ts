@@ -56,65 +56,88 @@ export function createId(): string {
   return `id-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
 }
 
-/** Reports the fields the record needs but does not hold. */
-export function validateConnection(connection: SavedConnection): string[] {
-  const problems: string[] = []
+/** The most minutes that Athena reuses a result for: seven days. */
+export const ATHENA_REUSE_MAX_MINUTES = 10080
+
+/**
+ * Reports the fields the record needs but does not contain, by the name of the
+ * field. An empty record means that the connection is complete.
+ */
+export function validateConnection(connection: SavedConnection): Record<string, string> {
+  const problems: Record<string, string> = {}
   if (!connection.name.trim()) {
-    problems.push('Enter a name for the connection.')
+    problems.name = 'Enter a name for the connection.'
   }
   // A number box that the user empties gives a text, and the backend
   // refuses a text where it reads a whole number.
   const { connectTimeoutSecs, queryTimeoutSecs, maxRows, maxSessions } = connection.options
   if (!isCount(connectTimeoutSecs)) {
-    problems.push('Connect timeout must be a whole number, 0 or greater.')
+    problems.connectTimeoutSecs = 'Connect timeout must be a whole number, 0 or greater.'
   }
   if (!isCount(queryTimeoutSecs)) {
-    problems.push('Statement timeout must be a whole number, 0 or greater.')
+    problems.queryTimeoutSecs = 'Statement timeout must be a whole number, 0 or greater.'
   }
   if (!isCount(maxRows)) {
-    problems.push('Row limit must be a whole number, 0 or greater.')
+    problems.maxRows = 'Row limit must be a whole number, 0 or greater.'
   }
   if (!isCount(maxSessions) || maxSessions < 1) {
-    problems.push('Max sessions must be a whole number, 1 or greater.')
+    problems.maxSessions = 'Max sessions must be a whole number, 1 or greater.'
   }
   switch (connection.dbType) {
     case DbType.Sqlite:
       if (!connection.options.filePath?.trim()) {
-        problems.push('Enter the path to a SQLite database file.')
+        problems.filePath = 'Enter the path to a SQLite database file.'
       }
       break
-    case DbType.Athena:
-      if (!connection.options.awsRegion?.trim()) {
-        problems.push('Enter an AWS region for the Athena connection.')
+    case DbType.Athena: {
+      const options = connection.options
+      if (!options.awsRegion?.trim()) {
+        problems.awsRegion = 'Enter an AWS region for the Athena connection.'
       }
-      if (
-        !connection.options.athenaWorkgroup?.trim() &&
-        !connection.options.athenaOutputLocation?.trim()
-      ) {
-        problems.push('Enter a workgroup or an output location for the Athena connection.')
+      if (!options.athenaWorkgroup?.trim() && !options.athenaOutputLocation?.trim()) {
+        problems.athenaWorkgroup =
+          'Enter a workgroup or an output location for the Athena connection.'
       }
       // The secret access key is not checked here, because the keychain can
       // already hold it and the form then shows an empty box. The backend
       // refuses an incomplete pair when the connection opens.
       if (
-        connection.options.awsCredentialSource === AwsCredentialSource.Keys &&
-        !connection.options.awsAccessKeyId?.trim()
+        options.awsCredentialSource === AwsCredentialSource.Keys &&
+        !options.awsAccessKeyId?.trim()
       ) {
-        problems.push('Enter an access key ID, or choose another credential source.')
+        problems.awsAccessKeyId = 'Enter an access key ID, or choose another credential source.'
+      }
+      const age = options.athenaResultReuseMaxAgeMinutes
+      if (options.athenaResultReuse && (!isCount(age) || age > ATHENA_REUSE_MAX_MINUTES)) {
+        problems.athenaResultReuseMaxAgeMinutes = `Max age must be a whole number of minutes from 0 to ${ATHENA_REUSE_MAX_MINUTES}.`
       }
       break
+    }
     default:
       if (!connection.options.connectionUrl?.trim()) {
         if (!connection.host?.trim()) {
-          problems.push('Enter a host for the connection.')
+          problems.host = 'Enter a host for the connection.'
         }
-        const port = connection.port
-        if (port === null || !Number.isInteger(port) || port < 1 || port > 65535) {
-          problems.push('Port must be a whole number from 1 to 65535.')
+        // An emptied number box gives a text, which is not a whole number.
+        // SQL Browser gives the port of a named instance, so that port is
+        // not read.
+        const port: unknown = connection.port
+        const browsed =
+          connection.dbType === DbType.Mssql && !!connection.options.instanceName?.trim()
+        if (
+          !browsed &&
+          (!Number.isInteger(port) || (port as number) < 1 || (port as number) > 65535)
+        ) {
+          problems.port = 'Port must be a whole number from 1 to 65535.'
         }
       }
   }
   return problems
+}
+
+/** Gives the first problem of a record of problems, or null for none. */
+export function firstProblem(problems: Record<string, string>): string | null {
+  return Object.values(problems)[0] ?? null
 }
 
 /** True for a whole number of 0 or more. */
@@ -151,6 +174,8 @@ export const useConnectionsStore = defineStore('connections', () => {
   const health = ref<Record<string, ConnectionHealth>>({})
   const loading = ref(false)
   const connecting = ref<Record<string, boolean>>({})
+  /** Why the last connect of each connection failed, or why it was lost. */
+  const lastError = ref<Record<string, string>>({})
   const testing = ref(false)
 
   /** The connection whose objects the explorer shows. */
@@ -241,10 +266,9 @@ export const useConnectionsStore = defineStore('connections', () => {
   }
 
   async function save(connection: SavedConnection): Promise<boolean> {
-    const problems = validateConnection(connection)
-    const firstProblem = problems[0]
-    if (firstProblem) {
-      ui.warn(firstProblem)
+    const problem = firstProblem(validateConnection(connection))
+    if (problem) {
+      ui.warn(problem)
       return false
     }
     try {
@@ -263,6 +287,7 @@ export const useConnectionsStore = defineStore('connections', () => {
       await api.deleteConnection(id)
       delete active.value[id]
       delete health.value[id]
+      setLastError(id, null)
       if (selectedId.value === id) {
         selectedId.value = null
       }
@@ -272,16 +297,33 @@ export const useConnectionsStore = defineStore('connections', () => {
     }
   }
 
+  /** Records why a connection failed, or clears the record with null. */
+  function setLastError(id: string, message: string | null): void {
+    const rest = { ...lastError.value }
+    if (message === null) {
+      delete rest[id]
+    } else {
+      rest[id] = message
+    }
+    lastError.value = rest
+  }
+
   async function connect(connection: SavedConnection): Promise<boolean> {
+    // A second click while the connect runs opens no second connection.
+    if (connecting.value[connection.id]) {
+      return false
+    }
     connecting.value = { ...connecting.value, [connection.id]: true }
     try {
       const info = await api.connect(connection.id)
+      setLastError(connection.id, null)
       active.value = { ...active.value, [connection.id]: info }
       health.value = { ...health.value, [connection.id]: ConnectionHealth.Connected }
       selectedId.value = connection.id
       return true
     } catch (error) {
       const payload = ui.reportError(error)
+      setLastError(connection.id, payload.message)
       // A pasted access token lives for about one hour, and the stored one
       // cannot be made fresh again. The view asks for a new token.
       if (payload.category === ErrorCategory.Authentication && usesAccessToken(connection)) {
@@ -314,10 +356,9 @@ export const useConnectionsStore = defineStore('connections', () => {
   }
 
   async function test(connection: SavedConnection): Promise<boolean> {
-    const problems = validateConnection(connection)
-    const firstProblem = problems[0]
-    if (firstProblem) {
-      ui.warn(firstProblem)
+    const problem = firstProblem(validateConnection(connection))
+    if (problem) {
+      ui.warn(problem)
       return false
     }
     testing.value = true
@@ -357,7 +398,14 @@ export const useConnectionsStore = defineStore('connections', () => {
       // is gone, so its root goes. A connect after the drop reads it again.
       useExplorerStore().removeRoot(event.connectionId)
       if (event.message) {
-        ui.warn(event.message)
+        // A lost connection stops the work of every tab on it, so the
+        // notice stays until the user closes it.
+        setLastError(event.connectionId, event.message)
+        ui.reportError({
+          category: ErrorCategory.NotConnected,
+          message: event.message,
+          detail: null,
+        })
       }
     }
   }
@@ -394,6 +442,7 @@ export const useConnectionsStore = defineStore('connections', () => {
     health,
     loading,
     connecting,
+    lastError,
     testing,
     selectedId,
     expiredTokenId,

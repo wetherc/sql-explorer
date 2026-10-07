@@ -142,12 +142,17 @@ The filter keeps 6 of the 18 rows of the result.
   same time. The temporary tables, the `SET` options and the transactions of
   a tab stay with the session of that tab. A session limit in the options of
   the connection bounds the sessions of one server, with six as the default.
+  A session that is idle for 60 minutes closes. At the limit, the session that
+  was not used for the longest time closes. A session in a transaction or with
+  a running statement does not close.
 - A second connection of the record reads the catalog for the explorer, so
   the tree does not wait behind a statement. The temporary tables and the
   attached databases of a tab do not show in the tree. A SQLite database in
   memory has one session alone, and the tree reads it on that session.
 - Passwords go into the keychain of the operating system. The settings file
-  holds no password.
+  contains no password. When the server of a saved connection changes and the user
+  types no new password, the application removes the stored password. A copy
+  of a connection asks for the password again.
 - A connection that stops answering is opened again, and the interface shows
   the state of each connection.
 
@@ -162,7 +167,8 @@ The filter keeps 6 of the 18 rows of the result.
 - One registry holds every key of the application, and a palette lists the
   commands with the keys that reach them.
 - A script runs statement by statement. The splitter respects quotes, comments,
-  dollar tags and the MySQL `DELIMITER` command.
+  dollar tags and the MySQL `DELIMITER` command. On MS SQL Server a script runs
+  batch by batch, and a line that has only `GO` ends a batch.
 - The formatter of the dialect lays out the statement, through the format
   command of the editor or a button.
 - A statement that carries a name such as `:id` opens a dialog for the values.
@@ -171,24 +177,37 @@ The filter keeps 6 of the 18 rows of the result.
 - A plan tab shows the plan of one statement. The estimated plan needs no run.
   The actual plan runs the statement, and the interface asks first.
 - The Messages tab holds what the server sent, with the severity, the code, the
-  line and the procedure of each message.
-- A statement that runs can be stopped, and the time limit of the connection
-  stops one that runs too long.
+  line and the procedure of each message. The messages come in while the script
+  runs. When a statement fails, the results panel shows the Messages tab.
+- When the server gives the place of an error, the editor marks that place, and
+  a "Go to line" button moves the cursor to it.
+- A tab shows a mark while its statement runs, and a red dot when its last run
+  failed.
+- A statement that runs can be stopped with the Stop button or with `Ctrl` or
+  `Cmd` with `Shift` and `C`. The time limit of the connection stops a
+  statement that runs too long.
 - The result grid draws only the rows in view, so a large result stays quick. It
   sorts, filters, marks a value that is absent, and opens a wide value.
 - Results go to a CSV, JSON, Markdown, INSERT or Excel file, or to the
   clipboard. A whole result goes to a file from the backend, so the rows do not
-  pass through the interface.
+  pass through the interface. An export of a whole result shows its progress
+  and has a Stop button. An Excel export tells the user when it stops at the
+  row limit of a sheet, or when it cuts the text of a cell.
 - A result tab can be pinned. It then holds its rows and the time of its run
   against the next statement, so two results stand beside each other.
 - The File menu of the operating system opens a query in a new tab, opens a
   query from a file, opens a folder of queries, and writes the query that
-  stands open. The keys of a desktop reach the same four commands.
+  stands open to its file. The keys of a desktop do the same four commands.
+- A file keeps its encoding when it is saved: UTF-8, UTF-8 or UTF-16 with a
+  byte order mark, or Windows-1252. When the text has a character that
+  Windows-1252 cannot store, the file is saved as UTF-8 with a byte order mark,
+  and a warning tells the user. A file that looks binary does not open.
 - The status bar reports the rows and the time, and it counts the time up
   while a statement runs. For Athena it reports the data scanned with the cost
   at a rate the settings hold.
 - The history and the saved statements persist, and so do the open tabs with
-  their parameter values.
+  their parameter values. When a settings file cannot be read, the application
+  renames it to a `.corrupt` file, starts without it, and shows a notice.
 
 **Objects**
 
@@ -210,12 +229,14 @@ The filter keeps 6 of the 18 rows of the result.
 - A filter box keeps the path down to each match.
 - The context menu builds a preview statement in the backend, so every name is
   quoted for the engine. It also builds the statements of an object: a CREATE
-  draft, a SELECT, an INSERT, an UPDATE and a DELETE. The CREATE of a table is a
-  draft, because it holds no index, no default and no constraint.
+  draft, a SELECT, an INSERT and an UPDATE. The CREATE of a table is a draft,
+  because it contains no index, no default and no constraint.
 - A Properties dialog holds the facts of a relation, its columns, its indexes
   and its constraints, in one call to the backend.
-- One command reads every relation of a database, and the completion of the
-  editor then knows a name that the tree has not opened.
+- When the user expands a database in the tree, the application reads all the
+  relations of that database in the background. The completion of the editor
+  then knows a name that the tree has not opened.
+- A branch that cannot load shows the error and a Retry button.
 
 ## Prerequisites
 
@@ -245,12 +266,8 @@ sudo apt install -y \
 ```
 
 The Kerberos headers of `libkrb5-dev` and the `clang` compiler build the
-Integrated Security of MS SQL Server.
-
-An earlier version of this application used Tauri 1, which needs
-`libsoup-2.4` and `webkit2gtk-4.0`. Neither package ships on Ubuntu 24.04 or on
-Debian 13, so that version could not be built there. Tauri 2 removes the
-problem.
+Integrated Security of MS SQL Server. The `.deb` and `.rpm` packages that the
+build makes depend on the Kerberos and the OpenSSL libraries of the system.
 
 ### macOS
 
@@ -315,11 +332,12 @@ build on macOS makes the NSIS installer and not the MSI installer.
 ## Tests and linters
 
 ```sh
-pnpm test           # every unit test, both halves
+pnpm test           # every unit test, both halves and the vendored crates
 pnpm test:unit      # the frontend only
+pnpm test:backend   # the backend and the vendored crates only
 pnpm test:coverage  # the frontend with a coverage report
 pnpm test:coverage:backend  # the backend with a coverage report
-pnpm lint           # ESLint, clippy and the formatters
+pnpm lint           # Prettier, ESLint, vue-tsc, clippy and rustfmt checks
 pnpm format         # Prettier and rustfmt
 pnpm verify         # the linters and then the tests
 ```
@@ -327,7 +345,8 @@ pnpm verify         # the linters and then the tests
 A pre-commit hook runs the formatters, the linters and the unit tests with
 the coverage gate of each half, and it stops a commit that does not pass. The
 frontend gate is the set of thresholds in `frontend/vitest.config.ts`. The
-backend gate is a line coverage of 87%, which `.githooks/pre-commit` sets. The
+backend gate is a line coverage of 91% and a function coverage of 86%, which
+`.githooks/pre-commit` sets. The
 hook runs the checks on the staged files alone: it puts the changes that are
 not staged, and the files that git does not track, into a stash for the run,
 and puts them back after it. Run `git commit --no-verify` to step past the
@@ -403,53 +422,62 @@ name, so `pnpm test:live live_mysql` runs the MySQL tests alone. The passwords i
 ## Layout
 
 ```
-backend/          The Rust half
+backend/              The Rust half
   src/
-    commands.rs   The commands the interface calls
-    db.rs         The shared data model
-    db/drivers/   One file for each engine
-    error.rs      The error type and the payload the interface receives
-    secrets.rs    The keychain of the operating system
-    sql.rs        Quoting rules, the statement splitter and the parameters
-    state.rs      The open connections and the statements that run
-    storage.rs    The connection record and its options
-    store.rs      The settings, the history and the saved statements
-frontend/         The Vue half
+    commands.rs       The commands the interface calls
+    db.rs             The shared data model
+    db/columnar.rs    The binary frames that send the rows to the interface
+    db/drivers.rs     The helpers that the drivers share
+    db/drivers/       One file for each engine
+    db/sink.rs        The receiver of the rows of a run: a response or a file
+    error.rs          The error type and the payload the interface receives
+    files.rs          The query files, their folders and their encodings
+    history.rs        The records of the history and the saved statements
+    jsonfile.rs       The JSON files of the settings, written safely
+    main.rs           The start of the application
+    menu.rs           The File menu of the operating system
+    script.rs         The statements that the explorer builds for a relation
+    secrets.rs        The keychain of the operating system
+    session.rs        The server sessions of each connection
+    sql.rs            Quoting rules, the statement splitter and the parameters
+    state.rs          The open connections and the statements that run
+    storage.rs        The connection record and its options
+    store.rs          The settings, the history and the saved statements
+    xlsx.rs           The writer of Excel files
+  live/               The Docker servers and the fixtures of the live tests
+  vendor/             The patched copies of tiberius and tokio-postgres
+frontend/             The Vue half
   src/
-    components/   The views
-    layouts/      The shell of the application
-    lib/          The calls to the backend and the pure helpers
-    stores/       The state of the interface
-    types/        The shapes the backend sends
-docs/             The GitHub Pages site
-  guide/          The user guide, which the app bundles and the site publishes
+    components/       The views
+    layouts/          The shell of the application
+    lib/              The calls to the backend and the pure helpers
+    plugins/          The set-up of Vuetify, Monaco and the icons
+    stores/           The state of the interface
+    types/            The types of the data that the backend sends
+docs/                 The GitHub Pages site
+  guide/              The user guide, which the app bundles and the site publishes
+tests/fixtures/       Test data that the frontend and the backend both read
 ```
 
 ## What it does not do
 
-- The interface holds no transaction control and no edit of a row in the grid.
-  One part comes first: a session generation that the reconnection path
-  checks.
-- `docs/LIMITATIONS.md` records every other limit, with its cause. Read it
-  before you report a defect. It covers the copy of `tiberius` that the build
-  holds, the `PRINT` text of MS SQL Server, the ciphers that `rustls` refuses,
-  the catalog of Athena, and the way a parameter changes a batch on MS SQL
-  Server.
+- The interface has no transaction control and no edit of a row in the grid.
+- The user guide in `docs/guide/` gives the limits of each engine, for example
+  the way a parameter changes a batch on MS SQL Server. Read it before you
+  report a defect.
 
 ## Notes on the design
 
 **The backend builds every connection configuration.** No component joins a
-connection string by hand. An earlier version did, and the string lost the port
-of every MS SQL Server connection, because the parser of `tiberius` reads the
-port only from inside the `server` value. The same string lost any password that
-held a semicolon or a brace.
+connection string by hand. A joined string loses the port of a MS SQL Server
+connection, because the parser of `tiberius` reads the port only from inside
+the `server` value. It also loses a password that has a semicolon or a brace.
 
-**Errors carry their reason.** A failed command returns a category, a message and
-the chain of causes. An earlier version replaced every database error with one
-fixed sentence, which made a set of deterministic faults look like intermittent
-behaviour.
+**Errors give their reason.** A failed command returns a category, a message,
+the chain of causes and, when the server gives it, the line and the column of
+the fault.
 
-**Each connection holds its own lock.** One slow statement no longer blocks the
+**Each connection has its own lock.** One slow statement does not block the
 other connections.
 
 **Rows are arrays and not objects.** A statement can return two columns with the

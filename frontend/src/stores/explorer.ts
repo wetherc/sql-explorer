@@ -4,6 +4,7 @@ import { api } from '@/lib/api'
 import { useConnectionsStore } from './connections'
 import { useSettingsStore } from './settings'
 import { useUiStore } from './ui'
+import { fullErrorText, toErrorPayload } from '@/lib/errors'
 import { emptySchemaIndex, type SchemaIndex } from '@/lib/sql'
 import {
   Dialect,
@@ -24,6 +25,14 @@ import {
 
 /** The pause between the last keystroke in the filter and the match. */
 export const FILTER_DELAY_MS = 200
+
+/**
+ * How long the list of relations of one schema stays shared after its read
+ * ends. Each folder of relations reads the same list, and a folder that the
+ * user opens later than this reads a list of its own, so it cannot show a
+ * list that is out of date.
+ */
+export const RELATION_SHARE_MS = 2000
 
 export type NodeType =
   | 'connection'
@@ -121,6 +130,8 @@ export interface ExplorerNode {
   folder?: FolderContent
   /** True for an object that the engine keeps but does not run, such as a disabled trigger. */
   dimmed?: boolean
+  /** Why the last read of the children failed, or null after a read that did not fail. */
+  error?: string | null
 }
 
 /** Selects the icon of a node. */
@@ -564,8 +575,13 @@ export const useExplorerStore = defineStore('explorer', () => {
       return snapshot
     } catch (error) {
       // A schema that cannot be read leaves the editor with the names of the
-      // tree, so the failure is reported and nothing else stops.
-      ui.reportError(error)
+      // tree, so the failure is a warning and nothing else stops.
+      if (forgetStamp(connectionId) === stamp) {
+        ui.warn(
+          `Couldn't read the schema of ${database}, so autocomplete offers only the names in the tree.`,
+          fullErrorText(toErrorPayload(error)),
+        )
+      }
       return null
     }
   }
@@ -599,22 +615,11 @@ export const useExplorerStore = defineStore('explorer', () => {
     }
   }
 
-  /**
-   * The part of the index that the snapshots hold, with the names it saw, by
-   * the identifier of the connection. It lives apart from the whole index so
-   * that a change of the tree leaves this part cached, because the snapshots
-   * hold most of the names.
-   */
-  const snapshotParts = computed(() => {
-    const parts = new Map<string, ReturnType<typeof emptyPart>>()
-    for (const [key, snapshot] of Object.entries(snapshots.value)) {
-      const connectionId = key.slice(0, key.indexOf('/'))
-      let part = parts.get(connectionId)
-      if (!part) {
-        part = emptyPart()
-        parts.set(connectionId, part)
-      }
-      const { index, seen } = part
+  /** Builds the part of the index from the snapshots of one connection. */
+  function partOf(list: SchemaSnapshot[]): ReturnType<typeof emptyPart> {
+    const part = emptyPart()
+    const { index, seen } = part
+    for (const snapshot of list) {
       if (!seen.databases.has(snapshot.database)) {
         seen.databases.add(snapshot.database)
         index.databases.push(snapshot.database)
@@ -641,50 +646,84 @@ export const useExplorerStore = defineStore('explorer', () => {
         }
       }
     }
+    return part
+  }
+
+  /** The last part of each connection, with the snapshots it came from. */
+  const partCache = new Map<
+    string,
+    { list: SchemaSnapshot[]; part: ReturnType<typeof emptyPart> }
+  >()
+
+  /**
+   * The part of the index that the snapshots contain, with the names it saw, by
+   * the identifier of the connection. It lives apart from the whole index so
+   * that a change of the tree leaves this part cached, because the snapshots
+   * contain most of the names. A new snapshot of one connection builds the part
+   * of that connection again, and the parts of the other connections stay.
+   */
+  const snapshotParts = computed(() => {
+    const grouped = new Map<string, SchemaSnapshot[]>()
+    for (const [key, snapshot] of Object.entries(snapshots.value)) {
+      const connectionId = key.slice(0, key.indexOf('/'))
+      grouped.set(connectionId, [...(grouped.get(connectionId) ?? []), snapshot])
+    }
+    const parts = new Map<string, ReturnType<typeof emptyPart>>()
+    for (const [connectionId, list] of grouped) {
+      const cached = partCache.get(connectionId)
+      const same =
+        cached !== undefined &&
+        cached.list.length === list.length &&
+        cached.list.every((snapshot, position) => snapshot === list[position])
+      const part = same ? cached.part : partOf(list)
+      partCache.set(connectionId, { list, part })
+      parts.set(connectionId, part)
+    }
+    for (const connectionId of [...partCache.keys()]) {
+      if (!grouped.has(connectionId)) {
+        partCache.delete(connectionId)
+      }
+    }
     return parts
   })
 
   /** Builds the names that the editor offers for one connection. */
   function buildSchemaIndex(connectionId: string): SchemaIndex {
-    // The snapshots come first, because they hold the whole database. The
-    // copies hold references to the entries of the cached part, so a change
-    // of the tree pays for the copies and the walk, not for a rebuild of
-    // the snapshot part.
+    // The snapshots come first, because they contain the whole database. The
+    // tree adds what the user has opened and the snapshots do not contain. A
+    // tree that adds nothing gives the cached part itself, so a change of
+    // the tree copies no list of the snapshots.
     const base = snapshotParts.value.get(connectionId) ?? emptyPart()
-    const index: SchemaIndex = {
-      databases: [...base.index.databases],
-      schemas: [...base.index.schemas],
-      tables: [...base.index.tables],
-      columns: [...base.index.columns],
-    }
+    const added: SchemaIndex = emptySchemaIndex()
     const seen = {
-      databases: new Set(base.seen.databases),
-      schemas: new Set(base.seen.schemas),
-      tables: new Set(base.seen.tables),
+      databases: new Set<string>(),
+      schemas: new Set<string>(),
+      tables: new Set<string>(),
     }
-
-    // The tree adds what the user has opened and the snapshots do not hold.
-    // The walk reads the set of the cached part and mutates the copies only.
     const fromSnapshot = base.seen.tables
     const own = roots.value.filter((root) => root.connectionId === connectionId)
     walk(own, (node) => {
       const qualifier = [node.database, node.schema].filter(Boolean).join('.')
       const identity = `${qualifier}/${node.table ?? node.label}`
-      if (node.nodeType === 'database' && !seen.databases.has(node.label)) {
-        seen.databases.add(node.label)
-        index.databases.push(node.label)
-      } else if (node.nodeType === 'schema' && !seen.schemas.has(node.label)) {
-        seen.schemas.add(node.label)
-        index.schemas.push(node.label)
+      if (node.nodeType === 'database') {
+        if (!base.seen.databases.has(node.label) && !seen.databases.has(node.label)) {
+          seen.databases.add(node.label)
+          added.databases.push(node.label)
+        }
+      } else if (node.nodeType === 'schema') {
+        if (!base.seen.schemas.has(node.label) && !seen.schemas.has(node.label)) {
+          seen.schemas.add(node.label)
+          added.schemas.push(node.label)
+        }
       } else if (isRelation(node)) {
-        if (!seen.tables.has(identity)) {
+        if (!fromSnapshot.has(identity) && !seen.tables.has(identity)) {
           seen.tables.add(identity)
-          index.tables.push({ name: node.label, qualifier })
+          added.tables.push({ name: node.label, qualifier })
         }
       } else if (node.nodeType === 'column' && !fromSnapshot.has(identity)) {
         // A relation that a snapshot already holds keeps the columns of the
         // snapshot, so no name appears twice.
-        index.columns.push({
+        added.columns.push({
           name: node.label,
           table: node.table ?? '',
           qualifier,
@@ -692,7 +731,16 @@ export const useExplorerStore = defineStore('explorer', () => {
         })
       }
     })
-    return index
+    const lists = ['databases', 'schemas', 'tables', 'columns'] as const
+    if (lists.every((list) => added[list].length === 0)) {
+      return base.index
+    }
+    return {
+      databases: [...base.index.databases, ...added.databases],
+      schemas: [...base.index.schemas, ...added.schemas],
+      tables: [...base.index.tables, ...added.tables],
+      columns: [...base.index.columns, ...added.columns],
+    }
   }
 
   /** The cached index of each connection that an editor asked for. */
@@ -871,12 +919,17 @@ export const useExplorerStore = defineStore('explorer', () => {
     const generation = (loadGeneration.get(node.key) ?? 0) + 1
     loadGeneration.set(node.key, generation)
     const isLast = () => loadGeneration.get(node.key) === generation
+    // A node that leaves the tree during its read, such as the root of a
+    // connection that the user closed, takes no answer and no failure.
+    const wasInTree = inTree(node)
+    const isCurrent = () => isLast() && (!wasInTree || inTree(node))
     node.loading = true
+    node.error = null
     loadingNodes.add(node)
     loading.value = true
     try {
       const children = (await childrenOf(node)).map(adopt)
-      if (!isLast()) {
+      if (!isCurrent()) {
         return []
       }
       setChildren(node, children)
@@ -889,8 +942,10 @@ export const useExplorerStore = defineStore('explorer', () => {
       }
       return children
     } catch (error) {
-      if (isLast()) {
-        ui.reportError(error)
+      if (isCurrent()) {
+        // The tree shows the failure on the node with a way to read it
+        // again, so the notice in the corner leaves on its own.
+        node.error = ui.reportError(error, { kept: true }).message
         setChildren(node, [])
         node.loaded = false
       }
@@ -1050,11 +1105,16 @@ export const useExplorerStore = defineStore('explorer', () => {
         list,
         readers: new Set<FolderContent>(),
       }
-      list.catch(() => {
+      const drop = () => {
         if (relationReads.get(key) === entry) {
           relationReads.delete(key)
         }
-      })
+      }
+      list.then(
+        () => setTimeout(drop, RELATION_SHARE_MS),
+        // A read that fails is not shared, so the next folder asks again.
+        drop,
+      )
       relationReads.set(key, entry)
       read = entry
     }

@@ -4,13 +4,7 @@
        basis of the whole height, and that basis wins over a height of the
        card. The box would then take the height of the topic that stands
        open. -->
-  <AppDialog
-    :model-value="open"
-    max-width="900"
-    height="70vh"
-    scrollable
-    @update:model-value="close"
-  >
+  <AppDialog :model-value="open" size="large" height="70vh" scrollable @update:model-value="close">
     <v-card class="guide-card">
       <v-card-title class="text-subtitle-1">Guide</v-card-title>
       <v-card-text class="guide-body d-flex ga-4">
@@ -27,7 +21,7 @@
           />
         </v-list>
 
-        <div class="topic-body" data-test="guide-content">
+        <div ref="topicBody" class="topic-body" data-test="guide-content">
           <h2 class="text-subtitle-1 mb-2">{{ activeTopic.title }}</h2>
           <!-- The text comes from a file of the build and holds no text of
                the user, so it needs no cleaning step. -->
@@ -44,7 +38,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import AppDialog from './AppDialog.vue'
 import { GUIDE_TOPICS, renderTopic, topicById } from '@/lib/guide'
 
@@ -56,6 +50,18 @@ const activeId = ref(topics[0]!.id)
 
 const activeTopic = computed(() => topicById(activeId.value))
 const topicHtml = computed(() => renderTopic(activeTopic.value))
+
+/** The column of the topic text, which scrolls on its own. */
+const topicBody = ref<HTMLElement | null>(null)
+
+// A new topic starts at its top, and not at the place where the reader left
+// the topic before it.
+watch(activeId, async () => {
+  await nextTick()
+  if (topicBody.value) {
+    topicBody.value.scrollTop = 0
+  }
+})
 
 function close(open: boolean): void {
   emit('update:open', open)

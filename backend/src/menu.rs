@@ -52,7 +52,7 @@ pub const FILE_COMMANDS: [MenuCommand; 4] = [
     },
     MenuCommand {
         id: "query.save",
-        label: "Save Query",
+        label: "Save to File",
         accelerator: "CmdOrCtrl+S",
     },
 ];

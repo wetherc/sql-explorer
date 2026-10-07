@@ -57,7 +57,7 @@ export const useUiStore = defineStore('ui', () => {
   }
 
   /**
-   * Holds the list to the limit. A notice that leaves on its own goes before
+   * Keeps the list at the limit. A notice that leaves on its own goes before
    * one that stays until the user takes it away, so a burst of short notices
    * cannot hide a failure. A list of notices that all stay still loses its
    * oldest one. The notice that just arrived is always kept.
@@ -101,13 +101,22 @@ export const useUiStore = defineStore('ui', () => {
     })
   }
 
-  function warn(message: string, detail: string | null = null): Notice {
+  /**
+   * Shows a warning. With `kept: true` the warning stays until the user takes
+   * it away, and the limit of the list counts it as a notice that stays from
+   * the moment it arrives.
+   */
+  function warn(
+    message: string,
+    detail: string | null = null,
+    options: { kept?: boolean } = {},
+  ): Notice {
     return push({
       level: 'warning',
       message,
       detail,
       icon: 'mdi-alert-outline',
-      timeout: 6000,
+      timeout: options.kept ? -1 : 6000,
     })
   }
 

@@ -137,6 +137,53 @@ describe('ExplorerTree', () => {
 })
 
 describe('ExplorerTree as a tree a reader can follow', () => {
+  it('gives the note of an empty branch a level in the tree', () => {
+    const wrapper = mountTree([node({ loaded: true, children: [] })], new Set(['db']))
+    const note = wrapper.find('[data-test="tree-empty"]')
+    expect(note.attributes('role')).toBe('treeitem')
+    expect(note.attributes('aria-level')).toBe('2')
+    expect(note.attributes('aria-disabled')).toBe('true')
+  })
+
+  it('shows a failed read of an open branch with a Retry button', async () => {
+    const failed = { ...node(), error: 'The server went away.' }
+    const wrapper = mountTree([failed], new Set(['db']))
+    const note = wrapper.find('[data-test="tree-error"]')
+    expect(note.text()).toContain("Couldn't load: The server went away.")
+    expect(wrapper.text()).not.toContain('Nothing here')
+    await wrapper.find('[data-test="tree-retry"]').trigger('click')
+    expect(wrapper.emitted('retry')?.[0]?.[0]).toMatchObject({ key: 'db' })
+    expect(wrapper.emitted('activate')).toBeUndefined()
+  })
+
+  it('hides the failure while the branch reads again', () => {
+    const failed = { ...node({ loading: true }), error: 'The server went away.' }
+    const wrapper = mountTree([failed], new Set(['db']))
+    expect(wrapper.find('[data-test="tree-error"]').exists()).toBe(false)
+  })
+
+  it('tells a reader when a branch reads', () => {
+    expect(mountTree([node({ loading: true })]).attributes('aria-busy')).toBe('true')
+    expect(mountTree([node()]).attributes('aria-busy')).toBe('false')
+  })
+
+  it('takes the tab stop itself while its row is out of view, and passes the focus on', async () => {
+    const many = Array.from({ length: 400 }, (_item, index) =>
+      node({ key: `db${index}`, label: `Node ${index}` }),
+    )
+    const wrapper = mountTree(many, new Set(), 'db0')
+    expect(wrapper.attributes('tabindex')).toBe('-1')
+
+    Object.defineProperty(wrapper.element, 'scrollTop', { value: 24 * 200, writable: true })
+    await wrapper.trigger('scroll')
+    expect(wrapper.attributes('tabindex')).toBe('0')
+
+    ;(wrapper.element as HTMLElement).focus()
+    await wrapper.vm.$nextTick()
+    await wrapper.vm.$nextTick()
+    expect(document.activeElement?.textContent).toContain('Node 0')
+  })
+
   it('names itself a tree and its rows the items of one', () => {
     const wrapper = mountTree([node()])
 

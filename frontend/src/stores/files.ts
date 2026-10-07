@@ -17,6 +17,8 @@ export interface FileNode {
   children?: FileNode[]
   loading: boolean
   loaded: boolean
+  /** Why the last read of a folder failed, or null after a read that did not fail. */
+  error: string | null
 }
 
 /** Builds a node from one entry of a folder. */
@@ -29,6 +31,7 @@ export function nodeOfEntry(entry: FolderEntry, depth: number): FileNode {
     children: entry.entryType === 'folder' ? [] : undefined,
     loading: false,
     loaded: false,
+    error: null,
   }
 }
 
@@ -135,6 +138,7 @@ export const useFilesStore = defineStore('files', () => {
         children: [],
         loading: false,
         loaded: false,
+        error: null,
       },
     ]
   }
@@ -162,14 +166,6 @@ export const useFilesStore = defineStore('files', () => {
    */
   const loadGeneration = new Map<string, number>()
 
-  /** Reads the entries of one folder, unless they are already read. */
-  async function loadFolder(node: FileNode): Promise<void> {
-    if (node.loaded || node.loading) {
-      return
-    }
-    await readFolder(node)
-  }
-
   /**
    * Reads the entries of one folder and writes them into it. The entries
    * are new nodes, so each folder below that the panel shows open is read
@@ -180,6 +176,7 @@ export const useFilesStore = defineStore('files', () => {
     loadGeneration.set(node.path, generation)
     const isLast = () => loadGeneration.get(node.path) === generation
     node.loading = true
+    node.error = null
     let children: FileNode[]
     try {
       const entries = await api.listFolder(node.path)
@@ -191,7 +188,11 @@ export const useFilesStore = defineStore('files', () => {
       node.loaded = true
     } catch (error) {
       if (isLast()) {
-        ui.reportError(error)
+        // The panel shows the failure in the folder with a way to read it
+        // again, so the notice in the corner leaves on its own.
+        node.error = ui.reportError(error, { kept: true }).message
+        node.children = []
+        node.loaded = false
       }
       return
     } finally {
@@ -206,14 +207,20 @@ export const useFilesStore = defineStore('files', () => {
     }
   }
 
-  /** Opens one folder and reads its entries. */
+  /**
+   * Opens one folder and reads its entries. A folder that was read before
+   * is read again, because files can come and go on the disk while the
+   * folder stands shut. A read that already runs is not started twice.
+   */
   async function expand(path: string): Promise<void> {
     const node = findNode(roots.value, path)
     if (!node || node.entryType !== 'folder') {
       return
     }
     openPaths.value = new Set(openPaths.value).add(path)
-    await loadFolder(node)
+    if (!node.loading) {
+      await readFolder(node)
+    }
   }
 
   function collapse(path: string): void {
@@ -244,13 +251,29 @@ export const useFilesStore = defineStore('files', () => {
       tabs.activate(held.id)
       return
     }
+    // A second click during the read opens no second tab.
+    if (opening.has(path)) {
+      return
+    }
+    opening.add(path)
     try {
-      const text = await api.readTextFile(path)
-      tabs.add({ query: text, title: baseName(path), filePath: path })
+      const { contents, encoding } = await api.readTextFile(path)
+      // Another way to open the file can have opened it during the read.
+      const opened = tabs.tabForFile(path)
+      if (opened) {
+        tabs.activate(opened.id)
+        return
+      }
+      tabs.add({ query: contents, title: baseName(path), filePath: path, encoding })
     } catch (error) {
       ui.reportError(error)
+    } finally {
+      opening.delete(path)
     }
   }
+
+  /** The paths of the files whose read for a new tab runs. */
+  const opening = new Set<string>()
 
   /**
    * Asks the user for one statement file and opens it in a tab. The backend
@@ -274,6 +297,7 @@ export const useFilesStore = defineStore('files', () => {
         query: opened.contents,
         title: baseName(opened.path),
         filePath: opened.path,
+        encoding: opened.encoding,
       })
     } catch (error) {
       ui.reportError(error)

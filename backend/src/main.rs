@@ -8,6 +8,7 @@ mod db;
 mod error;
 mod files;
 mod history;
+mod jsonfile;
 mod menu;
 mod script;
 mod secrets;
@@ -35,7 +36,6 @@ fn main() {
     }
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new(secrets::build_store()))
         .setup(|app| {
@@ -106,6 +106,7 @@ fn main() {
             commands::save_binary_file,
             commands::export_query,
             commands::supported_engines,
+            commands::storage_problems,
         ])
         .run(tauri::generate_context!())
         .expect("The application could not start.");
@@ -114,17 +115,26 @@ fn main() {
 #[cfg(test)]
 mod tests {
     /// The backend trusts the host of a saved connection and the list of
-    /// folder roots. A grant of the store plugin would let script in the
-    /// webview rewrite those files and send a keychain password to its own
-    /// server.
+    /// folder roots, so the webview gets no grant beyond this list. A grant
+    /// to write files or to set the title would let script in the webview
+    /// change what the user sees or saves.
     #[test]
-    fn the_webview_has_no_grant_of_the_store_plugin() {
+    fn the_webview_has_only_the_listed_grants() {
         let text = include_str!("../capabilities/default.json");
         let json: serde_json::Value = serde_json::from_str(text).unwrap();
-        let grants = json["permissions"].as_array().unwrap();
-        assert!(!grants.is_empty());
-        assert!(grants
+        let grants: Vec<&str> = json["permissions"]
+            .as_array()
+            .unwrap()
             .iter()
-            .all(|grant| !grant.as_str().unwrap().starts_with("store:")));
+            .map(|grant| grant.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            grants,
+            [
+                "core:default",
+                "core:window:allow-destroy",
+                "dialog:allow-open"
+            ]
+        );
     }
 }

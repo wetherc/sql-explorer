@@ -17,7 +17,7 @@
           :value="tab.id"
           class="query-tab"
           data-test="query-tab"
-          @keydown.delete.prevent="askClose(tab)"
+          @keydown="onTabKey($event, tab)"
           @dblclick.stop.prevent="startRename(tab)"
         >
           <!-- The field stops its own pointer events, so an edit does not
@@ -37,7 +37,29 @@
             @keydown.esc.prevent="cancelRename"
             @blur="commitRename"
           />
-          <span v-else class="tab-title">{{ tab.title }}</span>
+          <span v-else class="tab-title" :title="tabTooltip(tab)" data-test="tab-title">{{
+            tab.title
+          }}</span>
+          <v-progress-circular
+            v-if="isRunning(tab)"
+            indeterminate
+            size="10"
+            width="2"
+            class="ml-2"
+            aria-hidden="true"
+            data-test="tab-running"
+          />
+          <span v-if="isRunning(tab)" class="app-visually-hidden">, running</span>
+          <span
+            v-else-if="hasFailed(tab)"
+            class="failed-mark"
+            aria-hidden="true"
+            data-test="tab-failed"
+            >●</span
+          >
+          <span v-if="!isRunning(tab) && hasFailed(tab)" class="app-visually-hidden"
+            >, last run failed</span
+          >
           <span v-if="tab.dirty" class="dirty-mark" aria-hidden="true">●</span>
           <span v-if="tab.dirty" class="app-visually-hidden">, has changes</span>
           <v-icon
@@ -121,6 +143,7 @@ import QueryView from './QueryView.vue'
 import { useConnectionsStore } from '@/stores/connections'
 import { useQueryStore } from '@/stores/query'
 import { useTabsStore, type QueryTab } from '@/stores/tabs'
+import { disposeModel, keptKeys } from './editorModels'
 
 const tabs = useTabsStore()
 const connections = useConnectionsStore()
@@ -130,8 +153,8 @@ const queries = useQueryStore()
  * The number of tabs that keep their view. A view holds an editor and the
  * grids of its results, which together take much memory. The text of a tab,
  * its results and its messages stay in the stores, so a tab that loses its
- * view keeps its work. The editor of such a tab loses the list of undo steps
- * and the place of the cursor.
+ * view keeps its work. Its text model and the place of the cursor stay in
+ * `editorModels`, so undo still works when the view mounts again.
  */
 const LIVE_TAB_LIMIT = 5
 
@@ -163,6 +186,22 @@ watch(
     recentTabIds.value = [id, ...recentTabIds.value.filter((old) => old !== id && open.has(old))]
   },
   { immediate: true },
+)
+
+// A closed tab frees the text model that its editor kept.
+watch(
+  () => tabs.tabs.map((tab) => tab.id),
+  (ids) => {
+    const open = new Set(ids)
+    for (const key of keptKeys()) {
+      if (!open.has(key)) {
+        disposeModel(key)
+      }
+    }
+  },
+  // The watch runs after the editor of the closed tab has unmounted, so no
+  // editor shows the model when the model goes.
+  { flush: 'post' },
 )
 
 const emit = defineEmits<{ (event: 'open-connections'): void }>()
@@ -231,6 +270,30 @@ const pendingClose = ref<QueryTab | null>(null)
 
 function isRunning(tab: QueryTab): boolean {
   return queries.peekState(tab.id)?.running ?? false
+}
+
+/** True when the last run of the tab ended in an error. */
+function hasFailed(tab: QueryTab): boolean {
+  return queries.peekState(tab.id)?.failed ?? false
+}
+
+/**
+ * The full name of a tab and the connection it runs against, because the
+ * strip cuts a long name short.
+ */
+function tabTooltip(tab: QueryTab): string {
+  return tab.connectionId ? `${tab.title} (${connections.nameFor(tab.connectionId)})` : tab.title
+}
+
+/**
+ * Closes the tab on the Delete key. Vue's `.delete` modifier matches
+ * Backspace too, so the key is checked by name.
+ */
+function onTabKey(event: KeyboardEvent, tab: QueryTab): void {
+  if (event.key === 'Delete') {
+    event.preventDefault()
+    askClose(tab)
+  }
 }
 
 /** The text of the question, which names each thing the close loses. */
@@ -336,6 +399,12 @@ defineExpose({ renameActiveTab, closeActiveTab })
   border-radius: 3px;
   padding: 0 4px;
   outline: none;
+}
+
+.failed-mark {
+  margin-left: 6px;
+  font-size: var(--app-text-xs);
+  color: rgb(var(--v-theme-error));
 }
 
 .dirty-mark {

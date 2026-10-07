@@ -17,8 +17,11 @@ import type {
   MenuCommandState,
   ObjectType,
   OpenedFile,
+  TextEncoding,
+  TextFile,
   SaveFileRequest,
   SaveStatementRequest,
+  SavedStatement,
   HistoryEntry,
   IndexRef,
   PartitionList,
@@ -367,20 +370,26 @@ export const api = {
     return invoke('list_folder', { path })
   },
 
-  /** Reads the text of one file inside a folder that the user opened. */
-  readTextFile(path: string): Promise<string> {
+  /** Reads the text of one file inside a folder that the user opened, with
+   *  the encoding that the backend found. */
+  readTextFile(path: string): Promise<TextFile> {
     return invoke('read_text_file', { path })
   },
 
-  /** Writes the text of one file inside a folder that the user opened. */
-  writeTextFile(path: string, contents: string): Promise<void> {
-    return invoke('write_text_file', { path, contents })
+  /** Writes the text of one file inside a folder that the user opened, in
+   *  the encoding given. Gives back the encoding that the backend used,
+   *  which is UTF-8 with a mark when the given encoding cannot store the
+   *  text. */
+  writeTextFile(path: string, contents: string, encoding?: TextEncoding): Promise<TextEncoding> {
+    return invoke('write_text_file', { path, contents, encoding })
   },
 
-  /** Asks the user for a path and writes the statement of a tab there. The
-   *  folder of that file becomes a root, so a later save reaches it. Gives
-   *  back the path, or null when the user closed the dialog. */
-  saveStatementFile(request: SaveStatementRequest): Promise<string | null> {
+  /** Asks the user for a path and writes the statement of a tab there, in
+   *  UTF-8 when the request gives no encoding. Text that Windows-1252 can't
+   *  store is written as UTF-8 with a mark. The folder of that file becomes a root, so a later save reaches
+   *  it. Gives back the path and the encoding of the file, or null when the
+   *  user closed the dialog. */
+  saveStatementFile(request: SaveStatementRequest): Promise<SavedStatement | null> {
     return invoke('save_statement_file', { request })
   },
 
@@ -410,6 +419,12 @@ export const api = {
    *  password stays for this session only. */
   passwordsPersist(): Promise<boolean> {
     return invoke('passwords_persist')
+  },
+
+  /** The problems the backend met while it read the saved files, such as a
+   *  file it could not read and set aside. */
+  storageProblems(): Promise<string[]> {
+    return invoke('storage_problems')
   },
 
   onConnectionStatus(handler: (event: ConnectionStatusEvent) => void): Promise<UnlistenFn> {
