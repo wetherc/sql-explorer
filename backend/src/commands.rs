@@ -72,16 +72,20 @@ fn announcement_text(error: &Error) -> String {
 /// The session goes. When it was the last session of the connection, the
 /// connection goes too and the window hears that it is disconnected. When
 /// other sessions remain, the connection stays open, so the window hears
-/// that it is connected, with the reason the one session closed. A
-/// connection that a connect or a disconnect replaced in the meantime is
-/// left alone, because that command sent its own state.
+/// that it is connected. A connection that a connect or a disconnect
+/// replaced in the meantime is left alone, because that command sent its own
+/// state.
+///
+/// The window shows the reason of a state that has one as a notice. A caller
+/// that also returns the error to the window gives no reason, because the
+/// window then reports the same failure twice.
 async fn reopen_failed<R: Runtime>(
     app: &AppHandle<R>,
     state: &AppState,
     connection_id: &str,
     open: &OpenConnection,
     session_key: &str,
-    reason: String,
+    reason: Option<String>,
 ) {
     let current = state.connection(connection_id).await;
     if !current.is_ok_and(|current| Arc::ptr_eq(&current.sessions, &open.sessions)) {
@@ -95,7 +99,7 @@ async fn reopen_failed<R: Runtime>(
     } else {
         ConnectionHealth::Connected
     };
-    announce(app, connection_id, health, Some(reason));
+    announce(app, connection_id, health, reason);
 }
 
 /// Runs work on the secret store on a blocking thread. A call to the
@@ -226,16 +230,13 @@ pub async fn connect<R: Runtime>(
         }
         Err(error) => {
             // The window shows the connection as closed, so an older
-            // connection under the identifier goes too.
+            // connection under the identifier goes too. The command returns
+            // the error, and the window reports it there, so the state goes
+            // out with no reason.
             if state.remove(&id).await {
                 stop_requests(state.take_requests_of(&id).await).await;
             }
-            announce(
-                &app,
-                &id,
-                ConnectionHealth::Disconnected,
-                Some(announcement_text(&error)),
-            );
+            announce(&app, &id, ConnectionHealth::Disconnected, None);
             Err(error)
         }
     }
@@ -483,15 +484,9 @@ async fn ensure_session_healthy<R: Runtime>(
             Ok(replacement)
         }
         Err(error) => {
-            reopen_failed(
-                app,
-                state,
-                connection_id,
-                open,
-                key,
-                announcement_text(&error),
-            )
-            .await;
+            // The request that asked for the session returns the error, and
+            // the window reports it there.
+            reopen_failed(app, state, connection_id, open, key, None).await;
             Err(error)
         }
     }
@@ -1136,7 +1131,7 @@ async fn reopen_after_stop<R: Runtime>(
                 limit_reason(error),
                 announcement_text(&open_error)
             );
-            reopen_failed(app, state, connection_id, open, session_key, reason).await;
+            reopen_failed(app, state, connection_id, open, session_key, Some(reason)).await;
         }
     }
 }
@@ -3551,8 +3546,8 @@ mod tests {
         })
     }
 
-    /// Builds an application of the tests that holds the store plugin, so
-    /// the files of the settings answer.
+    /// Builds an application of the tests with a context, so the files of
+    /// the settings answer.
     fn app_with_store() -> tauri::App<tauri::test::MockRuntime> {
         tauri::test::mock_builder()
             .build(tauri::generate_context!())
@@ -3683,6 +3678,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(filled.password.as_deref(), Some("from-the-store"));
+    }
+
+    #[tokio::test]
+    async fn a_connect_that_fails_reports_its_error_once() {
+        use tauri::{Listener, Manager};
+        let app = app_with_store();
+        app.manage(state());
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-folder").join("a.db");
+        let saved = sqlite_connection(missing.to_str().unwrap());
+        store::write_connection(app.handle(), &saved).unwrap();
+        let events = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let kept = events.clone();
+        app.listen(CONNECTION_STATUS_EVENT, move |event| {
+            kept.lock()
+                .unwrap()
+                .push(serde_json::from_str(event.payload()).unwrap());
+        });
+
+        let error = connect(app.handle().clone(), saved.id.clone(), app.state())
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.category(), crate::error::ErrorCategory::Io);
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["health"], "disconnected");
+        assert!(events[0]["message"].is_null());
     }
 
     #[tokio::test]
@@ -4877,7 +4900,7 @@ mod tests {
         .await
         .unwrap();
 
-        reopen_failed(app.handle(), &state, "s1", &open, "t1", "gone".into()).await;
+        reopen_failed(app.handle(), &state, "s1", &open, "t1", Some("gone".into())).await;
         assert!(open.sessions.get("t1").await.is_none());
         assert!(state.connection("s1").await.is_ok());
 
@@ -4888,7 +4911,7 @@ mod tests {
             "s1",
             &open,
             DEFAULT_SESSION,
-            "gone".into(),
+            Some("gone".into()),
         )
         .await;
         assert!(state.connection("s1").await.is_err());
@@ -4910,7 +4933,7 @@ mod tests {
             "s1",
             &stale,
             DEFAULT_SESSION,
-            "gone".into(),
+            Some("gone".into()),
         )
         .await;
         let current = state.connection("s1").await.unwrap();
@@ -4925,7 +4948,7 @@ mod tests {
             "s1",
             &stale,
             DEFAULT_SESSION,
-            "gone".into(),
+            Some("gone".into()),
         )
         .await;
         assert!(stale.sessions.get(DEFAULT_SESSION).await.is_some());
