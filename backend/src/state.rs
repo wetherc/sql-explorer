@@ -8,6 +8,7 @@
 use crate::db::drivers::{CancelHandle, DatabaseDriver};
 use crate::db::DriverCapabilities;
 use crate::error::{Error, Result};
+use crate::kept::KeptResults;
 use crate::secrets::SecretStore;
 use crate::session::{Session, SessionPool, DEFAULT_SESSION, SESSION_IDLE_REAP};
 use crate::sql::Dialect;
@@ -186,6 +187,10 @@ pub struct AppState {
     /// list of the state and writes it to the record, and two changes at
     /// once could write the older list last.
     pub files_record: Mutex<()>,
+    /// The result sets of the runs that the row limit cut and that can give
+    /// their full rows again, so an export of all rows does not run the
+    /// statement a second time.
+    pub kept: KeptResults,
 }
 
 /// The number of single-file grants that the state keeps. A new grant past
@@ -203,6 +208,7 @@ impl AppState {
             file_roots: Mutex::new(Vec::new()),
             file_grants: Mutex::new(Vec::new()),
             files_record: Mutex::new(()),
+            kept: KeptResults::default(),
         }
     }
 
@@ -380,10 +386,12 @@ impl AppState {
         info
     }
 
-    /// Removes an open connection, together with its sessions and its
-    /// background drivers. Returns true when one was present.
+    /// Removes an open connection, together with its sessions, its
+    /// background drivers and its kept results. Returns true when one was
+    /// present.
     pub async fn remove(&self, connection_id: &str) -> bool {
         self.clear_background(connection_id).await;
+        self.kept.release_connection(connection_id);
         self.connections
             .lock()
             .await
@@ -405,6 +413,7 @@ impl AppState {
         connections.remove(connection_id);
         drop(connections);
         self.clear_background(connection_id).await;
+        self.kept.release_connection(connection_id);
         true
     }
 
@@ -679,6 +688,22 @@ mod tests {
         );
         assert!(state.remove("c1").await);
         assert!(!state.remove("c1").await);
+    }
+
+    #[tokio::test]
+    async fn a_removed_connection_releases_its_kept_results() {
+        use crate::kept::tests::fixed;
+        let state = state();
+        let open = OpenConnection::new(descriptor(), Box::new(StubDriver));
+        state.insert("c1", open.clone()).await;
+        state.kept.keep("r1", "c1", vec![(0, fixed(1))]);
+        assert!(state.remove("c1").await);
+        assert_eq!(state.kept.len(), 0);
+
+        state.insert("c1", open.clone()).await;
+        state.kept.keep("r2", "c1", vec![(0, fixed(1))]);
+        assert!(state.remove_if_same("c1", &open.sessions).await);
+        assert_eq!(state.kept.len(), 0);
     }
 
     #[tokio::test]

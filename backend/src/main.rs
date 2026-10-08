@@ -9,6 +9,7 @@ mod error;
 mod files;
 mod history;
 mod jsonfile;
+mod kept;
 mod menu;
 mod script;
 mod secrets;
@@ -104,6 +105,8 @@ fn main() {
             commands::save_text_file,
             commands::save_binary_file,
             commands::export_query,
+            commands::export_kept,
+            commands::release_kept,
             commands::supported_engines,
             commands::storage_problems,
         ])

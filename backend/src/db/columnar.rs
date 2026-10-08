@@ -15,6 +15,7 @@
 use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{ColumnInfo, Message, QueryStats};
 use crate::error::{Error, Result};
+use crate::kept::{KeptSet, KeptSource};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
@@ -401,6 +402,10 @@ struct RunEnd<'a> {
     rows_affected: Option<u64>,
     elapsed_ms: u64,
     stats: Option<QueryStats>,
+    /// The sets that the row limit cut and whose full rows a kept result
+    /// still gives, so an export of all rows does not run the statement
+    /// again.
+    kept: &'a [KeptSet],
 }
 
 /// A sink that sends the rows to the user interface as binary chunks. It
@@ -422,6 +427,13 @@ pub struct ChunkSink {
     /// The messages that no message frame sent. The frame that ends the run
     /// sends them.
     messages: Vec<Message>,
+    /// The source of the full rows of the open set, when the driver offered
+    /// one.
+    offered: Option<KeptSource>,
+    /// The sources of the sets that ended cut, with the number of each set.
+    kept_sources: Vec<(u32, KeptSource)>,
+    /// The kept sets that the frame at the end of the run names.
+    kept: Vec<KeptSet>,
 }
 
 impl ChunkSink {
@@ -437,7 +449,22 @@ impl ChunkSink {
             batch_weight: 0,
             truncated: false,
             messages: Vec::new(),
+            offered: None,
+            kept_sources: Vec::new(),
+            kept: Vec::new(),
         }
+    }
+
+    /// Takes the sources of the sets that ended cut, so the command of the
+    /// run can put them in the registry of kept results.
+    pub fn take_kept(&mut self) -> Vec<(u32, KeptSource)> {
+        std::mem::take(&mut self.kept_sources)
+    }
+
+    /// Records the identifiers of the kept sets, which the frame at the end
+    /// of the run gives to the window.
+    pub fn announce_kept(&mut self, kept: Vec<KeptSet>) {
+        self.kept = kept;
     }
 
     /// Sends the chunk that stands open, when it holds a row.
@@ -485,6 +512,7 @@ impl ChunkSink {
             rows_affected: summary.rows_affected,
             elapsed_ms: summary.elapsed_ms,
             stats: summary.stats,
+            kept: &self.kept,
         };
         let json = serde_json::to_string(&end)?;
         let mut buffer = Vec::new();
@@ -502,6 +530,7 @@ impl RowSink for ChunkSink {
         self.columns = columns.len();
         self.rows_in_set = 0;
         self.truncated = false;
+        self.offered = None;
         let mut buffer = Vec::new();
         write_begin_set(&mut buffer, self.set, &columns);
         self.send(buffer)
@@ -524,6 +553,11 @@ impl RowSink for ChunkSink {
     fn end_set(&mut self, truncated: bool) -> Result<()> {
         self.flush()?;
         let cut = self.truncated || truncated;
+        // A source matters only for a set that the limit cut, because the
+        // grid shows every row of a set that ended whole.
+        if let Some(source) = self.offered.take().filter(|_| cut) {
+            self.kept_sources.push((self.set, source));
+        }
         let mut buffer = Vec::new();
         write_end_set(&mut buffer, self.set, cut);
         self.send(buffer)
@@ -544,6 +578,10 @@ impl RowSink for ChunkSink {
         if !sent {
             self.messages.push(message);
         }
+    }
+
+    fn keep_source(&mut self, source: KeptSource) {
+        self.offered = Some(source);
     }
 }
 
@@ -1168,6 +1206,46 @@ mod tests {
         assert_eq!(value["elapsedMs"], 8);
         assert_eq!(value["rowsAffected"], 0);
         assert_eq!(value["messages"], json!([]));
+    }
+
+    #[test]
+    fn the_sink_keeps_the_source_of_a_cut_set_alone() {
+        use crate::kept::tests::fixed;
+        let (channel, messages) = collecting_channel();
+        let mut sink = ChunkSink::new(channel, 1);
+        // The first set ends whole, so its source goes.
+        sink.begin_set(columns()).unwrap();
+        sink.keep_source(fixed(1));
+        sink.end_set(false).unwrap();
+        // The row limit cuts the second set.
+        sink.begin_set(columns()).unwrap();
+        sink.row(vec![json!(1), json!("one")]).unwrap();
+        assert_eq!(
+            sink.row(vec![json!(2), json!("two")]).unwrap(),
+            SinkControl::Stop
+        );
+        sink.keep_source(fixed(2));
+        sink.end_set(false).unwrap();
+        // The driver cuts the third set, and offers no source.
+        sink.begin_set(columns()).unwrap();
+        sink.end_set(true).unwrap();
+
+        let sources = sink.take_kept();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].0, 1);
+        assert!(sink.take_kept().is_empty());
+        sink.announce_kept(vec![KeptSet {
+            set: 1,
+            id: "r1:1".into(),
+        }]);
+        sink.finish(RunSummary::default()).unwrap();
+
+        let frames = frames_of(&messages.lock().unwrap());
+        let Some(Frame::End { summary }) = frames.last() else {
+            panic!("the last frame does not end the run");
+        };
+        let value: JsonValue = serde_json::from_str(summary).unwrap();
+        assert_eq!(value["kept"], json!([{ "set": 1, "id": "r1:1" }]));
     }
 
     #[test]

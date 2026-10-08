@@ -1062,6 +1062,12 @@ pub async fn execute_query<R: Runtime>(
     let outcome = in_sent_text(outcome, &query, &ran);
 
     state.end_request(&request_id).await;
+    // A set that the row limit cut can stay in the registry, also when a
+    // later statement of the script failed, because the grid shows that set.
+    let kept = state
+        .kept
+        .keep(&request_id, &connection_id, sink.take_kept());
+    sink.announce_kept(kept);
     match finish_run(&state, &connection_id, &open, &key, &session, outcome).await {
         Ok(summary) => sink.finish(summary),
         Err(error) => {
@@ -2080,6 +2086,18 @@ pub enum ExportFormat {
     Xlsx,
 }
 
+impl ExportFormat {
+    /// The name of the filter of the save dialog, and the extension of the
+    /// file.
+    fn file_type(self) -> (&'static str, &'static str) {
+        match self {
+            ExportFormat::Csv => ("CSV", "csv"),
+            ExportFormat::Json => ("JSON", "json"),
+            ExportFormat::Xlsx => ("Excel", "xlsx"),
+        }
+    }
+}
+
 /// What an export to a file needs to know. The backend asks the user for
 /// the path itself, so the interface names only the file to suggest.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -2670,11 +2688,7 @@ pub async fn export_query<R: Runtime>(
         query_params,
     } = request;
 
-    let (label, extension) = match format {
-        ExportFormat::Csv => ("CSV", "csv"),
-        ExportFormat::Json => ("JSON", "json"),
-        ExportFormat::Xlsx => ("Excel", "xlsx"),
-    };
+    let (label, extension) = format.file_type();
     // The check comes before the dialog, so the user does not pick a file
     // for an export that cannot run.
     let dialect = state.connection(&connection_id).await?.dialect;
@@ -2724,7 +2738,12 @@ pub async fn export_query<R: Runtime>(
     let outcome = in_sent_text(outcome, &query, &ran);
     state.end_request(&request_id).await;
     finish_run(&state, &connection_id, &open, &key, &session, outcome).await?;
+    finish_export(sink).await.map(Some)
+}
 
+/// Closes the file of an export whose read ended well, and gives what the
+/// export wrote. A read that gave no result set writes no file.
+async fn finish_export(sink: FileSink) -> Result<ExportSummary> {
     if !sink.saw_set {
         return Err(Error::Unsupported(
             "The statement returned no result set.".to_string(),
@@ -2736,7 +2755,120 @@ pub async fn export_query<R: Runtime>(
         summary.rows,
         summary.path
     );
-    Ok(Some(summary))
+    Ok(summary)
+}
+
+/// What an export of a kept result needs to know.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeptExportRequest {
+    /// The identifier of the kept set, from the frame at the end of its run.
+    pub kept_id: String,
+    /// The identifier that the Stop button of the export names.
+    pub request_id: String,
+    /// The file name that the save dialog suggests.
+    pub default_name: String,
+    pub format: ExportFormat,
+    /// The row limit of the export, which is higher than the one of the view.
+    pub max_rows: usize,
+}
+
+/// Writes every row of a kept result set to a file, and does not run the
+/// statement again.
+///
+/// The read uses the kept result alone and takes no driver of a session, so
+/// the tab can run other statements while the export goes on. The Stop
+/// button and the time limit of the connection end the read, as they end a
+/// run.
+#[tauri::command]
+pub async fn export_kept<R: Runtime>(
+    app: AppHandle<R>,
+    request: KeptExportRequest,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<ExportSummary>> {
+    // The checks come before the dialog, so the user does not pick a file
+    // for an export that cannot run.
+    let kept = kept_result(&state, &request.kept_id)?;
+    let open = state.connection(&kept.connection_id).await?;
+    let (label, extension) = request.format.file_type();
+    let Some(path) = ask_save_path(&app, &request.default_name, label, extension, None).await
+    else {
+        return Ok(None);
+    };
+    let options = ExecOptions {
+        max_rows: request.max_rows,
+        timeout_secs: open.descriptor.exec_options().timeout_secs,
+        one_statement: true,
+    };
+    write_kept(
+        &state,
+        &request.request_id,
+        &kept,
+        &path,
+        request.format,
+        &options,
+    )
+    .await
+    .map(Some)
+}
+
+/// The kept result with the identifier, or the error that tells the user to
+/// run the statement again.
+fn kept_result(state: &AppState, kept_id: &str) -> Result<Arc<crate::kept::KeptResult>> {
+    state.kept.get(kept_id).ok_or_else(|| {
+        Error::Invalid(
+            "The saved result of this query is gone. Run the query again to export all rows."
+                .to_string(),
+        )
+    })
+}
+
+/// Reads a kept result into a file at the path, under the Stop button of the
+/// request and the time limit of the options.
+async fn write_kept(
+    state: &AppState,
+    request_id: &str,
+    kept: &crate::kept::KeptResult,
+    path: &std::path::Path,
+    format: ExportFormat,
+    options: &ExecOptions,
+) -> Result<ExportSummary> {
+    let token = state.start_request(request_id, &kept.connection_id).await;
+    let written = async {
+        // An error, a stop or the time limit drops the sink before
+        // `finish`, and the writer then removes the part that was written.
+        let mut sink = FileSink::create(path, format).await?;
+        // No server statement runs, so the stop needs no grace and no
+        // handle. The drop of the read ends its requests.
+        let read = kept.source.read(options, &mut sink);
+        match run_bounded(
+            read,
+            &token,
+            options.timeout_secs,
+            std::time::Duration::ZERO,
+            None,
+        )
+        .await
+        {
+            Bounded::Answered(result) => result?,
+            Bounded::Stopped(error) => return Err(error),
+        }
+        Ok(sink)
+    }
+    .await;
+    state.end_request(request_id).await;
+    finish_export(written?).await
+}
+
+/// Removes one kept result from the registry. The window calls this when the
+/// result leaves the interface: a new run of the tab, a close of the result
+/// or a close of the tab. An identifier that the registry does not contain
+/// is not an error, because the bounds of the registry can remove an entry
+/// first.
+#[tauri::command]
+pub async fn release_kept(kept_id: String, state: tauri::State<'_, AppState>) -> Result<()> {
+    state.kept.release(&kept_id);
+    Ok(())
 }
 
 /// Refuses an export of a statement that changes data. The export runs the
@@ -6525,5 +6657,147 @@ mod tests {
             .background_session("s1", BackgroundRole::Catalog)
             .await
             .is_some());
+    }
+
+    /// A kept result of the connection `s1` with a fixed list of rows.
+    fn kept_rows(rows: usize) -> crate::kept::KeptResult {
+        crate::kept::KeptResult::new("s1", crate::kept::tests::fixed(rows))
+    }
+
+    fn export_options(max_rows: usize, timeout_secs: u64) -> ExecOptions {
+        ExecOptions {
+            max_rows,
+            timeout_secs,
+            one_statement: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_kept_result_writes_its_rows_to_the_file() {
+        let state = AppState::new(Arc::new(MemoryStore::default()));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("all.csv");
+        let summary = write_kept(
+            &state,
+            "e1",
+            &kept_rows(3),
+            &path,
+            ExportFormat::Csv,
+            &export_options(2, 30),
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.rows, 2);
+        assert!(summary.truncated);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text, format!("{CSV_BOM}n\r\n0\r\n1\r\n"));
+        // The request of the export ended with the export.
+        assert!(state.take_request("e1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_stop_button_ends_the_read_of_a_kept_result() {
+        let state = Arc::new(AppState::new(Arc::new(MemoryStore::default())));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("all.json");
+        let kept = crate::kept::KeptResult::new("s1", crate::kept::KeptSource::Pending);
+        let stopper = state.clone();
+        let options = export_options(10, 0);
+        let (outcome, ()) = tokio::join!(
+            write_kept(&state, "e1", &kept, &path, ExportFormat::Json, &options),
+            async move {
+                loop {
+                    if let Some(request) = stopper.take_request("e1").await {
+                        stop_requests(vec![request]).await;
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            }
+        );
+        assert!(matches!(outcome, Err(Error::Cancelled)));
+        // The file never takes its name, and the writer thread removes the
+        // temporary part.
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn the_time_limit_ends_the_read_of_a_kept_result() {
+        let state = AppState::new(Arc::new(MemoryStore::default()));
+        let dir = tempfile::tempdir().unwrap();
+        let kept = crate::kept::KeptResult::new("s1", crate::kept::KeptSource::Pending);
+        let outcome = write_kept(
+            &state,
+            "e1",
+            &kept,
+            &dir.path().join("all.xlsx"),
+            ExportFormat::Xlsx,
+            &export_options(10, 1),
+        )
+        .await;
+        assert!(matches!(outcome, Err(Error::Timeout(1))));
+        assert!(state.take_request("e1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_kept_result_without_a_set_writes_no_file() {
+        let state = AppState::new(Arc::new(MemoryStore::default()));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("all.csv");
+        let kept = crate::kept::KeptResult::new("s1", crate::kept::KeptSource::Empty);
+        let outcome = write_kept(
+            &state,
+            "e1",
+            &kept,
+            &path,
+            ExportFormat::Csv,
+            &export_options(10, 30),
+        )
+        .await;
+        assert!(matches!(outcome, Err(Error::Unsupported(_))));
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn an_export_of_a_result_that_is_gone_asks_for_a_new_run() {
+        use tauri::Manager;
+        let (_dir, descriptor) = temp_sqlite();
+        let (app, state) = state_with_sqlite(descriptor).await;
+        app.manage(state);
+        let request = |kept_id: &str| KeptExportRequest {
+            kept_id: kept_id.into(),
+            request_id: "e1".into(),
+            default_name: "all.csv".into(),
+            format: ExportFormat::Csv,
+            max_rows: 10,
+        };
+
+        let error = export_kept(app.handle().clone(), request("r1:0"), app.state())
+            .await
+            .unwrap_err();
+        assert!(matches!(&error, Error::Invalid(text) if text.contains("Run the query again")));
+
+        // A result of a connection that closed cannot be read.
+        let kept = app.state::<AppState>().kept.keep(
+            "r1",
+            "closed",
+            vec![(0, crate::kept::tests::fixed(1))],
+        );
+        let error = export_kept(app.handle().clone(), request(&kept[0].id), app.state())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::NotConnected(_)));
+
+        release_kept(kept[0].id.clone(), app.state()).await.unwrap();
+        assert_eq!(app.state::<AppState>().kept.len(), 0);
+        // A second release of the same result is not an error.
+        release_kept(kept[0].id.clone(), app.state()).await.unwrap();
+    }
+
+    #[test]
+    fn each_export_format_names_its_file_type() {
+        assert_eq!(ExportFormat::Csv.file_type(), ("CSV", "csv"));
+        assert_eq!(ExportFormat::Json.file_type(), ("JSON", "json"));
+        assert_eq!(ExportFormat::Xlsx.file_type(), ("Excel", "xlsx"));
     }
 }

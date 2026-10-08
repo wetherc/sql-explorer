@@ -4,6 +4,7 @@
 
 use crate::db::{ColumnInfo, Message, QueryResponse, QueryStats, ResultSet};
 use crate::error::{Error, Result};
+use crate::kept::KeptSource;
 use serde_json::Value as JsonValue;
 
 /// The answer a sink gives for one row. `Stop` tells the driver to end the
@@ -39,6 +40,14 @@ pub trait RowSink: Send {
 
     /// Receives one message of the server.
     fn message(&mut self, message: Message);
+
+    /// Receives a source that gives the full rows of the open set again,
+    /// without a second run of the statement. A driver calls this before it
+    /// ends a set that it cut at the row limit. The default drops the
+    /// source, because a sink that writes a file or a buffer has no later
+    /// use for it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn keep_source(&mut self, _source: KeptSource) {}
 }
 
 /// A sink that keeps the rows in memory and builds a `QueryResponse`. It
@@ -245,6 +254,16 @@ mod tests {
         assert_eq!(response.rows_affected, Some(3));
         assert_eq!(response.elapsed_ms, 42);
         assert_eq!(response.stats, Some(stats));
+    }
+
+    #[test]
+    fn a_buffer_drops_a_kept_source() {
+        let mut sink = BufferSink::new(1);
+        sink.begin_set(columns()).unwrap();
+        sink.keep_source(crate::kept::tests::fixed(2));
+        sink.end_set(true).unwrap();
+        let response = sink.into_response(RunSummary::default());
+        assert!(response.results[0].truncated);
     }
 
     #[test]
