@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  callsProcedure,
   SQL_KEYWORDS,
   completionsFor,
   emptySchemaIndex,
@@ -20,6 +21,18 @@ import {
   type SchemaIndex,
 } from '@/lib/sql'
 import { Dialect } from '@/types/api'
+
+describe('callsProcedure', () => {
+  it('finds a call of a stored procedure by its first word', () => {
+    expect(callsProcedure('EXEC dbo.report', Dialect.MsSql)).toBe(true)
+    expect(callsProcedure('-- run it\nexecute report @n = 1', Dialect.MsSql)).toBe(true)
+    expect(callsProcedure('/* x */ call report()', Dialect.MySql)).toBe(true)
+    expect(callsProcedure('SELECT 1; EXEC report', Dialect.MsSql)).toBe(false)
+    expect(callsProcedure('[exec]', Dialect.MsSql)).toBe(false)
+    expect(callsProcedure('-- only a comment', Dialect.MsSql)).toBe(false)
+    expect(callsProcedure('', Dialect.Postgres)).toBe(false)
+  })
+})
 
 describe('formatterDialect', () => {
   it('names the dialect of the formatter for each engine', () => {

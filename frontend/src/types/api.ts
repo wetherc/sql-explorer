@@ -354,6 +354,13 @@ export interface SpillRequest {
   maxBytes: number
 }
 
+/** The disk space and the number of the full results saved on this
+ *  computer. */
+export interface SavedResultsUsage {
+  bytes: number
+  count: number
+}
+
 /** What an export of a kept result needs to know. */
 export interface KeptExportRequest {
   keptId: string

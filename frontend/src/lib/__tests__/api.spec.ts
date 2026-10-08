@@ -190,6 +190,10 @@ describe('api', () => {
     expect(invoke).toHaveBeenCalledWith('release_kept', { keptId: 'r1:0' })
     await api.stopSaving('r1')
     expect(invoke).toHaveBeenCalledWith('stop_saving', { requestId: 'r1' })
+    await api.savedResultsUsage()
+    expect(invoke).toHaveBeenCalledWith('saved_results_usage')
+    await api.clearSavedResults()
+    expect(invoke).toHaveBeenCalledWith('clear_saved_results')
 
     await api.saveBinaryFile({
       defaultName: 'a.xlsx',

@@ -812,6 +812,18 @@ function tokenize(statement: string, dialect: Dialect): Token[] {
   return tokens
 }
 
+/** The words that start a call of a stored procedure. */
+const PROCEDURE_CALLS = new Set(['EXEC', 'EXECUTE', 'CALL'])
+
+/**
+ * True when the first word of the statement calls a stored procedure, as in
+ * `EXEC p` or `CALL p()`. The comments before that word do not count.
+ */
+export function callsProcedure(statement: string, dialect: Dialect): boolean {
+  const first = tokenize(statement, dialect)[0]
+  return first !== undefined && !first.quoted && PROCEDURE_CALLS.has(first.text.toUpperCase())
+}
+
 /**
  * Reads a name in quotes that starts at the given position. A doubled closing
  * quote stands for one quote in the name. Returns the name and the position

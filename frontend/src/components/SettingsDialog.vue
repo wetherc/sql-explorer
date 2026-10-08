@@ -83,6 +83,18 @@
           data-test="setting-full-results-disk"
           @update:model-value="(value) => settings.update({ fullResultsDiskGb: value })"
         />
+        <div v-if="usage" class="d-flex align-center ga-3" data-test="saved-results-usage">
+          <span class="text-body-2">{{ usageText(usage) }}</span>
+          <v-spacer />
+          <v-btn
+            text="Clear saved results"
+            size="small"
+            variant="tonal"
+            :disabled="usage.count === 0 || clearing"
+            data-test="clear-saved-results"
+            @click="clearSaved"
+          />
+        </div>
         <v-switch
           :model-value="settings.settings.pauseAtRowLimit"
           color="primary"
@@ -165,16 +177,74 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import AppDialog from './AppDialog.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import NumberSetting from './NumberSetting.vue'
+import { api } from '@/lib/api'
+import { shortSize } from '@/lib/kept'
+import { useQueryStore } from '@/stores/query'
 import { THEME_CHOICES, useSettingsStore } from '@/stores/settings'
+import { useUiStore } from '@/stores/ui'
+import type { SavedResultsUsage } from '@/types/api'
 
-defineProps<{ open: boolean }>()
+const props = defineProps<{ open: boolean }>()
 const emit = defineEmits<{ (event: 'update:open', value: boolean): void }>()
 
 const settings = useSettingsStore()
+const queries = useQueryStore()
+const ui = useUiStore()
+
+/** The disk space of the saved full results, read each time the dialog
+ *  opens. Null until the backend gives it. */
+const usage = ref<SavedResultsUsage | null>(null)
+
+/** True while the backend removes the saved full results. */
+const clearing = ref(false)
+
+function results(count: number): string {
+  return count === 1 ? '1 result' : `${count} results`
+}
+
+function usageText({ bytes, count }: SavedResultsUsage): string {
+  return count === 0
+    ? 'No results are saved on this computer.'
+    : `Saved results use ${shortSize(bytes)} (${results(count)}).`
+}
+
+async function loadUsage(): Promise<void> {
+  try {
+    usage.value = (await api.savedResultsUsage()) ?? null
+  } catch (error) {
+    usage.value = null
+    ui.reportError(error)
+  }
+}
+
+watch(
+  () => props.open,
+  (open) => {
+    if (open) {
+      void loadUsage()
+    }
+  },
+  { immediate: true },
+)
+
+/** Deletes every saved full result. The panes that showed one then run
+ *  their query again for Export all rows. */
+async function clearSaved(): Promise<void> {
+  clearing.value = true
+  try {
+    const cleared = await api.clearSavedResults()
+    queries.forgetSpills()
+    ui.success(`Cleared ${results(cleared.count)}, freed ${shortSize(cleared.bytes)}.`)
+  } catch (error) {
+    ui.reportError(error)
+  }
+  clearing.value = false
+  await loadUsage()
+}
 
 /** True while the question about resetting the settings is open. */
 const resettingSettings = ref(false)

@@ -123,6 +123,10 @@ Turn on **Save full results on this computer** in the **Results** group of
 Settings, and **Export all rows** stops running the query a second time. The
 option is off by default.
 
+To save the full results of one run without turning the option on, open the
+menu on the arrow beside **Run** and choose **Run and keep all rows**. The
+command palette lists the same command. It has no key.
+
 With the option on, a run doesn't stop reading at the grid's row limit. It keeps
 reading up to the export row limit, shows the first rows in the grid as usual,
 and writes every row of the result to a temporary file on your computer. The
@@ -140,6 +144,11 @@ it ends the saving and keeps the run: the app deletes the partial file, the
 read stops at the grid's row limit, and the warning above the grid says **Not
 saved: you stopped saving**. The later results of the same run aren't saved
 either.
+
+When you run a procedure call (a statement that starts with `EXEC`, `EXECUTE`
+or `CALL`) while the app saves full results, a notice tells you that the
+procedure's later result sets are skipped if the saved results reach the disk
+limit.
 
 The app saves the result of a single statement on any database except Athena.
 A script with more than one statement reads only up to the grid's row limit.
@@ -164,6 +173,11 @@ limit was reached**. A script with more than one statement shows **Not saved:
 scripts with more than one statement can't be saved**. A run that you stop or
 that fails shows **Not saved: the read stopped**. When the export row limit,
 the disk space or the disk stops a save, **Messages** also gives the details.
+
+Under **Disk space for saved results**, Settings shows how much space the saved
+results use right now and how many there are, for example **Saved results use
+412 MB (3 results).** **Clear saved results** deletes all of them at once. After
+that, **Export all rows** runs the query again for each result that was saved.
 
 The app deletes a saved file when you run the tab again (unless you pinned the
 result), close the result or the tab, or disconnect. It also deletes a file

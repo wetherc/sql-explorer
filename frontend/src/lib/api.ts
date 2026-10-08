@@ -17,6 +17,7 @@ import type {
   ExportRequest,
   ExportSummary,
   KeptExportRequest,
+  SavedResultsUsage,
   RunFileSummary,
   FolderEntry,
   MenuCommandState,
@@ -485,6 +486,17 @@ export const api = {
    *  nothing now. */
   stopSaving(requestId: string): Promise<boolean> {
     return invoke('stop_saving', { requestId })
+  },
+
+  /** The disk space and the number of the saved full results. */
+  savedResultsUsage(): Promise<SavedResultsUsage> {
+    return invoke('saved_results_usage')
+  },
+
+  /** Removes every saved full result, and gives the space and the number
+   *  that they used. */
+  clearSavedResults(): Promise<SavedResultsUsage> {
+    return invoke('clear_saved_results')
   },
 
   /** Lets the backend forget a kept result that left the interface. */

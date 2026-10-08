@@ -9,6 +9,7 @@ import { useUiStore } from './ui'
 import { isCancellation, toErrorPayload } from '@/lib/errors'
 import { scanCost } from '@/lib/format'
 import { pauseSeconds, releaseKept, spillRequest } from '@/lib/kept'
+import { callsProcedure } from '@/lib/sql'
 import { ResultTable, type ResultStreamHandlers } from '@/lib/results'
 import { MessageLevel, PlanMode } from '@/types/api'
 import { savedFile, type SavedFile } from '@/lib/runFile'
@@ -377,6 +378,18 @@ export const useQueryStore = defineStore('query', () => {
     forgetKept(pane)
   }
 
+  /** Forgets every kept result that was saved on this computer, after
+   *  Settings removed those files. */
+  function forgetSpills(): void {
+    for (const state of Object.values(states)) {
+      for (const pane of state.panes) {
+        if (pane.kept?.origin === 'spill') {
+          forgetKept(pane)
+        }
+      }
+    }
+  }
+
   /**
    * Forgets the kept result of a pane, so an export of all rows runs the
    * query again. The backend no longer has the result, so nothing goes back
@@ -653,6 +666,12 @@ export const useQueryStore = defineStore('query', () => {
     const text = query.trim()
     const spill = spillRequest(settings.settings, keepAllRows || settings.settings.keepFullResults)
     const pauseSecs = pauseSeconds(settings.settings)
+    const dialect = connections.active[connectionId]?.dialect
+    if (spill && dialect !== undefined && callsProcedure(text, dialect)) {
+      ui.info(
+        "If saved results reach the disk limit, the procedure's later result sets are skipped.",
+      )
+    }
     return runRequest(
       tabId,
       connectionId,
@@ -1007,6 +1026,7 @@ export const useQueryStore = defineStore('query', () => {
     stopSavingMessages,
     saveShownMessages,
     forgetKept,
+    forgetSpills,
     stopSaving,
   }
 })

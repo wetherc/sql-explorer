@@ -1519,6 +1519,53 @@ describe('kept results', () => {
     })
   })
 
+  it('forgets the saved results that Settings cleared and keeps other kept results', async () => {
+    apiStub.executeQuery.mockImplementationOnce(
+      streamed({
+        results: [
+          { rows: [[1]], truncated: true },
+          { rows: [[2]], truncated: true },
+          { rows: [[3]] },
+        ],
+        kept: [
+          { set: 0, id: 'r1:0', origin: 'spill', keptAt: 5, savedRows: 9, savedBytes: 80 },
+          { set: 1, id: 'r1:1', origin: 'athena', keptAt: 5 },
+        ],
+      }),
+    )
+    const queries = useQueryStore()
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    queries.stateFor('t2')
+    queries.forgetSpills()
+    expect(queries.stateFor('t1').panes.map((pane) => pane.keptId)).toEqual([
+      undefined,
+      'r1:1',
+      undefined,
+    ])
+  })
+
+  it('tells that a procedure loses its later sets when the saved results reach the disk limit', async () => {
+    const queries = useQueryStore()
+    const ui = useUiStore()
+    const notes = () => ui.notices.filter((notice) => notice.level === 'info').length
+    apiStub.executeQuery.mockImplementation(streamed({ results: [{ rows: [[1]] }] }))
+    useConnectionsStore().active = { c1: infoFixture('c1') }
+    await queries.execute('t1', 'c1', 'EXEC report')
+    expect(notes()).toBe(0)
+
+    useSettingsStore().update({ keepFullResults: true })
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    expect(notes()).toBe(0)
+    await queries.execute('t1', 'c2', 'EXEC report')
+    expect(notes()).toBe(0)
+    await queries.execute('t1', 'c1', 'EXEC report')
+    expect(ui.notices.slice(-1)[0]).toMatchObject({
+      level: 'info',
+      message:
+        "If saved results reach the disk limit, the procedure's later result sets are skipped.",
+    })
+  })
+
   it('gives each cut set that the run did not save its reason', async () => {
     apiStub.executeQuery.mockImplementationOnce(
       async (_request: unknown, handlers: import('@/lib/results').ResultStreamHandlers) => {

@@ -444,6 +444,29 @@ impl KeptResults {
         oldest.is_some()
     }
 
+    /// The number of kept spill files.
+    pub fn spill_count(&self) -> usize {
+        self.entries()
+            .values()
+            .filter(|entry| entry.source.is_spill())
+            .count()
+    }
+
+    /// Removes each kept spill file, and gives their number and the bytes
+    /// that they used. The files go after the lock of the registry ends.
+    pub fn release_spills(&self) -> (usize, u64) {
+        let removed: Vec<_> = self
+            .entries()
+            .extract_if(|_, entry| entry.source.is_spill())
+            .map(|(_, entry)| entry)
+            .collect();
+        let bytes = removed
+            .iter()
+            .filter_map(|entry| entry.source.saved_bytes())
+            .sum();
+        (removed.len(), bytes)
+    }
+
     /// The count of the disk use of the spill files.
     pub fn disk_use(&self) -> DiskUse {
         self.disk.clone()
@@ -752,6 +775,25 @@ pub(crate) mod tests {
         assert!(registry.get("new:0").is_some());
         assert!(registry.release_oldest_spill());
         assert!(!registry.release_oldest_spill());
+        assert!(registry.get("athena:0").is_some());
+        assert_eq!(disk.bytes(), 0);
+    }
+
+    #[test]
+    fn a_clear_removes_each_spill_and_keeps_other_sources() {
+        let folder = tempfile::tempdir().unwrap();
+        let registry = KeptResults::default();
+        let disk = registry.disk_use();
+        let spill =
+            |rows| KeptSource::SpillFile(crate::spill::tests::spill(folder.path(), &disk, rows));
+        assert_eq!(registry.release_spills(), (0, 0));
+        registry.keep("athena", "c1", vec![(0, fixed(1))]);
+        registry.keep("r1", "c1", vec![(0, spill(1)), (1, spill(2))]);
+        assert_eq!(registry.spill_count(), 2);
+        let bytes = disk.bytes();
+        assert!(bytes > 0);
+        assert_eq!(registry.release_spills(), (2, bytes));
+        assert_eq!(registry.spill_count(), 0);
         assert!(registry.get("athena:0").is_some());
         assert_eq!(disk.bytes(), 0);
     }
