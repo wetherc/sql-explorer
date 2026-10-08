@@ -392,8 +392,6 @@ pub struct SheetWriter<W: Write + Seek> {
     line: String,
     /// The number of text cells cut at the bound of a cell.
     cut_cells: u64,
-    /// True when a row arrived after the sheet was full.
-    full: bool,
 }
 
 impl<W: Write + Seek> SheetWriter<W> {
@@ -460,7 +458,6 @@ impl<W: Write + Seek> SheetWriter<W> {
             numeric,
             line: String::new(),
             cut_cells: 0,
-            full: false,
         })
     }
 
@@ -468,7 +465,6 @@ impl<W: Write + Seek> SheetWriter<W> {
     /// the row is then left out.
     pub fn row(&mut self, values: &[JsonValue]) -> Result<bool> {
         if self.rows >= MAX_SHEET_ROWS {
-            self.full = true;
             return Ok(false);
         }
         self.write_row(values)?;
@@ -478,11 +474,6 @@ impl<W: Write + Seek> SheetWriter<W> {
     /// The number of text cells that were cut at the bound of a cell.
     pub fn cut_cells(&self) -> u64 {
         self.cut_cells
-    }
-
-    /// True when the sheet was full and a row was left out.
-    pub fn sheet_full(&self) -> bool {
-        self.full
     }
 
     /// Sets the count of the rows, so that a test reaches the bound of a
@@ -761,17 +752,15 @@ mod tests {
     }
 
     #[test]
-    fn the_writer_counts_the_cut_cells_and_marks_a_full_sheet() {
+    fn the_writer_counts_the_cut_cells_and_leaves_out_a_row_of_a_full_sheet() {
         let mut writer =
             SheetWriter::create(Cursor::new(Vec::new()), "Result", &["t".to_string()]).unwrap();
         let long = "\u{1}".to_string() + &"<".repeat(MAX_CELL_UNITS + 1);
         assert!(writer.row(&[json!(long)]).unwrap());
         assert!(writer.row(&[json!("short")]).unwrap());
         assert_eq!(writer.cut_cells(), 1);
-        assert!(!writer.sheet_full());
         writer.set_rows(MAX_SHEET_ROWS);
         assert!(!writer.row(&[json!(1)]).unwrap());
-        assert!(writer.sheet_full());
         let sheet = part_of(writer.finish().unwrap().into_inner(), SHEET_PART);
         assert!(sheet.contains(&"&lt;".repeat(MAX_CELL_UNITS)));
         assert!(!sheet.contains(&"&lt;".repeat(MAX_CELL_UNITS + 1)));

@@ -2636,8 +2636,8 @@ fn decode_base64(text: &str) -> Result<Vec<u8>> {
 
 /// Runs a statement again with a higher row limit and writes the rows
 /// straight to a file as they arrive. A large result therefore never
-/// passes through the user interface, and the backend holds one row at a
-/// time.
+/// passes through the user interface, and the backend keeps at most the
+/// rows in the queue of the file writer.
 ///
 /// The statement must only read, because an export runs it a second time.
 #[tauri::command]
@@ -2681,9 +2681,10 @@ pub async fn export_query<R: Runtime>(
         };
         let (query, bound) = prepare_parameters(&query, open.dialect, query_params.as_ref())?;
         // The sink writes to a temporary path. An error, a stop or a time
-        // limit leaves the run before `finish`, and the drop of the sink then
-        // removes the part that was written.
-        let sink = FileSink::create(&path, format)?;
+        // limit leaves the run before `finish`. The drop of the sink then
+        // closes the queue of the writer thread, and the writer removes the
+        // part that was written.
+        let sink = FileSink::create(&path, format).await?;
         Ok::<_, Error>((open, session, key, options, query, bound, sink))
     }
     .await;
@@ -2716,7 +2717,7 @@ pub async fn export_query<R: Runtime>(
             "The statement returned no result set.".to_string(),
         ));
     }
-    let summary = sink.finish()?;
+    let summary = sink.finish().await?;
     log::info!(
         "Wrote {} rows to the file '{}'.",
         summary.rows,
@@ -2737,12 +2738,188 @@ fn refuse_export_of_writes(query: &str, dialect: crate::sql::Dialect) -> Result<
     ))
 }
 
-/// A sink that writes the rows of the first result set to a file as they
-/// arrive. It writes to a temporary path beside the file and renames it at
-/// a successful end, so a run that fails or stops leaves no file. It
-/// answers `Stop` for a row of a second set, because the export writes one
-/// file.
+/// The number of pieces that wait for the writer of an export. A driver that
+/// reads faster than the disk writes waits when the queue is full, so the
+/// memory of an export stays bounded.
+const EXPORT_QUEUE: usize = 1024;
+
+/// One piece of an export on its way to the writer thread.
+enum Piece {
+    Begin(Vec<crate::db::ColumnInfo>),
+    Row(Vec<serde_json::Value>),
+    /// The run ended well, so the writer closes the file and renames it.
+    Finish,
+}
+
+/// The error of the writer thread, kept for the sink. The writer stops at
+/// its first error and drops the end of the queue, so the next send of the
+/// sink fails and gives this error to the run.
+type WriterFault = Arc<std::sync::Mutex<Option<Error>>>;
+
+/// A sink that sends the rows of the first result set to a writer thread.
+///
+/// The driver calls the sink on an async thread of the runtime. The writes
+/// to the file, the deflate of an xlsx file and the flushes to the disk run
+/// on a thread of their own, so a slow disk does not stop the async thread
+/// that serves the other commands. The sink keeps the counts and the limits,
+/// so it answers `Stop` without a wait for the writer. It answers `Stop` for
+/// a row of a second set, because the export writes one file.
 struct FileSink {
+    pieces: std::sync::mpsc::SyncSender<Piece>,
+    fault: WriterFault,
+    /// The result of `ExportWriter::finish`, which the writer thread sends
+    /// after a `Finish` piece.
+    done: Option<tokio::sync::oneshot::Receiver<Result<u64>>>,
+    final_path: std::path::PathBuf,
+    /// The number of rows that still fit in the sheet of an xlsx file. Other
+    /// formats have no such bound.
+    sheet_room: Option<usize>,
+    rows: usize,
+    truncated: bool,
+    /// True when the sheet of an xlsx file was full and rows were left out.
+    sheet_full: bool,
+    /// True once the first set began.
+    saw_set: bool,
+    /// True once the first set ended.
+    set_done: bool,
+}
+
+impl FileSink {
+    /// Creates the temporary file on a blocking thread and starts the writer
+    /// thread.
+    async fn create(path: &std::path::Path, format: ExportFormat) -> Result<Self> {
+        let target = path.to_path_buf();
+        let writer = off_thread(move || ExportWriter::create(&target, format)).await?;
+        let (pieces, queue) = std::sync::mpsc::sync_channel(EXPORT_QUEUE);
+        let (sender, done) = tokio::sync::oneshot::channel();
+        let fault = WriterFault::default();
+        let kept = Arc::clone(&fault);
+        std::thread::Builder::new()
+            .name("export-writer".to_string())
+            .spawn(move || write_pieces(writer, queue, kept, sender))?;
+        let sheet_room =
+            matches!(format, ExportFormat::Xlsx).then_some(crate::xlsx::MAX_SHEET_ROWS - 1);
+        Ok(Self::new(pieces, fault, done, path, sheet_room))
+    }
+
+    fn new(
+        pieces: std::sync::mpsc::SyncSender<Piece>,
+        fault: WriterFault,
+        done: tokio::sync::oneshot::Receiver<Result<u64>>,
+        path: &std::path::Path,
+        sheet_room: Option<usize>,
+    ) -> Self {
+        Self {
+            pieces,
+            fault,
+            done: Some(done),
+            final_path: path.to_path_buf(),
+            sheet_room,
+            rows: 0,
+            truncated: false,
+            sheet_full: false,
+            saw_set: false,
+            set_done: false,
+        }
+    }
+
+    /// The error that stopped the writer thread. A thread that stopped
+    /// without an error, such as one that panicked, gives a general error.
+    fn writer_fault(&self) -> Error {
+        self.fault
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .unwrap_or_else(|| {
+                Error::Anyhow(anyhow::anyhow!(
+                    "The export stopped because the file writer quit unexpectedly."
+                ))
+            })
+    }
+
+    /// Puts one piece in the queue of the writer. A full queue makes the
+    /// driver wait for the writer, which slows the read to the speed of the
+    /// disk.
+    fn send(&self, piece: Piece) -> Result<()> {
+        use std::sync::mpsc::TrySendError;
+        let piece = match self.pieces.try_send(piece) {
+            Ok(()) => return Ok(()),
+            Err(TrySendError::Full(piece)) => piece,
+            Err(TrySendError::Disconnected(_)) => return Err(self.writer_fault()),
+        };
+        wait_in_place(|| self.pieces.send(piece)).map_err(|_| self.writer_fault())
+    }
+
+    /// Tells the writer to close the file and rename it onto the path the
+    /// user chose, and waits for the writer to finish.
+    async fn finish(mut self) -> Result<ExportSummary> {
+        self.send(Piece::Finish)?;
+        let done = self.done.take().expect("the sink finishes once");
+        let cut_cells = match done.await {
+            Ok(result) => result?,
+            Err(_) => return Err(self.writer_fault()),
+        };
+        let warning = cut_cells_warning(cut_cells);
+        if let Some(text) = &warning {
+            log::warn!("{text}");
+        }
+        Ok(ExportSummary {
+            rows: self.rows,
+            truncated: self.truncated,
+            path: self.final_path.to_string_lossy().to_string(),
+            sheet_full: self.sheet_full,
+            cut_cells,
+            warning,
+        })
+    }
+}
+
+/// Runs blocking work on the current thread. On a worker of a runtime with
+/// many threads, the runtime first moves the other tasks of this worker to
+/// another thread, so they do not wait for the work. A runtime with one
+/// thread cannot move its tasks, and the work then runs as it is.
+fn wait_in_place<T>(work: impl FnOnce() -> T) -> T {
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    match Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(work)
+        }
+        _ => work(),
+    }
+}
+
+/// The loop of the writer thread. It writes each piece in the order of the
+/// queue. A queue that closes before a `Finish` piece means that the run
+/// failed or stopped, and the drop of the writer then removes the part that
+/// was written.
+fn write_pieces(
+    mut writer: ExportWriter,
+    queue: std::sync::mpsc::Receiver<Piece>,
+    fault: WriterFault,
+    done: tokio::sync::oneshot::Sender<Result<u64>>,
+) {
+    for piece in queue {
+        let step = match piece {
+            Piece::Begin(columns) => writer.begin(columns),
+            Piece::Row(row) => writer.row(&row),
+            Piece::Finish => {
+                let _ = done.send(writer.finish());
+                return;
+            }
+        };
+        if let Err(error) = step {
+            *fault
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
+            return;
+        }
+    }
+}
+
+/// The writer of an export file, which runs on the writer thread. It writes
+/// to a temporary path beside the file and renames it at a successful end,
+/// so a run that fails or stops leaves no file.
+struct ExportWriter {
     format: ExportFormat,
     final_path: std::path::PathBuf,
     temp_path: std::path::PathBuf,
@@ -2755,18 +2932,15 @@ struct FileSink {
     /// The unique column names of the set, for the JSON objects.
     names: Vec<String>,
     rows: usize,
-    truncated: bool,
-    /// True once the first set began.
-    saw_set: bool,
-    /// True once the first set ended.
-    set_done: bool,
+    /// True once the set began.
+    began: bool,
     /// True once the file reached its final path.
     finished: bool,
 }
 
-impl FileSink {
+impl ExportWriter {
     fn create(path: &std::path::Path, format: ExportFormat) -> Result<Self> {
-        // The sink removes the temporary file itself when the export does
+        // The writer removes the temporary file itself when the export does
         // not finish, so the file leaves the cleanup of `tempfile`.
         let (file, temp_path) = files::temp_file_beside(path)?
             .keep()
@@ -2785,9 +2959,7 @@ impl FileSink {
             sheet_title,
             names: Vec::new(),
             rows: 0,
-            truncated: false,
-            saw_set: false,
-            set_done: false,
+            began: false,
             finished: false,
         })
     }
@@ -2798,75 +2970,9 @@ impl FileSink {
             .ok_or_else(|| Error::Anyhow(anyhow::anyhow!("The export file is closed.")))
     }
 
-    /// Closes the file and renames it onto the path the user chose.
-    fn finish(mut self) -> Result<ExportSummary> {
+    fn begin(&mut self, columns: Vec<crate::db::ColumnInfo>) -> Result<()> {
         use std::io::Write;
-        let mut cut_cells = 0;
-        let mut sheet_full = false;
-        if self.saw_set {
-            match self.format {
-                ExportFormat::Json => {
-                    let rows = self.rows;
-                    let out = self.writer()?;
-                    if rows == 0 {
-                        writeln!(out, "]")?;
-                    } else {
-                        writeln!(out, "\n]")?;
-                    }
-                }
-                // The sheet holds the file while it is open, so the close of
-                // the container gives the file back.
-                ExportFormat::Xlsx => {
-                    if let Some(sheet) = self.sheet.take() {
-                        cut_cells = sheet.cut_cells();
-                        sheet_full = sheet.sheet_full();
-                        self.out = Some(sheet.finish()?);
-                    }
-                }
-                ExportFormat::Csv => {}
-            }
-        }
-        let out = self.out.take().expect("the file is open until here");
-        // The rows go to the disk before the rename, so a power loss cannot
-        // leave an empty or a partial file at the path the user chose.
-        let file = out.into_inner().map_err(|error| error.into_error())?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&self.temp_path, &self.final_path)?;
-        files::sync_folder_of(&self.final_path);
-        self.finished = true;
-        let warning = cut_cells_warning(cut_cells);
-        if let Some(text) = &warning {
-            log::warn!("{text}");
-        }
-        Ok(ExportSummary {
-            rows: self.rows,
-            truncated: self.truncated,
-            path: self.final_path.to_string_lossy().to_string(),
-            sheet_full,
-            cut_cells,
-            warning,
-        })
-    }
-}
-
-impl Drop for FileSink {
-    fn drop(&mut self) {
-        if !self.finished {
-            self.sheet.take();
-            self.out.take();
-            let _ = std::fs::remove_file(&self.temp_path);
-        }
-    }
-}
-
-impl crate::db::sink::RowSink for FileSink {
-    fn begin_set(&mut self, columns: Vec<crate::db::ColumnInfo>) -> Result<()> {
-        use std::io::Write;
-        if self.saw_set {
-            return Ok(());
-        }
-        self.saw_set = true;
+        self.began = true;
         match self.format {
             ExportFormat::Csv => {
                 let names: Vec<serde_json::Value> = columns
@@ -2905,15 +3011,12 @@ impl crate::db::sink::RowSink for FileSink {
         Ok(())
     }
 
-    fn row(&mut self, row: Vec<serde_json::Value>) -> Result<crate::db::sink::SinkControl> {
+    /// Writes one row. The sink keeps the bound of a sheet, so a row of an
+    /// xlsx file always fits.
+    fn row(&mut self, row: &[serde_json::Value]) -> Result<()> {
         use std::io::Write;
-        if self.set_done {
-            return Ok(crate::db::sink::SinkControl::Stop);
-        }
         match self.format {
-            ExportFormat::Csv => {
-                write_csv_line(self.writer()?, &row)?;
-            }
+            ExportFormat::Csv => write_csv_line(self.writer()?, row)?,
             ExportFormat::Json => {
                 let rows = self.rows;
                 let out = self
@@ -2924,22 +3027,95 @@ impl crate::db::sink::RowSink for FileSink {
                     writeln!(out, ",")?;
                 }
                 write!(out, "  ")?;
-                write_json_object(out, &self.names, &row)?;
+                write_json_object(out, &self.names, row)?;
             }
             ExportFormat::Xlsx => {
                 let sheet = self
                     .sheet
                     .as_mut()
                     .ok_or_else(|| Error::Anyhow(anyhow::anyhow!("The sheet isn't open.")))?;
-                // A sheet holds a bounded number of rows. The rows past the
-                // bound stay out of the file, and the summary reports the
-                // result as truncated.
-                if !sheet.row(&row)? {
-                    self.truncated = true;
-                    return Ok(crate::db::sink::SinkControl::Stop);
-                }
+                sheet.row(row)?;
             }
         }
+        self.rows += 1;
+        Ok(())
+    }
+
+    /// Closes the file and renames it onto the path the user chose. Gives
+    /// the number of text cells of an xlsx file that were cut.
+    fn finish(mut self) -> Result<u64> {
+        use std::io::Write;
+        let mut cut_cells = 0;
+        if self.began {
+            match self.format {
+                ExportFormat::Json => {
+                    let rows = self.rows;
+                    let out = self.writer()?;
+                    if rows == 0 {
+                        writeln!(out, "]")?;
+                    } else {
+                        writeln!(out, "\n]")?;
+                    }
+                }
+                // The sheet holds the file while it is open, so the close of
+                // the container gives the file back.
+                ExportFormat::Xlsx => {
+                    if let Some(sheet) = self.sheet.take() {
+                        cut_cells = sheet.cut_cells();
+                        self.out = Some(sheet.finish()?);
+                    }
+                }
+                ExportFormat::Csv => {}
+            }
+        }
+        let out = self.out.take().expect("the file is open until here");
+        // The rows go to the disk before the rename, so a power loss cannot
+        // leave an empty or a partial file at the path the user chose.
+        let file = out.into_inner().map_err(|error| error.into_error())?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&self.temp_path, &self.final_path)?;
+        files::sync_folder_of(&self.final_path);
+        self.finished = true;
+        Ok(cut_cells)
+    }
+}
+
+impl Drop for ExportWriter {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.sheet.take();
+            self.out.take();
+            let _ = std::fs::remove_file(&self.temp_path);
+        }
+    }
+}
+
+impl crate::db::sink::RowSink for FileSink {
+    fn begin_set(&mut self, columns: Vec<crate::db::ColumnInfo>) -> Result<()> {
+        if self.saw_set {
+            return Ok(());
+        }
+        self.saw_set = true;
+        self.send(Piece::Begin(columns))
+    }
+
+    fn row(&mut self, row: Vec<serde_json::Value>) -> Result<crate::db::sink::SinkControl> {
+        if self.set_done {
+            return Ok(crate::db::sink::SinkControl::Stop);
+        }
+        // A sheet holds a bounded number of rows. The rows past the bound
+        // stay out of the file, and the summary reports the result as
+        // truncated.
+        if let Some(room) = self.sheet_room.as_mut() {
+            if *room == 0 {
+                self.truncated = true;
+                self.sheet_full = true;
+                return Ok(crate::db::sink::SinkControl::Stop);
+            }
+            *room -= 1;
+        }
+        self.send(Piece::Row(row))?;
         self.rows += 1;
         Ok(crate::db::sink::SinkControl::Continue)
     }
@@ -3829,6 +4005,122 @@ mod tests {
         })
     }
 
+    /// Waits until a folder is empty, for at most five seconds. The writer
+    /// thread of an export removes its part after the sink is gone.
+    fn wait_for_empty(folder: &std::path::Path) -> bool {
+        for _ in 0..500 {
+            if std::fs::read_dir(folder).unwrap().next().is_none() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        false
+    }
+
+    /// A sink whose queue a test reads itself, with room for one piece.
+    fn bare_sink(
+        path: &std::path::Path,
+    ) -> (
+        FileSink,
+        std::sync::mpsc::Receiver<Piece>,
+        tokio::sync::oneshot::Sender<Result<u64>>,
+    ) {
+        let (pieces, queue) = std::sync::mpsc::sync_channel(1);
+        let (sender, done) = tokio::sync::oneshot::channel();
+        let sink = FileSink::new(pieces, WriterFault::default(), done, path, None);
+        (sink, queue, sender)
+    }
+
+    #[test]
+    fn a_full_queue_waits_for_the_writer() {
+        let (sink, queue, _done) = bare_sink(std::path::Path::new("/tmp/x.csv"));
+        sink.send(Piece::Finish).unwrap();
+        // The queue is full, so the next send waits until a reader takes
+        // the first piece.
+        let reader = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            queue.iter().count()
+        });
+        sink.send(Piece::Finish).unwrap();
+        drop(sink);
+        assert_eq!(reader.join().unwrap(), 2);
+    }
+
+    #[test]
+    fn a_writer_that_quits_while_the_queue_is_full_stops_the_export() {
+        let (sink, queue, _done) = bare_sink(std::path::Path::new("/tmp/x.csv"));
+        sink.send(Piece::Finish).unwrap();
+        let reader = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            drop(queue);
+        });
+        let error = sink.send(Piece::Finish).unwrap_err();
+        assert!(error.to_string().contains("quit unexpectedly"), "{error}");
+        reader.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_writer_that_ends_without_an_answer_stops_the_export() {
+        let (sink, _queue, done) = bare_sink(std::path::Path::new("/tmp/x.csv"));
+        drop(done);
+        let error = sink.finish().await.unwrap_err();
+        assert!(error.to_string().contains("quit unexpectedly"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn an_error_of_the_writer_reaches_the_run() {
+        use crate::db::sink::RowSink;
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("wide.xlsx");
+        let mut sink = FileSink::create(&path, ExportFormat::Xlsx).await.unwrap();
+        // A sheet cannot take this many columns, so the writer stops at the
+        // start of the set.
+        let columns = (0..=crate::xlsx::MAX_SHEET_COLUMNS)
+            .map(|index| ColumnInfo::new(format!("c{index}"), "int"))
+            .collect();
+        sink.begin_set(columns).unwrap();
+        let mut error = None;
+        for _ in 0..500 {
+            if let Err(found) = sink.row(vec![serde_json::json!(1)]) {
+                error = Some(found);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(matches!(error, Some(Error::Unsupported(_))), "{error:?}");
+        // The error went to the run once. A later finish still fails.
+        assert!(sink.finish().await.is_err());
+        assert!(wait_for_empty(folder.path()));
+    }
+
+    #[tokio::test]
+    async fn an_error_at_the_finish_of_the_writer_reaches_the_run() {
+        use crate::db::sink::RowSink;
+        let folder = tempfile::tempdir().unwrap();
+        // A folder with a file in it stands at the path, so the rename fails.
+        let path = folder.path().join("taken.csv");
+        std::fs::create_dir_all(path.join("inside")).unwrap();
+        let mut sink = FileSink::create(&path, ExportFormat::Csv).await.unwrap();
+        sink.begin_set(vec![ColumnInfo::new("id", "int")]).unwrap();
+        sink.end_set(false).unwrap();
+        assert!(matches!(sink.finish().await, Err(Error::Io(_))));
+        assert!(no_temporary_file(folder.path()));
+    }
+
+    #[test]
+    fn a_wait_in_place_runs_the_work_with_or_without_a_runtime() {
+        assert_eq!(wait_in_place(|| 1), 1);
+        let one_thread = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        assert_eq!(one_thread.block_on(async { wait_in_place(|| 2) }), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_wait_in_place_on_a_runtime_with_many_threads_runs_the_work() {
+        assert_eq!(wait_in_place(|| 3), 3);
+    }
+
     /// Builds an application of the tests with a context, so the files of
     /// the settings answer.
     fn app_with_store() -> tauri::App<tauri::test::MockRuntime> {
@@ -4141,8 +4433,8 @@ mod tests {
         assert_eq!(csv_field(&json!("two\nlines")), "\"two\nlines\"");
     }
 
-    #[test]
-    fn a_result_reaches_a_file_in_both_forms() {
+    #[tokio::test]
+    async fn a_result_reaches_a_file_in_both_forms() {
         use crate::db::sink::{RowSink, SinkControl};
         use crate::db::ColumnInfo;
         let columns = vec![
@@ -4156,13 +4448,13 @@ mod tests {
 
         let folder = tempfile::tempdir().unwrap();
         let csv = folder.path().join("out.csv");
-        let mut sink = FileSink::create(&csv, ExportFormat::Csv).unwrap();
+        let mut sink = FileSink::create(&csv, ExportFormat::Csv).await.unwrap();
         sink.begin_set(columns.clone()).unwrap();
         for row in &rows {
             assert_eq!(sink.row(row.clone()).unwrap(), SinkControl::Continue);
         }
         sink.end_set(false).unwrap();
-        let summary = sink.finish().unwrap();
+        let summary = sink.finish().await.unwrap();
         assert_eq!(summary.rows, 2);
         assert!(!summary.truncated);
         assert_eq!(
@@ -4173,13 +4465,13 @@ mod tests {
         assert!(no_temporary_file(folder.path()));
 
         let json = folder.path().join("out.json");
-        let mut sink = FileSink::create(&json, ExportFormat::Json).unwrap();
+        let mut sink = FileSink::create(&json, ExportFormat::Json).await.unwrap();
         sink.begin_set(columns).unwrap();
         for row in &rows {
             sink.row(row.clone()).unwrap();
         }
         sink.end_set(true).unwrap();
-        let summary = sink.finish().unwrap();
+        let summary = sink.finish().await.unwrap();
         assert!(summary.truncated);
         assert_eq!(
             std::fs::read_to_string(&json).unwrap(),
@@ -4204,15 +4496,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_result_reaches_an_excel_file_as_one_sheet() {
+    #[tokio::test]
+    async fn a_result_reaches_an_excel_file_as_one_sheet() {
         use crate::db::sink::{RowSink, SinkControl};
         use crate::db::ColumnInfo;
         use std::io::Read;
 
         let folder = tempfile::tempdir().unwrap();
         let path = folder.path().join("Daily count.xlsx");
-        let mut sink = FileSink::create(&path, ExportFormat::Xlsx).unwrap();
+        let mut sink = FileSink::create(&path, ExportFormat::Xlsx).await.unwrap();
         sink.begin_set(vec![
             ColumnInfo::new("id", "int"),
             ColumnInfo::new("name", "text"),
@@ -4226,7 +4518,7 @@ mod tests {
         sink.row(vec![serde_json::json!(2), serde_json::json!(null)])
             .unwrap();
         sink.end_set(false).unwrap();
-        let summary = sink.finish().unwrap();
+        let summary = sink.finish().await.unwrap();
 
         assert_eq!(summary.rows, 2);
         assert!(!summary.truncated);
@@ -4255,35 +4547,34 @@ mod tests {
         assert!(workbook.contains(r#"<sheet name="Daily count""#));
     }
 
-    #[test]
-    fn a_stopped_export_of_an_excel_file_leaves_no_file() {
+    #[tokio::test]
+    async fn a_stopped_export_of_an_excel_file_leaves_no_file() {
         use crate::db::sink::RowSink;
         use crate::db::ColumnInfo;
         let folder = tempfile::tempdir().unwrap();
         let path = folder.path().join("part.xlsx");
-        let mut sink = FileSink::create(&path, ExportFormat::Xlsx).unwrap();
+        let mut sink = FileSink::create(&path, ExportFormat::Xlsx).await.unwrap();
         sink.begin_set(vec![ColumnInfo::new("id", "int")]).unwrap();
         sink.row(vec![serde_json::json!(1)]).unwrap();
         drop(sink);
+        // The writer thread removes the part after the queue closes.
+        assert!(wait_for_empty(folder.path()));
         assert!(!path.exists());
-        assert!(std::fs::read_dir(folder.path()).unwrap().next().is_none());
     }
 
-    #[test]
-    fn an_excel_export_stops_at_the_bound_of_a_sheet() {
+    #[tokio::test]
+    async fn an_excel_export_stops_at_the_bound_of_a_sheet() {
         use crate::db::sink::{RowSink, SinkControl};
         use crate::db::ColumnInfo;
         let folder = tempfile::tempdir().unwrap();
         let path = folder.path().join("full.xlsx");
-        let mut sink = FileSink::create(&path, ExportFormat::Xlsx).unwrap();
+        let mut sink = FileSink::create(&path, ExportFormat::Xlsx).await.unwrap();
         sink.begin_set(vec![ColumnInfo::new("id", "int")]).unwrap();
 
-        // The sheet stands one row below its bound, so the next row is the
-        // last one that fits.
-        sink.sheet
-            .as_mut()
-            .unwrap()
-            .set_rows(crate::xlsx::MAX_SHEET_ROWS - 1);
+        // The sheet has room for one more row, so the next row is the last
+        // one that fits.
+        assert_eq!(sink.sheet_room, Some(crate::xlsx::MAX_SHEET_ROWS - 1));
+        sink.sheet_room = Some(1);
         assert_eq!(
             sink.row(vec![serde_json::json!(1)]).unwrap(),
             SinkControl::Continue
@@ -4294,7 +4585,7 @@ mod tests {
         );
         sink.end_set(false).unwrap();
 
-        let summary = sink.finish().unwrap();
+        let summary = sink.finish().await.unwrap();
         assert!(summary.truncated);
         assert!(summary.sheet_full);
         assert_eq!(summary.cut_cells, 0);
@@ -4302,14 +4593,14 @@ mod tests {
         assert!(path.exists());
     }
 
-    #[test]
-    fn an_excel_export_counts_the_cells_it_cut() {
+    #[tokio::test]
+    async fn an_excel_export_counts_the_cells_it_cut() {
         use crate::db::sink::RowSink;
         use crate::db::ColumnInfo;
         use std::io::Read;
         let folder = tempfile::tempdir().unwrap();
         let path = folder.path().join("long.xlsx");
-        let mut sink = FileSink::create(&path, ExportFormat::Xlsx).unwrap();
+        let mut sink = FileSink::create(&path, ExportFormat::Xlsx).await.unwrap();
         sink.begin_set(vec![
             ColumnInfo::new("note", "text"),
             ColumnInfo::new("code", "varchar"),
@@ -4319,7 +4610,7 @@ mod tests {
         sink.row(vec![serde_json::json!(long), serde_json::json!("007")])
             .unwrap();
         sink.end_set(false).unwrap();
-        let summary = sink.finish().unwrap();
+        let summary = sink.finish().await.unwrap();
         assert!(!summary.sheet_full);
         assert_eq!(summary.cut_cells, 1);
         assert!(summary.warning.unwrap().starts_with("1 cell had more"));
@@ -4353,27 +4644,28 @@ mod tests {
         assert_eq!(value["cutCells"], 2);
     }
 
-    #[test]
-    fn a_stopped_export_leaves_no_file() {
+    #[tokio::test]
+    async fn a_stopped_export_leaves_no_file() {
         use crate::db::sink::RowSink;
         use crate::db::ColumnInfo;
         let folder = tempfile::tempdir().unwrap();
         let path = folder.path().join("part.csv");
-        let mut sink = FileSink::create(&path, ExportFormat::Csv).unwrap();
+        let mut sink = FileSink::create(&path, ExportFormat::Csv).await.unwrap();
         sink.begin_set(vec![ColumnInfo::new("id", "int")]).unwrap();
         sink.row(vec![serde_json::json!(1)]).unwrap();
         drop(sink);
+        // The writer thread removes the part after the queue closes.
+        assert!(wait_for_empty(folder.path()));
         assert!(!path.exists());
-        assert!(std::fs::read_dir(folder.path()).unwrap().next().is_none());
     }
 
-    #[test]
-    fn an_export_writes_the_first_set_alone() {
+    #[tokio::test]
+    async fn an_export_writes_the_first_set_alone() {
         use crate::db::sink::{RowSink, SinkControl};
         use crate::db::ColumnInfo;
         let folder = tempfile::tempdir().unwrap();
         let path = folder.path().join("first.csv");
-        let mut sink = FileSink::create(&path, ExportFormat::Csv).unwrap();
+        let mut sink = FileSink::create(&path, ExportFormat::Csv).await.unwrap();
         sink.begin_set(vec![ColumnInfo::new("id", "int")]).unwrap();
         sink.row(vec![serde_json::json!(1)]).unwrap();
         sink.end_set(false).unwrap();
@@ -4387,7 +4679,7 @@ mod tests {
         );
         sink.end_set(false).unwrap();
 
-        let summary = sink.finish().unwrap();
+        let summary = sink.finish().await.unwrap();
         assert_eq!(summary.rows, 1);
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -4395,16 +4687,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_empty_json_export_is_a_valid_list() {
+    #[tokio::test]
+    async fn an_empty_json_export_is_a_valid_list() {
         use crate::db::sink::RowSink;
         use crate::db::ColumnInfo;
         let folder = tempfile::tempdir().unwrap();
         let path = folder.path().join("empty.json");
-        let mut sink = FileSink::create(&path, ExportFormat::Json).unwrap();
+        let mut sink = FileSink::create(&path, ExportFormat::Json).await.unwrap();
         sink.begin_set(vec![ColumnInfo::new("id", "int")]).unwrap();
         sink.end_set(false).unwrap();
-        let summary = sink.finish().unwrap();
+        let summary = sink.finish().await.unwrap();
         assert_eq!(summary.rows, 0);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "[\n]\n");
     }
