@@ -233,6 +233,10 @@ export function addMessage(state: QueryState, message: Message): void {
   }
 }
 
+/** What a tab says when its server session closed and a new one opened. */
+export const SESSION_RESET_TEXT =
+  "This tab's session was reset. Temporary tables, open transactions and SET options are gone."
+
 /** Gives the last result of a list, or nothing when the list is empty. */
 function lastPane(panes: ResultPane[]): ResultPane | undefined {
   return panes.length > 0 ? panes[panes.length - 1] : undefined
@@ -423,6 +427,9 @@ export const useQueryStore = defineStore('query', () => {
     const connectionName = connections.nameFor(connectionId)
     let succeeded = false
     let failure: ErrorPayload | null = null
+    // The end of the run or its failure says when the session of the tab
+    // closed, so the tab tells the user once.
+    let sessionReset = false
     const run: Run = { fresh: [], abandoned: false, rowsAtClose: 0 }
     runs.set(tabId, run)
 
@@ -491,6 +498,7 @@ export const useQueryStore = defineStore('query', () => {
             state.rowsAffected = end.rowsAffected
             state.elapsedMs = end.elapsedMs
             state.stats = end.stats
+            sessionReset ||= end.sessionReset === true
             attachKept(state, run, end.kept ?? [])
           },
         },
@@ -511,6 +519,7 @@ export const useQueryStore = defineStore('query', () => {
       // so that failure gives no notice.
       failure = run.abandoned ? toErrorPayload(error) : ui.reportError(error, { kept: true })
       state.error = failure
+      sessionReset ||= failure.sessionReset === true
       // A stop that the user asked for is not a failure, so the tab keeps
       // its view and shows no failed mark.
       if (!run.abandoned && !isCancellation(failure)) {
@@ -536,6 +545,10 @@ export const useQueryStore = defineStore('query', () => {
       state.requestId = null
       state.requestConnectionId = null
       state.startedAt = null
+    }
+    if (sessionReset && !run.abandoned) {
+      addMessage(state, { level: MessageLevel.Warning, text: SESSION_RESET_TEXT, detail: null })
+      ui.warn(SESSION_RESET_TEXT)
     }
 
     // A plan is not the statement of the user, so the history holds the runs

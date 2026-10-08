@@ -77,6 +77,11 @@ pub struct ErrorPayload {
     /// its category. The window shows the advice of the category when this
     /// is null.
     pub reason: Option<&'static str>,
+    /// True when the session of the tab closed after the failure. The next
+    /// request of the tab opens a new session, without the temporary
+    /// tables, the open transaction and the `SET` options of the old one.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub session_reset: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -129,6 +134,11 @@ pub enum Error {
     /// the GSSAPI error that names the KDC.
     #[error("Couldn't reach the Kerberos server. Check your VPN or network connection.")]
     KerberosUnreachable(Box<Error>),
+    /// A failure after which the session of the tab closed. The inner error
+    /// is the failure itself, and the text, the category and the place are
+    /// the ones of the inner error.
+    #[error("{0}")]
+    SessionReset(Box<Error>),
 
     #[error(transparent)]
     Tiberius(#[from] tiberius::error::Error),
@@ -275,7 +285,7 @@ impl Error {
             Error::Authentication(_) => ErrorCategory::Authentication,
             Error::Unsupported(_) => ErrorCategory::Unsupported,
             Error::Invalid(_) => ErrorCategory::Invalid,
-            Error::Located { inner, .. } => inner.category(),
+            Error::Located { inner, .. } | Error::SessionReset(inner) => inner.category(),
             // The advice for a timeout names the timeout of the connection,
             // which does not change the lock limit.
             Error::LockWait(_) => ErrorCategory::Database,
@@ -297,7 +307,7 @@ impl Error {
     /// Other errors, such as a syntax error or a deadlock, are not.
     pub fn is_stop_reply(&self) -> bool {
         match self {
-            Error::Located { inner, .. } => inner.is_stop_reply(),
+            Error::Located { inner, .. } | Error::SessionReset(inner) => inner.is_stop_reply(),
             Error::Postgres(error) => {
                 error
                     .as_db_error()
@@ -360,6 +370,12 @@ impl Error {
 
     /// Builds the payload that the user interface receives.
     pub fn to_payload(&self) -> ErrorPayload {
+        if let Error::SessionReset(inner) = self {
+            return ErrorPayload {
+                session_reset: true,
+                ..inner.to_payload()
+            };
+        }
         if let Error::Located {
             inner,
             line,
@@ -413,6 +429,7 @@ impl Error {
             line: None,
             column: None,
             reason: self.reason(),
+            session_reset: false,
         }
     }
 
@@ -818,6 +835,24 @@ mod tests {
     fn a_lock_wait_without_a_server_detail_gives_the_server_text_alone() {
         let payload = Error::LockWait(Box::new(Error::Connection("gone".into()))).to_payload();
         assert_eq!(payload.detail.as_deref(), Some("gone"));
+    }
+
+    #[test]
+    fn a_session_reset_keeps_the_failure_and_adds_the_mark() {
+        let reset = Error::SessionReset(Box::new(Error::Cancelled.at(2, 5)));
+        assert_eq!(reset.category(), ErrorCategory::Cancelled);
+        assert!(reset.is_stop_reply());
+        assert_eq!(reset.to_string(), "The operation was cancelled.");
+        let payload = reset.to_payload();
+        assert!(payload.session_reset);
+        assert_eq!(payload.category, "cancelled");
+        assert_eq!((payload.line, payload.column), (Some(2), Some(5)));
+
+        let value = serde_json::to_value(&reset).unwrap();
+        assert_eq!(value["sessionReset"], true);
+        // A payload without the mark leaves the field out.
+        let value = serde_json::to_value(Error::Timeout(5)).unwrap();
+        assert!(value.get("sessionReset").is_none());
     }
 
     #[test]

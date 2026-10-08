@@ -5,8 +5,15 @@ import { makeApiStub, connectionFixture, streamed } from './helpers'
 const apiStub = makeApiStub()
 vi.mock('@/lib/api', () => ({ api: apiStub, CONNECTION_STATUS_EVENT: 'connection-status' }))
 
-const { KEPT_MESSAGES, editorPosition, newQueryState, runRowLimit, totalRows, useQueryStore } =
-  await import('@/stores/query')
+const {
+  KEPT_MESSAGES,
+  SESSION_RESET_TEXT,
+  editorPosition,
+  newQueryState,
+  runRowLimit,
+  totalRows,
+  useQueryStore,
+} = await import('@/stores/query')
 const { ResultTable } = await import('@/lib/results')
 const { useConnectionsStore } = await import('@/stores/connections')
 const { useHistoryStore } = await import('@/stores/history')
@@ -185,9 +192,17 @@ describe('query store', () => {
     await Promise.resolve()
     queries.clear('t1')
 
-    held.release({ category: 'cancelled', message: 'The statement was stopped.', detail: null })
+    const warn = vi.spyOn(ui, 'warn')
+    held.release({
+      category: 'cancelled',
+      message: 'The statement was stopped.',
+      detail: null,
+      sessionReset: true,
+    })
     expect(await running).toBe(false)
     expect(report).not.toHaveBeenCalled()
+    // A tab that closed gets no word of its new session.
+    expect(warn).not.toHaveBeenCalled()
     expect(record).toHaveBeenCalledWith(
       expect.objectContaining({
         rowCount: 2,
@@ -216,6 +231,54 @@ describe('query store', () => {
     expect(state.activePaneId).toBe(state.panes[1]?.id)
     expect(state.errorLocation).toBeNull()
     expect(state.error?.category).toBe('cancelled')
+  })
+
+  it('tells the tab when a stop reset its session', async () => {
+    const held = heldRun()
+    const warn = vi.spyOn(useUiStore(), 'warn')
+    const queries = useQueryStore()
+    const running = queries.execute('t1', 'c1', 'SELECT 1')
+    await Promise.resolve()
+    held.release({
+      category: 'cancelled',
+      message: 'The statement was stopped.',
+      detail: null,
+      sessionReset: true,
+    })
+    expect(await running).toBe(false)
+    const state = queries.stateFor('t1')
+    expect(state.messages[state.messages.length - 1]).toEqual({
+      level: 'warning',
+      text: SESSION_RESET_TEXT,
+      detail: null,
+    })
+    expect(warn).toHaveBeenCalledWith(SESSION_RESET_TEXT)
+  })
+
+  it('tells the tab when its session opened again before the run', async () => {
+    apiStub.executeQuery.mockImplementation(
+      async (_request: unknown, handlers: import('@/lib/results').ResultStreamHandlers) => {
+        handlers.onEnd({
+          messages: [],
+          rowsAffected: null,
+          elapsedMs: 1,
+          stats: null,
+          sessionReset: true,
+        })
+      },
+    )
+    const warn = vi.spyOn(useUiStore(), 'warn')
+    const queries = useQueryStore()
+    expect(await queries.execute('t1', 'c1', 'SELECT 1')).toBe(true)
+    expect(queries.stateFor('t1').messages.map((message) => message.text)).toEqual([
+      SESSION_RESET_TEXT,
+    ])
+    expect(warn).toHaveBeenCalledTimes(1)
+
+    // A run on the same session says nothing more.
+    apiStub.executeQuery.mockImplementation(streamed(response()))
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    expect(warn).toHaveBeenCalledTimes(1)
   })
 
   it('refuses an empty statement', async () => {

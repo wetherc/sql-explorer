@@ -59,6 +59,18 @@ pub struct Session {
     /// a message. A request that waited for the driver at that moment must
     /// not send on it, because it would read the rest of the old answer.
     broken: AtomicBool,
+    /// True when this session took the place of a session that stopped
+    /// answering, until a run on it tells the tab.
+    replaced: AtomicBool,
+}
+
+/// What one run tells the tab about the session it ran on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionReport {
+    /// True when the session of the tab closed and a new one took its
+    /// place, so the temporary tables, the open transaction and the `SET`
+    /// options of the old session are gone.
+    pub reset: bool,
 }
 
 impl Session {
@@ -77,7 +89,20 @@ impl Session {
             last_used: Mutex::new(Instant::now()),
             health: Mutex::new(()),
             broken: AtomicBool::new(false),
+            replaced: AtomicBool::new(false),
         }
+    }
+
+    /// Records that this session takes the place of a session that stopped
+    /// answering.
+    pub fn mark_replacement(&self) {
+        self.replaced.store(true, Ordering::SeqCst);
+    }
+
+    /// True once after [`Session::mark_replacement`], so one run alone
+    /// tells the tab.
+    pub fn take_replaced(&self) -> bool {
+        self.replaced.swap(false, Ordering::SeqCst)
     }
 
     /// Records that nothing can be sent on the session again.
@@ -573,6 +598,15 @@ mod tests {
             .await
             .unwrap();
         assert!(flag.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn a_replacement_tells_one_run_alone() {
+        let session = Session::new(Box::new(StubDriver::plain()));
+        assert!(!session.take_replaced());
+        session.mark_replacement();
+        assert!(session.take_replaced());
+        assert!(!session.take_replaced());
     }
 
     #[tokio::test]

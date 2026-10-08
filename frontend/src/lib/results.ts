@@ -354,6 +354,9 @@ export interface RunEnd {
   /** The sets that the row limit cut and whose full rows the backend kept.
    *  A plan gives none. */
   kept?: KeptSet[]
+  /** True when the tab's session closed before or during the run and a new
+   *  session took its place. */
+  sessionReset?: boolean
 }
 
 /** What the reader of a run tells its caller. */

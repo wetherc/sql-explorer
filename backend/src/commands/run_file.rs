@@ -26,6 +26,7 @@ use crate::db::sink::{RowSink, SinkControl};
 use crate::db::{ColumnInfo, ExecOptions, Message};
 use crate::error::{Error, Result};
 use crate::message_log::{MessageLogs, MessageTee};
+use crate::session::SessionReport;
 use crate::sql::ParamValues;
 use crate::state::AppState;
 use std::path::{Path, PathBuf};
@@ -350,6 +351,9 @@ pub async fn run_to_file<R: Runtime>(
 
     let TeeSink { file, grid, .. } = sink;
     let mut grid = grid.into_inner();
+    grid.report_session(SessionReport {
+        reset: session.take_replaced(),
+    });
     let finished = finish_run(&state, &connection_id, &open, &key, &session, outcome).await;
     end_message_log(
         logs.as_deref(),

@@ -674,6 +674,9 @@ export interface ErrorPayload {
   /** A marker for an error whose message gives its own advice, such as
    *  `kerberosUnreachable`. Null when the advice of the category applies. */
   reason?: string | null
+  /** True when the tab's session closed after the failure, so the next run
+   *  opens a new session. */
+  sessionReset?: boolean
 }
 
 /** Builds the options that a new connection starts with. */

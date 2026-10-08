@@ -17,7 +17,7 @@ use crate::history::HistoryEntry;
 use crate::message_log::{MessageLogs, MessageTee};
 use crate::script::{self, ScriptStatement};
 use crate::secrets::{self, SecretStore};
-use crate::session::{Session, DEFAULT_SESSION};
+use crate::session::{Session, SessionReport, DEFAULT_SESSION};
 use crate::spill::SpillSink;
 use crate::sql::ParamValues;
 use crate::state::{
@@ -488,7 +488,11 @@ async fn ensure_session_healthy<R: Runtime>(
         // request checks it again.
         Err(Error::Cancelled) => Err(Error::Cancelled),
         Ok(driver) => {
-            let replacement = open.sessions.insert(key, Session::new(driver)).await;
+            // The first run on the new session tells the tab that its
+            // temporary tables, its transaction and its options are gone.
+            let replacement = Session::new(driver);
+            replacement.mark_replacement();
+            let replacement = open.sessions.insert(key, replacement).await;
             // The background drivers share the fate of the session that
             // stopped answering, so the next metadata read opens new ones.
             state.clear_background(connection_id).await;
@@ -1272,6 +1276,9 @@ pub async fn execute_query<R: Runtime>(
     sources.extend(paused.map(|(set, read)| (set, crate::kept::KeptSource::PausedRead(read))));
     let kept = state.kept.keep(&request_id, &connection_id, sources);
     sink.announce_kept(kept);
+    sink.report_session(SessionReport {
+        reset: session.take_replaced(),
+    });
     let finished = finish_run(&state, &connection_id, &open, &key, &session, outcome).await;
     end_message_log(
         logs.as_deref(),
@@ -1419,6 +1426,9 @@ async fn finish_run<T>(
                     "A session of '{connection_id}' closed after a stop. The next request opens \
                      a new one."
                 );
+                // The tab learns that its temporary tables, its transaction
+                // and its options are gone.
+                return Err(Error::SessionReset(Box::new(error)));
             }
             Err(error)
         }
@@ -5995,7 +6005,12 @@ mod tests {
 
         let outcome: Bounded<()> = Bounded::Stopped(Error::Cancelled);
         let result = finish_run(&state, "s1", &open, "t1", &frail, outcome).await;
-        assert!(result.is_err());
+        // The error tells the tab that its session closed.
+        let error = result.unwrap_err();
+        assert!(
+            matches!(&error, Error::SessionReset(inner) if matches!(**inner, Error::Cancelled))
+        );
+        assert!(error.to_payload().session_reset);
 
         // The session leaves the slot of the tab at once, and the default
         // session stays as it was. The next request of the tab opens a new
@@ -6427,6 +6442,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_session_that_stopped_answering_opens_again_and_tells_the_tab() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (app, state) = state_with_sqlite(descriptor).await;
+        let open = state.connection("s1").await.unwrap();
+        let silent = open
+            .sessions
+            .insert(
+                "t1",
+                Session::new(Box::new(PingDriver {
+                    pings: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    answers: false,
+                    hangs: false,
+                })),
+            )
+            .await;
+        silent.age(crate::state::HEALTH_CHECK_AFTER).await;
+
+        let (_, replacement, _) = session_for(
+            app.handle(),
+            &state,
+            "s1",
+            Some("t1"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(!Arc::ptr_eq(&replacement, &silent));
+        assert!(replacement.take_replaced());
+        assert!(!silent.take_replaced());
+    }
+
+    #[tokio::test]
     async fn a_session_that_stopped_answering_and_cannot_reopen_goes() {
         let broken = sqlite_connection("/no/such/folder/x.db");
         let driver = Box::new(PingDriver {
@@ -6789,7 +6836,7 @@ mod tests {
         // SQLite aborts a statement cleanly, so the session stays.
         let outcome: Bounded<()> = Bounded::Stopped(Error::Cancelled);
         let result = finish_run(&state, "s1", &open, &key, &session, outcome).await;
-        assert!(result.is_err());
+        assert!(matches!(result, Err(Error::Cancelled)));
         let kept = open.sessions.get("t1").await.unwrap();
         assert!(Arc::ptr_eq(&session, &kept));
     }
@@ -7031,7 +7078,8 @@ mod tests {
         let outcome: Bounded<()> = Bounded::Stopped(Error::Cancelled);
         let result = finish_run(&state, "s1", &open, "t1", &session, outcome).await;
 
-        assert!(result.is_err());
+        // The tab closed, so no tab learns of a new session.
+        assert!(matches!(result, Err(Error::Cancelled)));
         assert!(open.sessions.get("t1").await.is_none());
     }
 

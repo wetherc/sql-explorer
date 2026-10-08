@@ -16,6 +16,7 @@ use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{ColumnInfo, Message, QueryStats};
 use crate::error::{Error, Result};
 use crate::kept::{KeptSet, KeptSource};
+use crate::session::SessionReport;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
@@ -406,6 +407,10 @@ struct RunEnd<'a> {
     /// still gives, so an export of all rows does not run the statement
     /// again.
     kept: &'a [KeptSet],
+    /// True when the session of the tab closed before or during the run,
+    /// and a new session took its place.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    session_reset: bool,
 }
 
 /// A sink that sends the rows to the user interface as binary chunks. It
@@ -434,6 +439,8 @@ pub struct ChunkSink {
     kept_sources: Vec<(u32, KeptSource)>,
     /// The kept sets that the frame at the end of the run names.
     kept: Vec<KeptSet>,
+    /// What the run tells the tab about its session.
+    session: SessionReport,
 }
 
 impl ChunkSink {
@@ -452,7 +459,14 @@ impl ChunkSink {
             offered: None,
             kept_sources: Vec::new(),
             kept: Vec::new(),
+            session: SessionReport::default(),
         }
+    }
+
+    /// Records what the frame at the end of the run tells the tab about its
+    /// session.
+    pub fn report_session(&mut self, session: SessionReport) {
+        self.session = session;
     }
 
     /// Takes the sources of the sets that ended cut, so the command of the
@@ -513,6 +527,7 @@ impl ChunkSink {
             elapsed_ms: summary.elapsed_ms,
             stats: summary.stats,
             kept: &self.kept,
+            session_reset: self.session.reset,
         };
         let json = serde_json::to_string(&end)?;
         let mut buffer = Vec::new();
@@ -1206,6 +1221,22 @@ mod tests {
         assert_eq!(value["elapsedMs"], 8);
         assert_eq!(value["rowsAffected"], 0);
         assert_eq!(value["messages"], json!([]));
+        assert!(value.get("sessionReset").is_none());
+    }
+
+    #[test]
+    fn the_end_of_a_run_reports_a_new_session() {
+        let (channel, messages) = collecting_channel();
+        let mut sink = ChunkSink::new(channel, 10);
+        sink.report_session(SessionReport { reset: true });
+        sink.fail(5).unwrap();
+
+        let frames = frames_of(&messages.lock().unwrap());
+        let Frame::End { summary } = &frames[0] else {
+            panic!("the frame does not end the run");
+        };
+        let value: JsonValue = serde_json::from_str(summary).unwrap();
+        assert_eq!(value["sessionReset"], true);
     }
 
     #[test]

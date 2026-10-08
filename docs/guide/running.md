@@ -42,6 +42,13 @@ Changing the tab's connection or closing the tab also stops the statement, and
 the application asks you before either one. On some engines a stop opens a new
 session, which discards the old session's temporary tables and `SET` options.
 
+When a stop or the time limit closes the tab's session, the tab tells you with
+a warning in the corner and in **Messages**: "This tab's session was reset.
+Temporary tables, open transactions and SET options are gone." An open
+transaction on the old session rolls back when the session closes. You see the
+same warning when a session that stopped answering is opened again before a
+run.
+
 ## Messages
 
 The **Messages** tab lists what the server sent, with each message's severity,
