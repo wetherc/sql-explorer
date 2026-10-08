@@ -126,6 +126,9 @@ default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 
 [dev-dependencies]
+# A test of the xlsx writer parses each part of a workbook to check that the
+# parts are well-formed XML and that their links agree.
+quick-xml = "0.41"
 # The tests of the command layer run against a mock application handle.
 tauri = { version = "2", features = ["test"] }
 # A test of a time limit moves the clock of the runtime instead of waiting.

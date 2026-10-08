@@ -814,6 +814,127 @@ mod tests {
         assert!(links.contains(r#"Id="rId2""#) && links.contains("worksheets/sheet2.xml"));
     }
 
+    /// The elements of one XML part with their attributes, in the order of
+    /// the part. The parse fails on XML that is not well-formed.
+    fn elements_of(text: &str) -> Vec<(String, std::collections::HashMap<String, String>)> {
+        use quick_xml::events::Event;
+        let mut reader = quick_xml::Reader::from_str(text);
+        let mut elements = Vec::new();
+        let mut depth = 0usize;
+        loop {
+            let (element, opens) = match reader.read_event().unwrap() {
+                Event::Start(element) => (element, true),
+                Event::Empty(element) => (element, false),
+                Event::End(_) => {
+                    depth -= 1;
+                    continue;
+                }
+                Event::Eof => break,
+                _ => continue,
+            };
+            depth += usize::from(opens);
+            let attributes = element
+                .attributes()
+                .map(|attribute| {
+                    let attribute = attribute.unwrap();
+                    (
+                        String::from_utf8(attribute.key.as_ref().to_vec()).unwrap(),
+                        String::from_utf8(attribute.value.to_vec()).unwrap(),
+                    )
+                })
+                .collect();
+            let name = String::from_utf8(element.name().as_ref().to_vec()).unwrap();
+            elements.push((name, attributes));
+        }
+        assert_eq!(depth, 0, "an element is not closed");
+        elements
+    }
+
+    #[test]
+    fn a_workbook_with_several_sheets_has_valid_parts_that_agree() {
+        let mut writer = SheetWriter::create(
+            Cursor::new(Vec::new()),
+            "Result 1",
+            &["id".to_string(), "note".to_string()],
+        )
+        .unwrap();
+        writer.row(&[json!(1), json!("a <b> & \"c\"")]).unwrap();
+        writer
+            .next_sheet("Result 2", &["name".to_string()], vec![false])
+            .unwrap();
+        writer.row(&[json!("x\u{1}y")]).unwrap();
+        writer
+            .next_sheet("Result 3", &["n".to_string()], vec![true])
+            .unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes.clone())).unwrap();
+        let names: std::collections::HashSet<String> =
+            archive.file_names().map(str::to_string).collect();
+        for name in &names {
+            let mut text = String::new();
+            archive
+                .by_name(name)
+                .unwrap()
+                .read_to_string(&mut text)
+                .unwrap();
+            assert!(!elements_of(&text).is_empty(), "{name} has no element");
+        }
+
+        // Each part has a content type, and each named part exists.
+        let types = elements_of(&part_of(bytes.clone(), "[Content_Types].xml"));
+        let defaults: Vec<&String> = types
+            .iter()
+            .filter(|(name, _)| name == "Default")
+            .map(|(_, attributes)| &attributes["Extension"])
+            .collect();
+        let overrides: Vec<String> = types
+            .iter()
+            .filter(|(name, _)| name == "Override")
+            .map(|(_, attributes)| attributes["PartName"].trim_start_matches('/').to_string())
+            .collect();
+        for part in &overrides {
+            assert!(names.contains(part), "{part} is missing");
+        }
+        for name in &names {
+            let extension = name.rsplit('.').next().unwrap().to_string();
+            assert!(
+                overrides.contains(name) || defaults.contains(&&extension),
+                "{name} has no content type"
+            );
+        }
+
+        // The root links to the workbook, and the workbook links to each sheet.
+        let root = elements_of(&part_of(bytes.clone(), "_rels/.rels"));
+        assert!(root.iter().any(|(name, attributes)| name == "Relationship"
+            && names.contains(attributes["Target"].trim_start_matches('/'))));
+        let links: std::collections::HashMap<String, String> =
+            elements_of(&part_of(bytes.clone(), "xl/_rels/workbook.xml.rels"))
+                .into_iter()
+                .filter(|(name, _)| name == "Relationship")
+                .map(|(_, attributes)| {
+                    (
+                        attributes["Id"].clone(),
+                        format!("xl/{}", attributes["Target"]),
+                    )
+                })
+                .collect();
+        let sheets: Vec<_> = elements_of(&part_of(bytes, "xl/workbook.xml"))
+            .into_iter()
+            .filter(|(name, _)| name == "sheet")
+            .map(|(_, attributes)| attributes)
+            .collect();
+        let sheet_names: Vec<&str> = sheets.iter().map(|sheet| sheet["name"].as_str()).collect();
+        assert_eq!(sheet_names, vec!["Result 1", "Result 2", "Result 3"]);
+        let ids: std::collections::HashSet<&String> =
+            sheets.iter().map(|sheet| &sheet["sheetId"]).collect();
+        assert_eq!(ids.len(), 3);
+        for sheet in &sheets {
+            let target = &links[&sheet["r:id"]];
+            assert!(names.contains(target), "{target} is missing");
+        }
+    }
+
     #[test]
     fn a_sheet_without_a_row_holds_its_header_alone() {
         let writer =
