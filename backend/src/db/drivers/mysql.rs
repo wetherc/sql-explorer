@@ -7,7 +7,7 @@ use crate::db::drivers::{
     routine_type, rows_affected_message, size_text, system_roots, trigger_event, trigger_timing,
     CancelHandle, DatabaseDriver, NumberValue, KEEPALIVE_IDLE,
 };
-use crate::db::sink::{RowSink, RunSummary, SinkControl};
+use crate::db::sink::{feed, RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
     IndexInfo, Message, MessageLevel, ObjectType, PlanMode, QueryParams, QueryResponse,
@@ -224,6 +224,56 @@ impl MysqlDriver {
             "The MySQL connection is closed.".to_string(),
         ))
     }
+
+    /// Runs each statement of the text into the sink, and gives the count of
+    /// changed rows.
+    async fn stream_statements(
+        &mut self,
+        query: &str,
+        params: Option<&QueryParams>,
+        options: &ExecOptions,
+        sink: &mut dyn RowSink,
+    ) -> Result<Option<u64>> {
+        let mut rows_affected: Option<u64> = None;
+        let mut stopped = false;
+        let values = bind_params(params)?;
+        let mut used = 0;
+        // The end of the last statement found in the text, so that a
+        // statement that stands twice is found at its own place.
+        let mut cursor = 0;
+        for statement in split_statements(query, Dialect::MySql) {
+            if stopped {
+                break;
+            }
+            let start = query[cursor..]
+                .find(statement.as_str())
+                .map(|at| cursor + at);
+            if let Some(at) = start {
+                cursor = at + statement.len();
+            }
+            let kill = MysqlCancel {
+                opts: self.opts.clone(),
+                connection_id: self.connection_id,
+                limit: self.connect_limit,
+            };
+            let conn = self.conn()?;
+            stream_statement(
+                conn,
+                &statement,
+                values.as_deref(),
+                &mut used,
+                options,
+                sink,
+                &mut rows_affected,
+                &mut stopped,
+                &kill,
+            )
+            .await
+            .map_err(|error| locate_error(error, query, start))?;
+            report_warnings(self.conn()?, sink).await;
+        }
+        Ok(rows_affected)
+    }
 }
 
 /// Turns the authentication plugin error of the server into advice the user
@@ -342,6 +392,40 @@ async fn stream_statement(
     Ok(())
 }
 
+/// The seconds that the server waits for a client that does not read, past
+/// the limit of the pause.
+const WRITE_TIMEOUT_MARGIN: u64 = 60;
+
+/// Raises `net_write_timeout` of the session, and gives its old value. The
+/// server drops a connection when a write of the result waits longer than
+/// this time, and a paused read does not read. The new value is the limit
+/// of the pause plus [`WRITE_TIMEOUT_MARGIN`]. MariaDB has the same
+/// variable. A server that gives no value has the default of 60 seconds.
+async fn raise_write_timeout(conn: &mut Conn, pause: Duration) -> Result<u64> {
+    let old: Option<u64> = conn
+        .query_first("SELECT @@SESSION.net_write_timeout")
+        .await?;
+    let raised = pause.as_secs() + WRITE_TIMEOUT_MARGIN;
+    conn.query_drop(format!("SET SESSION net_write_timeout = {raised}"))
+        .await?;
+    Ok(old.unwrap_or(60))
+}
+
+/// Puts back the old `net_write_timeout` of the session. A connection that a
+/// stop or a fault closed cannot take it, and a new connection starts with
+/// the value of the server, so the failure goes to the log alone.
+async fn restore_write_timeout(conn: Option<&mut Conn>, old: u64) {
+    let Some(conn) = conn else {
+        return;
+    };
+    let restored = conn
+        .query_drop(format!("SET SESSION net_write_timeout = {old}"))
+        .await;
+    if let Err(error) = restored {
+        log::warn!("The session could not restore net_write_timeout to {old}: {error}");
+    }
+}
+
 /// The time that the drain of a stopped set may take before the driver
 /// sends `KILL QUERY`. A short rest of a result drains faster than the login
 /// of a second connection.
@@ -455,7 +539,7 @@ async fn read_sets<P: Protocol>(
                 truncated = true;
                 break;
             }
-            if sink.row(row_to_json(&row, &formats))? == SinkControl::Stop {
+            if feed(sink, row_to_json(&row, &formats)).await? == SinkControl::Stop {
                 truncated = true;
                 *stopped = true;
                 break;
@@ -546,6 +630,12 @@ impl DatabaseDriver for MysqlDriver {
         Dialect::MySql
     }
 
+    /// A read that pauses raises `net_write_timeout` for its statement, as
+    /// [`raise_write_timeout`] tells.
+    fn pauses_reads(&self) -> bool {
+        true
+    }
+
     fn create_query(
         &self,
         database: Option<&str>,
@@ -601,46 +691,15 @@ impl DatabaseDriver for MysqlDriver {
         sink: &mut dyn RowSink,
     ) -> Result<RunSummary> {
         let started = Instant::now();
-        let mut rows_affected: Option<u64> = None;
-        let mut stopped = false;
-
-        let values = bind_params(params)?;
-        let mut used = 0;
-        // The end of the last statement found in the text, so that a
-        // statement that stands twice is found at its own place.
-        let mut cursor = 0;
-        for statement in split_statements(query, Dialect::MySql) {
-            if stopped {
-                break;
-            }
-            let start = query[cursor..]
-                .find(statement.as_str())
-                .map(|at| cursor + at);
-            if let Some(at) = start {
-                cursor = at + statement.len();
-            }
-            let kill = MysqlCancel {
-                opts: self.opts.clone(),
-                connection_id: self.connection_id,
-                limit: self.connect_limit,
-            };
-            let conn = self.conn()?;
-            stream_statement(
-                conn,
-                &statement,
-                values.as_deref(),
-                &mut used,
-                options,
-                sink,
-                &mut rows_affected,
-                &mut stopped,
-                &kill,
-            )
-            .await
-            .map_err(|error| locate_error(error, query, start))?;
-            report_warnings(self.conn()?, sink).await;
+        let raised = match sink.pause_point() {
+            Some(point) => Some(raise_write_timeout(self.conn()?, point.limit).await?),
+            None => None,
+        };
+        let result = self.stream_statements(query, params, options, sink).await;
+        if let Some(old) = raised {
+            restore_write_timeout(self.conn.as_mut(), old).await;
         }
-
+        let rows_affected = result?;
         Ok(RunSummary {
             rows_affected,
             elapsed_ms: started.elapsed().as_millis() as u64,

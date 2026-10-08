@@ -67,7 +67,6 @@ pub trait RowSink: Send {
     /// that never pauses. A driver uses it to stop between two exchanges
     /// with the server at that place, and to keep the server from closing
     /// a connection that does not read for the length of the pause.
-    #[cfg_attr(not(test), allow(dead_code))]
     fn pause_point(&self) -> Option<PausePoint> {
         None
     }

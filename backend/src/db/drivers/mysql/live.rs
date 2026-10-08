@@ -8,6 +8,7 @@ use crate::db::{
     ObjectType, RelationType, ScheduledEvent, Table, Trigger, TriggerEvent, TriggerTiming,
 };
 use crate::storage::DbType;
+use std::time::Duration;
 
 const FIXTURE: &str = include_str!("../../../../live/fixtures/mysql.sql");
 
@@ -259,4 +260,101 @@ async fn live_mysql_marks_generated_columns_and_error_lines() {
 #[ignore = "needs a live MariaDB server"]
 async fn live_mariadb_marks_generated_columns_and_error_lines() {
     generated_columns_and_error_lines("SQLX_LIVE_MARIADB", "maria_gen").await;
+}
+
+/// A read of 1,000,000 numbers in order, from 1. The rows fill the buffers
+/// of the connection, so the server must wait while the read is paused.
+fn numbers_query() -> String {
+    let digits = "(SELECT 0 AS d UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 \
+                  UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 \
+                  UNION ALL SELECT 8 UNION ALL SELECT 9)";
+    let tables: Vec<String> = (0..6).map(|n| format!("{digits} AS t{n}")).collect();
+    let sum: Vec<String> = (0..6)
+        .map(|n| format!("t{n}.d * {}", 10_i64.pow(n)))
+        .collect();
+    format!(
+        "SELECT {} + 1 AS n FROM {} ORDER BY n",
+        sum.join(" + "),
+        tables.join(" CROSS JOIN ")
+    )
+}
+
+/// Pauses a read on a session whose `net_write_timeout` is two seconds,
+/// waits past that time, and exports every row. The session then has its
+/// own value again.
+async fn a_paused_read_exports_every_row_once(variable: &str) {
+    let Some(server) = live::server(variable) else {
+        return;
+    };
+    let mut driver = server.open(DbType::Mysql, None).await;
+    live::run(driver.as_mut(), "SET SESSION net_write_timeout = 2").await;
+    let paused = live::pause_read(driver, &numbers_query(), 100, Duration::from_secs(60)).await;
+    assert_eq!(live::numbers(&paused.grid), (1..=100).collect::<Vec<_>>());
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let rows = live::export_paused(&paused.read, usize::MAX).await.unwrap();
+    assert_eq!(live::numbers(&rows), (1..=1_000_000).collect::<Vec<_>>());
+    let response =
+        live::run_after(&paused.session, "SELECT @@SESSION.net_write_timeout AS t").await;
+    assert_eq!(live::cell(&response, 0, 0).as_deref(), Some("2"));
+}
+
+/// Releases a paused read, and runs a second statement on its session.
+async fn a_released_read_frees_its_session(variable: &str) {
+    let Some(server) = live::server(variable) else {
+        return;
+    };
+    let driver = server.open(DbType::Mysql, None).await;
+    let paused = live::pause_read(driver, &numbers_query(), 100, Duration::from_secs(60)).await;
+    let session = paused.session.clone();
+    drop(paused);
+    let response = live::run_after(&session, "SELECT 2 AS two").await;
+    assert_eq!(live::cell(&response, 0, 0).as_deref(), Some("2"));
+}
+
+/// Lets the limit of the pause end a read.
+async fn the_end_of_the_pause_releases_the_read(variable: &str) {
+    let Some(server) = live::server(variable) else {
+        return;
+    };
+    let driver = server.open(DbType::Mysql, None).await;
+    let paused = live::pause_read(driver, &numbers_query(), 100, Duration::from_secs(1)).await;
+    let response = live::run_after(&paused.session, "SELECT 3 AS three").await;
+    assert_eq!(live::cell(&response, 0, 0).as_deref(), Some("3"));
+    assert!(live::export_paused(&paused.read, usize::MAX).await.is_err());
+}
+
+#[tokio::test]
+#[ignore = "needs a live MySQL server"]
+async fn live_mysql_a_paused_read_exports_every_row_once() {
+    a_paused_read_exports_every_row_once("SQLX_LIVE_MYSQL").await;
+}
+
+#[tokio::test]
+#[ignore = "needs a live MariaDB server"]
+async fn live_mariadb_a_paused_read_exports_every_row_once() {
+    a_paused_read_exports_every_row_once("SQLX_LIVE_MARIADB").await;
+}
+
+#[tokio::test]
+#[ignore = "needs a live MySQL server"]
+async fn live_mysql_a_released_read_frees_its_session() {
+    a_released_read_frees_its_session("SQLX_LIVE_MYSQL").await;
+}
+
+#[tokio::test]
+#[ignore = "needs a live MariaDB server"]
+async fn live_mariadb_a_released_read_frees_its_session() {
+    a_released_read_frees_its_session("SQLX_LIVE_MARIADB").await;
+}
+
+#[tokio::test]
+#[ignore = "needs a live MySQL server"]
+async fn live_mysql_the_end_of_the_pause_releases_the_read() {
+    the_end_of_the_pause_releases_the_read("SQLX_LIVE_MYSQL").await;
+}
+
+#[tokio::test]
+#[ignore = "needs a live MariaDB server"]
+async fn live_mariadb_the_end_of_the_pause_releases_the_read() {
+    the_end_of_the_pause_releases_the_read("SQLX_LIVE_MARIADB").await;
 }
