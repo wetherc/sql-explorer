@@ -1424,6 +1424,9 @@ mod tests {
             saved_rows: None,
             saved_bytes: None,
             paused_secs: None,
+            server_session: None,
+            pause_at_most: None,
+            server_idle_secs: None,
         }]);
         sink.finish(RunSummary::default()).unwrap();
 

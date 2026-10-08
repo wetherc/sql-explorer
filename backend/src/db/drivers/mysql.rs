@@ -7,7 +7,7 @@ use crate::db::drivers::{
     routine_type, rows_affected_message, size_text, system_roots, trigger_event, trigger_timing,
     CancelHandle, DatabaseDriver, NumberValue, KEEPALIVE_IDLE,
 };
-use crate::db::sink::{feed, RowSink, RunSummary, SinkControl};
+use crate::db::sink::{feed, PauseFacts, RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
     IndexInfo, Message, MessageLevel, ObjectType, PlanMode, QueryParams, QueryResponse,
@@ -395,19 +395,20 @@ async fn stream_statement(
 }
 
 /// The seconds that the server waits for a client that does not read, past
-/// the limit of the pause.
+/// the longest pause.
 const WRITE_TIMEOUT_MARGIN: u64 = 60;
 
 /// Raises `net_write_timeout` of the session, and gives its old value. The
 /// server drops a connection when a write of the result waits longer than
-/// this time, and a paused read does not read. The new value is the limit
-/// of the pause plus [`WRITE_TIMEOUT_MARGIN`]. MariaDB has the same
-/// variable. A server that gives no value has the default of 60 seconds.
-async fn raise_write_timeout(conn: &mut Conn, pause: Duration) -> Result<u64> {
+/// this time, and a paused read does not read. The window can extend a
+/// pause up to [`crate::pause::MAX_PAUSE`], so the new value is that time
+/// plus [`WRITE_TIMEOUT_MARGIN`]. MariaDB has the same variable. A server
+/// that gives no value has the default of 60 seconds.
+async fn raise_write_timeout(conn: &mut Conn) -> Result<u64> {
     let old: Option<u64> = conn
         .query_first("SELECT @@SESSION.net_write_timeout")
         .await?;
-    let raised = pause.as_secs() + WRITE_TIMEOUT_MARGIN;
+    let raised = crate::pause::MAX_PAUSE.as_secs() + WRITE_TIMEOUT_MARGIN;
     conn.query_drop(format!("SET SESSION net_write_timeout = {raised}"))
         .await?;
     Ok(old.unwrap_or(60))
@@ -643,6 +644,15 @@ impl DatabaseDriver for MysqlDriver {
         true
     }
 
+    /// The server gives the number of the session in the handshake, so the
+    /// facts need no statement.
+    async fn pause_facts(&mut self) -> Result<PauseFacts> {
+        Ok(PauseFacts {
+            server_session: Some(u64::from(self.connection_id)),
+            ..PauseFacts::default()
+        })
+    }
+
     fn create_query(
         &self,
         database: Option<&str>,
@@ -703,7 +713,7 @@ impl DatabaseDriver for MysqlDriver {
     ) -> Result<RunSummary> {
         let started = Instant::now();
         let raised = match sink.pause_point() {
-            Some(point) => Some(raise_write_timeout(self.conn()?, point.limit).await?),
+            Some(_) => Some(raise_write_timeout(self.conn()?).await?),
             None => None,
         };
         let result = self.stream_statements(query, params, options, sink).await;
@@ -1469,6 +1479,18 @@ mod tests {
             lock_wait_statements(Duration::from_millis(300))[0],
             "SET SESSION lock_wait_timeout = 1"
         );
+    }
+
+    #[tokio::test]
+    async fn the_facts_of_a_pause_name_the_session_of_the_handshake() {
+        let mut driver = MysqlDriver {
+            conn: None,
+            connection_id: 42,
+            opts: Opts::default(),
+            connect_limit: Duration::from_secs(1),
+        };
+        let facts = driver.pause_facts().await.unwrap();
+        assert_eq!(facts.server_session, Some(42));
     }
 
     #[tokio::test]

@@ -21,6 +21,9 @@ pub(crate) struct RowsDriver {
     pub hang_on_stop: bool,
     /// The row limit of each run, so a test can see what the driver got.
     pub limits: Arc<Mutex<Vec<usize>>>,
+    /// What the driver tells about its session, or `None` for a driver that
+    /// fails to tell.
+    pub facts: Option<PauseFacts>,
 }
 
 impl RowsDriver {
@@ -33,6 +36,7 @@ impl RowsDriver {
             keeps_after_stop: false,
             hang_on_stop: false,
             limits: Arc::default(),
+            facts: Some(PauseFacts::default()),
         }
     }
 }
@@ -53,6 +57,10 @@ impl DatabaseDriver for RowsDriver {
     }
     async fn ping(&mut self) -> Result<()> {
         Ok(())
+    }
+    async fn pause_facts(&mut self) -> Result<PauseFacts> {
+        self.facts
+            .ok_or_else(|| Error::Invalid("The facts are gone.".to_string()))
     }
     async fn execute_stream(
         &mut self,
@@ -304,6 +312,53 @@ async fn the_end_of_the_pause_releases_the_read() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_extension_moves_the_end_of_the_pause() {
+    let (mut sink, control) = PausingSink::new(BufferSink::new(1), point(1));
+    let terms = control.terms.clone();
+    sink.begin_set(columns()).unwrap();
+    rows(&mut sink, 0, 2);
+    let started = Instant::now();
+    let waiting = tokio::spawn(async move {
+        let control = sink.resume().await.unwrap();
+        (control, sink)
+    });
+    let _handoff = control.handoff.await.unwrap();
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert_eq!(terms.left(), Duration::from_secs(30));
+    assert_eq!(terms.extend(PAUSE_STEP), Duration::from_secs(630));
+    let (stop, _sink) = waiting.await.unwrap();
+    assert_eq!(stop, SinkControl::Stop);
+    assert_eq!(started.elapsed(), Duration::from_secs(660));
+    assert!(control.commands.is_closed());
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_extension_stops_at_the_most_time_of_a_pause() {
+    let terms = PauseTerms::new(Duration::from_secs(50 * 60));
+    assert_eq!(terms.most(), MAX_PAUSE);
+    assert_eq!(terms.extend(PAUSE_STEP), MAX_PAUSE);
+    assert_eq!(terms.limit(), MAX_PAUSE);
+}
+
+#[test]
+fn a_server_that_ends_idle_transactions_shortens_the_pause() {
+    let terms = PauseTerms::new(Duration::from_secs(600));
+    terms.learn(PauseFacts {
+        server_session: None,
+        idle_limit: Some(Duration::from_secs(300)),
+    });
+    assert_eq!(terms.limit(), Duration::from_secs(270));
+    assert_eq!(terms.most(), Duration::from_secs(270));
+    let longer = PauseTerms::new(Duration::from_secs(60));
+    longer.learn(PauseFacts {
+        server_session: None,
+        idle_limit: Some(Duration::from_secs(300)),
+    });
+    assert_eq!(longer.limit(), Duration::from_secs(60));
+    assert_eq!(longer.most(), Duration::from_secs(270));
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_command_at_the_end_of_the_pause_still_counts() {
     let (sink, control) = PausingSink::new(BufferSink::new(1), point(1));
     drop(sink);
@@ -312,7 +367,7 @@ async fn a_command_at_the_end_of_the_pause_still_counts() {
     drop(control);
     // The limit is zero, so the wait takes the command after the limit.
     assert!(matches!(
-        wait_for_command(receiver, Duration::ZERO).await,
+        wait_for_command(receiver, &PauseTerms::new(Duration::ZERO)).await,
         Resume::Release
     ));
     let (commands, receiver) = oneshot::channel();
@@ -324,7 +379,7 @@ async fn a_command_at_the_end_of_the_pause_still_counts() {
         })
         .is_ok());
     assert!(matches!(
-        wait_for_command(receiver, Duration::ZERO).await,
+        wait_for_command(receiver, &PauseTerms::new(Duration::ZERO)).await,
         Resume::Continue { max_rows: 1, .. }
     ));
 }
@@ -600,7 +655,7 @@ async fn paused_read_into<G: RowSink + 'static>(
         slot.clone(),
     );
     let handoff = control.handoff.await.unwrap();
-    let read = PausedRead::new(control.commands, task, slot, Duration::from_secs(60));
+    let read = PausedRead::new(control.commands, task, slot, control.terms);
     (read, handoff.grid)
 }
 
@@ -618,7 +673,8 @@ async fn a_paused_read_continues_into_an_export_once() {
     let (read, grid) = paused_read(RowsDriver::new(5), 2).await;
     assert!(read.is_live());
     assert!(read.uses(&read.slot().session.clone()));
-    assert_eq!(read.limit(), Duration::from_secs(60));
+    assert_eq!(read.terms().limit(), Duration::from_secs(60));
+    assert_eq!(read.terms().facts(), PauseFacts::default());
     assert_eq!(only_set(grid).0.rows.len(), 2);
     // The task keeps the driver while the read is paused.
     assert!(read.slot().session.driver.try_lock().is_err());
@@ -636,6 +692,28 @@ async fn a_paused_read_continues_into_an_export_once() {
     let (export, _shared) = export_buffer();
     let error = read.continue_into(export, 100).await.unwrap_err();
     assert!(matches!(&error, Error::Invalid(text) if text.contains("released")));
+}
+
+#[tokio::test]
+async fn the_terms_keep_what_the_driver_told_before_the_read() {
+    let driver = RowsDriver {
+        facts: Some(PauseFacts {
+            server_session: Some(57),
+            ..PauseFacts::default()
+        }),
+        ..RowsDriver::new(5)
+    };
+    let (read, _grid) = paused_read(driver, 2).await;
+    assert_eq!(read.terms().facts().server_session, Some(57));
+
+    // A driver that fails to tell still pauses its read.
+    let driver = RowsDriver {
+        facts: None,
+        ..RowsDriver::new(5)
+    };
+    let (read, _grid) = paused_read(driver, 2).await;
+    assert!(read.is_live());
+    assert_eq!(read.terms().facts(), PauseFacts::default());
 }
 
 #[tokio::test]
@@ -680,7 +758,7 @@ async fn a_paused_read_that_its_limit_released_is_gone() {
     );
     let _grid = control.handoff.await.unwrap();
     let session = slot.session.clone();
-    let read = PausedRead::new(control.commands, task, slot, limit.limit);
+    let read = PausedRead::new(control.commands, task, slot, control.terms);
     // The task ends the read after its limit and frees the driver.
     drop(session.driver.lock().await);
     assert!(!read.is_live());

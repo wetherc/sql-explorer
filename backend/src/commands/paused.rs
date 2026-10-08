@@ -114,6 +114,7 @@ pub(super) async fn run(request: PausableRequest<'_>, grid: GridSink) -> Pausabl
     let PauseControl {
         mut handoff,
         commands,
+        terms,
     } = control;
     // The sink pauses the read at the row limit, so the driver reads past
     // that limit.
@@ -150,7 +151,7 @@ pub(super) async fn run(request: PausableRequest<'_>, grid: GridSink) -> Pausabl
     .await;
     match outcome {
         Bounded::Answered(Ok(Progress::Paused(given))) => {
-            let read = PausedRead::new(commands, task.disarm(), slot, point.limit);
+            let read = PausedRead::new(commands, task.disarm(), slot, terms);
             PausableRun {
                 outcome: Bounded::Answered(Ok(RunSummary {
                     rows_affected: None,

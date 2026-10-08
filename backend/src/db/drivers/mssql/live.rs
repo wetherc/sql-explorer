@@ -521,6 +521,52 @@ async fn live_the_report_names_the_session_that_blocks_a_read() {
 
 #[tokio::test]
 #[ignore = "needs a live MS SQL Server"]
+async fn live_a_paused_read_names_its_session_and_the_sessions_it_blocks() {
+    let Some((scratch, mut driver, server)) = Scratch::open("ms_paused_block").await else {
+        return;
+    };
+    let name = scratch.name();
+    let body = async move {
+        live::run(
+            driver.as_mut(),
+            "CREATE TABLE dbo.PauseProbe (id int PRIMARY KEY);\n\
+             INSERT INTO dbo.PauseProbe VALUES (1);",
+        )
+        .await;
+        let reader = server.open(DbType::Mssql, Some(&name)).await;
+        let waiter = server.open(DbType::Mssql, Some(&name)).await;
+        // The statement that waits for the client keeps a schema lock of the
+        // table, and TRUNCATE TABLE waits for that lock. The wide rows fill
+        // the buffers of the connection, so the statement cannot end while
+        // the read is paused.
+        let scene = live::PausedLockScene {
+            session_id: "SELECT @@SPID",
+            read: "SELECT TOP (20000) p.id, REPLICATE('x', 1000) AS pad FROM dbo.PauseProbe p \
+                   CROSS JOIN sys.all_objects a CROSS JOIN sys.all_objects b",
+            wait: "TRUNCATE TABLE dbo.PauseProbe",
+        };
+        let locked = live::report_on_paused_read(reader, waiter, driver.as_mut(), &scene).await;
+        live::assert_paused_read_blocks(&locked);
+        // The pending schema change locks the name of the table, so the
+        // report gives the lock resource.
+        let report = &locked.report;
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("lock resource")),
+            "{report:?}"
+        );
+        assert!(report.sessions.iter().all(|row| row
+            .object
+            .as_deref()
+            .is_some_and(|object| object.starts_with("OBJECT:"))));
+    };
+    live::with_cleanup(body, scratch.remove()).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a live MS SQL Server"]
 async fn live_a_login_without_server_state_gets_a_note() {
     let Some(server) = live::server("SQLX_LIVE_MSSQL") else {
         return;

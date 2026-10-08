@@ -252,7 +252,7 @@ pub async fn pause_read_with(
     };
     let mut response = handoff.grid.into_response(RunSummary::default());
     Paused {
-        read: PausedRead::new(control.commands, task, slot, limit),
+        read: PausedRead::new(control.commands, task, slot, control.terms),
         grid: response.results.remove(0).rows,
         session,
     }
@@ -367,6 +367,87 @@ pub async fn report_during_wait(
         waiter: waiter_id,
         report: report.expect("the loop reads a report"),
     }
+}
+
+/// The statements of a test of a paused read that blocks another session.
+pub struct PausedLockScene<'a> {
+    /// Gives the number of the session in the first cell.
+    pub session_id: &'a str,
+    /// A read whose open statement keeps a lock while it is paused.
+    pub read: &'a str,
+    /// Waits for the lock of the paused read.
+    pub wait: &'a str,
+}
+
+/// Pauses the read of the scene on `driver`, checks that the terms of the
+/// pause name the session of `driver`, and makes `waiter` wait for the lock
+/// of the paused read. The report of `reporter`, filtered to the paused
+/// session, is read until it shows the wait, for up to 15 seconds. The
+/// release of the paused read then ends the wait.
+pub async fn report_on_paused_read(
+    mut driver: Box<dyn DatabaseDriver>,
+    mut waiter: Box<dyn DatabaseDriver>,
+    reporter: &mut dyn DatabaseDriver,
+    scene: &PausedLockScene<'_>,
+) -> LockedReport {
+    let holder = session_number(driver.as_mut(), scene.session_id).await;
+    let waiter_id = session_number(waiter.as_mut(), scene.session_id).await;
+    let paused = pause_read(driver, scene.read, 100, Duration::from_secs(60)).await;
+    assert_eq!(paused.read.terms().facts().server_session, Some(holder));
+    let wait = scene.wait.to_string();
+    let waiting = tokio::spawn(async move {
+        let outcome = waiter
+            .execute_query(&wait, None, &ExecOptions::default())
+            .await;
+        (waiter, outcome)
+    });
+    let mut report = None;
+    // The catalog driver of the application has the same lock limit.
+    reporter
+        .limit_lock_waits(Duration::from_secs(5))
+        .await
+        .expect("the lock limit is set");
+    for _ in 0..150 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let read = reporter
+            .blocking_sessions()
+            .await
+            .unwrap_or_else(|error| panic!("the report failed: {error}"))
+            .blocked_by(holder);
+        let found = read
+            .sessions
+            .iter()
+            .any(|row| row.waiting_session == waiter_id);
+        report = Some(read);
+        if found {
+            break;
+        }
+    }
+    drop(paused);
+    let (_waiter, outcome) = waiting.await.expect("the wait ends");
+    outcome.unwrap_or_else(|error| panic!("the statement that waited failed: {error}"));
+    LockedReport {
+        holder,
+        waiter: waiter_id,
+        report: report.expect("the loop reads a report"),
+    }
+}
+
+/// Checks that the report of [`report_on_paused_read`] shows the waiter
+/// behind the paused session, and nothing behind another session.
+pub fn assert_paused_read_blocks(locked: &LockedReport) {
+    let report = &locked.report;
+    assert!(
+        report
+            .sessions
+            .iter()
+            .any(|row| row.waiting_session == locked.waiter),
+        "no wait in {report:?}"
+    );
+    assert!(report
+        .sessions
+        .iter()
+        .all(|row| row.blocking_session == locked.holder));
 }
 
 #[cfg(test)]

@@ -131,6 +131,7 @@ fn main() {
             commands::saved::stop_saving,
             commands::saved::saved_results_usage,
             commands::saved::clear_saved_results,
+            commands::extend_pause,
             commands::supported_engines,
             commands::storage_problems,
         ])

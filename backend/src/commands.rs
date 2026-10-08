@@ -3199,6 +3199,17 @@ pub async fn release_kept(kept_id: String, state: tauri::State<'_, AppState>) ->
     Ok(())
 }
 
+/// Moves the end of a paused read by ten minutes, up to the most time of a
+/// pause. A result that is gone, or that is not a paused read, gives an
+/// error.
+#[tauri::command]
+pub async fn extend_pause(
+    kept_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<crate::kept::PauseExtension> {
+    kept_result(&state, &kept_id)?.source.extend_pause()
+}
+
 /// Refuses an export of a statement that changes data. The export runs the
 /// statement again, so a change would happen twice.
 fn refuse_export_of_writes(query: &str, dialect: crate::sql::Dialect) -> Result<()> {
@@ -7685,6 +7696,10 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, Error::NotConnected(_)));
 
+        let error = extend_pause(kept[0].id.clone(), app.state())
+            .await
+            .unwrap_err();
+        assert!(matches!(&error, Error::Invalid(text) if text.contains("no longer paused")));
         release_kept(kept[0].id.clone(), app.state()).await.unwrap();
         assert_eq!(app.state::<AppState>().kept.len(), 0);
         // A second release of the same result is not an error.

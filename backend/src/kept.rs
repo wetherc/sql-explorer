@@ -24,7 +24,7 @@
 
 use crate::db::sink::RowSink;
 use crate::db::ExecOptions;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::spill::{DiskUse, SpillFolder};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -160,12 +160,31 @@ impl KeptSource {
         }
     }
 
-    /// The seconds a paused read stays paused, for the window. Every other
-    /// source gives `None`.
-    pub fn paused_secs(&self) -> Option<u64> {
+    /// The terms of a paused read, for the window. Every other source
+    /// gives `None`.
+    pub fn pause_terms(&self) -> Option<&crate::pause::PauseTerms> {
         match self {
-            KeptSource::PausedRead(read) => Some(read.limit().as_secs()),
+            KeptSource::PausedRead(read) => Some(read.terms()),
             _ => None,
+        }
+    }
+
+    /// Moves the end of a paused read by [`crate::pause::PAUSE_STEP`], up to
+    /// the most time of its pause. A source that is not a live paused read
+    /// gives an error.
+    pub fn extend_pause(&self) -> Result<PauseExtension> {
+        match self {
+            KeptSource::PausedRead(read) if read.is_live() => {
+                let terms = read.terms();
+                let left = terms.extend(crate::pause::PAUSE_STEP);
+                Ok(PauseExtension {
+                    paused_secs: left.as_secs(),
+                    at_most: terms.limit() >= terms.most(),
+                })
+            }
+            _ => Err(Error::Invalid(
+                "This query is no longer paused, so its pause cannot be extended.".to_string(),
+            )),
         }
     }
 
@@ -231,6 +250,29 @@ pub struct KeptSet {
     /// the row limit. The window shows the time that is left.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paused_secs: Option<u64>,
+    /// The number of the session of a paused read on the server, so the
+    /// window can ask whether that session blocks others.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_session: Option<u64>,
+    /// True when the pause cannot be extended, because it already lasts
+    /// the most time a pause can last.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pause_at_most: Option<bool>,
+    /// The seconds after which the server ends a session that waits in a
+    /// transaction, when the server has such a limit, so the window can
+    /// tell why the pause is short.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_idle_secs: Option<u64>,
+}
+
+/// The new time of a paused read after an extension.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PauseExtension {
+    /// The seconds that are left of the pause.
+    pub paused_secs: u64,
+    /// True when the pause cannot be extended again.
+    pub at_most: bool,
 }
 
 /// Why a run that asked to save its full results kept no file for a set
@@ -372,6 +414,7 @@ impl KeptResults {
         let mut kept = Vec::with_capacity(sources.len());
         for (set, source) in sources {
             let id = kept_id(request_id, set);
+            let terms = source.pause_terms();
             let set = KeptSet {
                 set,
                 id: id.clone(),
@@ -379,7 +422,12 @@ impl KeptResults {
                 kept_at,
                 saved_rows: source.saved_rows(),
                 saved_bytes: source.saved_bytes(),
-                paused_secs: source.paused_secs(),
+                paused_secs: terms.map(|terms| terms.limit().as_secs()),
+                server_session: terms.and_then(|terms| terms.facts().server_session),
+                pause_at_most: terms.map(|terms| terms.limit() >= terms.most()),
+                server_idle_secs: terms
+                    .and_then(|terms| terms.facts().idle_limit)
+                    .map(|idle| idle.as_secs()),
             };
             let mut entry = KeptResult::new(connection_id, source);
             entry.kept_at = now;
@@ -810,7 +858,14 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_paused_read_names_its_limit_and_ends_with_its_session() {
         use crate::pause::tests::{paused_chunk_read, RowsDriver};
-        let read = paused_chunk_read(RowsDriver::new(5), 2).await;
+        let driver = RowsDriver {
+            facts: Some(crate::db::sink::PauseFacts {
+                server_session: Some(57),
+                idle_limit: Some(std::time::Duration::from_secs(100)),
+            }),
+            ..RowsDriver::new(5)
+        };
+        let read = paused_chunk_read(driver, 2).await;
         let session = read.slot().session.clone();
         let registry = KeptResults::default();
         let kept = registry.keep(
@@ -825,11 +880,28 @@ pub(crate) mod tests {
         value.as_object_mut().unwrap().remove("keptAt");
         assert_eq!(
             value,
-            json!({ "set": 0, "id": "r1:0", "origin": "paused", "pausedSecs": 60 })
+            json!({
+                "set": 0,
+                "id": "r1:0",
+                "origin": "paused",
+                "pausedSecs": 60,
+                "serverSession": 57,
+                "pauseAtMost": false,
+                "serverIdleSecs": 100
+            })
         );
 
-        // A paused read gives its rows to an export alone.
+        // An extension moves the end up to the most time of the server.
         let entry = registry.get("r1:0").unwrap();
+        let extension = entry.source.extend_pause().unwrap();
+        assert!(extension.at_most);
+        assert!(extension.paused_secs <= 90 && extension.paused_secs >= 89);
+        let fixed_entry = registry.get("r1:1").unwrap();
+        let error = fixed_entry.source.extend_pause().unwrap_err();
+        assert!(matches!(&error, Error::Invalid(text) if text.contains("no longer paused")));
+        drop(fixed_entry);
+
+        // A paused read gives its rows to an export alone.
         let mut sink = BufferSink::new(10);
         let error = entry
             .source

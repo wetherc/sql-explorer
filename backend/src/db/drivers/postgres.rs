@@ -12,7 +12,7 @@ use crate::db::drivers::{
     rows_returned_message, size_text, system_roots, CancelHandle, DatabaseDriver, NumberValue,
     KEEPALIVE_IDLE, KEEPALIVE_INTERVAL,
 };
-use crate::db::sink::{feed, RowSink, RunSummary, SinkControl};
+use crate::db::sink::{feed, PauseFacts, RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
     IndexInfo, Message, MessageLevel, ObjectType, Partition, PartitionList, PlanMode, QueryParams,
@@ -509,6 +509,11 @@ impl DatabaseDriver for PostgresDriver {
     /// send it.
     fn pauses_reads(&self) -> bool {
         true
+    }
+
+    async fn pause_facts(&mut self) -> Result<PauseFacts> {
+        let messages = self.client.simple_query(PAUSE_FACTS).await?;
+        Ok(pause_facts_of(&messages))
     }
 
     fn create_query(
@@ -1714,6 +1719,49 @@ fn fetch_size(need: usize, fetched: usize, pause: Option<usize>) -> usize {
         _ => need,
     };
     (goal - fetched).min(FETCH_BATCH)
+}
+
+/// The statement that gives the facts of the session for a read that can
+/// pause: the number of the server process of the session, as the report of
+/// the sessions that block others names it, and the time after which the
+/// server ends a session that waits in a transaction.
+const PAUSE_FACTS: &str =
+    "SELECT pg_backend_pid(), current_setting('idle_in_transaction_session_timeout', true)";
+
+/// Reads the answer of [`PAUSE_FACTS`]. A value that is missing or that
+/// cannot be read gives `None`.
+fn pause_facts_of(messages: &[SimpleQueryMessage]) -> PauseFacts {
+    let row = messages.iter().find_map(|message| match message {
+        SimpleQueryMessage::Row(row) => Some(row),
+        _ => None,
+    });
+    PauseFacts {
+        server_session: row
+            .and_then(|row| row.get(0))
+            .and_then(|pid| pid.parse().ok()),
+        idle_limit: row.and_then(|row| row.get(1)).and_then(setting_time),
+    }
+}
+
+/// Reads a time setting of the server, as `SHOW` and `current_setting`
+/// give it: a number with a unit (`ms`, `s`, `min`, `h` or `d`), or a
+/// number of milliseconds. Zero means no limit and gives `None`.
+fn setting_time(text: &str) -> Option<Duration> {
+    let text = text.trim();
+    let split = text
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(text.len());
+    let (number, unit) = text.split_at(split);
+    let number: u64 = number.parse().ok()?;
+    let millis = match unit.trim() {
+        "" | "ms" => 1,
+        "s" => 1_000,
+        "min" => 60_000,
+        "h" => 3_600_000,
+        "d" => 86_400_000,
+        _ => return None,
+    };
+    (number > 0).then(|| Duration::from_millis(number.saturating_mul(millis)))
 }
 
 /// The error of a read that paused, when the server closed the session.
@@ -4739,6 +4787,42 @@ mod tests {
         assert!(response.results[0].truncated);
         drop(driver);
         task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_facts_of_a_pause_name_the_server_process() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            let mut answer = row_description(&["pg_backend_pid", "current_setting"]);
+            answer.extend_from_slice(&data_row(&[Some("4242"), Some("5min")]));
+            answer.extend_from_slice(&command_complete("SELECT 1"));
+            answer_query(&mut server, PAUSE_FACTS, &[answer]).await;
+        });
+        let mut driver = driver_on(client_end).await;
+        let facts = driver.pause_facts().await.unwrap();
+        assert_eq!(facts.server_session, Some(4242));
+        assert_eq!(facts.idle_limit, Some(Duration::from_secs(300)));
+        task.await.unwrap();
+    }
+
+    #[test]
+    fn the_time_settings_of_the_server_read_in_each_unit() {
+        let read = |text| setting_time(text).map(|time| time.as_millis());
+        assert_eq!(read("250"), Some(250));
+        assert_eq!(read("250ms"), Some(250));
+        assert_eq!(read("20s"), Some(20_000));
+        assert_eq!(read(" 5min "), Some(300_000));
+        assert_eq!(read("2h"), Some(7_200_000));
+        assert_eq!(read("1d"), Some(86_400_000));
+        assert_eq!(read("0"), None);
+        assert_eq!(read("5 weeks"), None);
+        assert_eq!(read("min"), None);
+    }
+
+    #[test]
+    fn facts_that_cannot_be_read_give_nothing() {
+        assert_eq!(pause_facts_of(&[]), PauseFacts::default());
     }
 
     #[tokio::test]

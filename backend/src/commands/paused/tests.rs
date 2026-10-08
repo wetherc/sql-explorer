@@ -314,7 +314,7 @@ async fn a_run_in_a_tab_pauses_and_a_new_run_of_the_tab_releases_it() {
         .unwrap();
     let end = ends.lock().unwrap().pop().unwrap();
     assert!(end.contains(r#""kept":[{"set":0,"id":"r1:0","origin":"paused","keptAt":"#));
-    assert!(end.contains(r#""pausedSecs":60}]"#));
+    assert!(end.contains(r#""pausedSecs":60,"pauseAtMost":false}]"#));
     let registry = &app.state::<AppState>().kept;
     assert!(registry.get("r1:0").is_some());
     assert!(paused.driver.try_lock().is_err());

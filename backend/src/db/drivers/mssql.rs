@@ -13,7 +13,7 @@ use crate::db::drivers::{
     size_text, trigger_event, CancelHandle, DatabaseDriver, NumberValue, KEEPALIVE_IDLE,
     KEEPALIVE_INTERVAL,
 };
-use crate::db::sink::{feed, BufferSink, RowSink, RunSummary, SinkControl};
+use crate::db::sink::{feed, BufferSink, PauseFacts, RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
     IndexInfo, Message, MessageLevel, ObjectType, PlanMode, QueryParams, QueryResponse,
@@ -432,6 +432,11 @@ const EXPIRED_TOKEN_MESSAGE: &str = "The access token has expired. Paste a new o
 const ENDED_AT_THE_LIMIT_MESSAGE: &str =
     "Reached the row limit, so the statement was cancelled on the server. To fetch more rows, \
      raise the row limit in the settings.";
+
+/// The statement that gives the number of the session on the server, as
+/// the report of the sessions that block others names it. `@@SPID` is a
+/// `smallint`, and the cast gives the `int` that the driver reads.
+const SESSION_NUMBER: &str = "SELECT CAST(@@SPID AS int)";
 
 /// The statement that tells whether an attention packet keeps the work of
 /// the session. The packet rolls back the statement that it ends. When the
@@ -1190,6 +1195,21 @@ impl DatabaseDriver for MssqlDriver {
     /// the rows, so a read can pause.
     fn pauses_reads(&self) -> bool {
         true
+    }
+
+    async fn pause_facts(&mut self) -> Result<PauseFacts> {
+        let row = self
+            .client
+            .simple_query(SESSION_NUMBER)
+            .await?
+            .into_row()
+            .await?;
+        Ok(PauseFacts {
+            server_session: row
+                .and_then(|row| row.get::<i32, _>(0))
+                .and_then(|spid| u64::try_from(spid).ok()),
+            ..PauseFacts::default()
+        })
     }
 
     fn create_query(
@@ -2578,6 +2598,16 @@ mod tests {
             .await
             .unwrap();
         (MssqlDriver { client }, server)
+    }
+
+    #[tokio::test]
+    async fn the_facts_of_a_pause_name_the_session_on_the_server() {
+        let (mut driver, server) = driver_that_counts().await;
+        // The fake server answers the first request with the number 0.
+        let facts = driver.pause_facts().await.unwrap();
+        assert_eq!(facts.server_session, Some(0));
+        assert_eq!(server.await.unwrap(), 1);
+        drop(driver);
     }
 
     #[tokio::test]

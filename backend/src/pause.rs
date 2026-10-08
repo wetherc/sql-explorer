@@ -22,7 +22,7 @@
 
 use crate::db::columnar::value_weight;
 use crate::db::drivers::DatabaseDriver;
-use crate::db::sink::{PausePoint, RowSink, RunSummary, SinkControl};
+use crate::db::sink::{PauseFacts, PausePoint, RowSink, RunSummary, SinkControl};
 use crate::db::{ColumnInfo, ExecOptions, Message, QueryParams};
 use crate::error::{Error, Result};
 use crate::kept::{KeptSource, UnsavedReason};
@@ -35,6 +35,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::{oneshot, Notify, OwnedMutexGuard};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 /// The longest time a read stays paused, whatever the window asks for.
 pub const MAX_PAUSE: Duration = Duration::from_secs(60 * 60);
@@ -66,6 +67,120 @@ pub enum Resume {
     },
     /// Ends the statement and frees the session.
     Release,
+}
+
+/// The step of one extension of a pause, as the window asks for it.
+pub const PAUSE_STEP: Duration = Duration::from_secs(10 * 60);
+
+/// The time limit of a pause, which an extension can move.
+struct Clock {
+    /// The moment the read paused, or `None` before the pause.
+    started: Option<Instant>,
+    /// The time the read stays paused, from `started`.
+    limit: Duration,
+    /// The most that `limit` can become.
+    most: Duration,
+}
+
+/// The terms of one pause: its time limit, and what the driver told about
+/// its session before the read started. The sink, the command of the run
+/// and the paused read share one value.
+pub struct PauseTerms {
+    clock: Mutex<Clock>,
+    facts: Mutex<PauseFacts>,
+    /// Wakes the wait of the sink when an extension moves the limit.
+    moved: Notify,
+}
+
+impl PauseTerms {
+    pub fn new(limit: Duration) -> Self {
+        Self {
+            clock: Mutex::new(Clock {
+                started: None,
+                limit: limit.min(MAX_PAUSE),
+                most: MAX_PAUSE,
+            }),
+            facts: Mutex::new(PauseFacts::default()),
+            moved: Notify::new(),
+        }
+    }
+
+    fn clock(&self) -> std::sync::MutexGuard<'_, Clock> {
+        self.clock.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The time the read stays paused, from the start of the pause.
+    pub fn limit(&self) -> Duration {
+        self.clock().limit
+    }
+
+    /// The most time the read can stay paused after all extensions.
+    pub fn most(&self) -> Duration {
+        self.clock().most
+    }
+
+    /// What the driver told about its session.
+    pub fn facts(&self) -> PauseFacts {
+        *self.facts.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Records what the driver told about its session. A server that ends
+    /// idle transactions makes the limit and the most shorter, so the read
+    /// ends before the server closes the session. The server counts from the
+    /// last fetch, which can come before the grid shows the rows, so the
+    /// limit is nine tenths of the time of the server.
+    fn learn(&self, facts: PauseFacts) {
+        if let Some(idle) = facts.idle_limit {
+            let cap = idle * 9 / 10;
+            let mut clock = self.clock();
+            clock.limit = clock.limit.min(cap);
+            clock.most = clock.most.min(cap);
+        }
+        *self.facts.lock().unwrap_or_else(PoisonError::into_inner) = facts;
+    }
+
+    /// Starts the time of the pause.
+    fn begin(&self) {
+        self.clock().started = Some(Instant::now());
+    }
+
+    /// The moment the pause ends. Before the pause, the limit counts from
+    /// now.
+    fn deadline(&self) -> Instant {
+        let clock = self.clock();
+        clock.started.unwrap_or_else(Instant::now) + clock.limit
+    }
+
+    /// The time that is left of the pause.
+    pub fn left(&self) -> Duration {
+        self.deadline().saturating_duration_since(Instant::now())
+    }
+
+    /// Moves the end of the pause by `by`, up to the most, and gives the
+    /// time that is left.
+    pub fn extend(&self, by: Duration) -> Duration {
+        {
+            let mut clock = self.clock();
+            clock.limit = (clock.limit + by).min(clock.most);
+        }
+        self.moved.notify_one();
+        self.left()
+    }
+
+    /// Waits until the end of the pause, which an extension can move.
+    async fn passed(&self) {
+        loop {
+            let deadline = self.deadline();
+            tokio::select! {
+                () = tokio::time::sleep_until(deadline) => {
+                    if Instant::now() >= self.deadline() {
+                        return;
+                    }
+                }
+                () = self.moved.notified() => {}
+            }
+        }
+    }
 }
 
 /// What the sink gives the command of the run when the read pauses.
@@ -121,6 +236,8 @@ pub struct PausingSink<G> {
     /// Wakes the task when the read is released, so the limit of the
     /// release starts.
     released: Arc<Notify>,
+    /// The terms of the pause.
+    terms: Arc<PauseTerms>,
     /// The rows that the export can still take.
     export_room: usize,
     /// True when the row limit of the export cut the set.
@@ -133,6 +250,8 @@ pub struct PauseControl<G> {
     pub handoff: oneshot::Receiver<Handoff<G>>,
     /// Takes the command for the paused read.
     pub commands: oneshot::Sender<Resume>,
+    /// The terms of the pause.
+    pub terms: Arc<PauseTerms>,
 }
 
 impl<G> PausingSink<G> {
@@ -141,6 +260,7 @@ impl<G> PausingSink<G> {
     pub fn new(grid: G, point: PausePoint) -> (Self, PauseControl<G>) {
         let (handoff_sender, handoff) = oneshot::channel();
         let (commands, command_receiver) = oneshot::channel();
+        let terms = Arc::new(PauseTerms::new(point.limit));
         let sink = Self {
             phase: Phase::Visible(grid),
             point,
@@ -155,10 +275,18 @@ impl<G> PausingSink<G> {
             handoff: Some(handoff_sender),
             commands: Some(command_receiver),
             released: Arc::new(Notify::new()),
+            terms: terms.clone(),
             export_room: 0,
             export_cut: false,
         };
-        (sink, PauseControl { handoff, commands })
+        (
+            sink,
+            PauseControl {
+                handoff,
+                commands,
+                terms,
+            },
+        )
     }
 
     /// The grid sink, when the read never paused.
@@ -201,13 +329,13 @@ impl<G> PausingSink<G> {
     }
 }
 
-/// Waits for the command of the window, up to the limit of the pause. A
-/// command that came at the same moment as the limit still counts, so an
+/// Waits for the command of the window, up to the end of the pause. A
+/// command that came at the same moment as the end still counts, so an
 /// export never loses its sink without an error.
-async fn wait_for_command(mut commands: oneshot::Receiver<Resume>, limit: Duration) -> Resume {
+async fn wait_for_command(mut commands: oneshot::Receiver<Resume>, terms: &PauseTerms) -> Resume {
     tokio::select! {
         biased;
-        () = tokio::time::sleep(limit) => commands.try_recv().unwrap_or(Resume::Release),
+        () = terms.passed() => commands.try_recv().unwrap_or(Resume::Release),
         command = &mut commands => command.unwrap_or(Resume::Release),
     }
 }
@@ -351,6 +479,7 @@ impl<G: RowSink + 'static> RowSink for PausingSink<G> {
             set: self.sets.saturating_sub(1),
         };
         let commands = self.commands.take();
+        self.terms.begin();
         let given = self
             .handoff
             .take()
@@ -358,7 +487,7 @@ impl<G: RowSink + 'static> RowSink for PausingSink<G> {
         let (true, Some(commands)) = (given, commands) else {
             return Ok(self.release());
         };
-        match wait_for_command(commands, self.point.limit).await {
+        match wait_for_command(commands, &self.terms).await {
             Resume::Continue { sink, max_rows } => self.start_export(sink, max_rows),
             Resume::Release => Ok(self.release()),
         }
@@ -456,8 +585,20 @@ where
 /// sink.
 pub type TaskEnd<G> = (Result<RunSummary>, PausingSink<G>);
 
+/// Asks the driver what it knows about its session. A driver that fails
+/// to tell still runs the read, and the window then shows less about the
+/// pause.
+async fn read_facts(driver: &mut dyn DatabaseDriver) -> PauseFacts {
+    driver.pause_facts().await.unwrap_or_else(|error| {
+        log::warn!("The session could not tell its facts for a pause: {error}");
+        PauseFacts::default()
+    })
+}
+
 /// Starts the task that runs the read. The task owns the lock of the driver
-/// until the read ends.
+/// until the read ends. Before the statement starts, the task asks the
+/// driver about its session, because nothing can be sent on the session
+/// while the read is paused.
 pub fn spawn_read<G: RowSink + 'static>(
     mut driver: OwnedMutexGuard<Box<dyn DatabaseDriver>>,
     query: String,
@@ -467,7 +608,9 @@ pub fn spawn_read<G: RowSink + 'static>(
     slot: SessionSlot,
 ) -> JoinHandle<TaskEnd<G>> {
     let released = sink.released.clone();
+    let terms = sink.terms.clone();
     tokio::spawn(async move {
+        terms.learn(read_facts(driver.as_mut()).await);
         let work = driver.execute_stream(&query, params.as_ref(), &options, &mut sink);
         let result = drive(work, released, RELEASE_LIMIT, slot.discard()).await;
         (result, sink)
@@ -528,7 +671,7 @@ struct Parked<G> {
 pub struct PausedRead<G = crate::message_log::GridSink> {
     parked: Mutex<Option<Parked<G>>>,
     slot: SessionSlot,
-    limit: Duration,
+    terms: Arc<PauseTerms>,
 }
 
 impl<G> PausedRead<G> {
@@ -536,12 +679,12 @@ impl<G> PausedRead<G> {
         commands: oneshot::Sender<Resume>,
         task: JoinHandle<TaskEnd<G>>,
         slot: SessionSlot,
-        limit: Duration,
+        terms: Arc<PauseTerms>,
     ) -> Self {
         Self {
             parked: Mutex::new(Some(Parked { commands, task })),
             slot,
-            limit,
+            terms,
         }
     }
 
@@ -554,9 +697,9 @@ impl<G> PausedRead<G> {
         &self.slot
     }
 
-    /// The longest time the read stays paused.
-    pub fn limit(&self) -> Duration {
-        self.limit
+    /// The terms of the pause.
+    pub fn terms(&self) -> &PauseTerms {
+        &self.terms
     }
 
     /// True while the read waits for a command. A read that an export took,

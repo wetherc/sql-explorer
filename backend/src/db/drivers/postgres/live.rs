@@ -866,26 +866,40 @@ async fn live_the_end_of_the_pause_releases_the_cursor() {
 
 #[tokio::test]
 #[ignore = "needs a live PostgreSQL server"]
-async fn live_a_session_that_the_server_ends_during_a_pause_gives_a_clear_error() {
+async fn live_a_server_limit_on_idle_transactions_releases_the_read_first() {
     let Some(mut driver) = pg_driver().await else {
         return;
     };
     live::run(
         driver.as_mut(),
-        "SET idle_in_transaction_session_timeout = '1s'",
+        "SET idle_in_transaction_session_timeout = '2s'",
     )
     .await;
     let paused = live::pause_read(driver, NUMBERS, 100, Duration::from_secs(60)).await;
+    let terms = paused.read.terms();
+    assert_eq!(terms.facts().idle_limit, Some(Duration::from_secs(2)));
+    assert_eq!(terms.limit(), Duration::from_millis(1800));
+    assert_eq!(terms.most(), Duration::from_millis(1800));
     tokio::time::sleep(Duration::from_secs(3)).await;
     let error = live::export_paused(&paused.read, usize::MAX)
         .await
         .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("closed the session while the read was paused"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("was released"), "{error}");
+    // The app ended the read before the server, so the session stays open.
+    let response = live::run_after(&paused.session, "SELECT 4 AS four").await;
+    assert_eq!(live::cell(&response, 0, 0).as_deref(), Some("4"));
+}
+
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL server"]
+async fn live_an_extended_pause_keeps_the_cursor_past_its_first_limit() {
+    let Some(driver) = pg_driver().await else {
+        return;
+    };
+    let paused = live::pause_read(driver, NUMBERS, 100, Duration::from_secs(1)).await;
+    paused.read.terms().extend(crate::pause::PAUSE_STEP);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    exports_every_row(paused, 1_000_000).await;
 }
 
 const PG_SESSION_ID: &str = "SELECT pg_backend_pid()";
@@ -1037,4 +1051,32 @@ async fn live_a_role_without_read_all_stats_gets_a_note() {
         live::run(admin.as_mut(), &format!("DROP ROLE {role}")).await;
     };
     live::with_cleanup(body, cleanup).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL server"]
+async fn live_a_paused_cursor_names_its_session_and_the_sessions_it_blocks() {
+    let Some((scratch, mut driver, server)) = Scratch::open("pg_paused_block").await else {
+        return;
+    };
+    let name = scratch.name.clone();
+    let body = async move {
+        live::run(
+            driver.as_mut(),
+            "CREATE TABLE pause_probe AS SELECT n FROM generate_series(1, 1000) AS n",
+        )
+        .await;
+        let reader = server.open(DbType::Postgres, Some(&name)).await;
+        let waiter = server.open(DbType::Postgres, Some(&name)).await;
+        // The cursor keeps a lock of the table until its transaction ends,
+        // and TRUNCATE waits for that lock.
+        let scene = live::PausedLockScene {
+            session_id: PG_SESSION_ID,
+            read: "SELECT n FROM pause_probe ORDER BY n",
+            wait: "TRUNCATE pause_probe",
+        };
+        let locked = live::report_on_paused_read(reader, waiter, driver.as_mut(), &scene).await;
+        live::assert_paused_read_blocks(&locked);
+    };
+    live::with_cleanup(body, scratch.remove()).await;
 }

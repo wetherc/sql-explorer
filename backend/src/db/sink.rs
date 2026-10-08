@@ -29,6 +29,19 @@ pub struct PausePoint {
     pub limit: std::time::Duration,
 }
 
+/// What a driver tells about its session before a read that can pause. See
+/// [`crate::db::drivers::DatabaseDriver::pause_facts`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PauseFacts {
+    /// The number of the session on the server, as the report of the
+    /// sessions that block others names it.
+    pub server_session: Option<u64>,
+    /// The time after which the server ends a session that waits in a
+    /// transaction, when the server has such a limit. A paused read waits
+    /// in a transaction on PostgreSQL.
+    pub idle_limit: Option<std::time::Duration>,
+}
+
 /// The numbers of one execution that travel beside the rows.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RunSummary {

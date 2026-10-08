@@ -10,7 +10,7 @@ pub mod postgres;
 pub mod sqlite;
 
 use crate::db::blocking::BlockingReport;
-use crate::db::sink::{BufferSink, RowSink, RunSummary};
+use crate::db::sink::{BufferSink, PauseFacts, RowSink, RunSummary};
 use crate::db::{
     AppColumn, Constraint, ConstraintType, CreateQuery, Database, DriverCapabilities, ExecOptions,
     IndexInfo, Message, ObjectType, PartitionList, PlanMode, QueryParams, QueryResponse,
@@ -72,6 +72,15 @@ pub trait DatabaseDriver: Send + Sync {
     /// the command layer then never gives the driver a sink that pauses.
     fn pauses_reads(&self) -> bool {
         false
+    }
+
+    /// Reads what the window needs to know about the session for a read
+    /// that can pause, such as the number of the session on the server.
+    /// The task of the read calls this before the statement starts, because
+    /// nothing can be sent on the session while the read is paused. The
+    /// default knows nothing.
+    async fn pause_facts(&mut self) -> Result<PauseFacts> {
+        Ok(PauseFacts::default())
     }
 
     /// Tells the server to end each later statement of this session that

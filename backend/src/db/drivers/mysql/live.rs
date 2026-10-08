@@ -576,3 +576,29 @@ async fn live_mysql_a_drained_procedure_tells_the_sink() {
 async fn live_mariadb_a_drained_procedure_tells_the_sink() {
     a_drained_procedure_tells_the_sink("SQLX_LIVE_MARIADB", "maria_drain").await;
 }
+
+#[tokio::test]
+#[ignore = "needs a live MySQL server"]
+async fn live_mysql_a_paused_read_names_its_session_and_the_sessions_it_blocks() {
+    let Some((scratch, mut driver, server)) = Scratch::open("SQLX_LIVE_MYSQL", "my_paused").await
+    else {
+        return;
+    };
+    let name = scratch.name.clone();
+    let body = async move {
+        live::run(driver.as_mut(), LOCK_PROBE).await;
+        let reader = server.open(DbType::Mysql, Some(&name)).await;
+        let waiter = server.open(DbType::Mysql, Some(&name)).await;
+        // The statement that waits for the client keeps a metadata lock of
+        // the table, and ALTER TABLE waits for that lock.
+        let read = numbers_query().replace(" FROM ", " FROM lock_probe CROSS JOIN ");
+        let scene = live::PausedLockScene {
+            session_id: "SELECT CONNECTION_ID()",
+            read: &read,
+            wait: "ALTER TABLE lock_probe ADD COLUMN w int",
+        };
+        let locked = live::report_on_paused_read(reader, waiter, driver.as_mut(), &scene).await;
+        live::assert_paused_read_blocks(&locked);
+    };
+    live::with_cleanup(body, scratch.remove()).await;
+}
