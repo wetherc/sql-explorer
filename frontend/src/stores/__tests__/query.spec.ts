@@ -5,7 +5,7 @@ import { makeApiStub, connectionFixture, streamed } from './helpers'
 const apiStub = makeApiStub()
 vi.mock('@/lib/api', () => ({ api: apiStub, CONNECTION_STATUS_EVENT: 'connection-status' }))
 
-const { editorPosition, newQueryState, runRowLimit, totalRows, useQueryStore } =
+const { KEPT_MESSAGES, editorPosition, newQueryState, runRowLimit, totalRows, useQueryStore } =
   await import('@/stores/query')
 const { ResultTable } = await import('@/lib/results')
 const { useConnectionsStore } = await import('@/stores/connections')
@@ -51,6 +51,7 @@ describe('newQueryState', () => {
       error: null,
       panes: [],
       messages: [],
+      droppedMessages: 0,
       rowsAffected: null,
       elapsedMs: 0,
       startedAt: null,
@@ -472,6 +473,40 @@ describe('query store', () => {
     await queries.execute('t1', 'c1', 'SELECT 1')
     expect(queries.stateFor('t1').messages).toBe(list)
     expect(queries.stateFor('t1').messages).toHaveLength(4)
+  })
+
+  it('keeps the last messages of a long run and counts the others', async () => {
+    const total = 2 * KEPT_MESSAGES + 10
+    apiStub.executeQuery.mockImplementation(
+      async (_request: unknown, handlers: import('@/lib/results').ResultStreamHandlers) => {
+        for (let index = 0; index < total - 1; index += 1) {
+          handlers.onMessage?.({ level: 'info', text: `line ${index}`, detail: null })
+        }
+        handlers.onEnd({
+          messages: [{ level: 'info', text: 'last', detail: null }],
+          rowsAffected: null,
+          elapsedMs: 1,
+          stats: null,
+        })
+      },
+    )
+    const queries = useQueryStore()
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    const state = queries.stateFor('t1')
+    expect(state.messages).toHaveLength(KEPT_MESSAGES + 10)
+    expect(state.droppedMessages).toBe(KEPT_MESSAGES)
+    expect(state.messages[0]?.text).toBe(`line ${KEPT_MESSAGES}`)
+    expect(state.messages[state.messages.length - 1]?.text).toBe('last')
+
+    // The next run starts a new count.
+    apiStub.executeQuery.mockImplementation(
+      async (_request: unknown, handlers: import('@/lib/results').ResultStreamHandlers) => {
+        handlers.onEnd({ messages: [], rowsAffected: null, elapsedMs: 1, stats: null })
+      },
+    )
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    expect(state.messages).toHaveLength(0)
+    expect(state.droppedMessages).toBe(0)
   })
 
   it('reports a length of time even when the start is no longer known', async () => {

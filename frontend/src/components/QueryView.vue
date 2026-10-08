@@ -359,7 +359,11 @@
                 </div>
               </v-alert>
 
-              <QueryMessages :messages="state.messages" :has-error="state.error !== null" />
+              <QueryMessages
+                :messages="state.messages"
+                :dropped="state.droppedMessages"
+                :has-error="state.error !== null"
+              />
             </div>
           </div>
         </div>

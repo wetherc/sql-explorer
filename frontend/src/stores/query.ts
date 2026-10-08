@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { markRaw, reactive, ref } from 'vue'
+import { markRaw, reactive, ref, toRaw } from 'vue'
 import { api } from '@/lib/api'
 import { createId } from './connections'
 import { useConnectionsStore } from './connections'
@@ -14,6 +14,14 @@ import type { ErrorPayload, ExecOptions, Message, QueryStats } from '@/types/api
 
 /** One gigabyte, as a storage unit counts it. */
 const BYTES_IN_GIGABYTE = 1024 ** 3
+
+/**
+ * The fewest of the last messages of a run that a tab keeps. A loop of the
+ * server can send millions of messages, and a list of all of them uses
+ * memory without a limit. The list drops its first messages when it gets
+ * to twice this length, so it keeps at most twice this count.
+ */
+export const KEPT_MESSAGES = 2000
 
 /**
  * One result set that the interface shows. The record carries an identifier
@@ -81,7 +89,10 @@ export interface QueryState {
   requestConnectionId: string | null
   error: ErrorPayload | null
   panes: ResultPane[]
+  /** The last messages of the run. See `KEPT_MESSAGES`. */
   messages: Message[]
+  /** The count of the first messages of the run that the tab dropped. */
+  droppedMessages: number
   rowsAffected: number | null
   elapsedMs: number
   /** The moment the statement started, so the elapsed time can be shown. */
@@ -110,6 +121,7 @@ export function newQueryState(): QueryState {
     error: null,
     panes: [],
     messages: [],
+    droppedMessages: 0,
     rowsAffected: null,
     elapsedMs: 0,
     startedAt: null,
@@ -165,6 +177,22 @@ interface Run {
   abandoned: boolean
   /** The rows of the run at the moment that its tab closed. */
   rowsAtClose: number
+}
+
+/**
+ * Adds one message to the end of the list of a tab in place. A copy of the
+ * list for each message costs time in the square of their number. At twice
+ * `KEPT_MESSAGES` the tab keeps the last `KEPT_MESSAGES` in a new list and
+ * counts the others. That copy happens once for each `KEPT_MESSAGES`
+ * messages, so the cost of each message stays constant on average.
+ */
+export function addMessage(state: QueryState, message: Message): void {
+  state.messages.push(message)
+  if (state.messages.length >= 2 * KEPT_MESSAGES) {
+    const all = toRaw(state.messages)
+    state.droppedMessages += all.length - KEPT_MESSAGES
+    state.messages = all.slice(-KEPT_MESSAGES)
+  }
 }
 
 /** Gives the last result of a list, or nothing when the list is empty. */
@@ -287,6 +315,7 @@ export const useQueryStore = defineStore('query', () => {
     // A result the user kept stays. Every other result goes.
     state.panes = state.panes.filter((pane) => pane.pinned)
     state.messages = []
+    state.droppedMessages = 0
     state.rowsAffected = null
     state.elapsedMs = 0
     state.startedAt = Date.now()
@@ -357,16 +386,11 @@ export const useQueryStore = defineStore('query', () => {
               openPane(table)
             }
           },
-          // A message goes on the end of the list in place. A loop of the
-          // server can send tens of thousands of them, and a new copy of the
-          // list for each one costs time in the square of their number.
-          onMessage: (message) => {
-            state.messages.push(message)
-          },
+          onMessage: (message) => addMessage(state, message),
           onEnd: (end) => {
             // The end gives the messages that did not stream before it.
             for (const message of end.messages) {
-              state.messages.push(message)
+              addMessage(state, message)
             }
             state.rowsAffected = end.rowsAffected
             state.elapsedMs = end.elapsedMs

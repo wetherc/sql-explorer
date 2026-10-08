@@ -32,13 +32,16 @@
  *
  * A loop that prints a line for each row can send tens of thousands of
  * messages. The list therefore draws the last `MAX_SHOWN_MESSAGES` of them
- * and counts the others in one line above them.
+ * and counts the others in one line above them. That count includes the
+ * messages that the store dropped.
  *
  * The component reads the length of the list through the store and the
  * messages from the plain array. A new message then changes this component
  * alone, and it wraps no message of the list in a proxy. The key of a line
  * is its place in the whole list, so a new message adds one line and takes
- * away the first one, and the lines between them stay.
+ * away the first one, and the lines between them stay. When the store drops
+ * messages, the dropped count rises by the length that the list loses, so
+ * the key of each line stays the same.
  */
 import { computed, toRaw } from 'vue'
 import type { Message } from '@/types/api'
@@ -47,12 +50,17 @@ import type { Message } from '@/types/api'
 const MAX_SHOWN_MESSAGES = 500
 
 const props = defineProps<{
+  /** The last messages of the run, as the store keeps them. */
   messages: Message[]
+  /** The count of the first messages of the run that the store dropped. */
+  dropped: number
   /** True when the tab shows a failure, which takes the place of the empty note. */
   hasError: boolean
 }>()
 
-const hiddenCount = computed(() => Math.max(0, props.messages.length - MAX_SHOWN_MESSAGES))
+const hiddenCount = computed(
+  () => props.dropped + Math.max(0, props.messages.length - MAX_SHOWN_MESSAGES),
+)
 
 // The length comes through the store, so each new message reaches the list.
 const shown = computed(() => {
