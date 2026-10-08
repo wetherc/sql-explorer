@@ -19,7 +19,7 @@
 use super::{
     cut_cells_warning, driver_for_request, end_message_log, finish_run, in_sent_text, off_thread,
     prepare_parameters, run_bounded, session_after_run, session_for, stop_grace, Bounded,
-    ExportFormat, ExportSummary, FileSink,
+    ExportFormat, ExportSummary, FileSink, RunExit,
 };
 use crate::db::columnar::ChunkSink;
 use crate::db::sink::{RowSink, SinkControl};
@@ -359,7 +359,7 @@ pub async fn run_to_file<R: Runtime>(
             &key,
             &session,
             &ran,
-            finished.is_err(),
+            RunExit::of(&finished),
         )
         .await,
     );

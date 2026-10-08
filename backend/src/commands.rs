@@ -36,7 +36,7 @@ pub mod run_file;
 pub mod run_messages;
 mod session_report;
 
-use session_report::session_after_run;
+use session_report::{session_after_run, RunExit};
 
 /// Opens the driver that belongs to the engine of the record.
 pub async fn open_driver(connection: &SavedConnection) -> Result<Box<dyn DatabaseDriver>> {
@@ -1276,6 +1276,7 @@ pub async fn execute_query<R: Runtime>(
         sink.take_kept(),
         matches!(outcome, Bounded::Answered(Ok(_))),
     );
+    let read_paused = paused.is_some();
     sources.extend(paused.map(|(set, read)| (set, crate::kept::KeptSource::PausedRead(read))));
     let kept = state.kept.keep(&request_id, &connection_id, sources);
     sink.announce_kept(kept);
@@ -1288,7 +1289,11 @@ pub async fn execute_query<R: Runtime>(
             &key,
             &session,
             &ran,
-            finished.is_err(),
+            if read_paused {
+                RunExit::Paused
+            } else {
+                RunExit::of(&finished)
+            },
         )
         .await,
     );

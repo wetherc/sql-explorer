@@ -371,9 +371,13 @@ async fn a_run_stopped_by_its_time_limit_still_ends_its_channel() {
     let error = execute_query(app.handle().clone(), request, app.state(), channel)
         .await
         .unwrap_err();
-    assert!(matches!(error, Error::Timeout(1)));
+    // The session closed, because the limit dropped its exchange, and the
+    // error tells the tab.
+    let Error::SessionReset(inner) = error else {
+        panic!("{error:?}")
+    };
+    assert!(matches!(*inner, Error::Timeout(1)));
     assert_eq!(frames.lock().unwrap().last(), Some(&FRAME_END));
-    // The session closed, because the limit dropped its exchange.
     assert!(open.sessions.get("t1").await.is_none());
 }
 

@@ -1,9 +1,33 @@
 //! What the end of a run tells the tab about its session.
 
 use super::release_broken;
+use crate::error::Result;
 use crate::session::{Session, SessionReport, TRANSACTION_PROBE_LIMIT};
 use crate::state::{AppState, OpenConnection};
 use std::sync::Arc;
+
+/// How a run left its session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RunExit {
+    /// The run ended with no error.
+    Ended,
+    /// The run ended with an error.
+    Failed,
+    /// The read of the run paused at the row limit, and its task keeps the
+    /// driver of the session.
+    Paused,
+}
+
+impl RunExit {
+    /// The exit of a run that did not pause, from its result.
+    pub(super) fn of<T>(finished: &Result<T>) -> Self {
+        if finished.is_ok() {
+            Self::Ended
+        } else {
+            Self::Failed
+        }
+    }
+}
 
 /// Gives what the end of a run tells the tab about its session: whether a
 /// new session took the place of the old one, and whether the session is
@@ -17,6 +41,10 @@ use std::sync::Arc;
 /// `COMMIT` in the text, so the text alone decides only when no probe is
 /// needed. Other runs report the state of the last probe.
 ///
+/// A read that paused at the row limit keeps the driver of the session until
+/// its release, so a probe would wait for the end of the pause. The report
+/// of a paused run gives the state of the last probe.
+///
 /// A probe that passes [`TRANSACTION_PROBE_LIMIT`] is dropped in the middle
 /// of an exchange, so the session then closes as after a stop.
 pub(super) async fn session_after_run(
@@ -26,7 +54,7 @@ pub(super) async fn session_after_run(
     session_key: &str,
     session: &Arc<Session>,
     script: &str,
-    failed: bool,
+    exit: RunExit,
 ) -> SessionReport {
     let reset = session.take_replaced();
     if session.is_broken() {
@@ -35,7 +63,9 @@ pub(super) async fn session_after_run(
             open_transaction: None,
         };
     }
-    if !session.needs_transaction_probe(script, open.dialect, failed) {
+    if exit == RunExit::Paused
+        || !session.needs_transaction_probe(script, open.dialect, exit == RunExit::Failed)
+    {
         return SessionReport {
             reset,
             open_transaction: Some(session.in_transaction()),
@@ -92,7 +122,7 @@ mod tests {
     use super::*;
     use crate::db::drivers::DatabaseDriver;
     use crate::db::{AppColumn, Database, DriverCapabilities, Schema, Table};
-    use crate::error::{Error, Result};
+    use crate::error::Error;
     use crate::sql::Dialect;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -188,6 +218,15 @@ mod tests {
         }
 
         async fn report(&self, script: &str, failed: bool) -> SessionReport {
+            let exit = if failed {
+                RunExit::Failed
+            } else {
+                RunExit::Ended
+            };
+            self.report_exit(script, exit).await
+        }
+
+        async fn report_exit(&self, script: &str, exit: RunExit) -> SessionReport {
             session_after_run(
                 &self.state,
                 "s1",
@@ -195,7 +234,7 @@ mod tests {
                 "t1",
                 &self.session,
                 script,
-                failed,
+                exit,
             )
             .await
         }
@@ -282,5 +321,32 @@ mod tests {
         tab.open.sessions.release("t1").await;
         assert_eq!(tab.report("BEGIN", false).await, SessionReport::default());
         assert!(tab.session.is_broken());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_paused_read_gets_no_probe() {
+        let tab = Tab::with(Probe::Open).await;
+        // A script that names autocommit makes each later run probe.
+        tab.report("SET autocommit = 0", false).await;
+        assert_eq!(tab.probes(), 1);
+        // The task of the paused read keeps the driver.
+        let _paused = tab.session.driver.lock().await;
+        assert_eq!(
+            tab.report_exit("SELECT 1", RunExit::Paused).await,
+            SessionReport {
+                reset: false,
+                open_transaction: Some(true),
+            }
+        );
+        assert_eq!(tab.probes(), 1);
+    }
+
+    #[test]
+    fn the_exit_of_a_run_follows_its_result() {
+        assert_eq!(RunExit::of(&Ok(())), RunExit::Ended);
+        assert_eq!(
+            RunExit::of::<()>(&Err(Error::Connection("gone".into()))),
+            RunExit::Failed
+        );
     }
 }
