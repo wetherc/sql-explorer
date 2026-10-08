@@ -14,6 +14,7 @@ mod menu;
 mod script;
 mod secrets;
 mod session;
+mod spill;
 mod sql;
 mod state;
 mod storage;

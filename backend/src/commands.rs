@@ -3023,7 +3023,7 @@ impl FileSink {
 /// many threads, the runtime first moves the other tasks of this worker to
 /// another thread, so they do not wait for the work. A runtime with one
 /// thread cannot move its tasks, and the work then runs as it is.
-fn wait_in_place<T>(work: impl FnOnce() -> T) -> T {
+pub(crate) fn wait_in_place<T>(work: impl FnOnce() -> T) -> T {
     use tokio::runtime::{Handle, RuntimeFlavor};
     match Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
