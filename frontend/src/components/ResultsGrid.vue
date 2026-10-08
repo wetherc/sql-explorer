@@ -114,6 +114,9 @@
     <div v-else-if="truncated" class="px-3 py-1">
       <v-alert type="warning" density="compact" variant="tonal" data-test="grid-truncated">
         Showing the first {{ rowTotal.toLocaleString() }} rows because of the row limit.
+        <template v-if="savedRows !== undefined">
+          All {{ savedRows.toLocaleString() }} rows are saved on this computer for export.
+        </template>
       </v-alert>
     </div>
 
@@ -359,6 +362,9 @@ const props = withDefaults(
     /** True when the backend kept the full result, so the export of all
      *  rows reads it and does not run the query again. */
     kept?: boolean
+    /** The number of rows that the backend saved on this computer, when it
+     *  saved the full result there. */
+    savedRows?: number
   }>(),
   {
     busy: false,
@@ -366,6 +372,7 @@ const props = withDefaults(
     kept: false,
     rows: undefined,
     truncated: undefined,
+    savedRows: undefined,
     savedNote: null,
   },
 )
@@ -374,9 +381,11 @@ const props = withDefaults(
 const exportAllSubtitle = computed(() =>
   props.exporting
     ? 'An export is already running.'
-    : props.kept
-      ? "Uses the saved result, so the query doesn't run again"
-      : 'Re-runs the query and streams rows from the server',
+    : props.savedRows !== undefined
+      ? `All ${props.savedRows.toLocaleString()} rows are saved on this computer, so exporting doesn't run the query again`
+      : props.kept
+        ? "Uses the saved result, so the query doesn't run again"
+        : 'Re-runs the query and streams rows from the server',
 )
 
 /** The number of rows of the result, which grows while the set streams. */

@@ -778,6 +778,19 @@ describe('AppLayout dialog state', () => {
     await limit!.vm.$emit('update:focused', false)
     expect(useSettingsStore().settings.exportRowLimit).toBe(5000)
 
+    const keepFull = wrapper
+      .findAllComponents({ name: 'VSwitch' })
+      .find((item) => item.attributes('data-test') === 'setting-keep-full-results')
+    await keepFull!.vm.$emit('update:modelValue', true)
+    expect(useSettingsStore().settings.keepFullResults).toBe(true)
+
+    const disk = wrapper
+      .findAllComponents({ name: 'VTextField' })
+      .find((item) => item.attributes('data-test') === 'setting-full-results-disk')
+    await disk!.vm.$emit('update:modelValue', '16')
+    await disk!.vm.$emit('update:focused', false)
+    expect(useSettingsStore().settings.fullResultsDiskGb).toBe(16)
+
     const columns = wrapper
       .findAllComponents({ name: 'VTextField' })
       .find((item) => item.attributes('data-test') === 'setting-snapshot-columns')

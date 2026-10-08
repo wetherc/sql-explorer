@@ -29,6 +29,8 @@ describe('parseSettings', () => {
       autoRunPreview: false,
       maxPinnedResults: 8,
       exportRowLimit: 2000,
+      keepFullResults: true,
+      fullResultsDiskGb: 8,
       athenaPricePerTerabyte: 6.25,
       athenaScanWarningGb: 50,
       schemaSnapshotColumns: 40000,
@@ -43,6 +45,8 @@ describe('parseSettings', () => {
       autoRunPreview: false,
       maxPinnedResults: 8,
       exportRowLimit: 2000,
+      keepFullResults: true,
+      fullResultsDiskGb: 8,
       athenaPricePerTerabyte: 6.25,
       athenaScanWarningGb: 50,
       schemaSnapshotColumns: 40000,
@@ -52,7 +56,13 @@ describe('parseSettings', () => {
 
   it('falls back for a field that is missing or of the wrong type', () => {
     const parsed = parseSettings(
-      JSON.stringify({ theme: 'other', fontSize: 'big', wordWrap: 1, maxRows: null }),
+      JSON.stringify({
+        theme: 'other',
+        fontSize: 'big',
+        wordWrap: 1,
+        maxRows: null,
+        keepFullResults: 'yes',
+      }),
     )
     expect(parsed).toEqual(defaultSettings())
   })
@@ -62,6 +72,8 @@ describe('parseSettings', () => {
     expect(parseSettings(JSON.stringify({ fontSize: 1 })).fontSize).toBe(8)
     expect(parseSettings(JSON.stringify({ fontSize: 12.6 })).fontSize).toBe(13)
     expect(parseSettings(JSON.stringify({ maxRows: 0 })).maxRows).toBe(1)
+    expect(parseSettings(JSON.stringify({ fullResultsDiskGb: 0 })).fullResultsDiskGb).toBe(1)
+    expect(parseSettings(JSON.stringify({ fullResultsDiskGb: 5000 })).fullResultsDiskGb).toBe(1024)
     expect(parseSettings(JSON.stringify({ fontSize: Number.NaN })).fontSize).toBe(13)
   })
 })

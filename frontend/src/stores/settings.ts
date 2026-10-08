@@ -34,6 +34,14 @@ export interface Settings {
   /** The row limit of an export that writes straight to a file. */
   exportRowLimit: number
   /**
+   * True when a run reads up to the export row limit and saves every row of
+   * a cut result set in a file on this computer, so an export of all rows
+   * reads that file and does not run the statement again.
+   */
+  keepFullResults: boolean
+  /** The disk space in gigabytes that all saved results together can use. */
+  fullResultsDiskGb: number
+  /**
    * The price of one terabyte that Athena scans, in US dollars. The rate
    * changes by region and by contract, so the figure is an estimate.
    */
@@ -65,6 +73,8 @@ export function defaultSettings(): Settings {
     autoRunPreview: true,
     maxPinnedResults: 5,
     exportRowLimit: 1000000,
+    keepFullResults: false,
+    fullResultsDiskGb: 2,
     athenaPricePerTerabyte: 5,
     athenaScanWarningGb: 100,
     schemaSnapshotColumns: 20000,
@@ -103,6 +113,11 @@ export function normaliseSettings(candidate: Partial<Settings>, fallback: Settin
         : fallback.autoRunPreview,
     maxPinnedResults: numberOr(candidate.maxPinnedResults, fallback.maxPinnedResults, 1, 20),
     exportRowLimit: numberOr(candidate.exportRowLimit, fallback.exportRowLimit, 1000, 100000000),
+    keepFullResults:
+      typeof candidate.keepFullResults === 'boolean'
+        ? candidate.keepFullResults
+        : fallback.keepFullResults,
+    fullResultsDiskGb: numberOr(candidate.fullResultsDiskGb, fallback.fullResultsDiskGb, 1, 1024),
     // The price keeps its fraction, so it does not go through `numberOr`.
     athenaPricePerTerabyte: priceOr(
       candidate.athenaPricePerTerabyte,

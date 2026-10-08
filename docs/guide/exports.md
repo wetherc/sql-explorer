@@ -1,6 +1,6 @@
 ---
 title: Exports and row limits
-description: Export rows to CSV, JSON, Markdown, INSERT statements or Excel, copy them, run a statement straight to a file, and set the grid and export row limits.
+description: Export rows to CSV, JSON, Markdown, INSERT statements or Excel, copy them, run a statement straight to a file, save full results on this computer, and set the grid and export row limits.
 order: 8
 ---
 
@@ -70,6 +70,52 @@ reports an error after the statement has run.
 **Stop** and the connection's time limit work as they do for a normal run. The
 rows go to a temporary file beside the one you chose, so a stopped or failed run
 leaves no file behind.
+
+## Saved full results
+
+Turn on **Save full results on this computer** in the **Results** group of
+Settings, and **Export all rows** stops running the query a second time. The
+option is off by default.
+
+With the option on, a run doesn't stop reading at the grid's row limit. It keeps
+reading up to the export row limit, shows the first rows in the grid as usual,
+and writes every row of the result to a temporary file on your computer. The
+warning above the grid then says how many rows were saved, and the **Export all
+rows** entries say **All N rows are saved on this computer, so exporting doesn't
+run the query again**. The export reads the file, so the server does no more
+work and the export finishes much sooner.
+
+Runs take longer with the option on, because the statement keeps running until
+it reaches the end of its result or the export row limit. The tab shows the
+statement as running for that time, and **Stop** works as usual.
+
+The app saves the result of a single statement on any database except Athena.
+A script with more than one statement reads only up to the grid's row limit.
+Athena doesn't need the option, because it already keeps the full result of
+each query in S3. **Run to file…** and query plans never save a result this way.
+
+**Disk space for saved results** sets the space that all saved results can use
+together, from 1 to 1,024 gigabytes. The default is 2 GB. When a new result
+needs more space, the app deletes the oldest saved result first. A result is
+not saved in these cases, and **Export all rows** runs the query again for it:
+
+- The result has more rows than the export row limit.
+- The result doesn't fit in the disk space, even after the app deletes every
+  older saved result. The read then stops at the grid's row limit.
+- The disk refuses the write, for example because it's full.
+- You stop the run, the run reaches the connection's time limit, or a statement
+  fails.
+
+When the export row limit, the disk space or the disk keeps a result from being
+saved, **Messages** says why, and a notice in the corner points you there.
+
+The app deletes a saved file when you run the tab again (unless you pinned the
+result), close the result or the tab, or disconnect. It also deletes a file
+after 12 hours, and deletes the oldest one when it has more than 64 kept
+results. The files live in a folder under the app's cache folder. If the app
+quits or crashes, it deletes the files that are left over the next time it
+starts. Each running copy of the app has a folder of its own, so a second copy
+never deletes the files of the first.
 
 ## Excel files
 

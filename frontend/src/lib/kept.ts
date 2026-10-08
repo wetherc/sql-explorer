@@ -1,4 +1,21 @@
 import { api } from './api'
+import type { Settings } from '@/stores/settings'
+import type { SpillRequest } from '@/types/api'
+
+/** The bytes of one gigabyte of the disk limit in Settings. */
+export const GIGABYTE = 1024 ** 3
+
+/**
+ * What a normal run asks for when the user turned on saved full results, or
+ * nothing when the option is off.
+ */
+export function spillRequest(
+  settings: Pick<Settings, 'keepFullResults' | 'exportRowLimit' | 'fullResultsDiskGb'>,
+): SpillRequest | undefined {
+  return settings.keepFullResults
+    ? { maxRows: settings.exportRowLimit, maxBytes: settings.fullResultsDiskGb * GIGABYTE }
+    : undefined
+}
 
 /**
  * Lets the backend forget the kept result of each pane that leaves the

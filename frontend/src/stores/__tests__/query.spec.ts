@@ -1031,6 +1031,81 @@ describe('kept results', () => {
     expect(await released()).toEqual(['r1:0'])
   })
 
+  it('asks the backend to save full results only when Settings turns it on', async () => {
+    const queries = useQueryStore()
+    const settings = useSettingsStore()
+    apiStub.executeQuery.mockImplementation(streamed({ results: [{ rows: [[1]] }] }))
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    expect(apiStub.executeQuery.mock.calls[0]![0]).toMatchObject({ spill: undefined })
+
+    settings.update({ keepFullResults: true, exportRowLimit: 5000, fullResultsDiskGb: 3 })
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    expect(apiStub.executeQuery.mock.calls[1]![0]).toMatchObject({
+      spill: { maxRows: 5000, maxBytes: 3 * 1024 ** 3 },
+    })
+  })
+
+  it('records the rows that the backend saved on this computer', async () => {
+    apiStub.executeQuery.mockImplementationOnce(
+      streamed({
+        results: [{ rows: [[1]], truncated: true }],
+        kept: [{ set: 0, id: 'r1:0', savedRows: 52310 }],
+      }),
+    )
+    const queries = useQueryStore()
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    expect(queries.stateFor('t1').panes[0]).toMatchObject({ keptId: 'r1:0', savedRows: 52310 })
+  })
+
+  it('points at Messages when a cut result was not saved and a warning came', async () => {
+    const queries = useQueryStore()
+    const ui = useUiStore()
+    const warn = vi.spyOn(ui, 'warn')
+    const notice = "A result wasn't saved on this computer. Messages has the reason."
+    const warning = { level: 'warning' as const, text: 'Not saved.', detail: null }
+    const run = async (fixture: Parameters<typeof streamed>[0]) => {
+      warn.mockClear()
+      apiStub.executeQuery.mockImplementationOnce(streamed(fixture))
+      await queries.execute('t1', 'c1', 'SELECT 1')
+      return warn.mock.calls.map((call) => call[0])
+    }
+    const cut = [{ rows: [[1]], truncated: true }]
+
+    // The option is off, so nothing was meant to be saved.
+    expect(await run({ results: cut, messages: [warning] })).not.toContain(notice)
+
+    useSettingsStore().update({ keepFullResults: true })
+    expect(await run({ results: cut, messages: [warning] })).toContain(notice)
+    // No warning came, or the set was saved, or no set was cut.
+    expect(await run({ results: cut })).not.toContain(notice)
+    expect(
+      await run({
+        results: cut,
+        messages: [warning],
+        kept: [{ set: 0, id: 'r2:0', savedRows: 9 }],
+      }),
+    ).not.toContain(notice)
+    expect(await run({ results: [{ rows: [[1]] }], messages: [warning] })).not.toContain(notice)
+
+    // A failed run says so on its own.
+    warn.mockClear()
+    apiStub.executeQuery.mockRejectedValueOnce(new Error('broken'))
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    expect(warn.mock.calls.map((call) => call[0])).not.toContain(notice)
+
+    // A tab that closed during the run has nothing to point at.
+    warn.mockClear()
+    apiStub.executeQuery.mockImplementationOnce(
+      async (_request: unknown, handlers: import('@/lib/results').ResultStreamHandlers) => {
+        handlers.onSet(ResultTable.fromRows([], [[1]], true))
+        queries.clear('t1')
+        handlers.onEnd({ messages: [warning], rowsAffected: null, elapsedMs: 1, stats: null })
+      },
+    )
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    expect(warn.mock.calls.map((call) => call[0])).not.toContain(notice)
+  })
+
   it('needs no answer from a release', async () => {
     apiStub.releaseKept.mockRejectedValue(new Error('gone'))
     keptRun('r1')

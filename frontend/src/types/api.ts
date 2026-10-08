@@ -280,6 +280,19 @@ export interface KeptSet {
   set: number
   /** The identifier that `exportKept` and `releaseKept` take. */
   id: string
+  /** The number of rows in the file on this computer that keeps every row
+   *  of the set. Only a saved full result has this count. */
+  savedRows?: number
+}
+
+/**
+ * What a run asks for when it saves its full result sets on this computer.
+ * The backend reads up to `maxRows`, and every saved result together uses at
+ * most `maxBytes` of disk space.
+ */
+export interface SpillRequest {
+  maxRows: number
+  maxBytes: number
 }
 
 /** What an export of a kept result needs to know. */

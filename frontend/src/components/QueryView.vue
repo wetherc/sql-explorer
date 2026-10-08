@@ -335,6 +335,7 @@
                   pane.savedFile ? savedFileNote(pane.rows, pane.truncated, pane.savedFile) : null
                 "
                 :kept="pane.keptId !== undefined"
+                :saved-rows="pane.savedRows"
                 @export="onExport"
                 @export-all="(format: ExportAllFormat) => onExportAll(pane, format)"
                 @copied="onCopied"

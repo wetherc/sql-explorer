@@ -33,6 +33,7 @@ import type {
   SavedConnection,
   SchemaRef,
   SchemaSnapshot,
+  SpillRequest,
   ScriptStatement,
   TableDetails,
   RelationType,
@@ -145,6 +146,7 @@ export const api = {
       tabId?: string
       queryParams?: Record<string, unknown>
       options?: ExecOptions
+      spill?: SpillRequest
     },
     handlers: ResultStreamHandlers,
   ): Promise<void> {

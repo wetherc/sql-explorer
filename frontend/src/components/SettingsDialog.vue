@@ -3,8 +3,8 @@
     <v-card>
       <v-card-title>Settings</v-card-title>
       <v-card-text class="d-flex flex-column ga-3">
-        <!-- The settings are in groups, because twelve controls in no order
-             are hard to scan. -->
+        <!-- The settings are in groups, because fourteen controls in no
+             order are hard to scan. -->
         <div class="settings-group">Appearance</div>
         <v-select
           :model-value="settings.settings.theme"
@@ -65,6 +65,23 @@
           hint="Maximum rows for an export that streams straight to a file, from 1,000 to 100,000,000."
           data-test="setting-export-limit"
           @update:model-value="(value) => settings.update({ exportRowLimit: value })"
+        />
+        <v-switch
+          :model-value="settings.settings.keepFullResults"
+          color="primary"
+          label="Save full results on this computer"
+          hint="When a result passes the row limit, the query keeps reading up to the export row limit and saves every row, so Export all rows doesn't run it again. Runs take longer."
+          persistent-hint
+          data-test="setting-keep-full-results"
+          @update:model-value="(value) => settings.update({ keepFullResults: value === true })"
+        />
+        <NumberSetting
+          :model-value="settings.settings.fullResultsDiskGb"
+          label="Disk space for saved results (gigabytes)"
+          hint="From 1 to 1,024. When a new result needs more space, the oldest saved result is deleted first."
+          :disabled="!settings.settings.keepFullResults"
+          data-test="setting-full-results-disk"
+          @update:model-value="(value) => settings.update({ fullResultsDiskGb: value })"
         />
 
         <v-divider />

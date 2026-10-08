@@ -8,9 +8,9 @@ import { useSettingsStore } from './settings'
 import { useUiStore } from './ui'
 import { isCancellation, toErrorPayload } from '@/lib/errors'
 import { scanCost } from '@/lib/format'
-import { releaseKept } from '@/lib/kept'
+import { releaseKept, spillRequest } from '@/lib/kept'
 import { ResultTable, type ResultStreamHandlers } from '@/lib/results'
-import { PlanMode } from '@/types/api'
+import { MessageLevel, PlanMode } from '@/types/api'
 import type { SavedFile } from '@/lib/runFile'
 import type {
   ErrorPayload,
@@ -60,6 +60,9 @@ export interface ResultPane {
    *  the read and the backend can still give every row. The export of all
    *  rows then reads that result and does not run the statement again. */
   keptId?: string
+  /** The number of rows that the backend saved in a file on this computer,
+   *  when the user turned on saved full results and the set fit the limits. */
+  savedRows?: number
   /** The statement, the values and the connection that made the result, or
    *  null for a plan. The export of every row runs this again, and not the
    *  text of the editor or the connection that the tab names now, which the
@@ -295,6 +298,7 @@ export const useQueryStore = defineStore('query', () => {
       const pane = state.panes.find((pane) => table !== undefined && pane.result === table)
       if (pane) {
         pane.keptId = entry.id
+        pane.savedRows = entry.savedRows
       } else {
         releaseKept([{ keptId: entry.id }])
       }
@@ -498,7 +502,7 @@ export const useQueryStore = defineStore('query', () => {
    * where `query` begins, so the store can give the place of a failure in
    * the editor.
    */
-  function execute(
+  async function execute(
     tabId: string,
     connectionId: string,
     query: string,
@@ -506,19 +510,44 @@ export const useQueryStore = defineStore('query', () => {
     start?: EditorPosition,
   ): Promise<boolean> {
     const text = query.trim()
-    return runRequest(
+    const spill = spillRequest(settings.settings)
+    const succeeded = await runRequest(
       tabId,
       connectionId,
       text,
       (requestId, options, handlers) =>
         api.executeQuery(
-          { connectionId, requestId, query: text, tabId, queryParams, options },
+          { connectionId, requestId, query: text, tabId, queryParams, options, spill },
           handlers,
         ),
       undefined,
       queryParams,
       start ? { sent: query, start } : undefined,
     )
+    if (spill && succeeded) {
+      warnUnsaved(tabId)
+    }
+    return succeeded
+  }
+
+  /**
+   * Points the user at the Messages tab when a run that asked to save its
+   * full results left a cut result unsaved and a warning arrived, such as
+   * the warning for a result that needs more disk space than Settings
+   * allows.
+   */
+  function warnUnsaved(tabId: string): void {
+    // A tab that closed during the run has no state.
+    const state = peekState(tabId)
+    if (!state) {
+      return
+    }
+    const unsaved = panesOfLastRun(state).some(
+      (pane) => pane.truncated && pane.savedRows === undefined,
+    )
+    if (unsaved && state.messages.some((message) => message.level === MessageLevel.Warning)) {
+      ui.warn("A result wasn't saved on this computer. Messages has the reason.")
+    }
   }
 
   /**

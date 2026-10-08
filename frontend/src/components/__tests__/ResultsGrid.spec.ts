@@ -78,6 +78,7 @@ describe('ResultsGrid', () => {
       props: { result: result({ truncated: true }) },
     })
     expect(wrapper.find('[data-test="grid-truncated"]').text()).toContain('row limit')
+    expect(wrapper.find('[data-test="grid-truncated"]').text()).not.toContain('saved')
   })
 
   it('names the file in place of the row limit when the rows also went to a file', () => {
@@ -693,6 +694,21 @@ describe('ResultsGrid', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     const item = document.querySelector('[data-test="grid-export-all-csv"]')
     expect(item?.textContent).toContain("Uses the saved result, so the query doesn't run again")
+  })
+
+  it('says that every row of a saved full result is on this computer', async () => {
+    const saved = mountWithPlugins(ResultsGrid, {
+      props: { result: result({ truncated: true }), kept: true, savedRows: 52310 },
+    })
+    expect(saved.find('[data-test="grid-truncated"]').text()).toContain(
+      'All 52,310 rows are saved on this computer for export.',
+    )
+    await saved.find('[data-test="grid-export"]').trigger('click')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const item = document.querySelector('[data-test="grid-export-all-json"]')
+    expect(item?.textContent).toContain(
+      "All 52,310 rows are saved on this computer, so exporting doesn't run the query again",
+    )
   })
 
   it('names the export after the selection once rows are selected', async () => {
