@@ -560,6 +560,7 @@ import { useUiStore, type Notice } from '@/stores/ui'
 import { alignParams, needsAValue, paramChipLabel, paramProblem, paramsForRun } from '@/lib/params'
 import {
   Dialect,
+  ErrorCategory,
   ParamType,
   PlanMode,
   type ChosenRunFile,
@@ -1324,8 +1325,15 @@ async function onExportAll(pane: ResultPane, format: ExportAllFormat): Promise<v
     if (paused) {
       queries.endPause(pane, true)
     }
-    if (isCancellation(toErrorPayload(error))) {
+    const payload = toErrorPayload(error)
+    if (isCancellation(payload)) {
       ui.info('Export stopped.')
+    } else if (payload.category === ErrorCategory.KeptGone) {
+      // The next export of the pane runs the query again.
+      queries.forgetKept(pane)
+      ui.reportError(payload, {
+        action: { label: 'Run again and export', run: () => void onExportAll(pane, format) },
+      })
     } else {
       ui.reportError(error)
     }

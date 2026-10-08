@@ -141,8 +141,14 @@ export const useUiStore = defineStore('ui', () => {
    * failure somewhere the user can read it again, such as the messages of a
    * tab, marks it as `kept: true`. The notice is then a passing word about
    * something the user can still go back to, and it leaves on its own.
+   *
+   * An `action` puts a button on the notice, for a command that can follow
+   * the failure, such as a new run of the query.
    */
-  function reportError(error: unknown, options: { kept?: boolean } = {}): ErrorPayload {
+  function reportError(
+    error: unknown,
+    options: { kept?: boolean; action?: NoticeAction } = {},
+  ): ErrorPayload {
     const payload = toErrorPayload(error)
     if (isCancellation(payload)) {
       info('Statement stopped.')
@@ -155,6 +161,7 @@ export const useUiStore = defineStore('ui', () => {
       detail: [advice, payload.detail].filter(Boolean).join('\n\n') || null,
       icon: errorIcon(payload.category),
       timeout: options.kept ? ERROR_TIMEOUT_MS : -1,
+      ...(options.action ? { action: options.action } : {}),
     })
     return payload
   }

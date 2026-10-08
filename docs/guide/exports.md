@@ -31,8 +31,13 @@ how old the saved result is, for example **Saved on Athena, 3 h ago**, and the
 tab stays free for other statements while the export runs. The app forgets a saved
 result when you run the tab again (unless you pinned the result), close the
 result or the tab, or disconnect. It also forgets a result after 12 hours,
-and forgets the oldest one when it has more than 64. If Athena no
-longer has the result, the export fails and asks you to run the query again.
+and forgets the oldest one when it has more than 64.
+
+If the saved result is gone when you export, for example because Athena no
+longer has it or the app forgot it, the export fails with a notice that has a
+**Run again and export** button. The button runs the query again and writes
+every row to a file in the same format. The export menu of that result then
+says **Runs the query again**.
 
 When it runs the statement again, **Export all rows** accepts only statements
 that read. The backend refuses a statement that contains a word such as

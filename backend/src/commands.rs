@@ -3136,7 +3136,7 @@ pub async fn export_kept<R: Runtime>(
 /// run the statement again.
 fn kept_result(state: &AppState, kept_id: &str) -> Result<Arc<crate::kept::KeptResult>> {
     state.kept.get(kept_id).ok_or_else(|| {
-        Error::Invalid(
+        Error::KeptGone(
             "The saved result of this query is gone. Run the query again to export all rows."
                 .to_string(),
         )
@@ -7666,7 +7666,8 @@ mod tests {
         let error = export_kept(app.handle().clone(), request("r1:0"), app.state())
             .await
             .unwrap_err();
-        assert!(matches!(&error, Error::Invalid(text) if text.contains("Run the query again")));
+        assert!(matches!(&error, Error::KeptGone(text) if text.contains("Run the query again")));
+        assert_eq!(error.category(), crate::error::ErrorCategory::KeptGone);
 
         // A result of a connection that closed cannot be read.
         let kept = app.state::<AppState>().kept.keep(

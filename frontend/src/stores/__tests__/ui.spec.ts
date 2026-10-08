@@ -115,6 +115,14 @@ describe('ui store', () => {
     const ui = useUiStore()
     ui.reportError({ category: ErrorCategory.Database, message: 'bad column', detail: null })
     expect(ui.notices[0]?.detail).toBeNull()
+    expect(ui.notices[0]).not.toHaveProperty('action')
+  })
+
+  it('puts the button of a follow-up command on an error', () => {
+    const ui = useUiStore()
+    const action = { label: 'Run again and export', run: vi.fn() }
+    ui.reportError({ category: ErrorCategory.KeptGone, message: 'gone', detail: null }, { action })
+    expect(ui.notices[0]?.action).toEqual(action)
   })
 
   it('reports a stopped statement as a note and not as an error', () => {

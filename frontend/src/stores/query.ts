@@ -366,6 +366,15 @@ export const useQueryStore = defineStore('query', () => {
     if (release) {
       releaseKept([pane])
     }
+    forgetKept(pane)
+  }
+
+  /**
+   * Forgets the kept result of a pane, so an export of all rows runs the
+   * query again. The backend no longer has the result, so nothing goes back
+   * to it.
+   */
+  function forgetKept(pane: ResultPane): void {
     pane.keptId = undefined
     pane.kept = undefined
     pane.pausedUntil = undefined
@@ -957,5 +966,6 @@ export const useQueryStore = defineStore('query', () => {
     saveAllMessages,
     stopSavingMessages,
     saveShownMessages,
+    forgetKept,
   }
 })

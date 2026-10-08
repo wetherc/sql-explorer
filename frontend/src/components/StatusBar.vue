@@ -148,6 +148,7 @@ const CATEGORY_LABELS: Record<ErrorCategory, string> = {
   secret: 'keychain problem',
   unsupported: 'not supported',
   invalid: 'invalid input',
+  keptGone: 'saved result gone',
   internal: 'internal error',
 }
 

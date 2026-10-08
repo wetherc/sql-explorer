@@ -103,6 +103,7 @@ describe('errorIcon', () => {
     expect(errorIcon(ErrorCategory.Io)).toBe('mdi-file-alert-outline')
     expect(errorIcon(ErrorCategory.Storage)).toBe('mdi-file-alert-outline')
     expect(errorIcon(ErrorCategory.Database)).toBe('mdi-alert-circle-outline')
+    expect(errorIcon(ErrorCategory.KeptGone)).toBe('mdi-history')
   })
 })
 

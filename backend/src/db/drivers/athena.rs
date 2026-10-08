@@ -317,7 +317,7 @@ impl KeptExecution {
         match read.stream(sink, &mut None, &|| false).await {
             Ok(_) => Ok(()),
             Err(Error::Athena(reason)) => {
-                Err(Error::Athena(format!("{KEPT_GONE_MESSAGE} {reason}")))
+                Err(Error::KeptGone(format!("{KEPT_GONE_MESSAGE} {reason}")))
             }
             Err(error) => Err(error),
         }
@@ -2928,7 +2928,7 @@ mod tests {
             )
         }))
         .await;
-        let Err(Error::Athena(text)) = read_kept(&kept_of(&fake)).await else {
+        let Err(Error::KeptGone(text)) = read_kept(&kept_of(&fake)).await else {
             panic!("the read did not fail with an error of the service");
         };
         assert!(text.starts_with(KEPT_GONE_MESSAGE));

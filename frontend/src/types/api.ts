@@ -688,6 +688,7 @@ export const ErrorCategory = {
   Secret: 'secret',
   Unsupported: 'unsupported',
   Invalid: 'invalid',
+  KeptGone: 'keptGone',
   Internal: 'internal',
 } as const
 export type ErrorCategory = (typeof ErrorCategory)[keyof typeof ErrorCategory]

@@ -37,6 +37,9 @@ pub enum ErrorCategory {
     Unsupported,
     /// The request is not valid, for a reason that is not about a connection.
     Invalid,
+    /// The kept result that an export asked for is gone, so the export must
+    /// run the query again.
+    KeptGone,
     /// Any other failure.
     Internal,
 }
@@ -57,6 +60,7 @@ impl ErrorCategory {
             ErrorCategory::Secret => "secret",
             ErrorCategory::Unsupported => "unsupported",
             ErrorCategory::Invalid => "invalid",
+            ErrorCategory::KeptGone => "keptGone",
             ErrorCategory::Internal => "internal",
         }
     }
@@ -116,6 +120,11 @@ pub enum Error {
     /// file that is too large.
     #[error("{0}")]
     Invalid(String),
+
+    /// A kept result that the registry released, or whose source can no
+    /// longer give its rows, such as an Athena result that expired.
+    #[error("{0}")]
+    KeptGone(String),
 
     /// An error at a known place in the text that the window sent.
     #[error("{inner}")]
@@ -290,6 +299,7 @@ impl Error {
             Error::Authentication(_) => ErrorCategory::Authentication,
             Error::Unsupported(_) => ErrorCategory::Unsupported,
             Error::Invalid(_) => ErrorCategory::Invalid,
+            Error::KeptGone(_) => ErrorCategory::KeptGone,
             Error::Located { inner, .. } | Error::SessionReset(inner) => inner.category(),
             // The advice for a timeout names the timeout of the connection,
             // which does not change the lock limit.
@@ -656,6 +666,7 @@ mod tests {
             (ErrorCategory::Unsupported, "unsupported"),
             (ErrorCategory::Authentication, "authentication"),
             (ErrorCategory::Invalid, "invalid"),
+            (ErrorCategory::KeptGone, "keptGone"),
             (ErrorCategory::Internal, "internal"),
         ];
         for (category, text) in categories {

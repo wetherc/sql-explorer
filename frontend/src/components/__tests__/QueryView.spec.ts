@@ -1989,6 +1989,38 @@ describe('QueryView edge paths', () => {
     expect(apiStub.releaseKept).not.toHaveBeenCalled()
   })
 
+  it('offers a new run when the kept result of an export is gone', async () => {
+    apiStub.executeQuery.mockImplementation(
+      streamed({ ...response, kept: [{ set: 0, id: 'r1:0', origin: 'athena', keptAt: 5 }] }),
+    )
+    apiStub.exportKept.mockRejectedValueOnce({
+      category: 'keptGone',
+      message: 'The saved result of this query is gone.',
+      detail: null,
+    })
+    apiStub.exportQuery.mockResolvedValueOnce(null)
+    const wrapper = await mountView()
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+    const grid = wrapper.findComponent({ name: 'ResultsGrid' })
+    await grid.vm.$emit('export-all', 'json')
+    await settle()
+
+    // The pane forgets the result, so its export menu says a new run follows.
+    expect(grid.props('kept')).toBeNull()
+    const notice = useUiStore().notices.find((entry) => entry.level === 'error')
+    expect(notice?.message).toBe('The saved result of this query is gone.')
+    expect(notice?.action?.label).toBe('Run again and export')
+    expect(apiStub.exportQuery).not.toHaveBeenCalled()
+
+    notice!.action!.run()
+    await settle()
+    expect(apiStub.exportQuery).toHaveBeenCalledWith(
+      expect.objectContaining({ query: 'SELECT 1', format: 'json' }),
+    )
+    expect(apiStub.exportKept).toHaveBeenCalledTimes(1)
+  })
+
   it('ends and releases the pause of a result whose export failed', async () => {
     const grid = await pausedGrid()
     apiStub.exportKept.mockRejectedValueOnce(new Error('The disk is full.'))

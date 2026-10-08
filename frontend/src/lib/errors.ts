@@ -71,6 +71,8 @@ export function errorIcon(category: ErrorCategory): string {
     case ErrorCategory.Io:
     case ErrorCategory.Storage:
       return 'mdi-file-alert-outline'
+    case ErrorCategory.KeptGone:
+      return 'mdi-history'
     default:
       return 'mdi-alert-circle-outline'
   }
