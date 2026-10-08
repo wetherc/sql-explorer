@@ -14,6 +14,7 @@ import type {
   ExecOptions,
   ExportRequest,
   ExportSummary,
+  KeptExportRequest,
   FolderEntry,
   MenuCommandState,
   ObjectType,
@@ -416,6 +417,18 @@ export const api = {
    *  chooses. Gives back null when the user closed the dialog. */
   exportQuery(request: ExportRequest): Promise<ExportSummary | null> {
     return invoke('export_query', { request })
+  },
+
+  /** Writes every row of a kept result to a file the user chooses, without
+   *  a new run of the query. Gives back null when the user closed the
+   *  dialog. */
+  exportKept(request: KeptExportRequest): Promise<ExportSummary | null> {
+    return invoke('export_kept', { request })
+  },
+
+  /** Lets the backend forget a kept result that left the interface. */
+  releaseKept(keptId: string): Promise<void> {
+    return invoke('release_kept', { keptId })
   },
 
   /** Asks the user for a path and writes bytes there. The content travels

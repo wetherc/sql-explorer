@@ -8,10 +8,18 @@ import { useSettingsStore } from './settings'
 import { useUiStore } from './ui'
 import { isCancellation, toErrorPayload } from '@/lib/errors'
 import { scanCost } from '@/lib/format'
+import { releaseKept } from '@/lib/kept'
 import { ResultTable, type ResultStreamHandlers } from '@/lib/results'
 import { PlanMode } from '@/types/api'
 import type { SavedFile } from '@/lib/runFile'
-import type { ErrorPayload, ExecOptions, ExportSummary, Message, QueryStats } from '@/types/api'
+import type {
+  ErrorPayload,
+  ExecOptions,
+  ExportSummary,
+  KeptSet,
+  Message,
+  QueryStats,
+} from '@/types/api'
 
 /** One gigabyte, as a storage unit counts it. */
 const BYTES_IN_GIGABYTE = 1024 ** 3
@@ -48,6 +56,10 @@ export interface ResultPane {
   pinned: boolean
   /** The name of the result, for a result that is not a plain result set. */
   label?: string
+  /** The identifier of the kept result of the set, when the row limit cut
+   *  the read and the backend can still give every row. The export of all
+   *  rows then reads that result and does not run the statement again. */
+  keptId?: string
   /** The statement, the values and the connection that made the result, or
    *  null for a plan. The export of every row runs this again, and not the
    *  text of the editor or the connection that the tab names now, which the
@@ -248,6 +260,7 @@ export const useQueryStore = defineStore('query', () => {
    * `cancel` before it calls this.
    */
   function clear(tabId: string): void {
+    releaseKept(states[tabId]?.panes ?? [])
     const run = runs.get(tabId)
     if (run) {
       run.abandoned = true
@@ -269,6 +282,23 @@ export const useQueryStore = defineStore('query', () => {
     return Object.values(states).filter(
       (state) => state.running && state.requestConnectionId === connectionId,
     ).length
+  }
+
+  /**
+   * Gives each kept set of a run to the pane of its table. A set whose pane
+   * is gone, because the user closed it or the tab, has its kept result
+   * released at once.
+   */
+  function attachKept(state: QueryState, run: Run, kept: KeptSet[]): void {
+    for (const entry of kept) {
+      const table = run.fresh[entry.set]
+      const pane = state.panes.find((pane) => table !== undefined && pane.result === table)
+      if (pane) {
+        pane.keptId = entry.id
+      } else {
+        releaseKept([{ keptId: entry.id }])
+      }
+    }
   }
 
   function paneOf(state: QueryState, paneId: string): ResultPane | undefined {
@@ -319,6 +349,7 @@ export const useQueryStore = defineStore('query', () => {
     state.requestConnectionId = connectionId
     state.error = null
     // A result the user kept stays. Every other result goes.
+    releaseKept(state.panes.filter((pane) => !pane.pinned))
     state.panes = state.panes.filter((pane) => pane.pinned)
     state.messages = []
     state.droppedMessages = 0
@@ -401,6 +432,7 @@ export const useQueryStore = defineStore('query', () => {
             state.rowsAffected = end.rowsAffected
             state.elapsedMs = end.elapsedMs
             state.stats = end.stats
+            attachKept(state, run, end.kept ?? [])
           },
         },
       )
@@ -668,7 +700,7 @@ export const useQueryStore = defineStore('query', () => {
     if (position < 0) {
       return
     }
-    state.panes.splice(position, 1)
+    releaseKept(state.panes.splice(position, 1))
     if (state.activePaneId === paneId) {
       const next = state.panes[position] ?? lastPane(state.panes) ?? null
       state.activePaneId = next ? next.id : null

@@ -685,6 +685,16 @@ describe('ResultsGrid', () => {
     expect(item?.classList.contains('v-list-item--disabled')).toBe(true)
   })
 
+  it('says that a whole export of a kept result does not run the query again', async () => {
+    const kept = mountWithPlugins(ResultsGrid, {
+      props: { result: result({ truncated: true }), kept: true },
+    })
+    await kept.find('[data-test="grid-export"]').trigger('click')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const item = document.querySelector('[data-test="grid-export-all-csv"]')
+    expect(item?.textContent).toContain("Uses the saved result, so the query doesn't run again")
+  })
+
   it('names the export after the selection once rows are selected', async () => {
     const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
     await wrapper.findAll('[data-test="grid-row"]')[0]!.trigger('click')

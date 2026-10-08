@@ -9,7 +9,7 @@
  * The form of the bytes stands in `backend/src/db/columnar.rs`.
  */
 
-import type { CellValue, ColumnInfo, Message, QueryStats } from '@/types/api'
+import type { CellValue, ColumnInfo, KeptSet, Message, QueryStats } from '@/types/api'
 import { exactAsNumber } from './format'
 
 const FRAME_BEGIN_SET = 1
@@ -351,6 +351,9 @@ export interface RunEnd {
   rowsAffected: number | null
   elapsedMs: number
   stats: QueryStats | null
+  /** The sets that the row limit cut and whose full rows the backend kept.
+   *  A plan gives none. */
+  kept?: KeptSet[]
 }
 
 /** What the reader of a run tells its caller. */

@@ -334,6 +334,7 @@
                 :saved-note="
                   pane.savedFile ? savedFileNote(pane.rows, pane.truncated, pane.savedFile) : null
                 "
+                :kept="pane.keptId !== undefined"
                 @export="onExport"
                 @export-all="(format: ExportAllFormat) => onExportAll(pane, format)"
                 @copied="onCopied"
@@ -1119,8 +1120,10 @@ function confirmInsertExport(): void {
 
 /**
  * Writes every row of the statement of one result to a file. The backend
- * runs the statement again with a higher row limit and writes the file
- * itself, so a large result never passes through the interface.
+ * writes the file itself, so a large result never passes through the
+ * interface. A result that the backend kept gives its rows again, and the
+ * statement does not run a second time. Every other result runs the
+ * statement again with a higher row limit.
  */
 async function onExportAll(pane: ResultPane, format: ExportAllFormat): Promise<void> {
   // The export runs the statement that made this result, on the connection
@@ -1140,16 +1143,20 @@ async function onExportAll(pane: ResultPane, format: ExportAllFormat): Promise<v
   const requestId = `export-${props.tab.id}-${Date.now()}`
   state.exporting = { connectionId: run.connectionId, requestId, stopping: false }
   try {
-    const summary = await api.exportQuery({
-      connectionId: run.connectionId,
-      requestId,
-      query: run.query,
-      defaultName: exportFileName(props.tab.title, format),
-      format,
-      maxRows: settings.settings.exportRowLimit,
-      tabId: props.tab.id,
-      queryParams: run.params,
-    })
+    const defaultName = exportFileName(props.tab.title, format)
+    const maxRows = settings.settings.exportRowLimit
+    const summary = pane.keptId
+      ? await api.exportKept({ keptId: pane.keptId, requestId, defaultName, format, maxRows })
+      : await api.exportQuery({
+          connectionId: run.connectionId,
+          requestId,
+          query: run.query,
+          defaultName,
+          format,
+          maxRows,
+          tabId: props.tab.id,
+          queryParams: run.params,
+        })
     if (!summary) {
       return
     }

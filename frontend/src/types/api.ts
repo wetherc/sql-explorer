@@ -270,6 +270,30 @@ export interface RunToFileRequest {
   options?: ExecOptions
 }
 
+/**
+ * One result set whose read stopped at the row limit and whose full rows the
+ * backend can still read, so an export of all rows does not run the query
+ * again.
+ */
+export interface KeptSet {
+  /** The number of the set in its run, from zero. */
+  set: number
+  /** The identifier that `exportKept` and `releaseKept` take. */
+  id: string
+}
+
+/** What an export of a kept result needs to know. */
+export interface KeptExportRequest {
+  keptId: string
+  /** The identifier that the Stop button of the export names. */
+  requestId: string
+  /** The file name that the save dialog of the backend suggests. */
+  defaultName: string
+  format: 'csv' | 'json' | 'xlsx'
+  /** The row limit of the export, which is higher than the one of the view. */
+  maxRows: number
+}
+
 /** What one export to a file wrote. */
 export interface ExportSummary {
   rows: number

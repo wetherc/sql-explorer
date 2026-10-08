@@ -950,3 +950,93 @@ describe('a run to a file', () => {
     expect(queries.peekState('t1')).toBeUndefined()
   })
 })
+
+describe('kept results', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    Object.values(apiStub).forEach((fn) => fn.mockReset())
+    apiStub.addHistoryEntry.mockResolvedValue([])
+    apiStub.releaseKept.mockResolvedValue(undefined)
+  })
+
+  /** Lets the releases that the store does not await reach the stub. */
+  const released = async (): Promise<string[]> => {
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    return apiStub.releaseKept.mock.calls.map((call) => call[0] as string)
+  }
+
+  /** A run of two cut sets whose full rows the backend kept. */
+  function keptRun(request: string) {
+    apiStub.executeQuery.mockImplementationOnce(
+      streamed({
+        results: [
+          { rows: [[1]], truncated: true },
+          { rows: [[2]], truncated: true },
+        ],
+        kept: [
+          { set: 0, id: `${request}:0` },
+          { set: 1, id: `${request}:1` },
+        ],
+      }),
+    )
+  }
+
+  it('gives each kept set to the pane of its table', async () => {
+    keptRun('r1')
+    const queries = useQueryStore()
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    const panes = queries.stateFor('t1').panes
+    expect(panes.map((pane) => pane.keptId)).toEqual(['r1:0', 'r1:1'])
+    expect(await released()).toEqual([])
+  })
+
+  it('releases the kept results that a new run drops, and keeps a pinned one', async () => {
+    keptRun('r1')
+    const queries = useQueryStore()
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    queries.togglePin('t1', queries.stateFor('t1').panes[1]!.id)
+
+    apiStub.executeQuery.mockImplementationOnce(streamed({ results: [{ rows: [[3]] }] }))
+    await queries.execute('t1', 'c1', 'SELECT 2')
+    expect(await released()).toEqual(['r1:0'])
+    expect(queries.stateFor('t1').panes[0]!.keptId).toBe('r1:1')
+  })
+
+  it('releases the kept result of a closed pane and of a closed tab', async () => {
+    keptRun('r1')
+    const queries = useQueryStore()
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    queries.closePane('t1', queries.stateFor('t1').panes[0]!.id)
+    expect(await released()).toEqual(['r1:0'])
+
+    queries.clear('t1')
+    expect(await released()).toEqual(['r1:0', 'r1:1'])
+  })
+
+  it('releases a kept set whose pane is gone before the run ends', async () => {
+    apiStub.executeQuery.mockImplementationOnce(
+      async (_request: unknown, handlers: import('@/lib/results').ResultStreamHandlers) => {
+        handlers.onSet(ResultTable.fromRows([], [[1]], true))
+        useQueryStore().clear('t1')
+        handlers.onEnd({
+          messages: [],
+          rowsAffected: null,
+          elapsedMs: 1,
+          stats: null,
+          kept: [{ set: 0, id: 'r1:0' }],
+        })
+      },
+    )
+    await useQueryStore().execute('t1', 'c1', 'SELECT 1')
+    expect(await released()).toEqual(['r1:0'])
+  })
+
+  it('needs no answer from a release', async () => {
+    apiStub.releaseKept.mockRejectedValue(new Error('gone'))
+    keptRun('r1')
+    const queries = useQueryStore()
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    queries.clear('t1')
+    expect(await released()).toEqual(['r1:0', 'r1:1'])
+  })
+})

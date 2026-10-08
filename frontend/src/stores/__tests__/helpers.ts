@@ -1,6 +1,13 @@
 import { vi } from 'vitest'
 import { ResultTable, type ResultStreamHandlers } from '@/lib/results'
-import type { CellValue, ColumnInfo, Message, QueryStats, SavedConnection } from '@/types/api'
+import type {
+  CellValue,
+  ColumnInfo,
+  KeptSet,
+  Message,
+  QueryStats,
+  SavedConnection,
+} from '@/types/api'
 import { DbType, Dialect, defaultConnectionOptions } from '@/types/api'
 
 /** A stub for every backend command, so no test reaches a real bridge. */
@@ -50,6 +57,8 @@ export function makeApiStub() {
     saveTextFile: vi.fn(),
     saveBinaryFile: vi.fn(),
     exportQuery: vi.fn(),
+    exportKept: vi.fn(),
+    releaseKept: vi.fn().mockResolvedValue(undefined),
     supportedEngines: vi.fn(),
     passwordsPersist: vi.fn(),
     storageProblems: vi.fn().mockResolvedValue([]),
@@ -109,6 +118,7 @@ export interface ResponseFixture {
   rowsAffected?: number | null
   elapsedMs?: number
   stats?: QueryStats | null
+  kept?: KeptSet[]
 }
 
 /**
@@ -128,6 +138,7 @@ export function streamed(response: ResponseFixture) {
       rowsAffected: response.rowsAffected ?? null,
       elapsedMs: response.elapsedMs ?? 0,
       stats: response.stats ?? null,
+      kept: response.kept,
     })
   }
 }

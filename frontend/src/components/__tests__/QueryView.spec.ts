@@ -1907,6 +1907,38 @@ describe('QueryView edge paths', () => {
     expect(useUiStore().notices.some((notice) => notice.level === 'success')).toBe(true)
   })
 
+  it('writes every row of a kept result without a new run of the query', async () => {
+    apiStub.exportKept.mockResolvedValue({
+      rows: 40000,
+      truncated: false,
+      path: '/tmp/all.json',
+      sheetFull: false,
+      cutCells: 0,
+      warning: null,
+    })
+    apiStub.executeQuery.mockImplementation(
+      streamed({ ...response, kept: [{ set: 0, id: 'r1:0' }] }),
+    )
+    const wrapper = await mountView()
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+
+    const grid = wrapper.findComponent({ name: 'ResultsGrid' })
+    expect(grid.props('kept')).toBe(true)
+    await grid.vm.$emit('export-all', 'json')
+    await settle()
+
+    expect(apiStub.exportKept).toHaveBeenCalledWith({
+      keptId: 'r1:0',
+      requestId: expect.any(String),
+      defaultName: expect.stringContaining('.json'),
+      format: 'json',
+      maxRows: 1000000,
+    })
+    expect(apiStub.exportQuery).not.toHaveBeenCalled()
+    expect(useUiStore().notices.some((notice) => notice.level === 'success')).toBe(true)
+  })
+
   it('asks the backend for an Excel file of every row', async () => {
     apiStub.exportQuery.mockResolvedValue({
       rows: 40000,

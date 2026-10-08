@@ -169,6 +169,18 @@ describe('api', () => {
       request: expect.objectContaining({ defaultName: 'all.csv' }),
     })
 
+    const kept = {
+      keptId: 'r1:0',
+      requestId: 'e1',
+      defaultName: 'all.csv',
+      format: 'csv' as const,
+      maxRows: 1000,
+    }
+    await api.exportKept(kept)
+    expect(invoke).toHaveBeenCalledWith('export_kept', { request: kept })
+    await api.releaseKept('r1:0')
+    expect(invoke).toHaveBeenCalledWith('release_kept', { keptId: 'r1:0' })
+
     await api.saveBinaryFile({
       defaultName: 'a.xlsx',
       filterLabel: 'Excel',

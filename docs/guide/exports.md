@@ -20,7 +20,17 @@ it to the clipboard. The grid's menu offers two types of export:
 connection. A pinned result from an older run therefore writes its own rows,
 even after you change the tab's text or connection.
 
-Because it runs the statement again, **Export all rows** accepts only statements
+On Athena, the statement doesn't run again. Athena saves the full result of
+every query in S3, so the export reads the rest of the rows from that saved
+result, and you don't pay for a second scan. The export entries then say
+**Uses the saved result, so the query doesn't run again**, and the tab stays
+free for other statements while the export runs. The app forgets a saved
+result when you run the tab again (unless you pinned the result), close the
+result or the tab, or disconnect. It also forgets a result after 12 hours,
+and forgets the oldest one when it has more than 64. If Athena no
+longer has the result, the export fails and asks you to run the query again.
+
+When it runs the statement again, **Export all rows** accepts only statements
 that read. The backend refuses a statement that contains a word such as
 `INSERT`, `UPDATE`, `DELETE`, `INTO` or `EXEC` outside a string or a comment,
 although it accepts a `FOR UPDATE` clause on PostgreSQL and MySQL.

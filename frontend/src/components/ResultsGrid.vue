@@ -356,15 +356,27 @@ const props = withDefaults(
     /** The note for a result whose rows also went to a file. It takes the
      *  place of the row limit warning. */
     savedNote?: string | null
+    /** True when the backend kept the full result, so the export of all
+     *  rows reads it and does not run the query again. */
+    kept?: boolean
   }>(),
-  { busy: false, exporting: false, rows: undefined, truncated: undefined, savedNote: null },
+  {
+    busy: false,
+    exporting: false,
+    kept: false,
+    rows: undefined,
+    truncated: undefined,
+    savedNote: null,
+  },
 )
 
 /** The note under each command that exports all rows. */
 const exportAllSubtitle = computed(() =>
   props.exporting
     ? 'An export is already running.'
-    : 'Re-runs the query and streams rows from the server',
+    : props.kept
+      ? "Uses the saved result, so the query doesn't run again"
+      : 'Re-runs the query and streams rows from the server',
 )
 
 /** The number of rows of the result, which grows while the set streams. */
