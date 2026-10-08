@@ -1,5 +1,14 @@
 import { defineStore } from 'pinia'
-import { computed, markRaw, ref, shallowReactive, shallowRef, watch, type ComputedRef } from 'vue'
+import {
+  computed,
+  markRaw,
+  ref,
+  shallowReactive,
+  shallowRef,
+  toRaw,
+  watch,
+  type ComputedRef,
+} from 'vue'
 import { api } from '@/lib/api'
 import { useConnectionsStore } from './connections'
 import { useSettingsStore } from './settings'
@@ -427,11 +436,13 @@ export const useExplorerStore = defineStore('explorer', () => {
   const filter = ref('')
   const loading = ref(false)
   /**
-   * The number of the last read of the children of each node, by the key of
-   * the node. A refresh raises the number, so the answer of a read that the
-   * refresh passed can be told apart and dropped.
+   * The number of the last read of the children of each node. A refresh
+   * raises the number, so the answer of a read that the refresh passed can be
+   * told apart and dropped. The map keys the plain node object. A read
+   * builds new nodes, so a node that leaves the tree never comes back, and
+   * its entry goes with it.
    */
-  const loadGeneration = new Map<string, number>()
+  const loadGeneration = new WeakMap<ExplorerNode, number>()
 
   /**
    * The filter text that the tree is matched against. It follows the field
@@ -920,9 +931,10 @@ export const useExplorerStore = defineStore('explorer', () => {
    * the schema of a database again.
    */
   async function load(node: ExplorerNode, fresh = false): Promise<ExplorerNode[]> {
-    const generation = (loadGeneration.get(node.key) ?? 0) + 1
-    loadGeneration.set(node.key, generation)
-    const isLast = () => loadGeneration.get(node.key) === generation
+    const raw = toRaw(node)
+    const generation = (loadGeneration.get(raw) ?? 0) + 1
+    loadGeneration.set(raw, generation)
+    const isLast = () => loadGeneration.get(raw) === generation
     // A node that leaves the tree during its read, such as the root of a
     // connection that the user closed, takes no answer and no failure.
     const wasInTree = inTree(node)

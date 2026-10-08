@@ -1541,6 +1541,27 @@ describe('explorer store', () => {
     expect(quick!.children?.map((child) => child.label)).toEqual(['audit'])
   })
 
+  it('keeps the read of a new root apart from the read of the root before it', async () => {
+    let releaseFirst: (value: { name: string }[]) => void = () => {}
+    apiStub.listDatabases.mockReturnValueOnce(
+      new Promise<{ name: string }[]>((resolve) => {
+        releaseFirst = resolve
+      }),
+    )
+    const explorer = await readyStore()
+    const first = explorer.expand(explorer.addRoot('c1'))
+    explorer.removeRoot('c1')
+    const root = explorer.addRoot('c1')
+    apiStub.listDatabases.mockResolvedValue([{ name: 'New' }])
+    await explorer.expand(root)
+
+    releaseFirst([{ name: 'Old' }])
+    await first
+    expect(root.children?.map((child) => child.label)).toEqual(['New'])
+    expect(root.loading).toBe(false)
+    expect(explorer.loading).toBe(false)
+  })
+
   it('drops the answer of a read that a refresh passed', async () => {
     let releaseFirst: (value: { name: string }[]) => void = () => {}
     apiStub.listDatabases.mockReturnValueOnce(

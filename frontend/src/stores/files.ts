@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { computed, ref } from 'vue'
+import { computed, ref, toRaw } from 'vue'
 import { api } from '@/lib/api'
 import { useTabsStore } from './tabs'
 import { useUiStore } from './ui'
@@ -163,8 +163,10 @@ export const useFilesStore = defineStore('files', () => {
   /**
    * The number of the last read of each folder. A refresh starts a read
    * while an older one runs, and the answer of the older read is dropped.
+   * The map keys the plain node object, so the entry of a folder that leaves
+   * the panel goes with its node.
    */
-  const loadGeneration = new Map<string, number>()
+  const loadGeneration = new WeakMap<FileNode, number>()
 
   /**
    * Reads the entries of one folder and writes them into it. The entries
@@ -172,9 +174,10 @@ export const useFilesStore = defineStore('files', () => {
    * too, and it does not stand open and empty.
    */
   async function readFolder(node: FileNode): Promise<void> {
-    const generation = (loadGeneration.get(node.path) ?? 0) + 1
-    loadGeneration.set(node.path, generation)
-    const isLast = () => loadGeneration.get(node.path) === generation
+    const raw = toRaw(node)
+    const generation = (loadGeneration.get(raw) ?? 0) + 1
+    loadGeneration.set(raw, generation)
+    const isLast = () => loadGeneration.get(raw) === generation
     node.loading = true
     node.error = null
     let children: FileNode[]
