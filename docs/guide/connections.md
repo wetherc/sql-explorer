@@ -119,5 +119,13 @@ the tab opens a fresh session on its next run. If no session can close, the new
 tab's run fails with a message that suggests closing a tab or raising
 **Max sessions**.
 
-When a connection stops answering, the application opens it again. The colour
-beside each connection shows its state.
+When a connection stops answering, the application opens it again. A session
+that sat idle for 30 seconds gets a quick check before its next use, and a
+session that gives no answer within 5 seconds counts as one that stopped
+answering. This catches a connection that a firewall or a sleeping laptop
+dropped without notice. The colour beside each connection shows its state.
+
+A read for the explorer tree, the Properties dialog or completion ends with a
+timeout error after 60 seconds. The time counts from the click, so it includes
+the check and the opening of a new connection. On Athena, each request to AWS
+also gives up after 30 seconds and is retried.

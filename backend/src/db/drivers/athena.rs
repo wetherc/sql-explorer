@@ -18,6 +18,7 @@ use crate::error::{Error, Result};
 use crate::sql::{split_statements, Dialect};
 use crate::storage::{AwsCredentialSource, SavedConnection};
 use async_trait::async_trait;
+use aws_config::timeout::TimeoutConfig;
 use aws_credential_types::Credentials;
 use aws_sdk_athena::operation::start_query_execution::builders::StartQueryExecutionFluentBuilder;
 use aws_sdk_athena::types::{
@@ -365,6 +366,24 @@ const EXPIRED_TOKEN_MESSAGE: &str =
     "The session token has expired. Paste a new one, or switch to an AWS profile, which gets a \
      fresh token for each connection.";
 
+/// The longest time that one attempt of one call to the service takes. A
+/// call has no limit of its own, so a request on a connection that the
+/// network dropped waits for an answer that never comes. The SDK retries an
+/// attempt that passes this limit. A call reads at most one page of 1,000
+/// rows, so a slow attempt still ends well inside it.
+const AWS_ATTEMPT_LIMIT: Duration = Duration::from_secs(30);
+
+/// The limits of the calls to the service. The connect limit is the one that
+/// the user set for the connection.
+fn timeouts(connection: &SavedConnection) -> TimeoutConfig {
+    TimeoutConfig::builder()
+        .connect_timeout(Duration::from_secs(
+            connection.options.connect_timeout_secs.max(1),
+        ))
+        .operation_attempt_timeout(AWS_ATTEMPT_LIMIT)
+        .build()
+}
+
 /// Builds the credentials that the user typed, or `None` when the
 /// connection reads the chain of the AWS tools instead.
 ///
@@ -411,7 +430,8 @@ impl AthenaDriver {
             .to_string();
 
         let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .region(aws_config::Region::new(region));
+            .region(aws_config::Region::new(region))
+            .timeout_config(timeouts(connection));
         // The keys of the user take the place of the whole chain. The
         // profile belongs to the chain, so the two never stand together.
         match typed_credentials(connection)? {
@@ -1614,6 +1634,22 @@ mod tests {
         connection.aws_session_token = Some("the-token".into());
         let with_token = typed_credentials(&connection).unwrap().unwrap();
         assert_eq!(with_token.session_token(), Some("the-token"));
+    }
+
+    #[test]
+    fn each_call_to_the_service_has_a_limit() {
+        let mut connection = athena_connection();
+        connection.options.connect_timeout_secs = 9;
+        let config = timeouts(&connection);
+        assert_eq!(config.connect_timeout(), Some(Duration::from_secs(9)));
+        assert_eq!(config.operation_attempt_timeout(), Some(AWS_ATTEMPT_LIMIT));
+
+        // A limit of zero still gives the connect a limit.
+        connection.options.connect_timeout_secs = 0;
+        assert_eq!(
+            timeouts(&connection).connect_timeout(),
+            Some(Duration::from_secs(1))
+        );
     }
 
     #[test]

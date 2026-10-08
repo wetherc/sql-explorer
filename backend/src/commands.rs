@@ -461,7 +461,7 @@ async fn ensure_session_healthy<R: Runtime>(
     // end.
     let healthy = {
         let mut driver = unless_stopped(async { Ok(session.driver.lock().await) }, token).await?;
-        driver.ping().await.is_ok()
+        answers_ping(driver.as_mut()).await
     };
     if healthy {
         session.mark_ok().await;
@@ -517,13 +517,54 @@ async fn metadata_read<'a, R: Runtime>(
     connection_id: &'a str,
 ) -> Result<CatalogRead<'a>> {
     let open = ensure_healthy(app, state, connection_id).await?;
-    let session = background_session(state, connection_id, &open, BackgroundRole::Catalog).await?;
-    Ok(CatalogRead::new(
+    catalog_read(state, connection_id, &open, BackgroundRole::Catalog).await
+}
+
+/// Starts a read of the catalog on the background driver of one role. The
+/// limit of the read starts before the driver is found, so the health check
+/// and the open of a new driver count against it.
+async fn catalog_read<'a>(
+    state: &'a AppState,
+    connection_id: &'a str,
+    open: &OpenConnection,
+    role: BackgroundRole,
+) -> Result<CatalogRead<'a>> {
+    let deadline = tokio::time::Instant::now() + CATALOG_LIMIT;
+    let session = background_session(state, connection_id, open, role, deadline).await?;
+    Ok(CatalogRead::until(
         state,
         connection_id,
         session,
         CATALOG_LIMIT,
+        deadline,
     ))
+}
+
+/// The longest time that a ping of a driver that stood idle takes. A server
+/// that closed the connection without a word gives no answer, and the ping
+/// then waits until the operating system gives up on the socket, which can
+/// take many minutes. A ping past this limit counts as a driver that stopped
+/// answering, so the caller opens a new one.
+pub const PING_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Sends a ping, and gives true when the driver answers within
+/// [`PING_LIMIT`].
+async fn answers_ping(driver: &mut dyn DatabaseDriver) -> bool {
+    matches!(
+        tokio::time::timeout(PING_LIMIT, driver.ping()).await,
+        Ok(Ok(()))
+    )
+}
+
+/// Waits for the work until the deadline, and gives the timeout error of a
+/// read of the catalog when the deadline comes first.
+async fn before_deadline<T>(
+    deadline: tokio::time::Instant,
+    work: impl std::future::Future<Output = T>,
+) -> Result<T> {
+    tokio::time::timeout_at(deadline, work)
+        .await
+        .map_err(|_| Error::Timeout(CATALOG_LIMIT.as_secs()))
 }
 
 /// The longest time that one read of the catalog takes, the wait for the
@@ -552,12 +593,24 @@ impl<'a> CatalogRead<'a> {
         session: Arc<Session>,
         limit: std::time::Duration,
     ) -> Self {
+        let deadline = tokio::time::Instant::now() + limit;
+        Self::until(state, connection_id, session, limit, deadline)
+    }
+
+    /// A read whose limit started before this call, at `deadline - limit`.
+    fn until(
+        state: &'a AppState,
+        connection_id: &'a str,
+        session: Arc<Session>,
+        limit: std::time::Duration,
+        deadline: tokio::time::Instant,
+    ) -> Self {
         Self {
             state,
             connection_id,
             session,
             limit,
-            deadline: tokio::time::Instant::now() + limit,
+            deadline,
         }
     }
 
@@ -1397,9 +1450,9 @@ pub async fn schema_snapshot<R: Runtime>(
         .unwrap_or(DEFAULT_SNAPSHOT_COLUMNS)
         .max(1);
 
-    let session = match request.own_connection.unwrap_or(true) {
+    let read = match request.own_connection.unwrap_or(true) {
         true => {
-            background_session(
+            catalog_read(
                 &state,
                 &request.connection_id,
                 &open,
@@ -1407,10 +1460,13 @@ pub async fn schema_snapshot<R: Runtime>(
             )
             .await?
         }
-        false => open.default_session().await?,
+        false => CatalogRead::new(
+            &state,
+            &request.connection_id,
+            open.default_session().await?,
+            CATALOG_LIMIT,
+        ),
     };
-
-    let read = CatalogRead::new(&state, &request.connection_id, session, CATALOG_LIMIT);
     let mut guard = read.lock().await?;
     read.run(guard.schema_snapshot(&request.database, limit))
         .await
@@ -1418,29 +1474,39 @@ pub async fn schema_snapshot<R: Runtime>(
 
 /// Confirms that a background driver that stood idle still answers. A driver
 /// that gives no answer must go, because the server closed its side.
-async fn background_answers(session: &Arc<Session>) -> bool {
+///
+/// The wait for the driver ends at the deadline of the read, because another
+/// read can keep the driver until its own deadline. The ping has
+/// [`PING_LIMIT`] of its own, so it can end a little after the deadline. A
+/// ping that the deadline cut in the middle of its exchange would leave the
+/// driver in its slot with half an answer still on the connection.
+async fn background_answers(
+    session: &Arc<Session>,
+    deadline: tokio::time::Instant,
+) -> Result<bool> {
     if !session.needs_ping || !session.needs_check().await {
-        return true;
+        return Ok(true);
     }
     // One check at a time for each driver, so two reads send one ping.
-    let _guard = session.health.lock().await;
+    let _guard = before_deadline(deadline, session.health.lock()).await?;
     if !session.needs_check().await {
-        return true;
+        return Ok(true);
     }
     let healthy = {
-        let mut driver = session.driver.lock().await;
-        driver.ping().await.is_ok()
+        let mut driver = before_deadline(deadline, session.driver.lock()).await?;
+        answers_ping(driver.as_mut()).await
     };
     if healthy {
         session.mark_ok().await;
     }
-    healthy
+    Ok(healthy)
 }
 
 /// Returns the background session of a connection for one role, and opens
 /// one when the connection has none or when the one it has stopped
 /// answering. A driver that cannot open gives the default session, because a
-/// snapshot that waits is better than no completions.
+/// snapshot that waits is better than no completions. The read of the
+/// password and the open of a new driver end at the deadline.
 ///
 /// A connection with one session alone gives its default session and opens
 /// no second connection. A second connection to a SQLite database in memory
@@ -1450,25 +1516,30 @@ async fn background_session(
     connection_id: &str,
     open: &OpenConnection,
     role: BackgroundRole,
+    deadline: tokio::time::Instant,
 ) -> Result<Arc<Session>> {
     if open.single_session {
         return open.default_session().await;
     }
     if let Some(session) = state.background_session(connection_id, role).await {
-        if background_answers(&session).await {
+        if background_answers(&session, deadline).await? {
             return Ok(session);
         }
         log::warn!("The {role:?} driver of '{connection_id}' stopped answering. Opening it again.");
         state.drop_background(connection_id, &session).await;
     }
-    let full = match with_secrets(state, open.descriptor.clone()).await {
+    let full = match before_deadline(deadline, with_secrets(state, open.descriptor.clone())).await?
+    {
         Ok(full) => full,
         Err(error) => {
             log::warn!("The password of '{connection_id}' could not be read: {error}");
             return open.default_session().await;
         }
     };
-    match open_driver(&full).await {
+    // The box stops the nesting of the future type here. Without it, the
+    // layout of `metadata_read` passes the query depth limit of the compiler
+    // in the build that measures coverage.
+    match before_deadline(deadline, Box::pin(open_driver(&full))).await? {
         Ok(driver) => Ok(state
             .set_background_driver(connection_id, role, driver)
             .await),
@@ -1510,9 +1581,7 @@ pub async fn script_object<R: Runtime>(
 
     // The work only reads the catalog, so it runs on the driver of the
     // metadata reads and leaves the sessions of the tabs free.
-    let session =
-        background_session(&state, &connection_id, &open, BackgroundRole::Catalog).await?;
-    let read = CatalogRead::new(&state, &connection_id, session, CATALOG_LIMIT);
+    let read = catalog_read(&state, &connection_id, &open, BackgroundRole::Catalog).await?;
     let mut guard = read.lock().await?;
     let relation = match target {
         ScriptTarget::Relation(relation) => relation,
@@ -4960,6 +5029,7 @@ mod tests {
         let driver = Box::new(PingDriver {
             pings: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             answers: true,
+            hangs: false,
         });
         let state = state();
         state
@@ -4975,6 +5045,7 @@ mod tests {
                 Session::new(Box::new(PingDriver {
                     pings: pings.clone(),
                     answers: false,
+                    hangs: false,
                 })),
             )
             .await;
@@ -4994,6 +5065,39 @@ mod tests {
         // session.
         assert!(open.sessions.get("t1").await.is_none());
         assert!(state.connection("s1").await.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_tab_session_whose_ping_passes_its_limit_opens_again() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (app, state) = state_with_sqlite(descriptor).await;
+        let open = state.connection("s1").await.unwrap();
+        let pings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let silent = open
+            .sessions
+            .insert(
+                "t1",
+                Session::new(Box::new(PingDriver {
+                    pings: pings.clone(),
+                    answers: true,
+                    hangs: true,
+                })),
+            )
+            .await;
+        silent.age(crate::state::HEALTH_CHECK_AFTER).await;
+
+        let (_, session, _) = session_for(
+            app.handle(),
+            &state,
+            "s1",
+            Some("t1"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(pings.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(!Arc::ptr_eq(&session, &silent));
     }
 
     #[tokio::test]
@@ -5081,6 +5185,9 @@ mod tests {
     struct PingDriver {
         pings: Arc<std::sync::atomic::AtomicUsize>,
         answers: bool,
+        /// True for a driver whose ping never ends, as on a connection that
+        /// a firewall dropped without a word.
+        hangs: bool,
     }
 
     #[async_trait::async_trait]
@@ -5093,6 +5200,9 @@ mod tests {
         }
         async fn ping(&mut self) -> Result<()> {
             self.pings.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.hangs {
+                std::future::pending::<()>().await;
+            }
             match self.answers {
                 true => Ok(()),
                 false => Err(Error::NotConnected("the second connection".into())),
@@ -5127,6 +5237,16 @@ mod tests {
         state: &AppState,
         answers: bool,
     ) -> (Arc<Session>, Arc<std::sync::atomic::AtomicUsize>) {
+        ping_stub(state, answers, false).await
+    }
+
+    /// Puts a background driver into the state, with the choice of a ping
+    /// that never ends.
+    async fn ping_stub(
+        state: &AppState,
+        answers: bool,
+        hangs: bool,
+    ) -> (Arc<Session>, Arc<std::sync::atomic::AtomicUsize>) {
         let pings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let session = state
             .set_background_driver(
@@ -5135,6 +5255,7 @@ mod tests {
                 Box::new(PingDriver {
                     pings: pings.clone(),
                     answers,
+                    hangs,
                 }),
             )
             .await;
@@ -5149,14 +5270,14 @@ mod tests {
         let (session, pings) = background_stub(&state, true).await;
 
         // A driver that answered a moment ago goes out without a ping.
-        let fresh = background_session(&state, "s1", &open, BackgroundRole::Catalog)
+        let fresh = background_session(&state, "s1", &open, BackgroundRole::Catalog, later())
             .await
             .unwrap();
         assert!(Arc::ptr_eq(&fresh, &session));
         assert_eq!(pings.load(std::sync::atomic::Ordering::SeqCst), 0);
 
         session.age(crate::state::HEALTH_CHECK_AFTER).await;
-        let checked = background_session(&state, "s1", &open, BackgroundRole::Catalog)
+        let checked = background_session(&state, "s1", &open, BackgroundRole::Catalog, later())
             .await
             .unwrap();
         assert!(Arc::ptr_eq(&checked, &session));
@@ -5164,7 +5285,7 @@ mod tests {
 
         // The ping moved the moment of the last answer, so the next read
         // sends no second ping.
-        background_session(&state, "s1", &open, BackgroundRole::Catalog)
+        background_session(&state, "s1", &open, BackgroundRole::Catalog, later())
             .await
             .unwrap();
         assert_eq!(pings.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -5178,7 +5299,7 @@ mod tests {
         let (session, pings) = background_stub(&state, false).await;
         session.age(crate::state::HEALTH_CHECK_AFTER).await;
 
-        let opened = background_session(&state, "s1", &open, BackgroundRole::Catalog)
+        let opened = background_session(&state, "s1", &open, BackgroundRole::Catalog, later())
             .await
             .unwrap();
 
@@ -5188,12 +5309,64 @@ mod tests {
         opened.driver.lock().await.ping().await.unwrap();
     }
 
+    /// A deadline that a test never reaches.
+    fn later() -> tokio::time::Instant {
+        tokio::time::Instant::now() + CATALOG_LIMIT
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_ping_past_its_limit_opens_a_new_background_driver() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (_app, state) = state_with_sqlite(descriptor).await;
+        let open = state.connection("s1").await.unwrap();
+        let (session, pings) = ping_stub(&state, true, true).await;
+        session.age(crate::state::HEALTH_CHECK_AFTER).await;
+
+        let opened = background_session(&state, "s1", &open, BackgroundRole::Catalog, later())
+            .await
+            .unwrap();
+
+        assert_eq!(pings.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(!Arc::ptr_eq(&opened, &session));
+        let kept = state
+            .background_session("s1", BackgroundRole::Catalog)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&kept, &opened));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_health_check_waits_for_a_busy_driver_until_the_deadline() {
+        let (session, pings) = {
+            let (_dir, descriptor) = temp_sqlite();
+            let (_app, state) = state_with_sqlite(descriptor).await;
+            background_stub(&state, true).await
+        };
+        session.age(crate::state::HEALTH_CHECK_AFTER).await;
+        // Another read keeps the driver.
+        let _reading = session.driver.lock().await;
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        let outcome = background_answers(&session, deadline).await;
+
+        assert!(matches!(outcome, Err(Error::Timeout(60))));
+        assert_eq!(pings.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn work_past_the_deadline_gives_the_timeout_of_the_catalog() {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        let outcome = before_deadline(deadline, std::future::pending::<()>()).await;
+        assert!(matches!(outcome, Err(Error::Timeout(60))));
+        assert_eq!(before_deadline(later(), async { 7 }).await.unwrap(), 7);
+    }
+
     #[tokio::test]
     async fn a_read_of_the_tree_does_not_wait_behind_a_read_of_the_schema() {
         let (_dir, descriptor) = temp_sqlite();
         let (app, state) = state_with_sqlite(descriptor).await;
         let open = state.connection("s1").await.unwrap();
-        let snapshot = background_session(&state, "s1", &open, BackgroundRole::Snapshot)
+        let snapshot = background_session(&state, "s1", &open, BackgroundRole::Snapshot, later())
             .await
             .unwrap();
         // The read of the schema keeps its driver for the whole test.
