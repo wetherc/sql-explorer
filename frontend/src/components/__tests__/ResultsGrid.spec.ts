@@ -764,26 +764,33 @@ describe('ResultsGrid', () => {
       [{ name: 'n', typeName: 'int' }],
       Array.from({ length: 12000 }, (_unused, index) => [index]),
     )
-    const wrapper = mountWithPlugins(ResultsGrid, { props: { result: many } })
-    await wrapper.findAll('[data-test="grid-header"]')[0]!.trigger('click')
-    await wrapper.findAll('[data-test="grid-header"]')[0]!.trigger('click')
-    // The keys are not all built, so the rows keep the order of the result.
-    expect(wrapper.find('[data-test="grid-sorting"]').exists()).toBe(true)
-    expect(wrapper.findAll('[data-test="grid-row"]')[0]!.text()).toContain('1')
+    // A slice also ends after a few milliseconds. The clock stands still,
+    // so each slice reads the full count of rows on a slow machine as well,
+    // and the 12,000 keys take exactly three slices.
+    const now = vi.spyOn(performance, 'now').mockReturnValue(0)
+    try {
+      const wrapper = mountWithPlugins(ResultsGrid, { props: { result: many } })
+      await wrapper.findAll('[data-test="grid-header"]')[0]!.trigger('click')
+      await wrapper.findAll('[data-test="grid-header"]')[0]!.trigger('click')
+      // The keys are not all built, so the rows keep the order of the result.
+      expect(wrapper.find('[data-test="grid-sorting"]').exists()).toBe(true)
+      expect(wrapper.findAll('[data-test="grid-row"]')[0]!.text()).toContain('1')
 
-    for (let turn = 0; turn < 10 && wrapper.find('[data-test="grid-sorting"]').exists(); turn++) {
+      // The third slice runs after the main thread had its turn.
       await new Promise((resolve) => setTimeout(resolve, 0))
       await wrapper.vm.$nextTick()
-    }
-    expect(wrapper.find('[data-test="grid-sorting"]').exists()).toBe(false)
-    expect(wrapper.findAll('[data-test="grid-row"]')[0]!.text()).toContain('11999')
+      expect(wrapper.find('[data-test="grid-sorting"]').exists()).toBe(false)
+      expect(wrapper.findAll('[data-test="grid-row"]')[0]!.text()).toContain('11999')
 
-    // An unmount during a build stops it.
-    const other = mountWithPlugins(ResultsGrid, { props: { result: many } })
-    await other.findAll('[data-test="grid-header"]')[0]!.trigger('click')
-    expect(other.find('[data-test="grid-sorting"]').exists()).toBe(true)
-    other.unmount()
-    await new Promise((resolve) => setTimeout(resolve, 0))
+      // An unmount during a build stops it.
+      const other = mountWithPlugins(ResultsGrid, { props: { result: many } })
+      await other.findAll('[data-test="grid-header"]')[0]!.trigger('click')
+      expect(other.find('[data-test="grid-sorting"]').exists()).toBe(true)
+      other.unmount()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    } finally {
+      now.mockRestore()
+    }
   })
 
   it('ignores an event of the body that reached no cell', async () => {
