@@ -265,11 +265,16 @@ async fn live_mariadb_marks_generated_columns_and_error_lines() {
 /// A read of 1,000,000 numbers in order, from 1. The rows fill the buffers
 /// of the connection, so the server must wait while the read is paused.
 fn numbers_query() -> String {
+    numbers_up_to(6)
+}
+
+/// A read of the numbers from 1 to 10 to the power of `places`, in order.
+fn numbers_up_to(places: u32) -> String {
     let digits = "(SELECT 0 AS d UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 \
                   UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 \
                   UNION ALL SELECT 8 UNION ALL SELECT 9)";
-    let tables: Vec<String> = (0..6).map(|n| format!("{digits} AS t{n}")).collect();
-    let sum: Vec<String> = (0..6)
+    let tables: Vec<String> = (0..places).map(|n| format!("{digits} AS t{n}")).collect();
+    let sum: Vec<String> = (0..places)
         .map(|n| format!("t{n}.d * {}", 10_i64.pow(n)))
         .collect();
     format!(
@@ -530,4 +535,44 @@ async fn live_mysql_a_user_without_process_gets_notes() {
 #[ignore = "needs a live MariaDB server"]
 async fn live_mariadb_a_user_without_process_gets_notes() {
     a_user_without_process_gets_notes("SQLX_LIVE_MARIADB", "maria_noproc").await;
+}
+
+/// Runs a procedure that returns more rows than the limit. A procedure can
+/// write, so the driver reads every row that remains and tells the sink.
+async fn a_drained_procedure_tells_the_sink(variable: &str, tag: &str) {
+    let Some((scratch, mut driver, _)) = Scratch::open(variable, tag).await else {
+        return;
+    };
+    let body = async {
+        let create = format!("CREATE PROCEDURE many_numbers() {}", numbers_up_to(3));
+        live::run(driver.as_mut(), &create).await;
+        let options = crate::db::ExecOptions {
+            max_rows: 10,
+            ..crate::db::ExecOptions::default()
+        };
+        let mut sink = crate::db::sink::probe::Telling::new(10);
+        driver
+            .execute_stream("CALL many_numbers()", None, &options, &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(sink.told, 1);
+        let response = sink
+            .buffer
+            .into_response(crate::db::sink::RunSummary::default());
+        assert_eq!(response.results[0].rows.len(), 10);
+        assert!(response.results[0].truncated);
+    };
+    live::with_cleanup(body, scratch.remove()).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a live MySQL server"]
+async fn live_mysql_a_drained_procedure_tells_the_sink() {
+    a_drained_procedure_tells_the_sink("SQLX_LIVE_MYSQL", "my_drain").await;
+}
+
+#[tokio::test]
+#[ignore = "needs a live MariaDB server"]
+async fn live_mariadb_a_drained_procedure_tells_the_sink() {
+    a_drained_procedure_tells_the_sink("SQLX_LIVE_MARIADB", "maria_drain").await;
 }

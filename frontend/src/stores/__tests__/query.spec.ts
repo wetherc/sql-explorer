@@ -69,6 +69,7 @@ describe('newQueryState', () => {
       messagesFile: null,
       openTransactionOn: null,
       saving: null,
+      readingPastLimit: false,
     })
   })
 })

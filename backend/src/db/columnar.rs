@@ -30,6 +30,12 @@ pub const FRAME_END: u8 = 4;
 pub const FRAME_MESSAGE: u8 = 5;
 pub const FRAME_PROGRESS: u8 = 7;
 
+pub const FRAME_STATUS: u8 = 6;
+
+/// The code of a status frame that says the driver reads and drops the rows
+/// past the row limit, because the server cannot end the batch early.
+pub const STATUS_READING_PAST_LIMIT: u8 = 1;
+
 /// How the values of one column of one chunk are held.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnEncoding {
@@ -221,6 +227,13 @@ pub fn write_progress(buffer: &mut Vec<u8>, set: u32, rows: u64, bytes: u64) {
     buffer.extend_from_slice(&set.to_le_bytes());
     buffer.extend_from_slice(&rows.to_le_bytes());
     buffer.extend_from_slice(&bytes.to_le_bytes());
+}
+
+/// Writes the frame that gives the state of a run that goes on, as one code
+/// byte.
+pub fn write_status(buffer: &mut Vec<u8>, code: u8) {
+    buffer.push(FRAME_STATUS);
+    buffer.push(code);
 }
 
 /// Writes the frame that ends the run. The JSON contains the messages that no
@@ -465,6 +478,8 @@ pub struct ChunkSink {
     default_reason: Option<UnsavedReason>,
     /// The cut sets without a kept result, with their reasons.
     unsaved: Vec<UnsavedSet>,
+    /// True after the status frame of a read past the row limit went out.
+    told_past_limit: bool,
 }
 
 impl ChunkSink {
@@ -487,6 +502,7 @@ impl ChunkSink {
             reason: None,
             default_reason: None,
             unsaved: Vec::new(),
+            told_past_limit: false,
         }
     }
 
@@ -654,6 +670,19 @@ impl RowSink for ChunkSink {
         write_progress(&mut buffer, self.set, rows, bytes);
         let _ = self.send(buffer);
     }
+
+    /// Sends the status frame once for each run. A frame that the channel
+    /// refuses is lost, because the status only informs the user and the
+    /// rows and the end of the run use the same channel.
+    fn reading_past_limit(&mut self) {
+        if self.told_past_limit {
+            return;
+        }
+        self.told_past_limit = true;
+        let mut buffer = Vec::new();
+        write_status(&mut buffer, STATUS_READING_PAST_LIMIT);
+        let _ = self.send(buffer);
+    }
 }
 
 #[cfg(test)]
@@ -694,6 +723,9 @@ mod tests {
             set: u32,
             rows: u64,
             bytes: u64,
+        },
+        Status {
+            code: u8,
         },
     }
 
@@ -774,6 +806,7 @@ mod tests {
                     rows: self.u64(),
                     bytes: self.u64(),
                 },
+                FRAME_STATUS => Frame::Status { code: self.u8() },
                 other => panic!("the frame {other} is unknown"),
             }
         }
@@ -1317,6 +1350,28 @@ mod tests {
     }
 
     #[test]
+    fn the_sink_tells_once_that_it_reads_past_the_limit() {
+        let (channel, messages) = collecting_channel();
+        let mut sink = ChunkSink::new(channel, 1);
+        sink.begin_set(columns()).unwrap();
+        sink.reading_past_limit();
+        sink.reading_past_limit();
+        sink.end_set(true).unwrap();
+
+        let frames = frames_of(&messages.lock().unwrap());
+        let statuses: Vec<&Frame> = frames
+            .iter()
+            .filter(|frame| matches!(frame, Frame::Status { .. }))
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![&Frame::Status {
+                code: STATUS_READING_PAST_LIMIT
+            }]
+        );
+    }
+
+    #[test]
     fn the_end_of_a_run_reports_a_new_session() {
         let (channel, messages) = collecting_channel();
         let mut sink = ChunkSink::new(channel, 10);
@@ -1610,6 +1665,9 @@ mod tests {
         sink.row(vec![json!(1)]).unwrap();
         sink.message(Message::info("second"));
         sink.row(vec![json!(2)]).unwrap();
+        // The status goes out at once, before the rows that wait in the
+        // open chunk.
+        sink.reading_past_limit();
         sink.end_set(false).unwrap();
         sink.message(Message::info("third"));
         sink.progress(2, 9);
@@ -1627,6 +1685,7 @@ mod tests {
                 }
                 Frame::End { .. } => "end".to_string(),
                 Frame::Progress { rows, .. } => format!("progress {rows}"),
+                Frame::Status { code } => format!("status {code}"),
             })
             .collect();
         assert_eq!(
@@ -1636,6 +1695,7 @@ mod tests {
                 "begin",
                 "rows 1",
                 "second",
+                "status 1",
                 "rows 2",
                 "end set",
                 "third",

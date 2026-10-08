@@ -47,6 +47,20 @@ While a statement runs, a **Stop** button appears beside **Run**, and
 **Stopping…** until the run ends. The connection's time limit
 also stops a statement that runs too long.
 
+When a result passes the row limit, the application asks the server to end the
+statement early, unless ending it would lose work. On MS SQL Server, ending a batch of several statements would skip the statements after the
+one that reached the limit. Ending a write that returns rows, such as
+`INSERT ... OUTPUT`, would roll the write back, and inside a transaction with
+`XACT_ABORT` on, the whole transaction would roll back. On MySQL and MariaDB, a
+statement that can write, such as a procedure call, runs to its end for the same
+reason.
+
+In these cases the application reads the rest of the result and drops the rows
+past the limit. The toolbar shows "Still reading rows past the limit. The server
+can't end this batch early." beside **Stop**, and the run lasts as long as the
+server takes to send every row. **Stop** still works, but on MS SQL Server it
+ends the whole batch, so the statements after the current one don't run.
+
 Changing the tab's connection or closing the tab also stops the statement, and
 the application asks you before either one. On some engines a stop opens a new
 session, which discards the old session's temporary tables and `SET` options.

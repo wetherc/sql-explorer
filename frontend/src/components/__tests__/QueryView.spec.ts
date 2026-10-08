@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ResultPane } from '@/stores/query'
+import type { ResultStreamHandlers } from '@/lib/results'
 import type { TextEncoding } from '@/types/api'
 import {
   makeApiStub,
@@ -893,6 +894,33 @@ describe('QueryView', () => {
 
     release(response)
     await settle()
+  })
+
+  it('says why a run goes on past the row limit', async () => {
+    let release: (value: unknown) => void = () => {}
+    let handlers: ResultStreamHandlers | null = null
+    apiStub.executeQuery.mockImplementation((_request: unknown, given: ResultStreamHandlers) => {
+      handlers = given
+      return new Promise((resolve) => {
+        release = resolve
+      })
+    })
+    const wrapper = await mountView()
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+    expect(wrapper.find('[data-test="reading-past-limit"]').exists()).toBe(false)
+
+    handlers!.onReadingPastLimit!()
+    await wrapper.vm.$nextTick()
+    const status = wrapper.find('[data-test="reading-past-limit"]')
+    expect(status.attributes('role')).toBe('status')
+    expect(status.text()).toBe(
+      "Still reading rows past the limit. The server can't end this batch early.",
+    )
+
+    release(response)
+    await settle()
+    expect(wrapper.find('[data-test="reading-past-limit"]').exists()).toBe(false)
   })
 
   it('offers a Stop button only while a statement runs', async () => {

@@ -318,6 +318,14 @@ impl<G: RowSink + 'static> RowSink for PausingSink<G> {
         }
     }
 
+    /// Only the grid shows the status. An export takes every row up to its
+    /// own limit.
+    fn reading_past_limit(&mut self) {
+        if let Phase::Visible(grid) = &mut self.phase {
+            grid.reading_past_limit();
+        }
+    }
+
     fn pause_point(&self) -> Option<PausePoint> {
         Some(self.point)
     }

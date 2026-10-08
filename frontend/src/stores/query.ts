@@ -158,6 +158,9 @@ export interface QueryState {
   /** The rows and the bytes that the backend saved so far of a set past the
    *  row limit of the grid, while the run saves its full results. */
   saving: { rows: number; bytes: number; stopping: boolean } | null
+  /** True while the run reads and drops the rows past the row limit,
+   *  because the server can't end the batch early. */
+  readingPastLimit: boolean
 }
 
 /** Builds the state a tab starts with. */
@@ -183,6 +186,7 @@ export function newQueryState(): QueryState {
     messagesFile: null,
     openTransactionOn: null,
     saving: null,
+    readingPastLimit: false,
   }
 }
 
@@ -443,6 +447,7 @@ export const useQueryStore = defineStore('query', () => {
     state.requestId = requestId
     state.requestConnectionId = connectionId
     state.error = null
+    state.readingPastLimit = false
     // A result the user kept stays. Every other result goes. A paused read
     // keeps the session of the tab, so the new run ends it, also for a
     // pinned result.
@@ -535,6 +540,9 @@ export const useQueryStore = defineStore('query', () => {
           onProgress: ({ rows, bytes }) => {
             state.saving = { rows, bytes, stopping: state.saving?.stopping ?? false }
           },
+          onReadingPastLimit: () => {
+            state.readingPastLimit = true
+          },
           onEnd: (end) => {
             // The end gives the messages that did not stream before it.
             for (const message of end.messages) {
@@ -600,6 +608,7 @@ export const useQueryStore = defineStore('query', () => {
       state.requestId = null
       state.requestConnectionId = null
       state.startedAt = null
+      state.readingPastLimit = false
     }
     // A session that closed after the failure rolled its transaction back.
     if (failure?.sessionReset) {

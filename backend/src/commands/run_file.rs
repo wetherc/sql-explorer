@@ -677,6 +677,12 @@ impl<F: RowSink, G: RowSink> RowSink for TeeSink<F, G> {
     fn progress(&mut self, rows: u64, bytes: u64) {
         self.grid.progress(rows, bytes);
     }
+
+    /// The grid shows the status. The file takes every row it can, so the
+    /// status concerns the grid alone.
+    fn reading_past_limit(&mut self) {
+        self.grid.reading_past_limit();
+    }
 }
 
 #[cfg(test)]
@@ -770,6 +776,15 @@ mod tests {
         tee.row(row(1)).unwrap();
         tee.end_set(false).unwrap();
         assert!(!response(tee.grid).results[0].truncated);
+    }
+
+    #[test]
+    fn the_grid_alone_hears_that_the_driver_reads_past_the_limit() {
+        use crate::db::sink::probe::Telling;
+        let mut tee = TeeSink::new(Telling::new(100), Telling::new(100), 2);
+        tee.reading_past_limit();
+        assert_eq!(tee.file.told, 0);
+        assert_eq!(tee.grid.told, 1);
     }
 
     #[test]

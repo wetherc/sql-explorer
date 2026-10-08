@@ -552,7 +552,12 @@ async fn read_sets<P: Protocol>(
             let drain = drain_set(&mut result);
             match kill {
                 Some(kill) => *killed |= drain_with_kill(drain, kill.cancel(), KILL_GRACE).await?,
-                None => drain.await?,
+                None => {
+                    // The drain reads every row that remains, so the user
+                    // hears why the run goes on.
+                    sink.reading_past_limit();
+                    drain.await?;
+                }
             }
         }
         finish_set(sink, count, truncated)?;

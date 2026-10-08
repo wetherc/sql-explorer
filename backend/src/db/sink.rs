@@ -73,6 +73,13 @@ pub trait RowSink: Send {
     /// the row limit of the grid. The default drops the values.
     fn progress(&mut self, _rows: u64, _bytes: u64) {}
 
+    /// Tells the sink that the driver reads and drops the rows past the row
+    /// limit, because it cannot end the batch early. The run then takes as
+    /// long as the server needs for the whole batch. A driver can call this
+    /// more than once in a run. The default does nothing, because a sink
+    /// that writes a file or a buffer has no user to tell.
+    fn reading_past_limit(&mut self) {}
+
     /// The place where this sink can pause the read, or `None` for a sink
     /// that never pauses. A driver uses it to stop between two exchanges
     /// with the server at that place, and to keep the server from closing
@@ -223,6 +230,47 @@ pub(crate) mod testing {
         let mut sink = BufferSink::new(1);
         sink.progress(1, 2);
         assert!(sink.into_response(RunSummary::default()).results.is_empty());
+    }
+}
+
+/// A sink for the tests of the drivers and of the sinks that wrap another
+/// sink.
+#[cfg(test)]
+pub(crate) mod probe {
+    use super::*;
+
+    /// Gives every call to a buffer and counts the calls of
+    /// [`RowSink::reading_past_limit`].
+    pub struct Telling {
+        pub buffer: BufferSink,
+        pub told: usize,
+    }
+
+    impl Telling {
+        pub fn new(max_rows: usize) -> Self {
+            Self {
+                buffer: BufferSink::new(max_rows),
+                told: 0,
+            }
+        }
+    }
+
+    impl RowSink for Telling {
+        fn begin_set(&mut self, columns: Vec<ColumnInfo>) -> Result<()> {
+            self.buffer.begin_set(columns)
+        }
+        fn row(&mut self, row: Vec<JsonValue>) -> Result<SinkControl> {
+            self.buffer.row(row)
+        }
+        fn end_set(&mut self, truncated: bool) -> Result<()> {
+            self.buffer.end_set(truncated)
+        }
+        fn message(&mut self, message: Message) {
+            self.buffer.message(message);
+        }
+        fn reading_past_limit(&mut self) {
+            self.told += 1;
+        }
     }
 }
 
@@ -409,6 +457,7 @@ mod tests {
         sink.begin_set(columns()).unwrap();
         sink.end_set(false).unwrap();
         sink.message(Message::info("note"));
+        sink.reading_past_limit();
         assert_eq!(sink.0, SinkControl::Continue);
 
         // A sink that does not pause gives its answer as it is.

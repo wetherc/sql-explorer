@@ -19,6 +19,12 @@ const FRAME_END = 4
 const FRAME_MESSAGE = 5
 const FRAME_PROGRESS = 7
 
+const FRAME_STATUS = 6
+
+/** The code of a status frame that says the backend reads and drops the
+ *  rows past the row limit, because the server can't end the batch early. */
+const STATUS_READING_PAST_LIMIT = 1
+
 const ENCODING_NULL = 0
 const ENCODING_BOOL = 1
 const ENCODING_INT32 = 2
@@ -387,6 +393,9 @@ export interface ResultStreamHandlers {
   onMessage?: (message: Message) => void
   /** The backend saved more rows of a set past the row limit of the grid. */
   onProgress?: (progress: SpillProgress) => void
+  /** The backend reads and drops the rows past the row limit, because the
+   *  server can't end the batch early. */
+  onReadingPastLimit?: () => void
   /** The run has ended. */
   onEnd: (end: RunEnd) => void
 }
@@ -533,6 +542,9 @@ export class ResultStream {
         case FRAME_PROGRESS:
           at = this.readProgress(view, at)
           break
+        case FRAME_STATUS:
+          at = this.readStatus(view, at)
+          break
         default:
           throw new Error(`The result contains a frame of unknown type ${frameType}.`)
       }
@@ -602,6 +614,15 @@ export class ResultStream {
       bytes: readU64(view, at + 12),
     })
     return at + 20
+  }
+
+  /** Reads the code of a status frame. A code that this reader doesn't know
+   *  changes nothing, so a newer backend can add one. */
+  private readStatus(view: DataView, at: number): number {
+    if (view.getUint8(at) === STATUS_READING_PAST_LIMIT) {
+      this.handlers.onReadingPastLimit?.()
+    }
+    return at + 1
   }
 
   private readEnd(view: DataView, buffer: ArrayBuffer, at: number): number {

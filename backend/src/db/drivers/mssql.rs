@@ -693,6 +693,9 @@ impl MssqlDriver {
         let mut asked_to_end = false;
         // True when the row limit brought the end, and not the sink.
         let mut ended_at_limit = false;
+        // True after the sink heard that the walk drops the rows past the
+        // limit.
+        let mut told_past_limit = false;
         let mut rows_affected: Option<u64> = None;
         let mut errors = 0usize;
 
@@ -766,6 +769,7 @@ impl MssqlDriver {
                             asked_to_end = true;
                             ended_at_limit = true;
                         }
+                        tell_past_limit(sink, may_end_early, &mut told_past_limit);
                         continue;
                     }
                     if feed(sink, row_to_json(&row)).await? == SinkControl::Stop {
@@ -775,6 +779,7 @@ impl MssqlDriver {
                             attention.signal();
                             asked_to_end = true;
                         }
+                        tell_past_limit(sink, may_end_early, &mut told_past_limit);
                         continue;
                     }
                     count += 1;
@@ -819,6 +824,16 @@ impl MssqlDriver {
         let mut stream = self.client.simple_query(statement).await?;
         while stream.try_next().await?.is_some() {}
         Ok(())
+    }
+}
+
+/// Tells the sink once that the walk reads and drops the rows past the
+/// limit. A walk that may end early sends the attention packet instead, so
+/// the sink hears nothing.
+fn tell_past_limit(sink: &mut dyn RowSink, may_end_early: bool, told: &mut bool) {
+    if !may_end_early && !*told {
+        sink.reading_past_limit();
+        *told = true;
     }
 }
 
@@ -3234,26 +3249,26 @@ mod tests {
         }
     }
 
+    /// A server that sends five rows and the end of the statement at once,
+    /// and waits for no attention packet.
+    async fn serve_five_rows(listener: TcpListener) {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        accept_login(&mut socket).await;
+        let packet_type = read_message(&mut socket).await;
+        assert!(packet_type == PACKET_RPC || packet_type == PACKET_SQL_BATCH);
+        let mut answer = int_metadata();
+        for value in 0..5 {
+            answer.extend_from_slice(&int_row(value));
+        }
+        answer.extend_from_slice(&done_token(0, 5));
+        write_packet(&mut socket, END_OF_MESSAGE, &answer).await;
+    }
+
     #[tokio::test]
     async fn a_batch_of_several_statements_walks_the_rest_of_the_result() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            accept_login(&mut socket).await;
-
-            // The whole answer arrives at once, and the server waits for no
-            // attention packet.
-            let packet_type = read_message(&mut socket).await;
-            assert!(packet_type == PACKET_RPC || packet_type == PACKET_SQL_BATCH);
-            let mut answer = int_metadata();
-            for value in 0..5 {
-                answer.extend_from_slice(&int_row(value));
-            }
-            answer.extend_from_slice(&done_token(0, 5));
-            write_packet(&mut socket, END_OF_MESSAGE, &answer).await;
-        });
+        let server = tokio::spawn(serve_five_rows(listener));
 
         let tcp = TcpStream::connect(address).await.unwrap();
         let client = Client::connect(test_config(), tcp.compat_write())
@@ -3266,12 +3281,14 @@ mod tests {
             timeout_secs: 30,
             one_statement: false,
         };
-        let mut sink = BufferSink::new(options.max_rows);
+        let mut sink = crate::db::sink::probe::Telling::new(options.max_rows);
         driver
             .stream_sets("SELECT a FROM b", &[], &options, &mut sink, false)
             .await
             .unwrap();
-        let response = sink.into_response(RunSummary::default());
+        // The walk drops three rows past the limit and tells the sink once.
+        assert_eq!(sink.told, 1);
+        let response = sink.buffer.into_response(RunSummary::default());
 
         // The set still holds the rows of the limit and reports the warning.
         assert_eq!(response.results[0].rows.len(), 2);
@@ -3281,6 +3298,34 @@ mod tests {
             .messages
             .iter()
             .any(|message| message.text == ENDED_AT_THE_LIMIT_MESSAGE));
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_sink_that_stops_a_batch_hears_that_the_walk_goes_on() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_five_rows(listener));
+
+        let tcp = TcpStream::connect(address).await.unwrap();
+        let client = Client::connect(test_config(), tcp.compat_write())
+            .await
+            .unwrap();
+        let mut driver = MssqlDriver { client };
+
+        let options = ExecOptions {
+            max_rows: 10,
+            timeout_secs: 30,
+            one_statement: false,
+        };
+        let mut sink = crate::db::sink::probe::Telling::new(1);
+        let walk = driver
+            .stream_sets("SELECT a FROM b", &[], &options, &mut sink, false)
+            .await
+            .unwrap();
+        assert!(walk.stopped);
+        assert_eq!(sink.told, 1);
 
         server.await.unwrap();
     }
@@ -3366,13 +3411,16 @@ mod tests {
             timeout_secs: 30,
             one_statement: false,
         };
-        let mut sink = BufferSink::new(2);
+        let mut sink = crate::db::sink::probe::Telling::new(2);
         let stopped = driver
             .stream_sets("SELECT a FROM b", &[], &options, &mut sink, true)
             .await
             .unwrap()
             .stopped;
-        let response = sink.into_response(RunSummary::default());
+        // The attention packet ends the statement, so the walk reads on
+        // through the rows in flight alone and tells the sink nothing.
+        assert_eq!(sink.told, 0);
+        let response = sink.buffer.into_response(RunSummary::default());
 
         assert!(stopped);
         assert_eq!(response.results[0].rows.len(), 2);

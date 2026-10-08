@@ -206,6 +206,8 @@ async fn an_export_takes_the_rows_of_the_grid_and_the_rest_of_the_read() {
     assert_eq!(rows(&mut sink, 3, 2), SinkControl::Continue);
     sink.message(Message::info("later"));
     sink.keep_source(crate::kept::tests::fixed(1));
+    // The export takes every row, so it gets no status.
+    sink.reading_past_limit();
     sink.begin_set(columns()).unwrap();
     sink.end_set(false).unwrap();
     assert!(sink.into_grid().is_none());
@@ -357,6 +359,13 @@ fn a_set_too_large_to_copy_ends_at_the_limit_without_a_pause() {
         .filter(|message| message.text == TOO_LARGE_TO_PAUSE)
         .collect();
     assert_eq!(notes.len(), 1);
+}
+
+#[test]
+fn the_grid_hears_that_the_driver_reads_past_the_limit() {
+    let (mut sink, _control) = PausingSink::new(crate::db::sink::probe::Telling::new(4), point(4));
+    sink.reading_past_limit();
+    assert_eq!(sink.into_grid().expect("the read never paused").told, 1);
 }
 
 /// A sink of an export that refuses each row.

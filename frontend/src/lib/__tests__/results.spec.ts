@@ -8,6 +8,7 @@ const FRAME_END_SET = 3
 const FRAME_END = 4
 const FRAME_MESSAGE = 5
 const FRAME_PROGRESS = 7
+const FRAME_STATUS = 6
 
 /**
  * A writer of the frames, which holds the same form as the writer of the
@@ -544,6 +545,34 @@ describe('the reader of the chunks', () => {
     const { stream: quiet } = collect()
     quiet.feed(new Writer().u8(FRAME_PROGRESS).u32(0).u32(1).u32(0).u32(2).u32(0).buffer())
     expect(quiet.failure).toBeNull()
+  })
+
+  it('reports a read past the row limit and skips a status it does not know', () => {
+    const writer = new Writer()
+    writer.u8(FRAME_STATUS).u8(1)
+    writer.u8(FRAME_STATUS).u8(42)
+    writer
+      .u8(FRAME_END)
+      .text(JSON.stringify({ messages: [], rowsAffected: null, elapsedMs: 1, stats: null }))
+
+    const onReadingPastLimit = vi.fn()
+    const ends: RunEnd[] = []
+    const stream = new ResultStream({
+      onReadingPastLimit,
+      onSet: () => {},
+      onEnd: (end) => ends.push(end),
+    })
+    stream.feed(writer.buffer())
+    expect(onReadingPastLimit).toHaveBeenCalledTimes(1)
+    expect(ends).toHaveLength(1)
+    expect(stream.failure).toBeNull()
+
+    // A reader with no handler for the status skips the frame and goes on.
+    const quiet = collect()
+    const again = new Writer()
+    again.u8(FRAME_STATUS).u8(1)
+    quiet.stream.feed(again.buffer())
+    expect(quiet.stream.failure).toBeNull()
   })
 
   it('refuses a frame and a form that it does not know', () => {

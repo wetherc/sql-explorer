@@ -242,6 +242,10 @@ impl<G: RowSink> RowSink for SpillSink<'_, G> {
     fn keep_source(&mut self, source: KeptSource) {
         self.grid.keep_source(source);
     }
+
+    fn reading_past_limit(&mut self) {
+        self.grid.reading_past_limit();
+    }
 }
 
 #[cfg(test)]
@@ -325,6 +329,16 @@ mod tests {
 
     fn texts(response: &QueryResponse) -> Vec<&str> {
         response.messages.iter().map(|m| m.text.as_str()).collect()
+    }
+
+    #[test]
+    fn the_grid_hears_that_the_driver_reads_past_the_limit() {
+        let folder = tempfile::tempdir().unwrap();
+        let kept = KeptResults::default();
+        let grid = crate::db::sink::probe::Telling::new(2);
+        let mut sink = SpillSink::new(grid, 2, folder.path().into(), u64::MAX, &kept);
+        sink.reading_past_limit();
+        assert_eq!(sink.into_grid().told, 1);
     }
 
     #[tokio::test]

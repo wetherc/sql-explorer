@@ -417,6 +417,10 @@ impl<S: RowSink> RowSink for MessageTee<S> {
         self.inner.progress(rows, bytes);
     }
 
+    fn reading_past_limit(&mut self) {
+        self.inner.reading_past_limit();
+    }
+
     fn pause_point(&self) -> Option<PausePoint> {
         self.inner.pause_point()
     }

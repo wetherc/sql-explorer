@@ -249,6 +249,7 @@ struct Recorder {
     calls: Vec<String>,
     messages: Vec<Message>,
     sources: usize,
+    past_limit: usize,
 }
 
 #[async_trait::async_trait]
@@ -270,6 +271,9 @@ impl RowSink for Recorder {
     }
     fn keep_source(&mut self, _source: KeptSource) {
         self.sources += 1;
+    }
+    fn reading_past_limit(&mut self) {
+        self.past_limit += 1;
     }
     fn pause_point(&self) -> Option<PausePoint> {
         Some(PausePoint {
@@ -304,12 +308,14 @@ async fn the_tee_gives_every_call_to_the_inner_sink() {
         .unwrap();
     assert_eq!(control, SinkControl::Continue);
     tee.keep_source(crate::kept::tests::fixed(1));
+    tee.reading_past_limit();
     tee.end_set(true).unwrap();
     tee.message(info("copied"));
 
     let inner = tee.into_inner();
     assert_eq!(inner.calls, ["begin 1", "row 1", "resume", "end true"]);
     assert_eq!(inner.sources, 1);
+    assert_eq!(inner.past_limit, 1);
     assert_eq!(inner.messages, [info("copied")]);
     let log = lock(&log);
     assert_eq!(log.seen, 1);

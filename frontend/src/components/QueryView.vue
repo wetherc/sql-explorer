@@ -90,6 +90,15 @@
           />
         </template>
       </v-tooltip>
+      <span
+        v-if="state.running && state.readingPastLimit"
+        role="status"
+        class="past-limit text-caption text-medium-emphasis"
+        :title="PAST_LIMIT_TEXT"
+        data-test="reading-past-limit"
+      >
+        {{ PAST_LIMIT_TEXT }}
+      </span>
 
       <v-divider vertical class="mx-1" />
 
@@ -686,6 +695,9 @@ const canRun = computed(() => {
   const id = props.tab.connectionId
   return id !== null && connections.isActive(id)
 })
+
+/** The status beside Stop while the backend drops the rows past the limit. */
+const PAST_LIMIT_TEXT = "Still reading rows past the limit. The server can't end this batch early."
 
 /** True after the user pressed Stop and before the run ends. */
 const stopping = computed(() => state.value.stopping)
@@ -1557,6 +1569,16 @@ defineExpose({
   flex-direction: column;
   height: 100%;
   min-height: 0;
+}
+
+/* The status can be wider than the room the toolbar has left, so it shrinks
+   and ends with an ellipsis. Its title gives the whole text. */
+.past-limit {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .toolbar {
