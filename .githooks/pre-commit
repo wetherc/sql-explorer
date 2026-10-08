@@ -39,15 +39,26 @@ fail() {
 }
 
 stashed=0
+stash_hash=
+
+# The worktrees of one repository share one stash list. A second hook in
+# another worktree can push an entry while this hook runs, so this hook finds
+# its own entry by its hash and never takes the top entry.
+#
+# Gives the name, such as stash@{2}, of the entry with the given hash.
+stash_name() {
+    git stash list --format='%gd %H' | awk -v hash="$1" '$2 == hash { print $1; exit }'
+}
 
 # Puts the changes of the stash back into the working tree and the index. The
 # checks write no tracked file, so the reset drops nothing of the user's.
 restore() {
     if [ "$stashed" = 1 ]; then
         git reset --hard --quiet
-        if ! git stash pop --index --quiet; then
+        name=$(stash_name "$stash_hash")
+        if [ -z "$name" ] || ! git stash pop --index --quiet "$name"; then
             printf '\n\033[31mThe hook could not put back the changes that were not staged.\033[0m\n' >&2
-            printf 'They are in the top entry of git stash. Use: git stash pop --index\n' >&2
+            printf 'They are in the stash entry %s. Use: git stash list, then git stash pop --index stash@{N}\n' "$stash_hash" >&2
         fi
     fi
 }
@@ -57,8 +68,15 @@ restore() {
 if [ -f "$(git rev-parse --git-path MERGE_HEAD)" ]; then
     printf '\033[33mA merge is in progress, so the checks run on the working tree.\033[0m\n'
 elif ! git diff --quiet || [ -n "$(git ls-files --others --exclude-standard)" ]; then
-    git stash push --keep-index --include-untracked --quiet \
-        --message 'pre-commit: changes that are not staged'
+    # The label names this run, so the hook can find its entry after the
+    # push even when another worktree pushed one at the same moment.
+    label="pre-commit: changes that are not staged ($root, $$)"
+    git stash push --keep-index --include-untracked --quiet --message "$label"
+    stash_hash=$(git stash list --format='%H %gs' | awk -v label="$label" \
+        'index($0, label) { print $1; exit }')
+    if [ -z "$stash_hash" ]; then
+        fail 'the hook could not find its own stash entry; run git stash list'
+    fi
     stashed=1
     trap restore EXIT
     trap 'exit 1' INT TERM
