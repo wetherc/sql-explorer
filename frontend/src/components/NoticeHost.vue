@@ -57,7 +57,7 @@
       @update:model-value="ui.closeNotice()"
     >
       <v-card v-if="ui.openedNotice">
-        <v-card-title class="text-subtitle-1 d-flex align-center ga-2 dialog-title">
+        <v-card-title class="d-flex align-center ga-2 dialog-title">
           <v-icon :color="ui.openedNotice.level">{{ ui.openedNotice.icon }}</v-icon>
           {{ ui.openedNotice.message }}
         </v-card-title>

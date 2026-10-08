@@ -290,7 +290,7 @@
 
     <AppDialog v-model="inspecting" max-width="720">
       <v-card>
-        <v-card-title class="text-subtitle-1">{{ inspectTitle }}</v-card-title>
+        <v-card-title>{{ inspectTitle }}</v-card-title>
         <v-card-text>
           <pre class="app-code-block">{{ inspectValue }}</pre>
         </v-card-text>

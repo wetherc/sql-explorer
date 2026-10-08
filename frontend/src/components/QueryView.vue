@@ -421,7 +421,7 @@
 
     <AppDialog v-model="askingTable" max-width="420">
       <v-card>
-        <v-card-title class="text-subtitle-1">Target table</v-card-title>
+        <v-card-title>Target table</v-card-title>
         <v-card-text>
           <v-text-field
             v-model="insertTable"
@@ -447,9 +447,9 @@
 
     <AppDialog v-model="askingParams" max-width="520">
       <v-card ref="paramCard">
-        <v-card-title class="text-subtitle-1">Parameter values</v-card-title>
+        <v-card-title>Parameter values</v-card-title>
         <v-card-text class="d-flex flex-column ga-3">
-          <div class="text-caption text-medium-emphasis" data-test="parameters-help">
+          <div class="param-help text-medium-emphasis" data-test="parameters-help">
             Add a parameter by writing <code>:name</code> in the statement.
           </div>
           <div
@@ -526,7 +526,7 @@
 
     <AppDialog v-model="savingQuery" max-width="480">
       <v-card>
-        <v-card-title class="text-subtitle-1">Save query</v-card-title>
+        <v-card-title>Save query</v-card-title>
         <v-card-text class="d-flex flex-column ga-3">
           <v-text-field v-model="saveName" label="Name" autofocus data-test="save-query-name" />
           <v-text-field v-model="saveFolder" label="Folder" placeholder="Saved queries" />
@@ -1341,6 +1341,10 @@ defineExpose({ runStatement, runAll, formatStatement, readPlan, saveToFile })
   flex: 0 0 auto;
   border-bottom: var(--app-divider);
   background: rgb(var(--v-theme-surface));
+}
+
+.param-help {
+  font-size: var(--app-text-sm);
 }
 
 .param-name {

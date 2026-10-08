@@ -1,6 +1,6 @@
 <template>
   <v-card>
-    <v-card-title class="text-subtitle-1">
+    <v-card-title>
       {{ isNew ? 'New connection' : `Edit ${draft.name || 'connection'}` }}
     </v-card-title>
 
@@ -26,7 +26,7 @@
         />
 
         <template v-if="engine?.usesHost">
-          <div class="d-flex ga-2">
+          <div class="d-flex align-start ga-2">
             <v-text-field
               v-model="draft.host"
               label="Host"
@@ -271,17 +271,23 @@
                   data-test="instance-field"
                 />
 
-                <div class="d-flex ga-2">
+                <!-- The fields of a row keep their own heights, so a hint below
+                     one field does not stretch the box of the others. The
+                     fields share the width equally, so a long hint does not
+                     cut the labels of the other fields. -->
+                <div class="field-row d-flex align-start ga-2">
                   <v-text-field
                     v-model.number="draft.options.connectTimeoutSecs"
                     :error-messages="fieldProblem('connectTimeoutSecs')"
-                    label="Connect timeout (seconds)"
+                    label="Connect timeout"
+                    suffix="sec"
                     type="number"
                   />
                   <v-text-field
                     v-model.number="draft.options.queryTimeoutSecs"
                     :error-messages="fieldProblem('queryTimeoutSecs')"
-                    label="Statement timeout (seconds)"
+                    label="Statement timeout"
+                    suffix="sec"
                     type="number"
                   />
                   <v-text-field
@@ -324,13 +330,15 @@
                 <v-textarea
                   v-model="draft.options.connectionUrl"
                   label="Connection string"
-                  rows="2"
+                  rows="1"
+                  auto-grow
+                  class="connection-string"
                   hint="If set, this overrides the host, port, and database. The Transport and Authentication settings apply when the string doesn't set them. Enter the password in the Password field, not in the string."
                   persistent-hint
                   data-test="connection-url-field"
                 />
 
-                <div class="d-flex ga-2">
+                <div class="d-flex align-start ga-2">
                   <v-text-field v-model="draft.group" label="Folder" placeholder="Connections" />
                   <v-select
                     v-model="draft.color"
@@ -355,7 +363,7 @@
       type="info"
       variant="tonal"
       density="compact"
-      class="form-problems mx-4 mb-2"
+      class="form-problems mx-5 mb-2"
       data-test="keychain-note"
     >
       The system keychain isn't available. Passwords and keys you save here last until the app
@@ -366,7 +374,7 @@
       type="warning"
       variant="tonal"
       density="compact"
-      class="form-problems mx-4 mb-2"
+      class="form-problems mx-5 mb-2"
       data-test="form-problems"
     >
       <div v-for="problem in problems" :key="problem">{{ problem }}</div>
@@ -377,7 +385,7 @@
       variant="tonal"
       density="compact"
       closable
-      class="form-problems mx-4 mb-2"
+      class="form-problems mx-5 mb-2"
       data-test="test-result"
       @click:close="testResult = null"
     >
@@ -862,6 +870,16 @@ async function focusToken(): Promise<void> {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
+}
+
+.field-row > .v-input {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* A connection string is code, so it shows in the monospace font. */
+.connection-string :deep(textarea) {
+  font-family: var(--app-font-mono);
 }
 
 .test-detail {

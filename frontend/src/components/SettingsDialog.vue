@@ -1,8 +1,8 @@
 <template>
   <AppDialog :model-value="open" size="medium" scrollable @update:model-value="close">
     <v-card>
-      <v-card-title class="text-subtitle-1">Settings</v-card-title>
-      <v-card-text class="d-flex flex-column ga-4">
+      <v-card-title>Settings</v-card-title>
+      <v-card-text class="d-flex flex-column ga-3">
         <!-- The settings are in groups, because twelve controls in no order
              are hard to scan. -->
         <div class="settings-group">Appearance</div>

@@ -1,7 +1,7 @@
 <template>
   <AppDialog :model-value="open" size="small" @update:model-value="cancel">
     <v-card>
-      <v-card-title class="text-subtitle-1">{{ title }}</v-card-title>
+      <v-card-title>{{ title }}</v-card-title>
       <v-card-text>
         <slot>{{ message }}</slot>
       </v-card-text>

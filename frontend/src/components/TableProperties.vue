@@ -1,7 +1,7 @@
 <template>
   <AppDialog :model-value="open" size="large" @update:model-value="emit('close')">
     <v-card data-test="properties-dialog">
-      <v-card-title class="text-subtitle-1">{{ title }}</v-card-title>
+      <v-card-title>{{ title }}</v-card-title>
 
       <v-card-text>
         <v-progress-linear v-if="loading" indeterminate class="mb-3" />

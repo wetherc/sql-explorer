@@ -136,7 +136,7 @@
       @update:model-value="ui.setKeyboardHelpOpen"
     >
       <v-card>
-        <v-card-title class="text-subtitle-1">Keyboard shortcuts</v-card-title>
+        <v-card-title>Keyboard shortcuts</v-card-title>
         <v-card-text>
           <div
             v-for="command in commandsWithKeys"

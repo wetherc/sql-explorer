@@ -6,7 +6,7 @@
        open. -->
   <AppDialog :model-value="open" size="large" height="70vh" scrollable @update:model-value="close">
     <v-card class="guide-card">
-      <v-card-title class="text-subtitle-1">Guide</v-card-title>
+      <v-card-title>Guide</v-card-title>
       <v-card-text class="guide-body d-flex ga-4">
         <!-- The list of topics stands beside the topic, because the reader
              moves between the topics while they read. -->
