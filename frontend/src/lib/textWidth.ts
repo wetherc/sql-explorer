@@ -1,7 +1,10 @@
 /** The width of one character when no canvas can measure a text. */
 export const FALLBACK_CHAR_WIDTH = 7
 
-/** The number of widths that a meter keeps before it starts again. */
+/**
+ * The number of widths that a meter keeps. Past it, the meter forgets the
+ * width that it used least recently.
+ */
 const KEPT_WIDTHS = 50_000
 
 /** Gives the width of a text in pixels, in one font. */
@@ -23,6 +26,10 @@ export function createTextMeter(context: MeasureContext | null): TextMeter {
     const key = `${font}\n${text}`
     const kept = widths.get(key)
     if (kept !== undefined) {
+      // A map keeps the order of its inserts, so the width goes to the end
+      // and the first entry is always the one used least recently.
+      widths.delete(key)
+      widths.set(key, kept)
       return kept
     }
     let width = text.length * FALLBACK_CHAR_WIDTH
@@ -31,7 +38,7 @@ export function createTextMeter(context: MeasureContext | null): TextMeter {
       width = context.measureText(text).width
     }
     if (widths.size >= KEPT_WIDTHS) {
-      widths.clear()
+      widths.delete(widths.keys().next().value as string)
     }
     widths.set(key, width)
     return width

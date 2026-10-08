@@ -30,13 +30,19 @@ describe('createTextMeter', () => {
     expect(context.measureText).not.toHaveBeenCalled()
   })
 
-  it('starts again when it keeps too many widths', () => {
+  it('forgets the width it used least recently when it keeps too many', () => {
     const context = fakeContext()
     const meter = createTextMeter(context)
-    for (let index = 0; index <= 50_000; index += 1) {
+    for (let index = 0; index < 50_000; index += 1) {
       meter(String(index), 'f')
     }
+    // A use of the first width makes the second one the oldest.
     meter('0', 'f')
+    meter('new', 'f')
+    expect(context.measureText).toHaveBeenCalledTimes(50_001)
+    meter('0', 'f')
+    expect(context.measureText).toHaveBeenCalledTimes(50_001)
+    meter('1', 'f')
     expect(context.measureText).toHaveBeenCalledTimes(50_002)
   })
 })
