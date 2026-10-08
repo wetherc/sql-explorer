@@ -887,3 +887,154 @@ async fn live_a_session_that_the_server_ends_during_a_pause_gives_a_clear_error(
         "{error}"
     );
 }
+
+const PG_SESSION_ID: &str = "SELECT pg_backend_pid()";
+
+/// Makes a lock in the scratch database and gives the report that a third
+/// session read while a second session waited for it.
+async fn locked_report(
+    server: &Server,
+    name: &str,
+    reporter: &mut dyn DatabaseDriver,
+    lock: &str,
+    wait: &str,
+) -> live::LockedReport {
+    let holder = server.open(DbType::Postgres, Some(name)).await;
+    let waiter = server.open(DbType::Postgres, Some(name)).await;
+    let scene = live::LockScene {
+        session_id: PG_SESSION_ID,
+        lock,
+        wait,
+        release: "ROLLBACK",
+    };
+    live::report_during_wait(holder, waiter, reporter, &scene).await
+}
+
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL server"]
+async fn live_the_report_names_the_session_that_blocks_a_read() {
+    let Some((scratch, mut driver, server)) = Scratch::open("pg_block").await else {
+        return;
+    };
+    let name = scratch.name.clone();
+    let body = async move {
+        live::run(
+            driver.as_mut(),
+            "CREATE TABLE lock_probe (id int PRIMARY KEY, v int);\n\
+             INSERT INTO lock_probe VALUES (1, 1);",
+        )
+        .await;
+
+        // A lock of the whole table stops a read.
+        let locked = locked_report(
+            &server,
+            &name,
+            driver.as_mut(),
+            "BEGIN; LOCK TABLE lock_probe IN ACCESS EXCLUSIVE MODE;",
+            "SELECT v FROM lock_probe",
+        )
+        .await;
+        let report = &locked.report;
+        let wait = report
+            .sessions
+            .iter()
+            .find(|row| row.waiting_session == locked.waiter)
+            .unwrap_or_else(|| panic!("no wait in {report:?}"));
+        assert_eq!(wait.blocking_session, locked.holder);
+        assert_eq!(wait.object.as_deref(), Some("lock_probe"));
+        assert_eq!(wait.lock_mode.as_deref(), Some("AccessShareLock"));
+        assert_eq!(wait.blocking_status.as_deref(), Some("idle in transaction"));
+        assert_eq!(wait.blocking_login.as_deref(), Some("postgres"));
+        assert!(wait.wait_ms.is_some());
+        assert!(wait
+            .blocking_statement
+            .as_deref()
+            .is_some_and(|text| text.contains("LOCK TABLE")));
+        assert_eq!(
+            wait.waiting_statement.as_deref(),
+            Some("SELECT v FROM lock_probe")
+        );
+        assert!(report
+            .open_transactions
+            .iter()
+            .any(|row| row.session == locked.holder && row.open_secs.is_some()));
+        assert!(report.notes.is_empty(), "{report:?}");
+
+        // A change of a row waits for the transaction that changed it.
+        let locked = locked_report(
+            &server,
+            &name,
+            driver.as_mut(),
+            "BEGIN; UPDATE lock_probe SET v = 2 WHERE id = 1;",
+            "UPDATE lock_probe SET v = 3 WHERE id = 1",
+        )
+        .await;
+        let report = &locked.report;
+        let wait = report
+            .sessions
+            .iter()
+            .find(|row| row.waiting_session == locked.waiter)
+            .unwrap_or_else(|| panic!("no wait in {report:?}"));
+        assert_eq!(wait.blocking_session, locked.holder);
+        assert_eq!(wait.object.as_deref(), Some("lock_probe"));
+        assert_eq!(wait.lock_mode.as_deref(), Some("ShareLock"));
+    };
+    live::with_cleanup(body, scratch.remove()).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL server"]
+async fn live_a_role_without_read_all_stats_gets_a_note() {
+    let Some((scratch, mut driver, server)) = Scratch::open("pg_stats").await else {
+        return;
+    };
+    let name = scratch.name.clone();
+    let role = live::unique_name("nostats");
+    let password = "LiveNoStats2026";
+    live::run(
+        driver.as_mut(),
+        &format!("CREATE ROLE {role} LOGIN PASSWORD '{password}'"),
+    )
+    .await;
+    let limited = Server {
+        user: role.clone(),
+        password: password.to_string(),
+        ..server.clone()
+    };
+    let body = async move {
+        live::run(
+            driver.as_mut(),
+            "CREATE TABLE lock_probe (id int PRIMARY KEY, v int);\n\
+             INSERT INTO lock_probe VALUES (1, 1);",
+        )
+        .await;
+        let mut reporter = limited.open(DbType::Postgres, Some(&name)).await;
+        let locked = locked_report(
+            &server,
+            &name,
+            reporter.as_mut(),
+            "BEGIN; LOCK TABLE lock_probe IN ACCESS EXCLUSIVE MODE;",
+            "SELECT v FROM lock_probe",
+        )
+        .await;
+        let report = &locked.report;
+        let holder = report
+            .open_transactions
+            .iter()
+            .find(|row| row.session == locked.holder)
+            .unwrap_or_else(|| panic!("no holder in {report:?}"));
+        assert_eq!(holder.statement, None);
+        // Every role can read the waits themselves.
+        assert!(report.sessions.iter().any(
+            |row| row.waiting_session == locked.waiter && row.blocking_session == locked.holder
+        ));
+        assert!(report.notes[0].contains("pg_read_all_stats"), "{report:?}");
+    };
+    let cleanup = async move {
+        scratch.remove().await;
+        let server = live::server("SQLX_LIVE_PG").expect("the server of the test");
+        let mut admin = server.open(DbType::Postgres, Some("postgres")).await;
+        live::run(admin.as_mut(), &format!("DROP ROLE {role}")).await;
+    };
+    live::with_cleanup(body, cleanup).await;
+}

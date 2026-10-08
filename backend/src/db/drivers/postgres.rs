@@ -39,6 +39,8 @@ use std::time::{Duration, Instant};
 use tokio_postgres::error::{DbError, ErrorPosition, SqlState};
 use tokio_postgres::{AsyncMessage, Client, Config as PgConfig, Row, SimpleQueryMessage};
 
+mod blocking;
+
 pub struct PostgresDriver {
     client: Client,
     /// The notices that the server sent since the last answer.
@@ -544,6 +546,10 @@ impl DatabaseDriver for PostgresDriver {
 
     /// A block that an error aborted still waits for a `ROLLBACK`, so the
     /// error 25P02 of the probe counts as an open block.
+    async fn blocking_sessions(&mut self) -> Result<crate::db::blocking::BlockingReport> {
+        self.blocking_report().await
+    }
+
     async fn holds_open_transaction(&mut self) -> Result<bool> {
         match self.outside_a_block().await {
             Ok(outside) => Ok(!outside),
