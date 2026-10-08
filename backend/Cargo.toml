@@ -179,6 +179,11 @@ strip = true
 # KDC, so a slow KDC stops the other tasks of that thread, and the connect time
 # limit cannot stop the wait.
 #
+# The copy also adds `Config::watch_gssapi`. The flag it takes is true while
+# a Kerberos step of the login waits. When the connect time limit drops the
+# login during such a step, the flag stays true, and the driver tells the user
+# that the Kerberos server did not answer.
+#
 # `tokio-postgres` 0.7.18 drops the type OID of each column of the row
 # description in the simple protocol, so a driver cannot name the type of a
 # column of a statement without parameters. The copy under `vendor/`

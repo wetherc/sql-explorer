@@ -120,6 +120,12 @@ pub enum Error {
     )]
     LockWait(Box<Error>),
 
+    /// A Windows Authentication login that could not reach the Kerberos
+    /// server (KDC). The inner error is the time limit of the connect or
+    /// the GSSAPI error that names the KDC.
+    #[error("Couldn't reach the Kerberos server. Check your VPN or network connection.")]
+    KerberosUnreachable(Box<Error>),
+
     #[error(transparent)]
     Tiberius(#[from] tiberius::error::Error),
 
@@ -269,6 +275,7 @@ impl Error {
             // The advice for a timeout names the timeout of the connection,
             // which does not change the lock limit.
             Error::LockWait(_) => ErrorCategory::Database,
+            Error::KerberosUnreachable(_) => ErrorCategory::Connection,
             Error::Tiberius(error) => mssql_category(error),
             Error::MySql(error) => mysql_category(error),
             Error::Postgres(error) => postgres_category(error),
@@ -382,11 +389,16 @@ impl Error {
                         (payload.message, payload.detail)
                     }
                 };
-                let detail = match detail {
-                    Some(detail) => format!("{text}\n{detail}"),
-                    None => text,
-                };
-                (self.to_string(), Some(detail))
+                (self.to_string(), Some(joined_detail(text, detail)))
+            }
+            // The detail keeps the text of the driver, so the user can see
+            // whether the time limit passed or the GSSAPI library failed.
+            Error::KerberosUnreachable(inner) => {
+                let payload = inner.to_payload();
+                (
+                    self.to_string(),
+                    Some(joined_detail(payload.message, payload.detail)),
+                )
             }
             _ => (self.to_string(), source_chain(self)),
         };
@@ -397,6 +409,14 @@ impl Error {
             line: None,
             column: None,
         }
+    }
+}
+
+/// Puts the text of an inner error and its detail on separate lines.
+fn joined_detail(text: String, detail: Option<String>) -> String {
+    match detail {
+        Some(detail) => format!("{text}\n{detail}"),
+        None => text,
     }
 }
 
@@ -742,6 +762,33 @@ mod tests {
         let postgres = "port=nope".parse::<tokio_postgres::Config>().unwrap_err();
         assert!(!Error::Postgres(postgres).is_lock_wait());
         assert!(!Error::Cancelled.is_lock_wait());
+    }
+
+    #[test]
+    fn an_unreachable_kerberos_server_keeps_the_driver_text_in_the_detail() {
+        let late = Error::KerberosUnreachable(Box::new(Error::Connection(
+            "The server didn't finish opening the connection within 5 seconds.".into(),
+        )));
+        assert_eq!(late.category(), ErrorCategory::Connection);
+        let payload = late.to_payload();
+        assert_eq!(payload.category, "connection");
+        assert_eq!(
+            payload.message,
+            "Couldn't reach the Kerberos server. Check your VPN or network connection."
+        );
+        assert_eq!(
+            payload.detail.as_deref(),
+            Some("The server didn't finish opening the connection within 5 seconds.")
+        );
+
+        let gssapi = Error::KerberosUnreachable(Box::new(Error::Anyhow(
+            anyhow::Error::new(std::io::Error::other("Cannot contact any KDC"))
+                .context("GSSAPI Error"),
+        )));
+        assert_eq!(
+            gssapi.to_payload().detail.as_deref(),
+            Some("GSSAPI Error\nCannot contact any KDC")
+        );
     }
 
     #[test]

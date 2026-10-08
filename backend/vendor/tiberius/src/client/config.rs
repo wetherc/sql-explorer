@@ -3,6 +3,8 @@ mod jdbc;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use super::AuthMethod;
 use crate::EncryptionLevel;
@@ -32,6 +34,9 @@ pub struct Config {
     pub(crate) trust: TrustConfig,
     pub(crate) auth: AuthMethod,
     pub(crate) readonly: bool,
+    /// A flag that is true while a GSSAPI call of the login waits. See
+    /// [`Config::watch_gssapi`].
+    pub(crate) gssapi_wait: Option<Arc<AtomicBool>>,
 }
 
 #[derive(Clone, Debug)]
@@ -65,6 +70,7 @@ impl Default for Config {
             trust: TrustConfig::Default,
             auth: AuthMethod::None,
             readonly: false,
+            gssapi_wait: None,
         }
     }
 }
@@ -174,6 +180,18 @@ impl Config {
     /// - Defaults to `false`.
     pub fn readonly(&mut self, readnoly: bool) {
         self.readonly = readnoly;
+    }
+
+    /// Gives a flag that the login sets to true before each GSSAPI call and
+    /// back to false after the call returns.
+    ///
+    /// The first GSSAPI call asks the Kerberos server (KDC) for a service
+    /// ticket. When a time limit around the connect drops the future during
+    /// such a call, the flag stays true. The caller can then tell that the
+    /// limit passed while the login waited for Kerberos, and not for the SQL
+    /// Server.
+    pub fn watch_gssapi(&mut self, flag: Arc<AtomicBool>) {
+        self.gssapi_wait = Some(flag);
     }
 
     pub(crate) fn get_host(&self) -> &str {

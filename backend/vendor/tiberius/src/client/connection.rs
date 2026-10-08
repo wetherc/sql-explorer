@@ -34,8 +34,9 @@ use libgssapi::{
 use pretty_hex::*;
 #[cfg(all(unix, feature = "integrated-auth-gssapi"))]
 use std::ops::Deref;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::{cmp, fmt::Debug, io, pin::Pin, task};
+use std::{cmp, fmt::Debug, future::Future, io, pin::Pin, task};
 use task::Poll;
 use tracing::{event, Level};
 #[cfg(all(windows, feature = "winauth"))]
@@ -69,6 +70,23 @@ where
         };
     }
     call()
+}
+
+/// Awaits one GSSAPI call and keeps `flag` true while the call waits.
+///
+/// The flag goes back to false only when the call returns. When a time limit
+/// drops the future during the wait, the flag stays true, so the caller of
+/// the connect can tell where the limit passed. See [`Config::watch_gssapi`].
+#[cfg_attr(not(all(unix, feature = "integrated-auth-gssapi")), allow(dead_code))]
+async fn watched<F: Future>(flag: Option<&AtomicBool>, call: F) -> F::Output {
+    if let Some(flag) = flag {
+        flag.store(true, Ordering::SeqCst);
+    }
+    let output = call.await;
+    if let Some(flag) = flag {
+        flag.store(false, Ordering::SeqCst);
+    }
+    output
 }
 
 /// A `Connection` is an abstraction between the [`Client`] and the server. It
@@ -144,6 +162,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
                 config.application_name,
                 config.readonly,
                 prelogin,
+                config.gssapi_wait,
             )
             .await?;
 
@@ -335,6 +354,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         application_name: Option<String>,
         readonly: bool,
         prelogin: PreloginMessage,
+        #[cfg_attr(
+            not(all(unix, feature = "integrated-auth-gssapi")),
+            allow(unused_variables)
+        )]
+        gssapi_wait: Option<Arc<AtomicBool>>,
     ) -> crate::Result<Self> {
         let mut login_message = LoginMessage::new();
 
@@ -385,22 +409,27 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             AuthMethod::Integrated => {
                 let spn = self.context.spn().to_string();
 
-                let (mut ctx, init_token) = run_gssapi(move || {
-                    let mut s = OidSet::new()?;
-                    s.add(&GSS_MECH_KRB5)?;
+                let wait = gssapi_wait.as_deref();
+                let (mut ctx, init_token) = watched(
+                    wait,
+                    run_gssapi(move || {
+                        let mut s = OidSet::new()?;
+                        s.add(&GSS_MECH_KRB5)?;
 
-                    let client_cred = Cred::acquire(None, None, CredUsage::Initiate, Some(&s))?;
+                        let client_cred = Cred::acquire(None, None, CredUsage::Initiate, Some(&s))?;
 
-                    let mut ctx = ClientCtx::new(
-                        Some(client_cred),
-                        Name::new(spn.as_bytes(), Some(&GSS_NT_KRB5_PRINCIPAL))?,
-                        CtxFlags::GSS_C_MUTUAL_FLAG | CtxFlags::GSS_C_SEQUENCE_FLAG,
-                        None,
-                    );
+                        let mut ctx = ClientCtx::new(
+                            Some(client_cred),
+                            Name::new(spn.as_bytes(), Some(&GSS_NT_KRB5_PRINCIPAL))?,
+                            CtxFlags::GSS_C_MUTUAL_FLAG | CtxFlags::GSS_C_SEQUENCE_FLAG,
+                            None,
+                        );
 
-                    let init_token = ctx.step(None, None)?.map(|token| Vec::from(token.deref()));
-                    Ok((ctx, init_token))
-                })
+                        let init_token =
+                            ctx.step(None, None)?.map(|token| Vec::from(token.deref()));
+                        Ok((ctx, init_token))
+                    }),
+                )
                 .await?;
 
                 login_message.integrated_security(Some(init_token.unwrap()));
@@ -412,10 +441,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
 
                 let auth_bytes = self.flush_sspi().await?;
 
-                let response = run_gssapi(move || {
-                    let response = ctx.step(Some(auth_bytes.as_ref()), None)?;
-                    Ok(response.map(|response| Vec::from(response.deref())))
-                })
+                let response = watched(
+                    wait,
+                    run_gssapi(move || {
+                        let response = ctx.step(Some(auth_bytes.as_ref()), None)?;
+                        Ok(response.map(|response| Vec::from(response.deref())))
+                    }),
+                )
                 .await?;
 
                 let next_token = match response {
@@ -737,6 +769,55 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> SqlReadBytes for Connection<S> {
     /// A mutable reference to the current execution context.
     fn context_mut(&mut self) -> &mut Context {
         &mut self.context
+    }
+}
+
+#[cfg(test)]
+mod watch_tests {
+    use super::watched;
+    use futures_util::FutureExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn the_flag_is_true_while_the_call_waits_and_false_after_it() {
+        let flag = AtomicBool::new(false);
+        let ready = std::cell::Cell::new(false);
+        let answer = futures_util::future::poll_fn(|_| match ready.get() {
+            true => std::task::Poll::Ready(7),
+            false => std::task::Poll::Pending,
+        });
+        let mut call = Box::pin(watched(Some(&flag), answer));
+        assert!(call.as_mut().now_or_never().is_none());
+        assert!(flag.load(Ordering::SeqCst));
+        ready.set(true);
+        assert_eq!(call.now_or_never(), Some(7));
+        assert!(!flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_call_that_is_dropped_during_the_wait_leaves_the_flag_true() {
+        let flag = AtomicBool::new(false);
+        let mut call = Box::pin(watched(Some(&flag), futures_util::future::pending::<()>()));
+        assert!(call.as_mut().now_or_never().is_none());
+        drop(call);
+        assert!(flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_call_without_a_flag_runs_as_it_is() {
+        assert_eq!(watched(None, async { 3 }).now_or_never(), Some(3));
+    }
+
+    #[test]
+    fn the_config_gives_the_flag_to_the_login() {
+        let mut config = crate::Config::new();
+        assert!(config.gssapi_wait.is_none());
+        let flag = std::sync::Arc::new(AtomicBool::new(false));
+        config.watch_gssapi(flag.clone());
+        assert!(std::sync::Arc::ptr_eq(
+            config.gssapi_wait.as_ref().unwrap(),
+            &flag
+        ));
     }
 }
 

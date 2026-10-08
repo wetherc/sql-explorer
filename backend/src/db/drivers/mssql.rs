@@ -27,6 +27,7 @@ use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime};
 use futures_util::TryStreamExt;
 use serde_json::Value as JsonValue;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tiberius::numeric::Numeric;
@@ -607,17 +608,25 @@ impl MssqlDriver {
     /// The mode `Prefer` asks for full encryption and trusts any
     /// certificate. A server without TLS refuses that request, and the
     /// driver then opens one more connection without encryption.
+    ///
+    /// A Windows Authentication login asks the Kerberos server (KDC) for a
+    /// ticket. The configuration gives `tiberius` a flag that is true while
+    /// that call waits, so a time limit that passes during the wait names
+    /// the Kerberos server and not the SQL Server.
     pub async fn connect(connection: &SavedConnection) -> Result<Box<dyn DatabaseDriver>> {
         let limit = connection.options.connect_timeout_secs.max(1);
         let auth = connection.options.mssql_auth;
+        let waiting_for_kerberos = Arc::new(AtomicBool::new(false));
+        let flag = waiting_for_kerberos.clone();
         let falls_back = connection.options.tls_mode == TlsMode::Prefer
             && connection
                 .options
                 .connection_url
                 .as_deref()
                 .is_none_or(|url| !string_keys(url).iter().any(|key| key == "encrypt"));
-        let client = connect_within(limit, async move {
-            let config = build_config(connection).await?;
+        let opened = connect_within(limit, async move {
+            let mut config = build_config(connection).await?;
+            config.watch_gssapi(flag);
             match open_client(config.clone()).await {
                 Err(tiberius::error::Error::Tls(text))
                     if falls_back && text == tiberius::error::ENCRYPTION_NOT_SUPPORTED =>
@@ -631,7 +640,8 @@ impl MssqlDriver {
             }
             .map_err(|error| describe_login(error, auth))
         })
-        .await??;
+        .await;
+        let client = name_kerberos_wait(opened, waiting_for_kerberos.load(Ordering::SeqCst))??;
         Ok(Box::new(MssqlDriver { client }))
     }
 
@@ -810,6 +820,38 @@ impl MssqlDriver {
     }
 }
 
+/// Names the Kerberos server as the cause of a connect time limit that
+/// passed while the login waited for a GSSAPI call. Any other result stays
+/// as it is.
+fn name_kerberos_wait<T>(opened: Result<T>, waiting_for_kerberos: bool) -> Result<T> {
+    match opened {
+        Err(error @ Error::Connection(_)) if waiting_for_kerberos => {
+            Err(Error::KerberosUnreachable(Box::new(error)))
+        }
+        other => other,
+    }
+}
+
+/// True when a GSSAPI error says that no Kerberos server (KDC) of the realm
+/// could be found or reached. MIT Kerberos and Heimdal, which macOS uses,
+/// word this in different ways. An error that does not come from GSSAPI is
+/// never such a failure, so a server fault with similar words does not
+/// match.
+fn names_an_unreachable_kdc(error: &tiberius::error::Error) -> bool {
+    let tiberius::error::Error::Gssapi(text) = error else {
+        return false;
+    };
+    let lower = text.to_lowercase();
+    [
+        "cannot contact any kdc",
+        "unable to reach any kdc",
+        "cannot find kdc",
+        "cannot resolve network address for kdc",
+    ]
+    .iter()
+    .any(|mark| lower.contains(mark))
+}
+
 /// Names the reason a login failed. Kerberos reports a missing ticket in
 /// words that mean nothing to a user of a database, so the message says what
 /// to do instead.
@@ -826,6 +868,9 @@ fn describe_login(error: tiberius::error::Error, auth: MssqlAuth) -> Error {
     }
     if auth != MssqlAuth::Integrated {
         return Error::from(error);
+    }
+    if names_an_unreachable_kdc(&error) {
+        return Error::KerberosUnreachable(Box::new(Error::from(error)));
     }
     let text = error.to_string();
     if names_a_ticket_fault(&text) {
@@ -4325,6 +4370,59 @@ mod tests {
             .category(),
             crate::error::ErrorCategory::Database
         );
+    }
+
+    #[test]
+    fn a_time_limit_during_a_kerberos_call_names_the_kerberos_server() {
+        let late = || -> Result<()> { Err(Error::Connection("within 5 seconds".into())) };
+        let named = name_kerberos_wait(late(), true).unwrap_err();
+        assert!(matches!(&named, Error::KerberosUnreachable(inner)
+            if matches!(inner.as_ref(), Error::Connection(text) if text == "within 5 seconds")));
+
+        // A limit that passed in another step keeps its own message.
+        assert!(matches!(
+            name_kerberos_wait(late(), false),
+            Err(Error::Connection(_))
+        ));
+        // Only the time limit gets the hint. A login error that came back
+        // while the flag was up keeps its own error.
+        let refused: Result<()> = Err(Error::Authentication("refused".into()));
+        assert!(matches!(
+            name_kerberos_wait(refused, true),
+            Err(Error::Authentication(_))
+        ));
+        assert_eq!(name_kerberos_wait(Ok(7), true).unwrap(), 7);
+    }
+
+    #[test]
+    fn a_gssapi_error_that_names_no_reachable_kdc_gets_the_hint() {
+        use tiberius::error::Error as TiberiusError;
+
+        for text in [
+            "Cannot contact any KDC for realm 'CORP.EXAMPLE.COM'",
+            "unable to reach any KDC in realm CORP.EXAMPLE.COM",
+            "Cannot find KDC for realm \"CORP.EXAMPLE.COM\"",
+            "Cannot resolve network address for KDC in requested realm",
+        ] {
+            let error = describe_login(TiberiusError::Gssapi(text.into()), MssqlAuth::Integrated);
+            assert!(matches!(&error, Error::KerberosUnreachable(_)), "{text}");
+            let payload = error.to_payload();
+            assert!(payload
+                .message
+                .starts_with("Couldn't reach the Kerberos server."));
+            assert!(payload.detail.unwrap().contains(text));
+        }
+
+        // A missing ticket keeps the advice to run kinit.
+        let error = describe_login(
+            TiberiusError::Gssapi("No Kerberos credentials available".into()),
+            MssqlAuth::Integrated,
+        );
+        assert!(error.to_string().contains("kinit"));
+        // The same words outside GSSAPI do not match.
+        assert!(!names_an_unreachable_kdc(&TiberiusError::Protocol(
+            "Cannot contact any KDC".into()
+        )));
     }
 
     #[test]

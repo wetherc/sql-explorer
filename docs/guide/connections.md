@@ -95,6 +95,14 @@ Windows Authentication and the Azure CLI need no secret. When you save a connect
 with either method, the application removes any password or token that the
 keychain kept for it.
 
+If a Windows Authentication connect fails with "Couldn't reach the Kerberos
+server. Check your VPN or network connection.", the login timed out while it
+waited for your Kerberos server (the KDC), or Kerberos reported that it couldn't
+find or contact a KDC for your realm. The SQL Server itself may be fine. This
+usually means the VPN is off or the network can't see your domain's KDC.
+Connect to the VPN and try again. The error's detail keeps the driver's own
+text, such as the time limit that passed or the GSSAPI message.
+
 ## AWS Athena
 
 An Athena connection needs a region. It can also reuse an earlier run's result,
