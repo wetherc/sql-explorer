@@ -968,9 +968,13 @@ fn missing_parameter(name: &str) -> Error {
 
 /// Lists the names of the parameters of a statement. The interface asks for a
 /// value for each name before it runs the statement.
+///
+/// The lexer reads the whole script, so the work runs on a blocking thread.
+/// A command that is not async runs on the main thread, and a long script
+/// would then stop the window until the lexer ends.
 #[tauri::command]
-pub fn query_parameters(query: String, dialect: crate::sql::Dialect) -> Vec<String> {
-    crate::sql::find_parameters(&query, dialect)
+pub async fn query_parameters(query: String, dialect: crate::sql::Dialect) -> Result<Vec<String>> {
+    off_thread(move || Ok(crate::sql::find_parameters(&query, dialect))).await
 }
 
 /// What one execution carries.
@@ -1994,7 +1998,7 @@ where
 {
     tauri::async_runtime::spawn_blocking(work)
         .await
-        .map_err(|error| Error::Storage(format!("The work on the settings stopped: {error}")))?
+        .map_err(|error| Error::Storage(format!("The background work stopped: {error}")))?
 }
 
 #[cfg(test)]
@@ -2004,6 +2008,17 @@ where
     F: FnOnce() -> Result<T> + Send + 'static,
 {
     work()
+}
+
+/// Runs blocking work that needs the application, such as a read or a write
+/// of a file of the settings, on a thread of its own.
+async fn with_app<R: Runtime, T, F>(app: &AppHandle<R>, work: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&AppHandle<R>) -> Result<T> + Send + 'static,
+{
+    let app = app.clone();
+    off_thread(move || work(&app)).await
 }
 
 /// Reads the files of the settings and gives each problem found in them,
@@ -2162,7 +2177,7 @@ async fn accept_folder<R: Runtime>(app: &AppHandle<R>, state: &AppState, root: s
     let _record = state.files_record.lock().await;
     state.add_file_root(root).await;
     let names = path_names(&state.file_roots().await);
-    if let Err(error) = store::write_file_roots(app, &names) {
+    if let Err(error) = with_app(app, move |app| store::write_file_roots(app, &names)).await {
         log::warn!("The folders of the panel could not be written: {error}");
     }
 }
@@ -2175,13 +2190,14 @@ async fn accept_folder<R: Runtime>(app: &AppHandle<R>, state: &AppState, root: s
 /// grant. A record that cannot be written costs the next session the grant
 /// alone, so the dialog goes on.
 async fn accept_file<R: Runtime>(app: &AppHandle<R>, state: &AppState, path: &std::path::Path) {
-    let Some(file) = files::grant_for(path) else {
+    let path = path.to_path_buf();
+    let Ok(Some(file)) = off_thread(move || Ok(files::grant_for(&path))).await else {
         return;
     };
     let _record = state.files_record.lock().await;
     state.add_file_grant(file).await;
     let names = path_names(&state.file_grants().await);
-    if let Err(error) = store::write_file_grants(app, &names) {
+    if let Err(error) = with_app(app, move |app| store::write_file_grants(app, &names)).await {
         log::warn!("The files that the user opened could not be written: {error}");
     }
 }
@@ -2292,7 +2308,8 @@ pub async fn open_statement_file<R: Runtime>(
         return Ok(None);
     };
 
-    let (contents, encoding) = files::read_text_file(&path)?;
+    let read = path.clone();
+    let (contents, encoding) = off_thread(move || files::read_text_file(&read)).await?;
     accept_file(&app, &state, &path).await;
     let opened = path.to_string_lossy().to_string();
     log::info!("Opened the file '{opened}'.");
@@ -2320,26 +2337,35 @@ pub async fn file_roots<R: Runtime>(
 
 async fn file_roots_for<R: Runtime>(app: &AppHandle<R>, state: &AppState) -> Result<Vec<String>> {
     let _record = state.files_record.lock().await;
-    let recorded = store::read_file_roots(app)?;
-    let kept: Vec<std::path::PathBuf> = recorded
-        .iter()
-        .filter_map(|path| files::root_from_record(path))
-        .collect();
+    let (recorded, kept) = with_app(app, |app| {
+        let recorded = store::read_file_roots(app)?;
+        let kept: Vec<std::path::PathBuf> = recorded
+            .iter()
+            .filter_map(|path| files::root_from_record(path))
+            .collect();
+        Ok((recorded.len(), kept))
+    })
+    .await?;
     state.set_file_roots(kept.clone()).await;
     let names = path_names(&kept);
-    if names.len() != recorded.len() {
-        store::write_file_roots(app, &names)?;
+    if names.len() != recorded {
+        let written = names.clone();
+        with_app(app, move |app| store::write_file_roots(app, &written)).await?;
     }
 
-    let recorded = store::read_file_grants(app)?;
-    let grants: Vec<std::path::PathBuf> = recorded
-        .iter()
-        .filter_map(|path| files::grant_for(std::path::Path::new(path)))
-        .collect();
+    let (recorded, grants) = with_app(app, |app| {
+        let recorded = store::read_file_grants(app)?;
+        let grants: Vec<std::path::PathBuf> = recorded
+            .iter()
+            .filter_map(|path| files::grant_for(std::path::Path::new(path)))
+            .collect();
+        Ok((recorded, grants))
+    })
+    .await?;
     state.set_file_grants(grants.clone()).await;
     let granted = path_names(&grants);
     if granted != recorded {
-        store::write_file_grants(app, &granted)?;
+        with_app(app, move |app| store::write_file_grants(app, &granted)).await?;
     }
     Ok(names)
 }
@@ -2364,7 +2390,7 @@ async fn close_folder_for<R: Runtime>(
     let _record = state.files_record.lock().await;
     state.remove_file_root(std::path::Path::new(path)).await;
     let names = path_names(&state.file_roots().await);
-    store::write_file_roots(app, &names)?;
+    with_app(app, move |app| store::write_file_roots(app, &names)).await?;
     log::info!("Closed the folder '{path}'.");
     Ok(())
 }
@@ -2376,16 +2402,26 @@ pub async fn list_folder(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<files::FolderEntry>> {
     let roots = state.file_roots().await;
-    let target = files::path_inside_roots(std::path::Path::new(&path), &roots)?;
-    files::read_folder(&target)
+    off_thread(move || {
+        let target = files::path_inside_roots(std::path::Path::new(&path), &roots)?;
+        files::read_folder(&target)
+    })
+    .await
 }
 
 /// Resolves a path that a read or a write of a file names, and refuses it
 /// when it is neither a grant nor inside a root.
+///
+/// The check resolves the path and each root on every call, so a root that
+/// the user renamed, or a root under a link that now points elsewhere, is
+/// judged by the disk as it is at the time of the call. The resolution runs
+/// on a blocking thread, because a slow or a network disk would otherwise
+/// stop an async thread.
 async fn accepted_path(path: &str, state: &AppState) -> Result<std::path::PathBuf> {
     let roots = state.file_roots().await;
     let grants = state.file_grants().await;
-    files::path_accepted(std::path::Path::new(path), &roots, &grants)
+    let path = path.to_owned();
+    off_thread(move || files::path_accepted(std::path::Path::new(&path), &roots, &grants)).await
 }
 
 /// Reads the text of one file that is a grant or inside the roots, and the
@@ -2452,7 +2488,11 @@ pub async fn save_statement_file<R: Runtime>(
     let Some(path) = ask_save_path(&app, &name, "SQL", "sql", folder.as_deref()).await else {
         return Ok(None);
     };
-    let saved = write_statement(&path, &request.contents, request.encoding)?;
+    let SaveStatementRequest {
+        contents, encoding, ..
+    } = request;
+    let target = path.clone();
+    let saved = off_thread(move || write_statement(&target, &contents, encoding)).await?;
     accept_file(&app, &state, &path).await;
     log::info!("Wrote the file '{}'.", saved.path);
     Ok(Some(saved))
@@ -2533,18 +2573,18 @@ pub async fn save_text_file<R: Runtime>(
     app: AppHandle<R>,
     request: SaveFileRequest,
 ) -> Result<Option<String>> {
-    let Some(path) = ask_save_path(
-        &app,
-        &request.default_name,
-        &request.filter_label,
-        &request.extension,
-        None,
-    )
-    .await
+    let SaveFileRequest {
+        default_name,
+        filter_label,
+        extension,
+        contents,
+    } = request;
+    let Some(path) = ask_save_path(&app, &default_name, &filter_label, &extension, None).await
     else {
         return Ok(None);
     };
-    files::write_bytes(&path, request.contents.as_bytes())?;
+    let target = path.clone();
+    off_thread(move || files::write_bytes(&target, contents.as_bytes())).await?;
     let written = path.to_string_lossy().to_string();
     log::info!("Wrote the file '{written}'.");
     Ok(Some(written))
@@ -2558,19 +2598,21 @@ pub async fn save_binary_file<R: Runtime>(
     app: AppHandle<R>,
     request: SaveFileRequest,
 ) -> Result<Option<String>> {
-    let bytes = decode_base64(&request.contents)?;
-    let Some(path) = ask_save_path(
-        &app,
-        &request.default_name,
-        &request.filter_label,
-        &request.extension,
-        None,
-    )
-    .await
+    let SaveFileRequest {
+        default_name,
+        filter_label,
+        extension,
+        contents,
+    } = request;
+    // The text of a large file is long, so the decode runs on a blocking
+    // thread as well.
+    let bytes = off_thread(move || decode_base64(&contents)).await?;
+    let Some(path) = ask_save_path(&app, &default_name, &filter_label, &extension, None).await
     else {
         return Ok(None);
     };
-    files::write_bytes(&path, &bytes)?;
+    let target = path.clone();
+    off_thread(move || files::write_bytes(&target, &bytes)).await?;
     let written = path.to_string_lossy().to_string();
     log::info!("Wrote the file '{written}'.");
     Ok(Some(written))
@@ -3194,10 +3236,12 @@ mod tests {
         assert!(none.is_none());
     }
 
-    #[test]
-    fn the_names_of_a_statement_reach_the_interface() {
+    #[tokio::test]
+    async fn the_names_of_a_statement_reach_the_interface() {
         assert_eq!(
-            query_parameters("SELECT :a, :b".to_string(), Dialect::MsSql),
+            query_parameters("SELECT :a, :b".to_string(), Dialect::MsSql)
+                .await
+                .unwrap(),
             vec!["a".to_string(), "b".to_string()]
         );
     }
@@ -3879,6 +3923,27 @@ mod tests {
         assert!(accepted_path(&beside.to_string_lossy(), &next)
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn a_folder_lists_inside_a_root_and_not_outside_it() {
+        use tauri::Manager;
+        let app = app_with_store();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.sql"), "SELECT 1").unwrap();
+        let state = state();
+        state.add_file_root(root.clone()).await;
+        app.manage(state);
+
+        let entries = list_folder(root.to_string_lossy().to_string(), app.state())
+            .await
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "a.sql");
+        let outside = list_folder(dir.path().to_string_lossy().to_string(), app.state()).await;
+        assert!(matches!(outside, Err(Error::Invalid(_))));
     }
 
     #[tokio::test]
