@@ -3227,9 +3227,12 @@ pub fn supported_engines() -> Vec<db::EngineInfo> {
 /// Reports whether a saved password stays after the application closes. It
 /// does not when the keychain of the system was not reachable at the start,
 /// and the connection form then says so.
+///
+/// The answer can wait for the probe of the keychain that selects the
+/// store, so it runs on a blocking thread and not on the main thread.
 #[tauri::command]
-pub fn passwords_persist(state: tauri::State<'_, AppState>) -> bool {
-    state.secrets.persists()
+pub async fn passwords_persist(state: tauri::State<'_, AppState>) -> Result<bool> {
+    with_store(&state, |store| Ok(store.persists())).await
 }
 
 #[cfg(test)]
@@ -4414,6 +4417,14 @@ mod tests {
             .unwrap();
         let listed = get_connections(app.handle().clone()).await.unwrap();
         assert!(listed.iter().all(|saved| saved.id != record.id));
+    }
+
+    #[tokio::test]
+    async fn a_store_in_memory_reports_that_passwords_do_not_persist() {
+        use tauri::Manager;
+        let app = app_with_store();
+        app.manage(state());
+        assert!(!passwords_persist(app.state()).await.unwrap());
     }
 
     #[tokio::test]

@@ -100,9 +100,70 @@ impl SecretStore for MemoryStore {
     }
 }
 
+/// A store that selects the real store at its first use, and passes each
+/// call on to it.
+///
+/// The selection writes a probe to the keychain. On Linux without a secret
+/// service, that write waits for the time limit of D-Bus. The application
+/// therefore does not select the store before it opens the window.
+pub struct LazyStore {
+    select: fn() -> std::sync::Arc<dyn SecretStore>,
+    chosen: std::sync::OnceLock<std::sync::Arc<dyn SecretStore>>,
+}
+
+impl LazyStore {
+    pub fn new(select: fn() -> std::sync::Arc<dyn SecretStore>) -> Self {
+        Self {
+            select,
+            chosen: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// The selected store. The first call selects it, and a call that comes
+    /// during the selection waits for it.
+    fn store(&self) -> &dyn SecretStore {
+        self.chosen.get_or_init(self.select).as_ref()
+    }
+}
+
+impl SecretStore for LazyStore {
+    fn set(&self, id: &str, password: &str) -> Result<()> {
+        self.store().set(id, password)
+    }
+
+    fn get(&self, id: &str) -> Result<Option<String>> {
+        self.store().get(id)
+    }
+
+    fn delete(&self, id: &str) -> Result<()> {
+        self.store().delete(id)
+    }
+
+    fn persists(&self) -> bool {
+        self.store().persists()
+    }
+}
+
+/// Gives the store of the application. The selection starts at once on a
+/// thread of its own, so it is usually done before the first command needs
+/// a secret, and the start of the application does not wait for it.
+pub fn build_store() -> std::sync::Arc<dyn SecretStore> {
+    let store = std::sync::Arc::new(LazyStore::new(select_store));
+    let early = std::sync::Arc::clone(&store);
+    let started = std::thread::Builder::new()
+        .name("keychain-probe".to_string())
+        .spawn(move || {
+            early.store();
+        });
+    if let Err(error) = started {
+        log::warn!("The keychain probe could not start early, so it runs at first use: {error}");
+    }
+    store
+}
+
 /// Selects the store to use. The keychain is tried first, and the store in
 /// memory takes over when the keychain refuses to work.
-pub fn build_store() -> std::sync::Arc<dyn SecretStore> {
+fn select_store() -> std::sync::Arc<dyn SecretStore> {
     let candidate = KeychainStore;
     let probe = "sql-explorer-probe";
     match candidate
@@ -161,6 +222,25 @@ mod tests {
         );
         store.delete("sql-explorer-test").unwrap();
         assert_eq!(store.get("sql-explorer-test").unwrap(), None);
+    }
+
+    static SELECTIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn memory_store() -> std::sync::Arc<dyn SecretStore> {
+        SELECTIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::sync::Arc::new(MemoryStore::default())
+    }
+
+    #[test]
+    fn the_lazy_store_selects_once_and_passes_each_call_on() {
+        let store = LazyStore::new(memory_store);
+        assert_eq!(SELECTIONS.load(std::sync::atomic::Ordering::SeqCst), 0);
+        store.set("a", "secret").unwrap();
+        assert_eq!(store.get("a").unwrap().as_deref(), Some("secret"));
+        assert!(!store.persists());
+        store.delete("a").unwrap();
+        assert_eq!(store.get("a").unwrap(), None);
+        assert_eq!(SELECTIONS.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]
