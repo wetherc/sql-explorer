@@ -66,6 +66,9 @@ mod tests {
     /// The `Attention` flag of a `DONE` token.
     const DONE_ATTENTION: u16 = 1 << 5;
 
+    /// The `Error` flag of a `DONE` token.
+    const DONE_ERROR: u16 = 1 << 1;
+
     fn config() -> Config {
         let mut config = Config::new();
         config.authentication(AuthMethod::sql_server("user", "password"));
@@ -233,6 +236,51 @@ mod tests {
         // The request ran to its end on the server, so it succeeds.
         let finished = client.execute("SELECT 1", &[]).await;
         assert!(finished.is_ok());
+
+        let answered = client.execute("SELECT 2", &[]).await;
+        assert!(answered.is_ok());
+
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_failed_end_reads_on_to_the_acknowledgement() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let (give_handle, take_handle) = tokio::sync::oneshot::channel();
+
+        let server_task = tokio::spawn(async move {
+            accept_login(&mut server).await;
+            let handle: std::sync::Arc<super::AttentionHandle> = take_handle.await.unwrap();
+
+            let (ty, _) = read_message(&mut server).await;
+            assert_eq!(ty, PacketType::SQLBatch as u8);
+
+            handle.signal();
+
+            let (ty, _) = read_message(&mut server).await;
+            assert_eq!(ty, PacketType::AttentionSignal as u8);
+
+            // The stopped `WAITFOR` of a plain batch ends its response with
+            // the error flag, and the acknowledgement follows on its own.
+            write_message(&mut server, &done_token(DONE_ERROR, 0)).await;
+            write_message(&mut server, &done_token(DONE_ATTENTION, 0)).await;
+
+            let (ty, _) = read_message(&mut server).await;
+            assert_eq!(ty, PacketType::Rpc as u8);
+
+            write_message(&mut server, &done_token(0, 0)).await;
+        });
+
+        let mut client = Client::connect(config(), client_end.compat())
+            .await
+            .unwrap();
+        give_handle.send(client.attention_handle()).unwrap();
+
+        let stopped = match client.simple_query("WAITFOR DELAY '00:00:30'").await {
+            Ok(stream) => stream.into_results().await.map(|_| ()),
+            Err(error) => Err(error),
+        };
+        assert!(matches!(stopped, Err(Error::Canceled)));
 
         let answered = client.execute("SELECT 2", &[]).await;
         assert!(answered.is_ok());

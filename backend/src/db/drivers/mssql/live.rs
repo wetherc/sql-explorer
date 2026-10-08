@@ -549,3 +549,193 @@ async fn live_a_login_without_server_state_gets_a_note() {
     };
     live::with_cleanup(body, cleanup).await;
 }
+
+/// Opens a session on `master` of the live server, or gives `None` when no
+/// server is configured.
+async fn master() -> Option<Box<dyn DatabaseDriver>> {
+    let server = live::server("SQLX_LIVE_MSSQL")?;
+    Some(server.open(DbType::Mssql, Some("master")).await)
+}
+
+/// Reads the count of the rows of the temporary table `#kept`.
+async fn kept_rows(driver: &mut dyn DatabaseDriver) -> Option<String> {
+    let response = live::run(driver, "SELECT COUNT(*) FROM #kept").await;
+    live::cell(&response, 0, 0)
+}
+
+fn one_param() -> crate::db::QueryParams {
+    vec![crate::db::QueryParam {
+        value: serde_json::json!(1),
+    }]
+}
+
+#[tokio::test]
+#[ignore = "needs a live MS SQL Server"]
+async fn live_a_transaction_that_a_batch_begins_stays_open_until_a_later_commit() {
+    let Some(mut driver) = master().await else {
+        return;
+    };
+    // A plain batch keeps its temporary table for the next runs.
+    live::run(driver.as_mut(), "CREATE TABLE #kept (n int)").await;
+    let response = live::run(driver.as_mut(), "BEGIN TRANSACTION").await;
+    assert!(response.messages.is_empty(), "{:?}", response.messages);
+    live::run(driver.as_mut(), "INSERT INTO #kept VALUES (1)").await;
+    assert!(driver.holds_open_transaction().await.unwrap());
+
+    live::run(driver.as_mut(), "COMMIT").await;
+    assert!(!driver.holds_open_transaction().await.unwrap());
+    assert_eq!(kept_rows(driver.as_mut()).await.as_deref(), Some("1"));
+}
+
+#[tokio::test]
+#[ignore = "needs a live MS SQL Server"]
+async fn live_a_rollback_in_a_later_run_undoes_the_work_of_the_transaction() {
+    let Some(mut driver) = master().await else {
+        return;
+    };
+    live::run(driver.as_mut(), "CREATE TABLE #kept (n int)").await;
+    live::run(
+        driver.as_mut(),
+        "BEGIN TRANSACTION; INSERT INTO #kept VALUES (1)",
+    )
+    .await;
+    assert!(driver.holds_open_transaction().await.unwrap());
+
+    live::run(driver.as_mut(), "ROLLBACK").await;
+    assert!(!driver.holds_open_transaction().await.unwrap());
+    assert_eq!(kept_rows(driver.as_mut()).await.as_deref(), Some("0"));
+}
+
+#[tokio::test]
+#[ignore = "needs a live MS SQL Server"]
+async fn live_a_batch_with_parameters_that_begins_a_transaction_gives_a_warning() {
+    let Some(mut driver) = master().await else {
+        return;
+    };
+    let options = crate::db::ExecOptions::default();
+    let params = one_param();
+    let opened = driver
+        .execute_query(
+            "BEGIN TRANSACTION; SELECT @P1 AS v",
+            Some(&params),
+            &options,
+        )
+        .await
+        .unwrap();
+    assert_eq!(live::cell(&opened, 0, 0).as_deref(), Some("1"));
+    let warning = opened.messages.last().unwrap();
+    assert_eq!(warning.level, crate::db::MessageLevel::Warning);
+    assert!(warning.text.contains("left it open"), "{}", warning.text);
+    assert!(driver.holds_open_transaction().await.unwrap());
+
+    let ended = driver
+        .execute_query("SELECT @P1 AS v; COMMIT", Some(&params), &options)
+        .await
+        .unwrap();
+    let warning = ended.messages.last().unwrap();
+    assert!(
+        warning.text.contains("ended a transaction"),
+        "{}",
+        warning.text
+    );
+    assert!(!driver.holds_open_transaction().await.unwrap());
+}
+
+#[tokio::test]
+#[ignore = "needs a live MS SQL Server"]
+async fn live_the_row_limit_ends_a_plain_batch_and_the_session_goes_on() {
+    let Some(mut driver) = master().await else {
+        return;
+    };
+    let options = crate::db::ExecOptions {
+        max_rows: 10,
+        ..crate::db::ExecOptions::default()
+    };
+    let response = live::run_with(driver.as_mut(), NUMBERS, &options).await;
+    assert_eq!(response.results[0].rows.len(), 10);
+    assert!(response.results[0].truncated);
+    assert!(response
+        .messages
+        .iter()
+        .any(|message| message.text == super::ENDED_AT_THE_LIMIT_MESSAGE));
+
+    // A batch of two statements reads the rest of the first set and runs
+    // the second.
+    let mut sink = crate::db::sink::probe::Telling::new(10);
+    let two = format!("{NUMBERS}; SELECT 7 AS seven");
+    driver
+        .execute_stream(&two, None, &options, &mut sink)
+        .await
+        .unwrap();
+    assert_eq!(sink.told, 1);
+    let response = sink
+        .buffer
+        .into_response(crate::db::sink::RunSummary::default());
+    assert!(response.results[0].truncated);
+    assert_eq!(live::cell(&response, 0, 0).as_deref(), Some("1"));
+    assert_eq!(response.results[1].rows.len(), 1);
+}
+
+#[tokio::test]
+#[ignore = "needs a live MS SQL Server"]
+async fn live_an_error_line_counts_from_the_top_of_a_plain_batch() {
+    let Some(mut driver) = master().await else {
+        return;
+    };
+    let error = driver
+        .execute_query(
+            "SELECT 1;\nSELECT 2;\nSELECT 1/0;",
+            None,
+            &crate::db::ExecOptions::default(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_payload().line, Some(3));
+}
+
+/// Runs a long wait under the limits of a run. `stop` presses Stop after a
+/// moment, and `timeout_secs` sets the time limit. The session then runs
+/// one more statement.
+async fn bounded_wait(stop: bool, timeout_secs: u64) -> crate::error::Error {
+    use crate::commands::{run_bounded, Bounded};
+    let mut driver = master().await.expect("the server is configured");
+    let cancel = driver.cancel_handle();
+    let token = tokio_util::sync::CancellationToken::new();
+    if stop {
+        let (cancel, token) = (cancel.clone().unwrap(), token.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            token.cancel();
+            cancel.cancel().await.unwrap();
+        });
+    }
+    let options = crate::db::ExecOptions::default();
+    let work = driver.execute_query("WAITFOR DELAY '00:00:30'", None, &options);
+    let outcome = run_bounded(work, &token, timeout_secs, Duration::from_secs(5), cancel).await;
+    let error = match outcome {
+        Bounded::Answered(Err(error)) => error,
+        Bounded::Answered(Ok(_)) => panic!("the wait ran to its end"),
+        Bounded::Stopped(error) => panic!("a limit dropped the wait: {error}"),
+    };
+    let response = live::run(driver.as_mut(), "SELECT 4 AS four").await;
+    assert_eq!(live::cell(&response, 0, 0).as_deref(), Some("4"));
+    error
+}
+
+#[tokio::test]
+#[ignore = "needs a live MS SQL Server"]
+async fn live_stop_and_the_time_limit_end_a_plain_batch() {
+    if live::server("SQLX_LIVE_MSSQL").is_none() {
+        return;
+    }
+    let stopped = bounded_wait(true, 300).await;
+    assert!(
+        matches!(stopped, crate::error::Error::Cancelled),
+        "{stopped}"
+    );
+    let timed_out = bounded_wait(false, 1).await;
+    assert!(
+        matches!(timed_out, crate::error::Error::Timeout(1)),
+        "{timed_out}"
+    );
+}

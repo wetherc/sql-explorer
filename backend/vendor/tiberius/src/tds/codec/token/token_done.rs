@@ -61,6 +61,12 @@ impl TokenDone {
         self.status.contains(DoneStatus::Attention)
     }
 
+    /// True when the error flag is set, because the statement failed or an
+    /// attention packet stopped it.
+    pub(crate) fn is_failed(&self) -> bool {
+        self.status.contains(DoneStatus::Error)
+    }
+
     pub(crate) fn rows(&self) -> u64 {
         self.done_rows
     }

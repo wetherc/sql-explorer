@@ -314,18 +314,6 @@ pub struct LockedReport {
     pub report: crate::db::blocking::BlockingReport,
 }
 
-/// Runs a statement that opens or ends a transaction. MS SQL Server sends
-/// error 266 when a request changes the count of open transactions, and the
-/// change stays, so the error only goes to the output of the test.
-async fn run_in_transaction(driver: &mut dyn DatabaseDriver, sql: &str) {
-    if let Err(error) = driver
-        .execute_query(sql, None, &ExecOptions::default())
-        .await
-    {
-        eprintln!("{sql} gave: {error}");
-    }
-}
-
 /// Reads the number of the session of a driver.
 pub async fn session_number(driver: &mut dyn DatabaseDriver, sql: &str) -> u64 {
     let response = run(driver, sql).await;
@@ -346,7 +334,7 @@ pub async fn report_during_wait(
 ) -> LockedReport {
     let holder_id = session_number(holder.as_mut(), scene.session_id).await;
     let waiter_id = session_number(waiter.as_mut(), scene.session_id).await;
-    run_in_transaction(holder.as_mut(), scene.lock).await;
+    run(holder.as_mut(), scene.lock).await;
     let wait = scene.wait.to_string();
     let waiting = tokio::spawn(async move {
         let outcome = waiter
@@ -371,7 +359,7 @@ pub async fn report_during_wait(
         }
         report = Some(read);
     }
-    run_in_transaction(holder.as_mut(), scene.release).await;
+    run(holder.as_mut(), scene.release).await;
     let (_waiter, outcome) = waiting.await.expect("the wait ends");
     outcome.unwrap_or_else(|error| panic!("the statement that waited failed: {error}"));
     LockedReport {

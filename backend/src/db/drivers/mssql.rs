@@ -53,6 +53,43 @@ struct Walk {
     /// The sum of the counts of changed rows, or `None` when the server sent
     /// no count outside a result set.
     rows_affected: Option<u64>,
+    /// Error 266, when it was the only error of the batch. The caller
+    /// decides if it fails the run, see [`MssqlDriver::settle_mismatch`].
+    mismatch: Option<tiberius::error::TokenError>,
+}
+
+/// The error that SQL Server sends when a procedure or an
+/// `sp_executesql` call ends with a count of open transactions that is not
+/// the count at its start.
+const TRANSACTION_COUNT_MISMATCH: u32 = 266;
+
+/// Gives a walk that error 266 ended as that error. Only a run with
+/// parameters can show the error as a warning.
+fn mismatch_as_error(walk: Walk) -> Result<Walk> {
+    match walk.mismatch {
+        Some(token) => Err(Error::from(tiberius::error::Error::Server(token))),
+        None => Ok(walk),
+    }
+}
+
+/// The warning that takes the place of error 266 after a run with
+/// parameters changed the count of open transactions. The detail keeps the
+/// text of the server.
+fn mismatch_warning(token: &tiberius::error::TokenError, opened: bool) -> Message {
+    let text = if opened {
+        "This batch started a transaction and left it open. Run COMMIT or ROLLBACK to end it."
+    } else {
+        "This batch ended a transaction that an earlier run started."
+    };
+    Message {
+        level: MessageLevel::Warning,
+        text: text.to_string(),
+        detail: Some(format!(
+            "{}\n{}",
+            mssql_error_detail(token),
+            token.message()
+        )),
+    }
 }
 
 /// Builds the `tiberius` configuration from a saved connection.
@@ -685,7 +722,15 @@ impl MssqlDriver {
         // The handle is taken before the stream, because the stream holds
         // the client while it lives.
         let attention = self.client.attention_handle();
-        let mut stream = self.client.query(statement, params).await?;
+        // A batch without parameters goes as a plain SQL batch, as SQL Server
+        // Management Studio sends it. Inside `sp_executesql`, a `BEGIN
+        // TRANSACTION` without its `COMMIT` ends with error 266, and a `USE`,
+        // a `SET` or a temporary table ends with the call.
+        let mut stream = if params.is_empty() {
+            self.client.simple_query(statement).await?
+        } else {
+            self.client.query(statement, params).await?
+        };
         let mut open = false;
         let mut count = 0usize;
         let mut truncated = false;
@@ -698,6 +743,7 @@ impl MssqlDriver {
         let mut told_past_limit = false;
         let mut rows_affected: Option<u64> = None;
         let mut errors = 0usize;
+        let mut mismatch = None;
 
         loop {
             let item = match stream.try_next().await {
@@ -706,6 +752,14 @@ impl MssqlDriver {
                 // The end that the attention packet brings is the wanted
                 // end, so it carries no fault to the user.
                 Err(tiberius::error::Error::Canceled) if asked_to_end => break,
+                // The stream gives its first error of the server at its end,
+                // so the batch has done all its work.
+                Err(tiberius::error::Error::Server(token))
+                    if errors == 1 && token.code() == TRANSACTION_COUNT_MISMATCH =>
+                {
+                    mismatch = Some(token);
+                    break;
+                }
                 Err(error) => return Err(error.into()),
             };
             match item {
@@ -795,7 +849,43 @@ impl MssqlDriver {
         Ok(Walk {
             stopped,
             rows_affected,
+            mismatch,
         })
+    }
+
+    /// Reads the count of open transactions of the session.
+    async fn transaction_count(&mut self) -> Result<i32> {
+        let row = self
+            .client
+            .simple_query("SELECT @@TRANCOUNT")
+            .await?
+            .into_row()
+            .await?;
+        Ok(row.and_then(|row| row.get::<i32, _>(0)).unwrap_or(0))
+    }
+
+    /// Decides what error 266 means after a run with parameters, which goes
+    /// through `sp_executesql`. The server sends the error when the call
+    /// changed the count of open transactions, but the change stays. When
+    /// the count after the run differs from `before`, the error becomes a
+    /// warning. Otherwise, for example when `XACT_ABORT` rolled the
+    /// transaction back, the error fails the run.
+    async fn settle_mismatch(
+        &mut self,
+        mut walk: Walk,
+        before: i32,
+        sink: &mut dyn RowSink,
+    ) -> Result<Walk> {
+        let Some(token) = walk.mismatch.take() else {
+            return Ok(walk);
+        };
+        let after = self.transaction_count().await?;
+        if after == before {
+            walk.mismatch = Some(token);
+            return mismatch_as_error(walk);
+        }
+        sink.message(mismatch_warning(&token, after > before));
+        Ok(walk)
     }
 
     /// True when an attention packet at the row limit loses no work. The
@@ -1141,13 +1231,7 @@ impl DatabaseDriver for MssqlDriver {
     }
 
     async fn holds_open_transaction(&mut self) -> Result<bool> {
-        let row = self
-            .client
-            .simple_query("SELECT @@TRANCOUNT")
-            .await?
-            .into_row()
-            .await?;
-        Ok(row.and_then(|row| row.get::<i32, _>(0)).unwrap_or(0) > 0)
+        Ok(self.transaction_count().await? > 0)
     }
 
     async fn execute_stream(
@@ -1195,6 +1279,14 @@ impl DatabaseDriver for MssqlDriver {
                 let borrowed: Vec<&dyn tiberius::ToSql> =
                     bound.iter().map(|value| value.as_ref()).collect();
 
+                // A run with parameters goes through `sp_executesql`, so the
+                // count of open transactions before it tells what a later
+                // error 266 means.
+                let before = if borrowed.is_empty() {
+                    None
+                } else {
+                    Some(self.transaction_count().await?)
+                };
                 // Every batch goes through the path that keeps rows, because
                 // an `INSERT ... OUTPUT` or a `BEGIN ... END` block can answer
                 // with rows as well as with a count of changed rows.
@@ -1206,8 +1298,12 @@ impl DatabaseDriver for MssqlDriver {
                         sink,
                         may_end_early,
                     )
-                    .await
-                    .map_err(|error| locate_error(error, query, start))?;
+                    .await;
+                let walk = match (walk, before) {
+                    (Ok(walk), Some(before)) => self.settle_mismatch(walk, before, sink).await,
+                    (walk, _) => walk.and_then(mismatch_as_error),
+                }
+                .map_err(|error| locate_error(error, query, start))?;
                 if let Some(changed) = walk.rows_affected {
                     rows_affected = Some(rows_affected.unwrap_or(0) + changed);
                 }
@@ -1267,6 +1363,7 @@ impl DatabaseDriver for MssqlDriver {
                 may_end_early,
             )
             .await;
+        let outcome = outcome.and_then(mismatch_as_error);
         if let Err(error) = self.run_switch(&format!("SET {switch} OFF")).await {
             // The switch holds for the session, so a session that keeps it on
             // answers every later statement with a plan. The connection is
@@ -2306,7 +2403,7 @@ mod tests {
         accept_login(&mut socket).await;
 
         let packet_type = read_message(&mut socket).await;
-        assert!(packet_type == PACKET_RPC || packet_type == PACKET_SQL_BATCH);
+        assert_eq!(packet_type, PACKET_SQL_BATCH);
         let mut answer = int_metadata();
         for value in 0..5 {
             answer.extend_from_slice(&int_row(value));
@@ -2318,7 +2415,7 @@ mod tests {
 
         // The connection takes the next statement of the session.
         let packet_type = read_message(&mut socket).await;
-        assert!(packet_type == PACKET_RPC || packet_type == PACKET_SQL_BATCH);
+        assert_eq!(packet_type, PACKET_SQL_BATCH);
         write_packet(&mut socket, END_OF_MESSAGE, &done_token(0, 0)).await;
     }
 
@@ -2387,7 +2484,7 @@ mod tests {
         write_packet(&mut socket, END_OF_MESSAGE, &done_token(0, 0)).await;
 
         let packet_type = read_message(&mut socket).await;
-        assert!(packet_type == PACKET_RPC || packet_type == PACKET_SQL_BATCH);
+        assert_eq!(packet_type, PACKET_SQL_BATCH);
         let mut rows = int_metadata();
         for value in 0..5 {
             rows.extend_from_slice(&int_row(value));
@@ -2461,7 +2558,7 @@ mod tests {
         let mut count = 0usize;
         let pause = Duration::from_millis(300);
         while let Ok(packet_type) = tokio::time::timeout(pause, read_message(&mut socket)).await {
-            assert!(packet_type == PACKET_RPC || packet_type == PACKET_SQL_BATCH);
+            assert_eq!(packet_type, PACKET_SQL_BATCH);
             let mut answer = int_metadata();
             answer.extend_from_slice(&int_row(count as i32));
             answer.extend_from_slice(&done_token(0, 1));
@@ -2589,7 +2686,7 @@ mod tests {
         }
 
         let packet_type = read_message(&mut socket).await;
-        assert!(packet_type == PACKET_RPC || packet_type == PACKET_SQL_BATCH);
+        assert_eq!(packet_type, PACKET_SQL_BATCH);
         let mut answer = int_metadata();
         for value in 0..5 {
             answer.extend_from_slice(&int_row(value));
@@ -2696,7 +2793,7 @@ mod tests {
             let (mut socket, _) = listener.accept().await.unwrap();
             accept_login(&mut socket).await;
             let packet_type = read_message(&mut socket).await;
-            assert!(packet_type == PACKET_RPC || packet_type == PACKET_SQL_BATCH);
+            assert_eq!(packet_type, PACKET_SQL_BATCH);
             write_packet(&mut socket, END_OF_MESSAGE, &answer).await;
         });
         let tcp = TcpStream::connect(address).await.unwrap();
@@ -2717,6 +2814,158 @@ mod tests {
             .unwrap();
         server.await.unwrap();
         sink.into_response(summary)
+    }
+
+    /// Runs the query against a fake server that checks the type of each
+    /// request and sends the answer that goes with it. The query must not be
+    /// one that only reads, so that no probe of the row limit goes before
+    /// it.
+    async fn run_scripted(
+        query: &str,
+        params: Option<QueryParams>,
+        exchanges: Vec<(u8, Vec<u8>)>,
+    ) -> Result<QueryResponse> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            accept_login(&mut socket).await;
+            for (packet_type, answer) in exchanges {
+                assert_eq!(read_message(&mut socket).await, packet_type);
+                write_packet(&mut socket, END_OF_MESSAGE, &answer).await;
+            }
+        });
+        let tcp = TcpStream::connect(address).await.unwrap();
+        let client = Client::connect(test_config(), tcp.compat_write())
+            .await
+            .unwrap();
+        let mut driver = MssqlDriver { client };
+        let options = ExecOptions::default();
+        let mut sink = BufferSink::new(10);
+        let outcome = driver
+            .execute_stream(query, params.as_ref(), &options, &mut sink)
+            .await;
+        server.await.unwrap();
+        outcome.map(|summary| sink.into_response(summary))
+    }
+
+    /// The answer to `SELECT @@TRANCOUNT`.
+    fn transaction_count_answer(count: i32) -> Vec<u8> {
+        let mut answer = int_metadata();
+        answer.extend_from_slice(&int_row(count));
+        answer.extend_from_slice(&done_token(DONE_COUNT, 1));
+        answer
+    }
+
+    /// The answer of a call of `sp_executesql` whose count of open
+    /// transactions at its end differs from the count at its start.
+    fn mismatch_answer() -> Vec<u8> {
+        let mut answer = counted_done_in_proc(1);
+        answer.extend_from_slice(&error_token(
+            TRANSACTION_COUNT_MISMATCH,
+            "Transaction count after EXECUTE indicates a mismatching number of BEGIN and \
+             COMMIT statements.",
+        ));
+        answer.extend_from_slice(&done_token(0x02, 0));
+        answer
+    }
+
+    fn one_param() -> Option<QueryParams> {
+        Some(vec![crate::db::QueryParam {
+            value: JsonValue::from(1),
+        }])
+    }
+
+    #[tokio::test]
+    async fn a_run_with_parameters_that_opens_a_transaction_gives_a_warning() {
+        let response = run_scripted(
+            "BEGIN TRANSACTION; UPDATE t SET a = @P1",
+            one_param(),
+            vec![
+                (PACKET_SQL_BATCH, transaction_count_answer(0)),
+                (PACKET_RPC, mismatch_answer()),
+                (PACKET_SQL_BATCH, transaction_count_answer(1)),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let warning = response.messages.last().unwrap();
+        assert_eq!(warning.level, MessageLevel::Warning);
+        assert!(warning.text.contains("left it open"), "{}", warning.text);
+        let detail = warning.detail.as_deref().unwrap();
+        assert!(detail.contains("Msg 266"), "{detail}");
+        assert!(
+            detail.contains("Transaction count after EXECUTE"),
+            "{detail}"
+        );
+        assert_eq!(response.rows_affected, Some(1));
+    }
+
+    #[tokio::test]
+    async fn a_run_with_parameters_that_ends_a_transaction_gives_a_warning() {
+        let response = run_scripted(
+            "UPDATE t SET a = @P1; COMMIT",
+            one_param(),
+            vec![
+                (PACKET_SQL_BATCH, transaction_count_answer(1)),
+                (PACKET_RPC, mismatch_answer()),
+                (PACKET_SQL_BATCH, transaction_count_answer(0)),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let warning = response.messages.last().unwrap();
+        assert_eq!(warning.level, MessageLevel::Warning);
+        assert!(
+            warning.text.contains("ended a transaction"),
+            "{}",
+            warning.text
+        );
+    }
+
+    #[tokio::test]
+    async fn error_266_fails_the_run_when_the_count_did_not_change() {
+        // XACT_ABORT, for example, can roll the transaction back after the
+        // error, so the count is the same as before the run.
+        let error = run_scripted(
+            "BEGIN TRANSACTION; UPDATE t SET a = @P1",
+            one_param(),
+            vec![
+                (PACKET_SQL_BATCH, transaction_count_answer(0)),
+                (PACKET_RPC, mismatch_answer()),
+                (PACKET_SQL_BATCH, transaction_count_answer(0)),
+            ],
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("Transaction count"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn error_266_of_a_plain_batch_fails_the_run() {
+        // A procedure that a plain batch runs can leave a transaction open,
+        // and the server then names the procedure. The error stays an error,
+        // as in SQL Server Management Studio.
+        let error = run_scripted(
+            "EXEC opens_a_transaction",
+            None,
+            vec![(PACKET_SQL_BATCH, mismatch_answer())],
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("Transaction count"), "{error}");
+    }
+
+    #[test]
+    fn a_walk_without_error_266_passes() {
+        let walk = Walk {
+            stopped: false,
+            rows_affected: None,
+            mismatch: None,
+        };
+        assert!(mismatch_as_error(walk).is_ok());
     }
 
     fn message_texts(response: &QueryResponse) -> Vec<&str> {
@@ -2840,8 +3089,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_block_shows_its_counts_and_its_rows() {
-        // The server sends a `DONEINPROC` token for each statement of a
-        // request that runs through `sp_executesql`.
+        // The fake answer ends each statement with a `DONEINPROC` token, as
+        // the server does for a statement inside a `BEGIN TRY` block.
         let mut answer = counted_done_in_proc(3);
         answer.extend_from_slice(&int_metadata());
         answer.extend_from_slice(&int_row(1));
@@ -2955,7 +3204,7 @@ mod tests {
             accept_login(&mut socket).await;
 
             let packet_type = read_message(&mut socket).await;
-            assert!(packet_type == PACKET_RPC || packet_type == PACKET_SQL_BATCH);
+            assert_eq!(packet_type, PACKET_SQL_BATCH);
             let mut answer = xml_metadata();
             answer.extend_from_slice(&xml_row("<a>1</a>"));
             answer.extend_from_slice(&done_token(0, 1));
@@ -2998,7 +3247,7 @@ mod tests {
             accept_login(&mut socket).await;
 
             let packet_type = read_message(&mut socket).await;
-            assert!(packet_type == PACKET_RPC || packet_type == PACKET_SQL_BATCH);
+            assert_eq!(packet_type, PACKET_SQL_BATCH);
             let text: Vec<u8> = "hi".encode_utf16().flat_map(u16::to_le_bytes).collect();
             let mut answer = variant_metadata();
             answer.extend_from_slice(&variant_row(0x38, &[], &42i32.to_le_bytes()));
@@ -3255,7 +3504,7 @@ mod tests {
         let (mut socket, _) = listener.accept().await.unwrap();
         accept_login(&mut socket).await;
         let packet_type = read_message(&mut socket).await;
-        assert!(packet_type == PACKET_RPC || packet_type == PACKET_SQL_BATCH);
+        assert_eq!(packet_type, PACKET_SQL_BATCH);
         let mut answer = int_metadata();
         for value in 0..5 {
             answer.extend_from_slice(&int_row(value));

@@ -49,6 +49,14 @@ On MS SQL Server, a statement with a parameter runs inside `sp_executesql`, so a
 parameter is also sent whole rather than one statement at a time, because the
 placeholder numbers belong to the whole text.
 
+A batch with a parameter can still begin or end a transaction. The server
+reports error 266 when `sp_executesql` ends with a different transaction count,
+but the run shows a warning in its place, and the tab still shows the lock icon
+of the open transaction. A batch without parameters goes to the server as a
+plain batch, the way SQL Server Management Studio sends it. Its temporary
+tables, `SET` options, `USE` and `BEGIN TRANSACTION` stay with the tab's session
+after the run.
+
 MS SQL Server receives a text value as `nvarchar`. When you compare it with a
 `varchar` column, the server converts the column rather than the value, so it often
 can't seek an index on that column and scans the whole table instead. Cast

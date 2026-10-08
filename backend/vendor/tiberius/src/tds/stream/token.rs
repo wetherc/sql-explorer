@@ -36,6 +36,8 @@ pub enum ReceivedToken {
 pub(crate) struct TokenStream<'a, S: AsyncRead + AsyncWrite + Unpin + Send> {
     conn: &'a mut Connection<S>,
     last_error: Option<Error>,
+    /// True when the last `DONE` token of the response has the error flag.
+    failed_end: bool,
 }
 
 impl<'a, S> TokenStream<'a, S>
@@ -46,6 +48,7 @@ where
         Self {
             conn,
             last_error: None,
+            failed_end: false,
         }
     }
 
@@ -164,6 +167,7 @@ where
         let done = TokenDone::decode(self.conn).await?;
         event!(Level::TRACE, "{}", done);
         self.check_attention(&done)?;
+        self.failed_end = done.is_failed();
         Ok(ReceivedToken::Done(done))
     }
 
@@ -234,7 +238,14 @@ where
 
     pub fn try_unfold(self) -> BoxStream<'a, crate::Result<ReceivedToken>> {
         let stream = futures_util::stream::try_unfold(self, |mut this| async move {
-            if this.conn.is_eof() {
+            // An attention packet can stop a statement such as `WAITFOR` in a
+            // plain SQL batch. The server then ends the response with a
+            // `DONE` token that has the error flag, and it sends the
+            // acknowledgement as a message of its own. The stream reads on to
+            // the acknowledgement, so the request ends with `Error::Canceled`.
+            // A response that ends without the error flag ran to its end, and
+            // the next request drains the late acknowledgement.
+            if this.conn.is_eof() && !(this.failed_end && this.conn.await_attention_ack()) {
                 match this.last_error {
                     None => return Ok(None),
                     Some(error) => return Err(error),

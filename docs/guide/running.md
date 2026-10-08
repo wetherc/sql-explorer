@@ -40,6 +40,9 @@ run of plain `SELECT` statements skips the check, unless the tab turned on
 `IMPLICIT_TRANSACTIONS` or turned off `autocommit`, where a read can start a
 transaction too.
 
+On MS SQL Server, you can run `BEGIN TRANSACTION` alone and then `COMMIT` or
+`ROLLBACK` in a later run of the same tab.
+
 ## Stopping a statement
 
 While a statement runs, a **Stop** button appears beside **Run**, and

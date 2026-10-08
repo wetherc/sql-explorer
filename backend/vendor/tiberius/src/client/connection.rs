@@ -600,6 +600,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         self.attention_pending = false;
     }
 
+    /// True when an attention packet went out and its acknowledgement did not
+    /// arrive yet. The read of the stream then continues with the next
+    /// message of the server, which brings the acknowledgement.
+    pub(crate) fn await_attention_ack(&mut self) -> bool {
+        if self.attention_pending {
+            self.flushed = false;
+        }
+        self.attention_pending
+    }
+
     /// Reads and discards tokens until the acknowledgement of an attention
     /// packet arrives. A new request must wait for the acknowledgement of the
     /// old one, or it would read the acknowledgement as its own response.
