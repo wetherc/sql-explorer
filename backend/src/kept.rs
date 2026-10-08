@@ -48,6 +48,9 @@ pub const KEPT_RESULT_AGE: Duration = Duration::from_secs(12 * 60 * 60);
 /// - A spill file, where the sink of the run writes the rows past the limit
 ///   to a local file. Its read reads the file, and its drop removes the file.
 pub enum KeptSource {
+    /// A finished Athena statement. Athena keeps the full result in S3, and
+    /// the read takes its pages again through `GetQueryResults`.
+    AthenaExecution(crate::db::drivers::athena::KeptExecution),
     /// A fixed list of rows, for the tests of the registry and the export.
     #[cfg(test)]
     Fixed {
@@ -66,9 +69,9 @@ impl KeptSource {
     /// Reads every row of the kept set into the sink, up to the row limit of
     /// the options. The read stops when the sink answers `Stop`. The caller
     /// keeps the time limit and the Stop button of the read.
-    #[cfg_attr(not(test), allow(unused_variables))]
     pub async fn read(&self, options: &ExecOptions, sink: &mut dyn RowSink) -> Result<()> {
         match *self {
+            KeptSource::AthenaExecution(ref execution) => execution.read(options, sink).await,
             #[cfg(test)]
             KeptSource::Fixed {
                 ref columns,
@@ -153,9 +156,6 @@ impl KeptResults {
         self.keep_at(request_id, connection_id, sources, Instant::now())
     }
 
-    // A build without tests has no variant of `KeptSource` yet, so the
-    // compiler sees the body after the first entry as unreachable.
-    #[cfg_attr(not(test), allow(unreachable_code, unused_variables, unused_mut))]
     fn keep_at(
         &self,
         request_id: &str,

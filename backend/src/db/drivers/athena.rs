@@ -15,6 +15,7 @@ use crate::db::{
     Schema, SchemaSnapshot, SnapshotColumn, Table,
 };
 use crate::error::{Error, Result};
+use crate::kept::KeptSource;
 use crate::sql::{split_statements, Dialect};
 use crate::storage::{AwsCredentialSource, SavedConnection};
 use async_trait::async_trait;
@@ -134,6 +135,193 @@ fn record_execution(running: &Running, run: u64, execution_id: &str) -> bool {
     }
     state.execution_id = Some(execution_id.to_string());
     true
+}
+
+/// The read of the pages of one finished statement.
+#[derive(Clone, Copy)]
+struct PageRead<'a> {
+    client: &'a Client,
+    execution_id: &'a str,
+    options: &'a ExecOptions,
+    deadline: Option<Instant>,
+    /// True when the first row of the first page repeats the column names.
+    expect_header: bool,
+}
+
+impl PageRead<'_> {
+    /// Reads the pages of the result and feeds each row to the sink, up to
+    /// the row limit. The first row is dropped when the statement repeats
+    /// the column names there. A stop of the sink or the row limit ends the
+    /// read without a fetch of the pages that remain. A stop of the user ends
+    /// the read before the next page. The read of each page obeys the time
+    /// that remains of the limit of the statement.
+    ///
+    /// The request for the next page starts when a page arrives, so the
+    /// service prepares that page while the rows of the current page go to
+    /// the sink. One request at most is open, so the rows of two pages at
+    /// most are in memory. A page that the row limit makes unnecessary is
+    /// not requested.
+    ///
+    /// Returns true when the sink stopped the run.
+    ///
+    /// A statement that writes rows gives no result set. The service then
+    /// reports the number of rows it changed, which lands in
+    /// `rows_affected`.
+    async fn stream(
+        &self,
+        sink: &mut dyn RowSink,
+        rows_affected: &mut Option<u64>,
+        stop_requested: &(dyn Fn() -> bool + Sync),
+    ) -> Result<bool> {
+        let PageRead {
+            client,
+            execution_id,
+            options,
+            deadline,
+            expect_header,
+        } = *self;
+        let mut next: Option<PageRequest> = None;
+        let mut columns: Option<Vec<ColumnInfo>> = None;
+        let mut first_page = true;
+        let mut count = 0usize;
+
+        loop {
+            // A request for the next page that is open at a stop is dropped,
+            // and the drop ends it.
+            if stop_requested() {
+                return Err(Error::Cancelled);
+            }
+            let request = next
+                .take()
+                .unwrap_or_else(|| PageRequest::send(client, execution_id, None));
+            let page = request.page(deadline, options.timeout_secs).await?;
+
+            let has_columns = page
+                .result_set()
+                .and_then(|set| set.result_set_metadata())
+                .is_some_and(|metadata| !metadata.column_info().is_empty());
+            if let Some(changed) = changed_rows(has_columns, page.update_count()) {
+                *rows_affected = Some(rows_affected.unwrap_or(0) + changed);
+                sink.message(rows_affected_message(changed));
+            }
+
+            let Some(result_set) = page.result_set() else {
+                break;
+            };
+
+            if columns.is_none() {
+                let read = result_set
+                    .result_set_metadata()
+                    .map(|metadata| {
+                        metadata
+                            .column_info()
+                            .iter()
+                            .map(|column| ColumnInfo::new(column.name(), column.r#type()))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                if read.is_empty() {
+                    break;
+                }
+                sink.begin_set(read.clone())?;
+                columns = Some(read);
+            }
+
+            let known = columns.as_ref().expect("the columns are read");
+            let rows = result_set.rows();
+            // A statement that reads rows repeats the column names in the
+            // first row of the first page. A row of another statement that
+            // happens to spell the column names is data and stays.
+            let rows =
+                if expect_header && first_page && !rows.is_empty() && is_header(&rows[0], known) {
+                    &rows[1..]
+                } else {
+                    rows
+                };
+            first_page = false;
+
+            // The row limit ends the read in this page when the page has more
+            // rows than the limit leaves, and a stop of the user ends the read
+            // before the next page. The next page is then not requested. A
+            // page that fills the limit exactly still leads to the next page,
+            // which tells if more rows exist.
+            let token = page.next_token();
+            if token.is_some() && count + rows.len() <= options.max_rows && !stop_requested() {
+                next = Some(PageRequest::send(client, execution_id, token));
+            }
+            for row in rows {
+                if count >= options.max_rows {
+                    self.keep(sink);
+                    finish_set(sink, count, true)?;
+                    return Ok(false);
+                }
+                if sink.row(row_to_json(row, known))? == SinkControl::Stop {
+                    self.keep(sink);
+                    finish_set(sink, count, true)?;
+                    return Ok(true);
+                }
+                count += 1;
+            }
+
+            if token.is_none() {
+                break;
+            }
+        }
+
+        if columns.is_some() {
+            finish_set(sink, count, false)?;
+        }
+        Ok(false)
+    }
+
+    /// Offers the result of the statement to the sink as a kept result. The
+    /// service keeps the full result under the identifier of the execution,
+    /// so the rows past the row limit stay readable without a new run.
+    fn keep(&self, sink: &mut dyn RowSink) {
+        sink.keep_source(KeptSource::AthenaExecution(KeptExecution {
+            client: self.client.clone(),
+            execution_id: self.execution_id.to_string(),
+            expect_header: self.expect_header,
+        }));
+    }
+}
+
+/// A finished Athena statement whose read stopped at the row limit. Athena
+/// keeps the full result in S3 under the identifier of the execution, and
+/// `GetQueryResults` reads its pages again.
+///
+/// The record has its own handle of the client. The handle sends each
+/// request on its own, so the read takes no driver of a session and the tab
+/// stays free while an export reads the result.
+pub struct KeptExecution {
+    client: Client,
+    execution_id: String,
+    expect_header: bool,
+}
+
+/// The message for a kept result that the service no longer gives.
+const KEPT_GONE_MESSAGE: &str = "Couldn't read the saved result from Athena. It may have expired, so run the query again to export all rows.";
+
+impl KeptExecution {
+    /// Reads every page of the result into the sink, up to the row limit of
+    /// the options and within their time limit. The caller keeps the Stop
+    /// button, and a drop of the read ends the request for the next page.
+    pub async fn read(&self, options: &ExecOptions, sink: &mut dyn RowSink) -> Result<()> {
+        let read = PageRead {
+            client: &self.client,
+            execution_id: &self.execution_id,
+            options,
+            deadline: deadline_of(options.timeout_secs),
+            expect_header: self.expect_header,
+        };
+        match read.stream(sink, &mut None, &|| false).await {
+            Ok(_) => Ok(()),
+            Err(Error::Athena(reason)) => {
+                Err(Error::Athena(format!("{KEPT_GONE_MESSAGE} {reason}")))
+            }
+            Err(error) => Err(error),
+        }
+    }
 }
 
 /// Asks the service to stop a statement.
@@ -692,24 +880,8 @@ impl AthenaDriver {
         }
     }
 
-    /// Reads the pages of the result and feeds each row to the sink, up to
-    /// the row limit. The first row is dropped when the statement repeats
-    /// the column names there. A stop of the sink or the row limit ends the
-    /// read without a fetch of the pages that remain. A stop of the user ends
-    /// the read before the next page. The read of each page obeys the time
-    /// that remains of the limit of the statement.
-    ///
-    /// The request for the next page starts when a page arrives, so the
-    /// service prepares that page while the rows of the current page go to
-    /// the sink. One request at most is open, so the rows of two pages at
-    /// most are in memory. A page that the row limit makes unnecessary is
-    /// not requested.
-    ///
-    /// Returns true when the sink stopped the run.
-    ///
-    /// A statement that writes rows gives no result set. The service then
-    /// reports the number of rows it changed, which lands in
-    /// `rows_affected`.
+    /// Reads the pages of the result into the sink. A stop of the user
+    /// ends the read before the next page. See [`PageRead::stream`].
     async fn stream_results(
         &self,
         execution_id: &str,
@@ -719,96 +891,15 @@ impl AthenaDriver {
         sink: &mut dyn RowSink,
         rows_affected: &mut Option<u64>,
     ) -> Result<bool> {
-        let mut next: Option<PageRequest> = None;
-        let mut columns: Option<Vec<ColumnInfo>> = None;
-        let mut first_page = true;
-        let mut count = 0usize;
-
-        loop {
-            // A request for the next page that is open at a stop is dropped,
-            // and the drop ends it.
-            if self.stop_requested() {
-                return Err(Error::Cancelled);
-            }
-            let request = next
-                .take()
-                .unwrap_or_else(|| PageRequest::send(&self.client, execution_id, None));
-            let page = request.page(deadline, options.timeout_secs).await?;
-
-            let has_columns = page
-                .result_set()
-                .and_then(|set| set.result_set_metadata())
-                .is_some_and(|metadata| !metadata.column_info().is_empty());
-            if let Some(changed) = changed_rows(has_columns, page.update_count()) {
-                *rows_affected = Some(rows_affected.unwrap_or(0) + changed);
-                sink.message(rows_affected_message(changed));
-            }
-
-            let Some(result_set) = page.result_set() else {
-                break;
-            };
-
-            if columns.is_none() {
-                let read = result_set
-                    .result_set_metadata()
-                    .map(|metadata| {
-                        metadata
-                            .column_info()
-                            .iter()
-                            .map(|column| ColumnInfo::new(column.name(), column.r#type()))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                if read.is_empty() {
-                    break;
-                }
-                sink.begin_set(read.clone())?;
-                columns = Some(read);
-            }
-
-            let known = columns.as_ref().expect("the columns are read");
-            let rows = result_set.rows();
-            // A statement that reads rows repeats the column names in the
-            // first row of the first page. A row of another statement that
-            // happens to spell the column names is data and stays.
-            let rows =
-                if expect_header && first_page && !rows.is_empty() && is_header(&rows[0], known) {
-                    &rows[1..]
-                } else {
-                    rows
-                };
-            first_page = false;
-
-            // The row limit ends the read in this page when the page has more
-            // rows than the limit leaves, and a stop of the user ends the read
-            // before the next page. The next page is then not requested. A
-            // page that fills the limit exactly still leads to the next page,
-            // which tells if more rows exist.
-            let token = page.next_token();
-            if token.is_some() && count + rows.len() <= options.max_rows && !self.stop_requested() {
-                next = Some(PageRequest::send(&self.client, execution_id, token));
-            }
-            for row in rows {
-                if count >= options.max_rows {
-                    finish_set(sink, count, true)?;
-                    return Ok(false);
-                }
-                if sink.row(row_to_json(row, known))? == SinkControl::Stop {
-                    finish_set(sink, count, true)?;
-                    return Ok(true);
-                }
-                count += 1;
-            }
-
-            if token.is_none() {
-                break;
-            }
-        }
-
-        if columns.is_some() {
-            finish_set(sink, count, false)?;
-        }
-        Ok(false)
+        let read = PageRead {
+            client: &self.client,
+            execution_id,
+            options,
+            deadline,
+            expect_header,
+        };
+        read.stream(sink, rows_affected, &|| self.stop_requested())
+            .await
     }
 
     /// Asks the service to stop a statement.
@@ -2563,6 +2654,175 @@ mod tests {
         let outcome = joined(task.await);
         assert!(matches!(outcome, Err(Error::Athena(_))));
         assert_eq!(joined(Ok(Ok(7))).unwrap(), 7);
+    }
+
+    /// A sink that keeps the rows in a buffer and the sources that the
+    /// driver offers.
+    struct KeepingSink {
+        rows: BufferSink,
+        kept: Vec<KeptSource>,
+    }
+
+    impl KeepingSink {
+        fn new(max_rows: usize) -> Self {
+            KeepingSink {
+                rows: BufferSink::new(max_rows),
+                kept: Vec::new(),
+            }
+        }
+    }
+
+    impl RowSink for KeepingSink {
+        fn begin_set(&mut self, columns: Vec<ColumnInfo>) -> Result<()> {
+            self.rows.begin_set(columns)
+        }
+
+        fn row(&mut self, row: Vec<JsonValue>) -> Result<SinkControl> {
+            self.rows.row(row)
+        }
+
+        fn end_set(&mut self, truncated: bool) -> Result<()> {
+            self.rows.end_set(truncated)
+        }
+
+        fn message(&mut self, message: crate::db::Message) {
+            self.rows.message(message)
+        }
+
+        fn keep_source(&mut self, source: KeptSource) {
+            self.kept.push(source);
+        }
+    }
+
+    /// Reads a kept source into a buffer and gives the one set it read.
+    async fn read_kept(source: &KeptSource) -> Result<ResultSet> {
+        let mut sink = BufferSink::new(100);
+        source.read(&LIMITS, &mut sink).await?;
+        Ok(sink
+            .into_response(RunSummary::default())
+            .results
+            .pop()
+            .unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_read_cut_at_the_row_limit_keeps_the_execution() {
+        let fake = fake_with_two_pages(2).await;
+        let mut driver = fake.driver();
+        let mut sink = KeepingSink::new(100);
+        driver
+            .execute_stream(
+                "SELECT 1",
+                None,
+                &ExecOptions {
+                    max_rows: 1,
+                    ..LIMITS
+                },
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        assert_eq!(sink.kept.len(), 1);
+        let KeptSource::AthenaExecution(execution) = &sink.kept[0] else {
+            panic!("the source is not an Athena execution");
+        };
+        assert_eq!(execution.execution_id, "q1");
+        assert!(execution.expect_header);
+
+        // The kept result gives every row of both pages, without the row of
+        // names and without a new start of the statement.
+        let set = read_kept(&sink.kept[0]).await.unwrap();
+        assert_eq!(set.rows.len(), 3);
+        assert!(!set.truncated);
+        assert_eq!(
+            fake.operations()
+                .iter()
+                .filter(|name| *name == "StartQueryExecution")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_read_that_the_sink_stops_keeps_the_execution() {
+        let fake = fake_with_two_pages(2).await;
+        let mut driver = fake.driver();
+        let mut sink = KeepingSink::new(1);
+        driver
+            .execute_stream("SELECT 1", None, &LIMITS, &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(sink.kept.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_whole_read_keeps_nothing() {
+        let fake = fake_with_two_pages(1).await;
+        let mut driver = fake.driver();
+        let mut sink = KeepingSink::new(100);
+        driver
+            .execute_stream("SELECT 1", None, &LIMITS, &mut sink)
+            .await
+            .unwrap();
+        assert!(sink.kept.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_statement_without_rows_keeps_nothing() {
+        let fake = FakeAthena::start(at_once(|operation| {
+            match operation {
+            "StartQueryExecution" => (200, STARTED.to_string()),
+            "GetQueryExecution" => (200, SUCCEEDED.to_string()),
+            _ => (
+                200,
+                r#"{"ResultSet":{"ResultSetMetadata":{"ColumnInfo":[]},"Rows":[]},"UpdateCount":0}"#
+                    .to_string(),
+            ),
+        }
+        }))
+        .await;
+        let mut driver = fake.driver();
+        let mut sink = KeepingSink::new(0);
+        driver
+            .execute_stream("CREATE TABLE t (a int)", None, &LIMITS, &mut sink)
+            .await
+            .unwrap();
+        assert!(sink.kept.is_empty());
+    }
+
+    /// The source of the execution `q1` of a fake service.
+    fn kept_of(fake: &FakeAthena) -> KeptSource {
+        KeptSource::AthenaExecution(KeptExecution {
+            client: fake.driver().client,
+            execution_id: "q1".into(),
+            expect_header: true,
+        })
+    }
+
+    #[tokio::test]
+    async fn a_result_that_the_service_lost_asks_for_a_new_run() {
+        let fake = FakeAthena::start(at_once(|_| {
+            (
+                400,
+                r#"{"__type":"InvalidRequestException","Message":"Query has expired"}"#.to_string(),
+            )
+        }))
+        .await;
+        let Err(Error::Athena(text)) = read_kept(&kept_of(&fake)).await else {
+            panic!("the read did not fail with an error of the service");
+        };
+        assert!(text.starts_with(KEPT_GONE_MESSAGE));
+        assert!(text.contains("Query has expired"));
+    }
+
+    #[tokio::test]
+    async fn a_kept_result_out_of_reach_reports_the_connection() {
+        let mut fake = FakeAthena::start(at_once(|_| (200, "{}".to_string()))).await;
+        let source = kept_of(&fake);
+        fake.server.abort();
+        let _ = (&mut fake.server).await;
+        let outcome = read_kept(&source).await;
+        assert!(matches!(outcome, Err(Error::Connection(_))));
     }
 
     /// The load of the configuration for a fake service, with fixed keys.

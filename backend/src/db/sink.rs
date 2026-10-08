@@ -46,7 +46,6 @@ pub trait RowSink: Send {
     /// ends a set that it cut at the row limit. The default drops the
     /// source, because a sink that writes a file or a buffer has no later
     /// use for it.
-    #[cfg_attr(not(test), allow(dead_code))]
     fn keep_source(&mut self, _source: KeptSource) {}
 }
 
