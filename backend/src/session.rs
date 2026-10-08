@@ -46,6 +46,9 @@ pub struct Session {
     /// True when the session stays fit for use after a limit stopped a
     /// statement.
     pub keeps_connection_after_stop: bool,
+    /// True when the driver can pause a read at the row limit. See
+    /// `DatabaseDriver::pauses_reads`.
+    pub pauses_reads: bool,
     /// The moment the session last answered.
     last_ok: Mutex<Instant>,
     /// The moment a request last took the session.
@@ -63,11 +66,13 @@ impl Session {
         let cancel_handle = driver.cancel_handle();
         let needs_ping = driver.needs_ping();
         let keeps_connection_after_stop = driver.keeps_connection_after_stop();
+        let pauses_reads = driver.pauses_reads();
         Self {
             driver: Arc::new(Mutex::new(driver)),
             cancel_handle,
             needs_ping,
             keeps_connection_after_stop,
+            pauses_reads,
             last_ok: Mutex::new(Instant::now()),
             last_used: Mutex::new(Instant::now()),
             health: Mutex::new(()),

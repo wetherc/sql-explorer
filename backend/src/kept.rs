@@ -46,12 +46,6 @@ pub const KEPT_RESULT_AGE: Duration = Duration::from_secs(12 * 60 * 60);
 /// Each variant reads its rows into a sink, in the order and with the
 /// columns of the set that the grid shows. A variant that owns a resource of
 /// its own frees it when the value drops.
-///
-/// One more source fits this type: a paused read on the session of the tab,
-/// such as a server cursor that stopped at the row limit. Its read continues
-/// the cursor on that session, so the read takes the driver of the session.
-/// A new run on the session must release it first, because the run closes or
-/// replaces the cursor.
 pub enum KeptSource {
     /// A finished Athena statement. Athena keeps the full result in S3, and
     /// the read takes its pages again through `GetQueryResults`.
@@ -59,6 +53,11 @@ pub enum KeptSource {
     /// A file on the local disk with every row of the set. The read reads
     /// the file, and the drop removes it.
     SpillFile(crate::spill::SpillFile),
+    /// A read that paused at the row limit on the session of the tab. Its
+    /// statement stays open on the server, and the task of the read keeps
+    /// the driver of the session. The export continues the read once, and
+    /// the drop of the value releases it. See [`crate::pause`].
+    PausedRead(crate::pause::PausedRead),
     /// A fixed list of rows, for the tests of the registry and the export.
     #[cfg(test)]
     Fixed {
@@ -85,6 +84,12 @@ impl KeptSource {
         match *self {
             KeptSource::AthenaExecution(ref execution) => execution.read(options, sink).await,
             KeptSource::SpillFile(ref file) => file.read(options, sink).await,
+            // The export continues a paused read through
+            // `PausedRead::continue_into`, because the task of the read must
+            // own the sink of the export.
+            KeptSource::PausedRead(_) => Err(crate::error::Error::Unsupported(
+                "A paused read gives its rows only to an export.".to_string(),
+            )),
             #[cfg(test)]
             KeptSource::Fixed {
                 ref columns,
@@ -124,6 +129,32 @@ impl KeptSource {
     }
 }
 
+impl KeptSource {
+    /// True while the source can still give its rows. A paused read that an
+    /// export took, or that the end of its pause released, is not live, and
+    /// the registry removes it.
+    pub fn is_live(&self) -> bool {
+        match self {
+            KeptSource::PausedRead(read) => read.is_live(),
+            _ => true,
+        }
+    }
+
+    /// The seconds a paused read stays paused, for the window. Every other
+    /// source gives `None`.
+    pub fn paused_secs(&self) -> Option<u64> {
+        match self {
+            KeptSource::PausedRead(read) => Some(read.limit().as_secs()),
+            _ => None,
+        }
+    }
+
+    /// True when the source is a paused read on the session.
+    fn pauses_on(&self, session: &Arc<crate::session::Session>) -> bool {
+        matches!(self, KeptSource::PausedRead(read) if read.uses(session))
+    }
+}
+
 /// One entry of the registry.
 pub struct KeptResult {
     /// The connection of the run. A disconnect releases the entry, and an
@@ -156,6 +187,10 @@ pub struct KeptSet {
     /// grid can tell the user that every row is on this computer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub saved_rows: Option<u64>,
+    /// The seconds the read stays paused, for a set whose read paused at
+    /// the row limit. The window shows the time that is left.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paused_secs: Option<u64>,
 }
 
 /// The identifier of one kept set: the identifier of the request of the run
@@ -210,6 +245,7 @@ impl KeptResults {
         for (set, source) in sources {
             let id = kept_id(request_id, set);
             let saved_rows = source.saved_rows();
+            let paused_secs = source.paused_secs();
             let mut entry = KeptResult::new(connection_id, source);
             entry.kept_at = now;
             removed.extend(entries.insert(id.clone(), Arc::new(entry)));
@@ -217,6 +253,7 @@ impl KeptResults {
                 set,
                 id,
                 saved_rows,
+                paused_secs,
             });
         }
         removed.extend(prune(&mut entries, now));
@@ -295,6 +332,18 @@ impl KeptResults {
             .map(|folder| folder.path().to_path_buf())
     }
 
+    /// Removes each paused read on the session, and gives their number. A
+    /// command that needs the driver of the session calls this first,
+    /// because the task of a paused read keeps that driver. The drop of an
+    /// entry releases its read, and the task then frees the driver.
+    pub fn release_paused(&self, session: &Arc<crate::session::Session>) -> usize {
+        let removed: Vec<_> = self
+            .entries()
+            .extract_if(|_, entry| entry.source.pauses_on(session))
+            .collect();
+        removed.len()
+    }
+
     /// The number of kept results.
     #[cfg(test)]
     pub fn len(&self) -> usize {
@@ -302,13 +351,17 @@ impl KeptResults {
     }
 }
 
-/// Removes the entries past [`KEPT_RESULT_AGE`], and then the oldest entries
-/// past [`MAX_KEPT_RESULTS`]. Gives the removed entries, so the caller can
-/// drop them after the lock of the registry ends.
+/// Removes the entries past [`KEPT_RESULT_AGE`] and the sources that are no
+/// longer live, and then the oldest entries past [`MAX_KEPT_RESULTS`]. Gives
+/// the removed entries, so the caller can drop them after the lock of the
+/// registry ends.
 #[must_use]
 fn prune(entries: &mut HashMap<String, Arc<KeptResult>>, now: Instant) -> Vec<Arc<KeptResult>> {
     let mut removed: Vec<_> = entries
-        .extract_if(|_, entry| now.saturating_duration_since(entry.kept_at) >= KEPT_RESULT_AGE)
+        .extract_if(|_, entry| {
+            now.saturating_duration_since(entry.kept_at) >= KEPT_RESULT_AGE
+                || !entry.source.is_live()
+        })
         .map(|(_, entry)| entry)
         .collect();
     while entries.len() > MAX_KEPT_RESULTS {
@@ -410,11 +463,13 @@ pub(crate) mod tests {
                     set: 0,
                     id: "r1:0".into(),
                     saved_rows: None,
+                    paused_secs: None,
                 },
                 KeptSet {
                     set: 2,
                     id: "r1:2".into(),
                     saved_rows: None,
+                    paused_secs: None,
                 },
             ]
         );
@@ -580,6 +635,61 @@ pub(crate) mod tests {
         registry.set_spill_folder(PathBuf::from("/first"));
         registry.set_spill_folder(PathBuf::from("/second"));
         assert_eq!(registry.spill_folder(), Some(PathBuf::from("/first")));
+    }
+
+    #[tokio::test]
+    async fn a_paused_read_names_its_limit_and_ends_with_its_session() {
+        use crate::pause::tests::{paused_chunk_read, RowsDriver};
+        let read = paused_chunk_read(RowsDriver::new(5), 2).await;
+        let session = read.slot().session.clone();
+        let registry = KeptResults::default();
+        let kept = registry.keep(
+            "r1",
+            "c1",
+            vec![(0, KeptSource::PausedRead(read)), (1, fixed(1))],
+        );
+        assert_eq!(kept[0].paused_secs, Some(60));
+        assert_eq!(kept[1].paused_secs, None);
+        assert_eq!(
+            serde_json::to_value(&kept[0]).unwrap(),
+            json!({ "set": 0, "id": "r1:0", "pausedSecs": 60 })
+        );
+
+        // A paused read gives its rows to an export alone.
+        let entry = registry.get("r1:0").unwrap();
+        let mut sink = BufferSink::new(10);
+        let error = entry
+            .source
+            .read(&ExecOptions::default(), &mut sink)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, crate::error::Error::Unsupported(_)));
+        drop(entry);
+
+        // A release of another session leaves the read.
+        let other = Arc::new(crate::session::Session::new(Box::new(RowsDriver::new(0))));
+        assert_eq!(registry.release_paused(&other), 0);
+        assert_eq!(registry.release_paused(&session), 1);
+        assert_eq!(registry.len(), 1);
+        // The release ends the statement, and the driver is free again.
+        drop(session.driver.lock().await);
+    }
+
+    #[tokio::test]
+    async fn a_paused_read_that_an_export_took_leaves_the_registry() {
+        use crate::pause::tests::{paused_chunk_read, RowsDriver};
+        let registry = KeptResults::default();
+        let live = paused_chunk_read(RowsDriver::new(5), 2).await;
+        registry.keep("r1", "c1", vec![(0, KeptSource::PausedRead(live))]);
+        let read = paused_chunk_read(RowsDriver::new(5), 2).await;
+        read.continue_into(Box::new(BufferSink::new(10)), 10)
+            .await
+            .unwrap();
+        // The next change of the registry removes the read that is gone.
+        registry.keep("r2", "c1", vec![(0, KeptSource::PausedRead(read))]);
+        assert!(registry.get("r1:0").is_some());
+        assert!(registry.get("r2:0").is_none());
+        assert_eq!(registry.len(), 1);
     }
 
     #[tokio::test]

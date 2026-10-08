@@ -379,7 +379,7 @@ pub const CHUNK_BYTES: usize = 4 * 1024 * 1024;
 /// A measure of the bytes one value adds to a chunk. The measure counts the
 /// bytes of the texts and a small charge for each other value, so the sink can
 /// bound the size of a chunk without a second read of the rows.
-fn value_weight(value: &JsonValue) -> usize {
+pub(crate) fn value_weight(value: &JsonValue) -> usize {
     match value {
         JsonValue::Null | JsonValue::Bool(_) => 8,
         JsonValue::Number(_) => 24,
@@ -1238,6 +1238,7 @@ mod tests {
             set: 1,
             id: "r1:1".into(),
             saved_rows: None,
+            paused_secs: None,
         }]);
         sink.finish(RunSummary::default()).unwrap();
 

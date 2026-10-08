@@ -30,6 +30,7 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Runtime};
 use tokio_util::sync::CancellationToken;
 
+mod paused;
 pub mod run_file;
 
 /// Opens the driver that belongs to the engine of the record.
@@ -334,6 +335,11 @@ pub async fn release_session(
     state: tauri::State<'_, AppState>,
 ) -> Result<()> {
     if let Ok(open) = state.connection(&connection_id).await {
+        // A paused read keeps the driver of the session, so it ends with the
+        // session.
+        if let Some(session) = open.sessions.get(&tab_id).await {
+            state.kept.release_paused(&session);
+        }
         if open.sessions.release(&tab_id).await {
             log::info!("The session of tab '{tab_id}' on '{connection_id}' is released.");
         }
@@ -378,6 +384,10 @@ async fn session_for<R: Runtime>(
     let key = open.session_key(tab_id);
 
     if let Some(session) = open.sessions.get(&key).await {
+        // A paused read keeps the driver of the session, and the check of
+        // the session and the request both wait for that driver. The release
+        // lets the read end its statement and free the driver.
+        state.kept.release_paused(&session);
         let session =
             ensure_session_healthy(app, state, connection_id, &open, &key, session, token).await?;
         session.touch().await;
@@ -798,17 +808,24 @@ async fn driver_for_request<'s>(
     session: &'s Session,
     token: &CancellationToken,
 ) -> Result<tokio::sync::MutexGuard<'s, Box<dyn DatabaseDriver>>> {
+    armed_driver(state, request_id, session, token, session.driver.lock()).await
+}
+
+/// Waits for the lock of the driver of a session, and then arms the request,
+/// as [`driver_for_request`] describes. The caller gives the wait for the
+/// lock, so a run that pauses can take a lock that it owns.
+async fn armed_driver<G>(
+    state: &AppState,
+    request_id: &str,
+    session: &Session,
+    token: &CancellationToken,
+    lock: impl std::future::Future<Output = G>,
+) -> Result<G> {
     let guard = tokio::select! {
-        guard = session.driver.lock() => guard,
+        guard = lock => guard,
         () = token.cancelled() => return Err(Error::Cancelled),
     };
-    if token.is_cancelled()
-        || !state
-            .arm_request(request_id, session.cancel_handle.clone())
-            .await
-    {
-        return Err(Error::Cancelled);
-    }
+    arm(state, request_id, session, token).await?;
     if session.is_broken() {
         return Err(Error::Connection(
             "The session closed after a stop while this statement waited for it. Run the \
@@ -817,6 +834,24 @@ async fn driver_for_request<'s>(
         ));
     }
     Ok(guard)
+}
+
+/// Gives the record of a request the handle that stops the statement of the
+/// session. A request that the user stopped gives `Cancelled`.
+async fn arm(
+    state: &AppState,
+    request_id: &str,
+    session: &Session,
+    token: &CancellationToken,
+) -> Result<()> {
+    if token.is_cancelled()
+        || !state
+            .arm_request(request_id, session.cancel_handle.clone())
+            .await
+    {
+        return Err(Error::Cancelled);
+    }
+    Ok(())
 }
 
 /// Runs one exchange with a server under the two limits that apply to it: the
@@ -1005,6 +1040,11 @@ pub struct ExecuteRequest {
     /// turned it on.
     #[serde(default)]
     pub spill: Option<SpillRequest>,
+    /// The seconds the read may pause at the row limit, so an export can
+    /// continue it. Zero ends the read at the limit. A request with a spill
+    /// never pauses, because the spill file then gives the full result.
+    #[serde(default)]
+    pub pause_secs: u64,
 }
 
 /// What a run that keeps its full result sets on the local disk asks for.
@@ -1085,6 +1125,10 @@ async fn run_into_sink(
 /// The rows travel on the channel while the read runs, so neither side keeps
 /// the whole answer. The command itself gives no rows back: the last frame of
 /// the channel carries the messages of the server and the numbers of the run.
+///
+/// A run that asks for a pause can stop its read at the row limit and keep
+/// the statement open. The command then ends, and the frame at the end of the
+/// run names the paused read. See [`crate::pause`].
 #[tauri::command]
 pub async fn execute_query<R: Runtime>(
     app: AppHandle<R>,
@@ -1100,6 +1144,7 @@ pub async fn execute_query<R: Runtime>(
         query_params,
         options,
         spill,
+        pause_secs,
     } = request;
     let started = std::time::Instant::now();
     // The record goes in first, so a Stop while the session opens still
@@ -1124,58 +1169,92 @@ pub async fn execute_query<R: Runtime>(
         }
     };
 
+    let channel = on_chunk.clone();
     let grid = ChunkSink::new(on_chunk, options.max_rows);
-    let (outcome, mut sink) = match spill_plan(&state, spill, open.dialect, &ran, &options) {
-        Some((spill, folder)) => {
-            // The driver reads up to the export row limit, and the grid
-            // gets the rows up to its own limit.
-            let read = ExecOptions {
-                max_rows: spill.max_rows,
-                ..options
+    let point = paused::pause_point(
+        paused::pause_seconds(pause_secs, spill.is_some()),
+        key != DEFAULT_SESSION,
+        &session,
+        &ran,
+        open.dialect,
+        options.max_rows,
+    );
+    let (outcome, grid, paused) = match point {
+        Some(point) => {
+            let request = paused::PausableRequest {
+                state: &state,
+                request_id: &request_id,
+                slot: crate::pause::SessionSlot {
+                    sessions: open.sessions.clone(),
+                    key: key.clone(),
+                    session: session.clone(),
+                },
+                token: &token,
+                query: ran.clone(),
+                bound,
+                options,
+                point,
+                started,
             };
-            let mut sink =
-                SpillSink::new(grid, options.max_rows, folder, spill.max_bytes, &state.kept);
-            let outcome = run_into_sink(
-                &state,
-                &request_id,
-                &session,
-                &token,
-                &ran,
-                bound.as_ref(),
-                &read,
-                &mut sink,
-            )
-            .await;
-            (outcome, sink.into_grid())
+            let run = paused::run(request, grid).await;
+            (run.outcome, run.grid, run.paused)
         }
-        None => {
-            let mut sink = grid;
-            let outcome = run_into_sink(
-                &state,
-                &request_id,
-                &session,
-                &token,
-                &ran,
-                bound.as_ref(),
-                &options,
-                &mut sink,
-            )
-            .await;
-            (outcome, sink)
-        }
+        None => match spill_plan(&state, spill, open.dialect, &ran, &options) {
+            Some((spill, folder)) => {
+                // The driver reads up to the export row limit, and the grid
+                // gets the rows up to its own limit.
+                let read = ExecOptions {
+                    max_rows: spill.max_rows,
+                    ..options
+                };
+                let mut sink =
+                    SpillSink::new(grid, options.max_rows, folder, spill.max_bytes, &state.kept);
+                let outcome = run_into_sink(
+                    &state,
+                    &request_id,
+                    &session,
+                    &token,
+                    &ran,
+                    bound.as_ref(),
+                    &read,
+                    &mut sink,
+                )
+                .await;
+                (outcome, Some(sink.into_grid()), None)
+            }
+            None => {
+                let mut sink = grid;
+                let outcome = run_into_sink(
+                    &state,
+                    &request_id,
+                    &session,
+                    &token,
+                    &ran,
+                    bound.as_ref(),
+                    &options,
+                    &mut sink,
+                )
+                .await;
+                (outcome, Some(sink), None)
+            }
+        },
     };
     let outcome = in_sent_text(outcome, &query, &ran);
 
     state.end_request(&request_id).await;
+    // A limit that stopped a run that can pause took its sink, so the end
+    // frame goes out through a new one.
+    let mut sink = grid.unwrap_or_else(|| ChunkSink::new(channel, 0));
     // A set that the row limit cut can stay in the registry, also when a
     // later statement of the script failed, because the grid shows that set.
     // A stop, a time limit or an error can end a set early, so a spill file
     // stays only after a run that ended well, because its file can miss
     // rows.
-    let sources = sources_to_keep(
+    let mut sources = sources_to_keep(
         sink.take_kept(),
         matches!(outcome, Bounded::Answered(Ok(_))),
     );
+    sources.extend(paused.map(|(set, read)| (set, crate::kept::KeptSource::PausedRead(read))));
     let kept = state.kept.keep(&request_id, &connection_id, sources);
     sink.announce_kept(kept);
     match finish_run(&state, &connection_id, &open, &key, &session, outcome).await {
@@ -2943,6 +3022,9 @@ async fn write_kept(
     format: ExportFormat,
     options: &ExecOptions,
 ) -> Result<ExportSummary> {
+    if let crate::kept::KeptSource::PausedRead(read) = &kept.source {
+        return paused::export(state, request_id, kept, read, path, format, options).await;
+    }
     let token = state.start_request(request_id, &kept.connection_id).await;
     let written = async {
         // An error, a stop or the time limit drops the sink before
@@ -5071,6 +5153,7 @@ mod tests {
             query_params: None,
             options: None,
             spill: None,
+            pause_secs: 0,
         }
     }
 

@@ -13,6 +13,20 @@ use serde_json::Value as JsonValue;
 pub enum SinkControl {
     Continue,
     Stop,
+    /// The sink kept the row and the driver must wait for
+    /// [`RowSink::resume`] before it reads the next row. Only a sink that
+    /// gives a [`PausePoint`] answers this. [`feed`] does the wait.
+    Pause,
+}
+
+/// The place where a sink can pause a read, as [`RowSink::pause_point`]
+/// gives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PausePoint {
+    /// The count of rows of a set after which the sink pauses the read.
+    pub rows: usize,
+    /// The longest time the read stays paused.
+    pub limit: std::time::Duration,
 }
 
 /// The numbers of one execution that travel beside the rows.
@@ -26,6 +40,7 @@ pub struct RunSummary {
 /// Where the rows of one execution go. The driver calls the methods in the
 /// order of the run: `begin_set`, then the rows of the set, then `end_set`,
 /// for each set. A message can arrive at any point of the run.
+#[async_trait::async_trait]
 pub trait RowSink: Send {
     /// Starts one result set. Called once for each set of the run.
     fn begin_set(&mut self, columns: Vec<ColumnInfo>) -> Result<()>;
@@ -47,6 +62,33 @@ pub trait RowSink: Send {
     /// source, because a sink that writes a file or a buffer has no later
     /// use for it.
     fn keep_source(&mut self, _source: KeptSource) {}
+
+    /// The place where this sink can pause the read, or `None` for a sink
+    /// that never pauses. A driver uses it to stop between two exchanges
+    /// with the server at that place, and to keep the server from closing
+    /// a connection that does not read for the length of the pause.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn pause_point(&self) -> Option<PausePoint> {
+        None
+    }
+
+    /// Waits until a paused read can go on, after `row` answered `Pause`.
+    /// The answer tells the driver to go on or to stop. The default stops,
+    /// because a sink that never pauses has nothing to wait for.
+    #[cfg_attr(not(test), allow(dead_code))]
+    async fn resume(&mut self) -> Result<SinkControl> {
+        Ok(SinkControl::Stop)
+    }
+}
+
+/// Gives one row to the sink, and waits for [`RowSink::resume`] when the
+/// sink pauses the read. The answer is `Continue` or `Stop`.
+#[cfg_attr(not(test), allow(dead_code))]
+pub async fn feed(sink: &mut dyn RowSink, row: Vec<JsonValue>) -> Result<SinkControl> {
+    match sink.row(row)? {
+        SinkControl::Pause => sink.resume().await,
+        control => Ok(control),
+    }
 }
 
 /// A sink that keeps the rows in memory and builds a `QueryResponse`. It
@@ -273,6 +315,44 @@ mod tests {
         let response = sink.into_response(RunSummary::default());
         assert!(response.results[0].rows.is_empty());
         assert!(response.results[0].truncated);
+    }
+
+    /// A sink that pauses at each row, and then gives the answer of the
+    /// test.
+    struct Pausing(SinkControl);
+
+    impl RowSink for Pausing {
+        fn begin_set(&mut self, _columns: Vec<ColumnInfo>) -> Result<()> {
+            Ok(())
+        }
+        fn row(&mut self, _row: Vec<JsonValue>) -> Result<SinkControl> {
+            Ok(SinkControl::Pause)
+        }
+        fn end_set(&mut self, _truncated: bool) -> Result<()> {
+            Ok(())
+        }
+        fn message(&mut self, _message: Message) {}
+    }
+
+    #[tokio::test]
+    async fn a_fed_row_waits_for_the_sink_that_pauses() {
+        // The default wait stops the read.
+        let mut sink = Pausing(SinkControl::Continue);
+        assert_eq!(feed(&mut sink, row(1)).await.unwrap(), SinkControl::Stop);
+        assert_eq!(sink.pause_point(), None);
+        sink.begin_set(columns()).unwrap();
+        sink.end_set(false).unwrap();
+        sink.message(Message::info("note"));
+        assert_eq!(sink.0, SinkControl::Continue);
+
+        // A sink that does not pause gives its answer as it is.
+        let mut buffer = BufferSink::new(1);
+        buffer.begin_set(columns()).unwrap();
+        assert_eq!(
+            feed(&mut buffer, row(1)).await.unwrap(),
+            SinkControl::Continue
+        );
+        assert_eq!(feed(&mut buffer, row(2)).await.unwrap(), SinkControl::Stop);
     }
 
     // The sink crosses `await` points in the drivers, so it must be `Send`.

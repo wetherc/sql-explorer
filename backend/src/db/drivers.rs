@@ -64,6 +64,15 @@ pub trait DatabaseDriver: Send + Sync {
         false
     }
 
+    /// True when the driver can pause a read at the place that the sink
+    /// gives in `RowSink::pause_point`. Such a driver gives each row through
+    /// `sink::feed`, so it waits while the sink pauses, and the statement
+    /// stays open on the server for that time. The default is false, and
+    /// the command layer then never gives the driver a sink that pauses.
+    fn pauses_reads(&self) -> bool {
+        false
+    }
+
     /// Tells the server to end each later statement of this session that
     /// waits for a lock longer than `limit`, with an error. The command layer
     /// calls this on the drivers of the catalog reads alone, so a lock of
