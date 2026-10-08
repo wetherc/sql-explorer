@@ -312,6 +312,12 @@ impl<G: RowSink + 'static> RowSink for PausingSink<G> {
         }
     }
 
+    fn progress(&mut self, rows: u64, bytes: u64) {
+        if let Phase::Visible(grid) = &mut self.phase {
+            grid.progress(rows, bytes);
+        }
+    }
+
     fn pause_point(&self) -> Option<PausePoint> {
         Some(self.point)
     }
@@ -381,6 +387,10 @@ impl<S: RowSink> RowSink for SharedSink<S> {
 
     fn not_kept(&mut self, reason: UnsavedReason) {
         self.sink().not_kept(reason);
+    }
+
+    fn progress(&mut self, rows: u64, bytes: u64) {
+        self.sink().progress(rows, bytes);
     }
 }
 

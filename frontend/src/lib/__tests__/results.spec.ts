@@ -7,6 +7,7 @@ const FRAME_CHUNK = 2
 const FRAME_END_SET = 3
 const FRAME_END = 4
 const FRAME_MESSAGE = 5
+const FRAME_PROGRESS = 7
 
 /**
  * A writer of the frames, which holds the same form as the writer of the
@@ -519,6 +520,29 @@ describe('the reader of the chunks', () => {
       .text(JSON.stringify({ messages: [], rowsAffected: null, elapsedMs: 1, stats: null }))
     quiet.feed(both.buffer())
     expect(ends).toHaveLength(1)
+    expect(quiet.failure).toBeNull()
+  })
+
+  it('reports the progress of a saved set, with counts past 32 bits', () => {
+    const writer = new Writer()
+    // 5,000,000,000 bytes is 1 * 2**32 + 705,032,704.
+    writer.u8(FRAME_PROGRESS).u32(1).u32(1_200_000).u32(0).u32(705_032_704).u32(1)
+    writer.u8(FRAME_MESSAGE).text(JSON.stringify({ level: 'info', text: 'after', detail: null }))
+    const progress: unknown[] = []
+    const messages: string[] = []
+    const stream = new ResultStream({
+      onProgress: (entry) => progress.push(entry),
+      onMessage: (message) => messages.push(message.text),
+      onSet: () => {},
+      onEnd: () => {},
+    })
+    stream.feed(writer.buffer())
+    expect(progress).toEqual([{ set: 1, rows: 1_200_000, bytes: 5_000_000_000 }])
+    expect(messages).toEqual(['after'])
+
+    // A reader with no progress handler skips the frame.
+    const { stream: quiet } = collect()
+    quiet.feed(new Writer().u8(FRAME_PROGRESS).u32(0).u32(1).u32(0).u32(2).u32(0).buffer())
     expect(quiet.failure).toBeNull()
   })
 

@@ -673,6 +673,10 @@ impl<F: RowSink, G: RowSink> RowSink for TeeSink<F, G> {
     fn not_kept(&mut self, reason: UnsavedReason) {
         self.grid.not_kept(reason);
     }
+
+    fn progress(&mut self, rows: u64, bytes: u64) {
+        self.grid.progress(rows, bytes);
+    }
 }
 
 #[cfg(test)]
@@ -700,12 +704,15 @@ mod tests {
     }
 
     #[test]
-    fn the_reason_of_an_unsaved_set_goes_to_the_grid() {
-        use crate::db::sink::testing::ReasonSink;
-        let mut tee = TeeSink::new(ReasonSink::default(), ReasonSink::default(), 2);
+    fn the_reports_of_a_spill_go_to_the_grid() {
+        use crate::db::sink::testing::ReportSink;
+        let mut tee = TeeSink::new(ReportSink::default(), ReportSink::default(), 2);
         tee.not_kept(UnsavedReason::DiskFailed);
+        tee.progress(7, 8);
         assert!(tee.file.reasons.is_empty());
+        assert!(tee.file.progress.is_empty());
         assert_eq!(tee.grid.reasons, vec![UnsavedReason::DiskFailed]);
+        assert_eq!(tee.grid.progress, vec![(7, 8)]);
     }
 
     #[test]

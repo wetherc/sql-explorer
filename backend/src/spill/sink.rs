@@ -6,6 +6,18 @@ use crate::db::{ColumnInfo, Message};
 use crate::error::Result;
 use crate::kept::{KeptResults, KeptSource, UnsavedReason};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+/// The rows of a spill after which the sink always reports its progress.
+const PROGRESS_ROWS: u64 = 50_000;
+
+/// The time after which the sink reports the progress of a spill, when
+/// fewer than `PROGRESS_ROWS` rows came since the last report.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
+
+/// The sink reads the clock once in this number of rows, because a read of
+/// the clock for each row costs time on a long read.
+const PROGRESS_CHECK_ROWS: u64 = 1000;
 
 /// The message for a result set whose spill passed the cap of the disk use.
 pub const FULL_MESSAGE: &str = "This result needs more disk space than Settings allows for saved \
@@ -57,6 +69,12 @@ pub struct SpillSink<'k, G: RowSink> {
     shown: usize,
     /// True when the open set had more rows than the grid takes.
     cut: bool,
+    /// The rows of the open spill at its last progress report.
+    reported_rows: u64,
+    /// The time of the last progress report, or of the start of the set.
+    reported_at: Instant,
+    /// The time between two progress reports.
+    progress_interval: Duration,
 }
 
 impl<'k, G: RowSink> SpillSink<'k, G> {
@@ -77,6 +95,27 @@ impl<'k, G: RowSink> SpillSink<'k, G> {
             halted: None,
             shown: 0,
             cut: false,
+            reported_rows: 0,
+            reported_at: Instant::now(),
+            progress_interval: PROGRESS_INTERVAL,
+        }
+    }
+
+    /// Gives the grid the rows and the bytes of the open spill, after
+    /// `PROGRESS_ROWS` rows or after `progress_interval`, whichever comes
+    /// first.
+    fn report_progress(&mut self) {
+        let Some(writer) = self.writer.as_ref() else {
+            return;
+        };
+        let rows = writer.rows();
+        let due = rows - self.reported_rows >= PROGRESS_ROWS
+            || (rows % PROGRESS_CHECK_ROWS == 0
+                && self.reported_at.elapsed() >= self.progress_interval);
+        if due {
+            self.reported_rows = rows;
+            self.reported_at = Instant::now();
+            self.grid.progress(rows, writer.bytes());
         }
     }
 
@@ -108,6 +147,8 @@ impl<G: RowSink> RowSink for SpillSink<'_, G> {
     fn begin_set(&mut self, columns: Vec<ColumnInfo>) -> Result<()> {
         self.shown = 0;
         self.cut = false;
+        self.reported_rows = 0;
+        self.reported_at = Instant::now();
         self.writer = self.halted.is_none().then(|| {
             SpillWriter::new(
                 self.folder.clone(),
@@ -135,6 +176,7 @@ impl<G: RowSink> RowSink for SpillSink<'_, G> {
             return self.grid.row(row);
         }
         self.cut = true;
+        self.report_progress();
         Ok(match self.writer {
             Some(_) => SinkControl::Continue,
             None => SinkControl::Stop,
@@ -189,6 +231,7 @@ mod tests {
         rows: BufferSink,
         sources: Vec<KeptSource>,
         reasons: Vec<UnsavedReason>,
+        progress: Vec<(u64, u64)>,
     }
 
     impl Grid {
@@ -197,6 +240,7 @@ mod tests {
                 rows: BufferSink::new(max_rows),
                 sources: Vec::new(),
                 reasons: Vec::new(),
+                progress: Vec::new(),
             }
         }
 
@@ -223,6 +267,9 @@ mod tests {
         }
         fn not_kept(&mut self, reason: UnsavedReason) {
             self.reasons.push(reason);
+        }
+        fn progress(&mut self, rows: u64, bytes: u64) {
+            self.progress.push((rows, bytes));
         }
     }
 
@@ -282,6 +329,40 @@ mod tests {
         assert_eq!(set.rows, (0..5).map(row).collect::<Vec<_>>());
         drop(source);
         assert_eq!(kept.disk_use().bytes(), 0);
+    }
+
+    #[test]
+    fn a_spill_reports_its_progress_past_the_grid_limit() {
+        let folder = tempfile::tempdir().unwrap();
+        let kept = KeptResults::default();
+        let rows = 2 * PROGRESS_ROWS as usize + 10;
+        let mut sink = SpillSink::new(Grid::new(10), 10, folder.path().into(), u64::MAX, &kept);
+        // The clock never comes due, so only the count of rows reports.
+        sink.progress_interval = Duration::MAX;
+        send_set(&mut sink, rows, false);
+        let grid = sink.into_grid();
+        let counts: Vec<u64> = grid.progress.iter().map(|(rows, _)| *rows).collect();
+        assert_eq!(counts, vec![PROGRESS_ROWS, 2 * PROGRESS_ROWS]);
+        assert!(grid.progress[0].1 > 0);
+        assert!(grid.progress[1].1 > grid.progress[0].1);
+    }
+
+    #[test]
+    fn a_spill_reports_its_progress_when_the_interval_passes() {
+        let folder = tempfile::tempdir().unwrap();
+        let kept = KeptResults::default();
+        let mut sink = SpillSink::new(Grid::new(10), 10, folder.path().into(), u64::MAX, &kept);
+        sink.progress_interval = Duration::ZERO;
+        // The rows inside the grid limit report nothing, so the first
+        // report comes at the check past the limit.
+        send_set(&mut sink, 2 * PROGRESS_CHECK_ROWS as usize + 1, false);
+        let counts: Vec<u64> = sink.grid.progress.iter().map(|(rows, _)| *rows).collect();
+        assert_eq!(counts, vec![PROGRESS_CHECK_ROWS, 2 * PROGRESS_CHECK_ROWS]);
+
+        // A set without a spill reports nothing.
+        sink.halted = Some(UnsavedReason::DiskLimit);
+        send_set(&mut sink, 2 * PROGRESS_CHECK_ROWS as usize, false);
+        assert_eq!(sink.into_grid().progress.len(), 2);
     }
 
     #[test]

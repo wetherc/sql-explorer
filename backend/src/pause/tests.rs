@@ -698,15 +698,20 @@ async fn a_release_that_passes_its_limit_closes_the_session() {
 }
 
 #[test]
-fn the_reason_of_an_unsaved_set_reaches_the_grid_and_a_shared_sink() {
-    use crate::db::sink::testing::ReasonSink;
+fn the_reports_of_a_spill_reach_the_grid_and_a_shared_sink() {
+    use crate::db::sink::testing::ReportSink;
     use crate::kept::UnsavedReason;
-    let (mut sink, _control) = PausingSink::new(ReasonSink::default(), point(1));
+    let (mut sink, _control) = PausingSink::new(ReportSink::default(), point(1));
     sink.not_kept(UnsavedReason::ExportLimit);
+    sink.progress(3, 4);
     let grid = sink.into_grid().expect("the read never paused");
     assert_eq!(grid.reasons, vec![UnsavedReason::ExportLimit]);
+    assert_eq!(grid.progress, vec![(3, 4)]);
 
-    let shared = Arc::new(Mutex::new(ReasonSink::default()));
+    let shared = Arc::new(Mutex::new(ReportSink::default()));
     SharedSink(shared.clone()).not_kept(UnsavedReason::Stopped);
-    assert_eq!(shared.lock().unwrap().reasons, vec![UnsavedReason::Stopped]);
+    SharedSink(shared.clone()).progress(5, 6);
+    let shared = shared.lock().unwrap();
+    assert_eq!(shared.reasons, vec![UnsavedReason::Stopped]);
+    assert_eq!(shared.progress, vec![(5, 6)]);
 }

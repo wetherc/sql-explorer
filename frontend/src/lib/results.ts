@@ -17,6 +17,7 @@ const FRAME_CHUNK = 2
 const FRAME_END_SET = 3
 const FRAME_END = 4
 const FRAME_MESSAGE = 5
+const FRAME_PROGRESS = 7
 
 const ENCODING_NULL = 0
 const ENCODING_BOOL = 1
@@ -365,6 +366,14 @@ export interface RunEnd {
   unsaved?: UnsavedSet[]
 }
 
+/** How far the backend got with the file that saves every row of a set. */
+export interface SpillProgress {
+  /** The number of the set in its run, from zero. */
+  set: number
+  rows: number
+  bytes: number
+}
+
 /** What the reader of a run tells its caller. */
 export interface ResultStreamHandlers {
   /** A result set has opened. The table holds no row yet and fills while
@@ -376,6 +385,8 @@ export interface ResultStreamHandlers {
   onSet: (table: ResultTable) => void
   /** The server sent a message while the run goes on. */
   onMessage?: (message: Message) => void
+  /** The backend saved more rows of a set past the row limit of the grid. */
+  onProgress?: (progress: SpillProgress) => void
   /** The run has ended. */
   onEnd: (end: RunEnd) => void
 }
@@ -519,6 +530,9 @@ export class ResultStream {
         case FRAME_MESSAGE:
           at = this.readMessage(view, buffer, at)
           break
+        case FRAME_PROGRESS:
+          at = this.readProgress(view, at)
+          break
         default:
           throw new Error(`The result contains a frame of unknown type ${frameType}.`)
       }
@@ -581,12 +595,29 @@ export class ResultStream {
     return json.at
   }
 
+  private readProgress(view: DataView, at: number): number {
+    this.handlers.onProgress?.({
+      set: view.getUint32(at, true),
+      rows: readU64(view, at + 4),
+      bytes: readU64(view, at + 12),
+    })
+    return at + 20
+  }
+
   private readEnd(view: DataView, buffer: ArrayBuffer, at: number): number {
     const json = readText(view, buffer, at)
     this.ended = true
     this.handlers.onEnd(JSON.parse(json.text) as RunEnd)
     return json.at
   }
+}
+
+/**
+ * Reads an unsigned 64-bit number as a JavaScript number. A count past 2**53
+ * loses its last digits, which a count of rows or bytes never reaches.
+ */
+function readU64(view: DataView, at: number): number {
+  return view.getUint32(at, true) + view.getUint32(at + 4, true) * 2 ** 32
 }
 
 /** Reads a length and the text that follows it. */

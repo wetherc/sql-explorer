@@ -454,6 +454,16 @@ impl SpillWriter {
         Ok(())
     }
 
+    /// The number of rows that the spill has so far.
+    pub fn rows(&self) -> u64 {
+        self.rows
+    }
+
+    /// The bytes that the spill has so far, on the disk and in the buffer.
+    pub fn bytes(&self) -> u64 {
+        self.reserved.bytes + self.buffer.len() as u64
+    }
+
     /// Sends the buffer to the writer thread, and starts the thread first
     /// when it is not running.
     fn flush(&mut self, make_room: &mut dyn FnMut() -> bool) -> std::result::Result<(), SpillEnd> {

@@ -28,6 +28,7 @@ pub const FRAME_CHUNK: u8 = 2;
 pub const FRAME_END_SET: u8 = 3;
 pub const FRAME_END: u8 = 4;
 pub const FRAME_MESSAGE: u8 = 5;
+pub const FRAME_PROGRESS: u8 = 7;
 
 /// How the values of one column of one chunk are held.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,6 +212,15 @@ pub fn write_end_set(buffer: &mut Vec<u8>, set: u32, truncated: bool) {
 pub fn write_message(buffer: &mut Vec<u8>, message_json: &str) {
     buffer.push(FRAME_MESSAGE);
     write_text(buffer, message_json);
+}
+
+/// Writes the frame that reports the progress of the spill of one result
+/// set: the rows and the bytes that the spill file has so far.
+pub fn write_progress(buffer: &mut Vec<u8>, set: u32, rows: u64, bytes: u64) {
+    buffer.push(FRAME_PROGRESS);
+    buffer.extend_from_slice(&set.to_le_bytes());
+    buffer.extend_from_slice(&rows.to_le_bytes());
+    buffer.extend_from_slice(&bytes.to_le_bytes());
 }
 
 /// Writes the frame that ends the run. The JSON contains the messages that no
@@ -636,6 +646,14 @@ impl RowSink for ChunkSink {
     fn not_kept(&mut self, reason: UnsavedReason) {
         self.reason = Some(reason);
     }
+
+    /// Sends the progress of the spill of the open set. A frame that the
+    /// channel refuses is dropped, because the next one replaces it.
+    fn progress(&mut self, rows: u64, bytes: u64) {
+        let mut buffer = Vec::new();
+        write_progress(&mut buffer, self.set, rows, bytes);
+        let _ = self.send(buffer);
+    }
 }
 
 #[cfg(test)]
@@ -672,6 +690,11 @@ mod tests {
         Message {
             json: String,
         },
+        Progress {
+            set: u32,
+            rows: u64,
+            bytes: u64,
+        },
     }
 
     impl<'a> Reader<'a> {
@@ -688,6 +711,12 @@ mod tests {
         fn u32(&mut self) -> u32 {
             let value = u32::from_le_bytes(self.bytes[self.at..self.at + 4].try_into().unwrap());
             self.at += 4;
+            value
+        }
+
+        fn u64(&mut self) -> u64 {
+            let value = u64::from_le_bytes(self.bytes[self.at..self.at + 8].try_into().unwrap());
+            self.at += 8;
             value
         }
 
@@ -740,6 +769,11 @@ mod tests {
                     summary: self.text(),
                 },
                 FRAME_MESSAGE => Frame::Message { json: self.text() },
+                FRAME_PROGRESS => Frame::Progress {
+                    set: self.u32(),
+                    rows: self.u64(),
+                    bytes: self.u64(),
+                },
                 other => panic!("the frame {other} is unknown"),
             }
         }
@@ -1211,6 +1245,25 @@ mod tests {
     }
 
     #[test]
+    fn the_sink_sends_the_progress_of_a_spill_as_a_frame() {
+        let (channel, messages) = collecting_channel();
+        let mut sink = ChunkSink::new(channel, 10);
+        sink.begin_set(columns()).unwrap();
+        sink.end_set(false).unwrap();
+        sink.begin_set(columns()).unwrap();
+        sink.progress(1_200_000, 5_000_000_000);
+        let frames = frames_of(&messages.lock().unwrap());
+        assert_eq!(
+            frames.last(),
+            Some(&Frame::Progress {
+                set: 1,
+                rows: 1_200_000,
+                bytes: 5_000_000_000,
+            })
+        );
+    }
+
+    #[test]
     fn the_sink_sends_a_set_as_frames() {
         let (channel, messages) = collecting_channel();
         let mut sink = ChunkSink::new(channel, 10);
@@ -1559,6 +1612,7 @@ mod tests {
         sink.row(vec![json!(2)]).unwrap();
         sink.end_set(false).unwrap();
         sink.message(Message::info("third"));
+        sink.progress(2, 9);
         sink.finish(RunSummary::default()).unwrap();
 
         let order: Vec<String> = frames_of(&messages.lock().unwrap())
@@ -1572,11 +1626,22 @@ mod tests {
                     value["text"].as_str().unwrap().to_string()
                 }
                 Frame::End { .. } => "end".to_string(),
+                Frame::Progress { rows, .. } => format!("progress {rows}"),
             })
             .collect();
         assert_eq!(
             order,
-            ["first", "begin", "rows 1", "second", "rows 2", "end set", "third", "end"]
+            [
+                "first",
+                "begin",
+                "rows 1",
+                "second",
+                "rows 2",
+                "end set",
+                "third",
+                "progress 2",
+                "end"
+            ]
         );
     }
 

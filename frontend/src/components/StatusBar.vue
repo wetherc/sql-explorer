@@ -21,6 +21,14 @@
       {{ stateLabel }}
     </div>
 
+    <template v-if="state?.saving">
+      <v-divider vertical />
+      <div data-test="status-saving">
+        Saving all rows: {{ shortCount(state.saving.rows) }} rows,
+        {{ shortSize(state.saving.bytes) }}
+      </div>
+    </template>
+
     <!-- While the statement runs, the time that has passed stands in the
          place the final time takes later, so a reader watches one figure. -->
     <template v-if="runningMs !== null">
@@ -62,6 +70,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { formatBytes, formatCost, formatDuration, formatRowCount, scanCost } from '@/lib/format'
+import { shortCount, shortSize } from '@/lib/kept'
 import { useConnectionsStore } from '@/stores/connections'
 import { useQueryStore } from '@/stores/query'
 import { useSettingsStore } from '@/stores/settings'

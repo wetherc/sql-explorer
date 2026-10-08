@@ -413,6 +413,10 @@ impl<S: RowSink> RowSink for MessageTee<S> {
         self.inner.not_kept(reason);
     }
 
+    fn progress(&mut self, rows: u64, bytes: u64) {
+        self.inner.progress(rows, bytes);
+    }
+
     fn pause_point(&self) -> Option<PausePoint> {
         self.inner.pause_point()
     }

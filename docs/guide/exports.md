@@ -133,7 +133,9 @@ file, so the server does no more work and the export finishes much sooner.
 
 Runs take longer with the option on, because the statement keeps running until
 it reaches the end of its result or the export row limit. The tab shows the
-statement as running for that time, and **Stop** works as usual.
+statement as running for that time, and **Stop** works as usual. Once the grid
+has its rows, the status bar shows how much of the result the app has saved so
+far, for example **Saving all rows: 1.2M rows, 340 MB**.
 
 The app saves the result of a single statement on any database except Athena.
 A script with more than one statement reads only up to the grid's row limit.

@@ -68,6 +68,7 @@ describe('newQueryState', () => {
       exporting: null,
       messagesFile: null,
       openTransactionOn: null,
+      saving: null,
     })
   })
 })
@@ -447,6 +448,26 @@ describe('query store', () => {
     const queries = useQueryStore()
     await queries.execute('t1', 'c1', 'SELECT 1')
     expect(marks).toEqual([false, true])
+  })
+
+  it('shows the progress of a saved set until the set ends', async () => {
+    const seen: unknown[] = []
+    apiStub.executeQuery.mockImplementation(async (_request, handlers) => {
+      const state = useQueryStore().stateFor('t1')
+      const table = new ResultTable([{ name: 'n', typeName: 'int' }])
+      handlers.onBegin?.(table)
+      handlers.onProgress?.({ set: 0, rows: 50_000, bytes: 4096 })
+      seen.push(state.saving)
+      handlers.onSet(table)
+      seen.push(state.saving)
+      handlers.onProgress?.({ set: 1, rows: 7, bytes: 8 })
+      handlers.onEnd({ messages: [], rowsAffected: null, elapsedMs: 1, stats: null })
+    })
+    const queries = useQueryStore()
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    expect(seen).toEqual([{ rows: 50_000, bytes: 4096 }, null])
+    // The end of the run clears the progress of a set that never ended.
+    expect(queries.stateFor('t1').saving).toBeNull()
   })
 
   it('passes over rows for a set that it never opened', async () => {

@@ -155,6 +155,9 @@ export interface QueryState {
   /** The connection whose session of this tab is inside an open
    *  transaction, or null. Closing the tab rolls that transaction back. */
   openTransactionOn: string | null
+  /** The rows and the bytes that the backend saved so far of a set past the
+   *  row limit of the grid, while the run saves its full results. */
+  saving: { rows: number; bytes: number } | null
 }
 
 /** Builds the state a tab starts with. */
@@ -179,6 +182,7 @@ export function newQueryState(): QueryState {
     exporting: null,
     messagesFile: null,
     openTransactionOn: null,
+    saving: null,
   }
 }
 
@@ -456,6 +460,7 @@ export const useQueryStore = defineStore('query', () => {
     state.startedAt = Date.now()
     state.activePaneId = null
     state.stats = null
+    state.saving = null
 
     // The history holds the name and not the identifier, so an entry stays
     // readable after the record of the connection is gone.
@@ -523,8 +528,13 @@ export const useQueryStore = defineStore('query', () => {
             } else {
               openPane(table)
             }
+            // The file of the set is complete, or the set saved none.
+            state.saving = null
           },
           onMessage: (message) => addMessage(state, message),
+          onProgress: ({ rows, bytes }) => {
+            state.saving = { rows, bytes }
+          },
           onEnd: (end) => {
             // The end gives the messages that did not stream before it.
             for (const message of end.messages) {
@@ -586,6 +596,7 @@ export const useQueryStore = defineStore('query', () => {
       }
       state.running = false
       state.stopping = false
+      state.saving = null
       state.requestId = null
       state.requestConnectionId = null
       state.startedAt = null

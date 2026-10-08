@@ -101,6 +101,20 @@ describe('StatusBar', () => {
     expect(wrapper.find('[data-test="status-state"]').text()).toBe('Running…')
   })
 
+  it('reports how far the saving of all rows got', async () => {
+    const wrapper = mountWithPlugins(StatusBar)
+    const tab = useTabsStore().add({ connectionId: 'c1' })
+    const state = useQueryStore().stateFor(tab.id)
+    state.running = true
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-test="status-saving"]').exists()).toBe(false)
+    state.saving = { rows: 1_200_000, bytes: 340 * 1024 ** 2 }
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-test="status-saving"]').text()).toBe(
+      'Saving all rows: 1.2M rows, 340 MB',
+    )
+  })
+
   it('counts the time while the statement runs', async () => {
     vi.useFakeTimers()
     const start = Date.now()

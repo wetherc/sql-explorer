@@ -68,6 +68,11 @@ pub trait RowSink: Send {
     /// the user why a cut set was not saved. The default drops the reason.
     fn not_kept(&mut self, _reason: UnsavedReason) {}
 
+    /// Receives the rows and the bytes that the spill file of the open set
+    /// has so far. The sink that spills a run calls this while it reads past
+    /// the row limit of the grid. The default drops the values.
+    fn progress(&mut self, _rows: u64, _bytes: u64) {}
+
     /// The place where this sink can pause the read, or `None` for a sink
     /// that never pauses. A driver uses it to stop between two exchanges
     /// with the server at that place, and to keep the server from closing
@@ -168,13 +173,15 @@ impl RowSink for BufferSink {
 pub(crate) mod testing {
     use super::*;
 
-    /// A sink that records the reasons of `not_kept` and drops all else.
+    /// A sink that records the reasons of `not_kept` and the values of
+    /// `progress`, and drops all else.
     #[derive(Default)]
-    pub(crate) struct ReasonSink {
+    pub(crate) struct ReportSink {
         pub reasons: Vec<UnsavedReason>,
+        pub progress: Vec<(u64, u64)>,
     }
 
-    impl RowSink for ReasonSink {
+    impl RowSink for ReportSink {
         fn begin_set(&mut self, _columns: Vec<ColumnInfo>) -> Result<()> {
             Ok(())
         }
@@ -192,17 +199,30 @@ pub(crate) mod testing {
         fn not_kept(&mut self, reason: UnsavedReason) {
             self.reasons.push(reason);
         }
+
+        fn progress(&mut self, rows: u64, bytes: u64) {
+            self.progress.push((rows, bytes));
+        }
     }
 
     #[test]
-    fn the_reason_sink_records_reasons_and_drops_the_rest() {
-        let mut sink = ReasonSink::default();
+    fn the_report_sink_records_reports_and_drops_the_rest() {
+        let mut sink = ReportSink::default();
         sink.begin_set(Vec::new()).unwrap();
         assert_eq!(sink.row(Vec::new()).unwrap(), SinkControl::Continue);
         sink.end_set(false).unwrap();
         sink.message(Message::info("note"));
         sink.not_kept(UnsavedReason::DiskLimit);
         assert_eq!(sink.reasons, vec![UnsavedReason::DiskLimit]);
+        sink.progress(1, 2);
+        assert_eq!(sink.progress, vec![(1, 2)]);
+    }
+
+    #[test]
+    fn a_sink_drops_the_progress_of_a_spill_by_default() {
+        let mut sink = BufferSink::new(1);
+        sink.progress(1, 2);
+        assert!(sink.into_response(RunSummary::default()).results.is_empty());
     }
 }
 
