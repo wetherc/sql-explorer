@@ -330,6 +330,34 @@ describe('tabs store', () => {
     })
   })
 
+  it('starts a write of the tabs only after the write before it ends', async () => {
+    const tabs = useTabsStore()
+    const tab = tabs.add({ query: 'SELECT 1' })
+    let endFirst: () => void = () => {}
+    apiStub.saveWorkspace
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            endFirst = resolve
+          }),
+      )
+      .mockResolvedValueOnce(undefined)
+
+    const first = tabs.persist()
+    tabs.setQuery(tab.id, 'SELECT 2')
+    const second = tabs.persist()
+    await Promise.resolve()
+    await Promise.resolve()
+    // The second write waits while the first one runs.
+    expect(apiStub.saveWorkspace).toHaveBeenCalledTimes(1)
+
+    endFirst()
+    await first
+    await second
+    expect(apiStub.saveWorkspace).toHaveBeenCalledTimes(2)
+    expect(apiStub.saveWorkspace.mock.calls[1]?.[0].tabs[0].query).toBe('SELECT 2')
+  })
+
   it('holds the values of the parameters of one tab', () => {
     const tabs = useTabsStore()
     const tab = tabs.add({ query: 'SELECT :id' })

@@ -253,7 +253,22 @@ export const useTabsStore = defineStore('tabs', () => {
     }
   }
 
-  async function persist(): Promise<void> {
+  // The last write of the tabs in the queue. Each write starts after the one
+  // before it ends. Two writes at once reach the backend on two threads, and
+  // the older record could then reach the disk last.
+  let lastWrite: Promise<void> = Promise.resolve()
+
+  /**
+   * Writes the tabs to the workspace file after every earlier write ends. The
+   * record is built when the write starts, so a write that waited writes the
+   * newest tabs.
+   */
+  function persist(): Promise<void> {
+    lastWrite = lastWrite.then(writeWorkspace)
+    return lastWrite
+  }
+
+  async function writeWorkspace(): Promise<void> {
     if (restoreFailed && tabs.value.length === 0) {
       return
     }
