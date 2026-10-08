@@ -179,6 +179,27 @@ database's relations in the background, so completion also knows names that the
 tree hasn't loaded. The **Column limit** setting controls how much
 of a large schema this read keeps.
 
+On Athena, this read uses Athena's metadata API (`ListTableMetadata`), the same
+API that the tree uses. It runs no query, so it scans no data and needs no query
+result location in S3. If the API returns a table record that the AWS SDK can't
+parse, the app reads that connection's catalog with queries on
+`information_schema` from then on.
+
+When the read fails, or stops at the column limit, an **Autocomplete is
+limited** button appears beside the tab's connection. Click it to see each
+database that completion can't fully use, with the reason. For a failed read,
+the menu shows the error, and completion offers only the names that the tree has
+loaded. For a read that stopped at the limit, completion uses the part of the
+schema that the read kept. Each database has a **Try again** button that reads
+its schema again at once. A read that gets the whole schema removes the database
+from the list, and the button goes away when the list is empty.
+
+After a failed read, expanding the database again doesn't repeat the read at
+once. The app waits 5 minutes before it tries again, and each failure after that
+doubles the wait, up to one hour. A refresh of the database in the tree and
+**Try again** both skip the wait. Closing or refreshing the connection clears the
+failures.
+
 On MS SQL Server, the read includes synonyms. A synonym gets its target's
 columns when the target is a table or a view in the same database, and
 completion offers only the name for any other synonym.

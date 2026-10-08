@@ -10,6 +10,8 @@ vi.mock('@/lib/api', () => ({ api: apiStub, CONNECTION_STATUS_EVENT: 'connection
 const {
   FILTER_DELAY_MS,
   RELATION_SHARE_MS,
+  SNAPSHOT_RETRY_MAX_MS,
+  SNAPSHOT_RETRY_MIN_MS,
   columnNode,
   constraintHint,
   eventHint,
@@ -1215,14 +1217,27 @@ describe('explorer store', () => {
     expect(explorer.schemaIndexFor('c1').schemas).toEqual(['dbo'])
   })
 
-  it('warns when the bound stopped the read of a schema', async () => {
-    apiStub.schemaSnapshot.mockResolvedValue({ ...snapshotFixture(), complete: false })
+  it('marks a schema that the bound cut short, with no notice', async () => {
+    apiStub.schemaSnapshot.mockResolvedValue({
+      ...snapshotFixture(),
+      columnCount: 20_000,
+      complete: false,
+    })
     const explorer = await readyStore()
-    await explorer.readSnapshot('c1', 'Sales', { maxColumns: 1, ownConnection: false })
-    expect(useUiStore().notices[0]?.level).toBe('warning')
+    await explorer.readSnapshot('c1', 'Sales', { maxColumns: 20_000, ownConnection: false })
+    expect(useUiStore().notices).toHaveLength(0)
+    expect(explorer.autocompleteLimits('c1')).toEqual([
+      {
+        database: 'Sales',
+        message:
+          'The schema of Sales has more than 20,000 columns, so only part of it is used. ' +
+          'Raise the limit in Settings.',
+        detail: null,
+      },
+    ])
   })
 
-  it('reports a schema that cannot be read and keeps nothing', async () => {
+  it('marks a schema that cannot be read and keeps nothing', async () => {
     apiStub.schemaSnapshot.mockRejectedValue({ category: 'database', message: 'no', detail: null })
     const explorer = await readyStore()
     const answer = await explorer.readSnapshot('c1', 'Sales', {
@@ -1231,12 +1246,145 @@ describe('explorer store', () => {
     })
     expect(answer).toBe(null)
     expect(explorer.snapshots).toEqual({})
-    const notice = useUiStore().notices[0]
-    expect(notice?.level).toBe('warning')
-    expect(notice?.message).toBe(
-      "Couldn't read the schema of Sales, so autocomplete offers only the names in the tree.",
-    )
-    expect(notice?.detail).toBe('no')
+    expect(useUiStore().notices).toHaveLength(0)
+    expect(explorer.autocompleteLimits('c1')).toEqual([
+      { database: 'Sales', message: "Couldn't read the schema of Sales.", detail: 'no' },
+    ])
+  })
+
+  it('waits longer after each failed read before a plain read tries again', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(1_000_000)
+      apiStub.schemaSnapshot.mockRejectedValue({
+        category: 'database',
+        message: 'no',
+        detail: null,
+      })
+      const explorer = await readyStore()
+      const options = { maxColumns: 10, ownConnection: true }
+      await explorer.readSnapshot('c1', 'Sales', options)
+      expect(apiStub.schemaSnapshot).toHaveBeenCalledTimes(1)
+
+      // Inside the wait, a plain read makes no call.
+      vi.setSystemTime(1_000_000 + SNAPSHOT_RETRY_MIN_MS - 1)
+      expect(await explorer.readSnapshot('c1', 'Sales', options)).toBe(null)
+      expect(apiStub.schemaSnapshot).toHaveBeenCalledTimes(1)
+
+      // After the wait, a plain read tries again, and the next wait is twice as long.
+      vi.setSystemTime(1_000_000 + SNAPSHOT_RETRY_MIN_MS)
+      await explorer.readSnapshot('c1', 'Sales', options)
+      expect(apiStub.schemaSnapshot).toHaveBeenCalledTimes(2)
+      const second = Date.now()
+      vi.setSystemTime(second + 2 * SNAPSHOT_RETRY_MIN_MS - 1)
+      await explorer.readSnapshot('c1', 'Sales', options)
+      expect(apiStub.schemaSnapshot).toHaveBeenCalledTimes(2)
+
+      // The wait stops growing at the longest wait.
+      for (let count = 0; count < 10; count += 1) {
+        await explorer.readSnapshot('c1', 'Sales', options, true)
+      }
+      const last = Date.now()
+      vi.setSystemTime(last + SNAPSHOT_RETRY_MAX_MS - 1)
+      await explorer.readSnapshot('c1', 'Sales', options)
+      expect(apiStub.schemaSnapshot).toHaveBeenCalledTimes(12)
+      vi.setSystemTime(last + SNAPSHOT_RETRY_MAX_MS)
+      await explorer.readSnapshot('c1', 'Sales', options)
+      expect(apiStub.schemaSnapshot).toHaveBeenCalledTimes(13)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('reads at once on a refresh or a try again, and drops the failure on success', async () => {
+    apiStub.schemaSnapshot.mockRejectedValue({ category: 'database', message: 'no', detail: null })
+    apiStub.listDatabases.mockResolvedValue([{ name: 'Sales' }])
+    apiStub.listSchemas.mockResolvedValue([{ name: 'dbo' }])
+    const explorer = await readyStore()
+    const root = explorer.addRoot('c1')
+    await explorer.expand(root)
+    const sales = root.children![0]!
+    await explorer.expand(sales)
+    await Promise.resolve()
+    expect(apiStub.schemaSnapshot).toHaveBeenCalledTimes(1)
+
+    // A refresh of the database node reads the schema inside the wait.
+    await explorer.refresh(sales)
+    await Promise.resolve()
+    expect(apiStub.schemaSnapshot).toHaveBeenCalledTimes(2)
+
+    // A try again reads it too, and a good read removes the mark.
+    apiStub.schemaSnapshot.mockResolvedValue(snapshotFixture())
+    expect(await explorer.retrySnapshot('c1', 'Sales')).toEqual(snapshotFixture())
+    expect(apiStub.schemaSnapshot).toHaveBeenLastCalledWith({
+      connectionId: 'c1',
+      database: 'Sales',
+      maxColumns: 20000,
+      ownConnection: true,
+    })
+    expect(explorer.autocompleteLimits('c1')).toEqual([])
+  })
+
+  it('records no failure for a read that a newer read replaced', async () => {
+    const explorer = await readyStore()
+    const fails: ((reason: unknown) => void)[] = []
+    apiStub.schemaSnapshot.mockImplementation(() => new Promise((_, reject) => fails.push(reject)))
+    const options = { maxColumns: 10, ownConnection: true }
+    const older = explorer.readSnapshot('c1', 'Sales', options)
+    const newer = explorer.readSnapshot('c1', 'Sales', options, true)
+    fails[0]!({ category: 'database', message: 'old', detail: null })
+    expect(await older).toBe(null)
+    expect(explorer.autocompleteLimits('c1')).toEqual([])
+    fails[1]!({ category: 'database', message: 'new', detail: null })
+    expect(await newer).toBe(null)
+    expect(explorer.autocompleteLimits('c1').map((limit) => limit.detail)).toEqual(['new'])
+  })
+
+  it('lists the limits of one connection by database, a failure before a partial read', async () => {
+    const explorer = await readyStore()
+    const options = { maxColumns: 10, ownConnection: true }
+    const failure = { category: 'database', message: 'no', detail: null }
+    apiStub.schemaSnapshot.mockResolvedValue({ ...snapshotFixture(), complete: false })
+    await explorer.readSnapshot('c1', 'Sales', options)
+    await explorer.readSnapshot('c1', 'Archive', options)
+    await explorer.readSnapshot('c2', 'Other', options)
+    apiStub.schemaSnapshot.mockResolvedValue(snapshotFixture())
+    await explorer.readSnapshot('c1', 'Whole', options)
+    apiStub.schemaSnapshot.mockRejectedValue(failure)
+    await explorer.readSnapshot('c1', 'Sales', options, true)
+    await explorer.readSnapshot('c1', 'Broken', options)
+
+    expect(explorer.autocompleteLimits(null)).toEqual([])
+    const limits = explorer.autocompleteLimits('c1')
+    expect(limits.map((limit) => limit.database)).toEqual(['Archive', 'Broken', 'Sales'])
+    expect(limits[0]!.detail).toBe(null)
+    expect(limits[1]!.message).toBe("Couldn't read the schema of Broken.")
+    // The failed read of Sales replaces the mark of its older, partial snapshot.
+    expect(limits[2]).toEqual({
+      database: 'Sales',
+      message: "Couldn't read the schema of Sales.",
+      detail: 'no',
+    })
+    expect(explorer.autocompleteLimits('c2').map((limit) => limit.database)).toEqual(['Other'])
+  })
+
+  it('drops the failures of a connection with its snapshots', async () => {
+    apiStub.schemaSnapshot.mockRejectedValue({ category: 'database', message: 'no', detail: null })
+    const explorer = await readyStore()
+    const options = { maxColumns: 10, ownConnection: true }
+    await explorer.readSnapshot('c1', 'Sales', options)
+    await explorer.readSnapshot('c2', 'Other', options)
+
+    explorer.forgetSnapshots('c1')
+    expect(explorer.autocompleteLimits('c1')).toEqual([])
+    expect(explorer.autocompleteLimits('c2')).toHaveLength(1)
+    // With the failure gone, a plain read calls the backend again.
+    await explorer.readSnapshot('c1', 'Sales', options)
+    expect(apiStub.schemaSnapshot).toHaveBeenCalledTimes(3)
+
+    explorer.clear()
+    expect(explorer.autocompleteLimits('c1')).toEqual([])
+    expect(explorer.autocompleteLimits('c2')).toEqual([])
   })
 
   it('says nothing about a failed schema read whose connection closed', async () => {

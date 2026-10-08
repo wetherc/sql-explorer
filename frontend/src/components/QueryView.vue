@@ -126,6 +126,7 @@
         data-test="connection-select"
         @update:model-value="onConnectionChange"
       />
+      <AutocompleteStatus :connection-id="tab.connectionId" />
 
       <v-spacer />
 
@@ -519,6 +520,7 @@
 
 <script setup lang="ts">
 import AppDialog from './AppDialog.vue'
+import AutocompleteStatus from './AutocompleteStatus.vue'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Splitpanes, Pane } from 'splitpanes'
 import 'splitpanes/dist/splitpanes.css'

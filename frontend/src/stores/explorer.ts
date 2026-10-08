@@ -43,6 +43,32 @@ export const FILTER_DELAY_MS = 200
  */
 export const RELATION_SHARE_MS = 2000
 
+/**
+ * The wait after the first failed read of a schema before a plain load of
+ * the database node reads it again. Each failure after it doubles the wait,
+ * up to the longest wait. A refresh of the node, and a request to try again,
+ * read the schema at once.
+ */
+export const SNAPSHOT_RETRY_MIN_MS = 5 * 60_000
+export const SNAPSHOT_RETRY_MAX_MS = 60 * 60_000
+
+/** The last failed read of the schema of one database. */
+export interface SnapshotFailure {
+  /** The full text of the error. */
+  detail: string
+  /** The time of the failure, in milliseconds since the epoch. */
+  failedAt: number
+  /** The wait after the failure before a plain load reads the schema again. */
+  retryAfterMs: number
+}
+
+/** One database whose names the editor offers in part or not at all. */
+export interface AutocompleteLimit {
+  database: string
+  message: string
+  detail: string | null
+}
+
 export type NodeType =
   | 'connection'
   | 'database'
@@ -515,12 +541,32 @@ export const useExplorerStore = defineStore('explorer', () => {
   const pendingSnapshots = new Map<string, Promise<SchemaSnapshot | null>>()
 
   /**
+   * The last failed read of each schema, by the key of the snapshot. A plain
+   * load of the database node reads the schema again only after the wait of
+   * the record. Without the record, each expand of the node sends the same
+   * read to the backend and gets the same failure.
+   */
+  const snapshotFailures = shallowRef<Record<string, SnapshotFailure>>({})
+
+  /** Removes the record of a failed read. */
+  function dropFailure(key: string): void {
+    if (key in snapshotFailures.value) {
+      const rest = { ...snapshotFailures.value }
+      delete rest[key]
+      snapshotFailures.value = rest
+    }
+  }
+
+  /**
    * Reads the schema of one database and keeps it. A read that is already
    * held is not made again, so a change of the current database costs one
    * read for each database and no more. A second caller during a read gets
    * the promise of that read, so one database costs one call to the backend.
    * A forced read starts a new call, and the answer of the older call then
    * does not go into the store.
+   *
+   * After a failed read, a read that is not forced gives null until the wait
+   * of the failure ends.
    */
   function readSnapshot(
     connectionId: string,
@@ -536,6 +582,10 @@ export const useExplorerStore = defineStore('explorer', () => {
     const pending = pendingSnapshots.get(key)
     if (!force && pending) {
       return pending
+    }
+    const failure = snapshotFailures.value[key]
+    if (!force && failure && Date.now() < failure.failedAt + failure.retryAfterMs) {
+      return Promise.resolve(null)
     }
     const isLast = () => pendingSnapshots.get(key) === read
     const read = fetchSnapshot(connectionId, database, options, isLast).finally(() => {
@@ -577,27 +627,72 @@ export const useExplorerStore = defineStore('explorer', () => {
         return snapshot
       }
       snapshots.value = { ...snapshots.value, [key]: markRaw(snapshot) }
-      if (!snapshot.complete) {
-        ui.warn(
-          `The schema of ${database} has more than ${options.maxColumns} columns, ` +
-            'so autocomplete covers only part of it. Raise the limit in Settings.',
-        )
-      }
+      dropFailure(key)
       return snapshot
     } catch (error) {
       // A schema that cannot be read leaves the editor with the names of the
-      // tree, so the failure is a warning and nothing else stops.
-      if (forgetStamp(connectionId) === stamp) {
-        ui.warn(
-          `Couldn't read the schema of ${database}, so autocomplete offers only the names in the tree.`,
-          fullErrorText(toErrorPayload(error)),
-        )
+      // tree. The query tabs on the connection show the failure in a marker
+      // beside the connection, so no notice opens in the corner.
+      if (forgetStamp(connectionId) === stamp && isLast()) {
+        const previous = snapshotFailures.value[key]
+        snapshotFailures.value = {
+          ...snapshotFailures.value,
+          [key]: {
+            detail: fullErrorText(toErrorPayload(error)),
+            failedAt: Date.now(),
+            retryAfterMs: previous
+              ? Math.min(previous.retryAfterMs * 2, SNAPSHOT_RETRY_MAX_MS)
+              : SNAPSHOT_RETRY_MIN_MS,
+          },
+        }
       }
       return null
     }
   }
 
-  /** Drops the snapshots of one connection. */
+  /**
+   * The databases of one connection whose names the editor offers in part or
+   * not at all, in the order of their names. A failed read comes before a
+   * partial snapshot of the same database, because the failure is newer.
+   */
+  function autocompleteLimits(connectionId: string | null): AutocompleteLimit[] {
+    if (connectionId === null) {
+      return []
+    }
+    const prefix = `${connectionId}/`
+    const limits = new Map<string, AutocompleteLimit>()
+    for (const [key, snapshot] of Object.entries(snapshots.value)) {
+      if (key.startsWith(prefix) && !snapshot.complete) {
+        const database = key.slice(prefix.length)
+        limits.set(database, {
+          database,
+          message:
+            `The schema of ${database} has more than ` +
+            `${snapshot.columnCount.toLocaleString('en-US')} columns, so only part of it ` +
+            'is used. Raise the limit in Settings.',
+          detail: null,
+        })
+      }
+    }
+    for (const [key, failure] of Object.entries(snapshotFailures.value)) {
+      if (key.startsWith(prefix)) {
+        const database = key.slice(prefix.length)
+        limits.set(database, {
+          database,
+          message: `Couldn't read the schema of ${database}.`,
+          detail: failure.detail,
+        })
+      }
+    }
+    return [...limits.values()].sort((a, b) => a.database.localeCompare(b.database))
+  }
+
+  /** Reads the schema of one database again, past the wait of a failure. */
+  function retrySnapshot(connectionId: string, database: string): Promise<SchemaSnapshot | null> {
+    return readSnapshot(connectionId, database, snapshotOptions(), true)
+  }
+
+  /** Drops the snapshots of one connection, and the records of its failed reads. */
   function forgetSnapshots(connectionId: string): void {
     forgetCounts.set(connectionId, (forgetCounts.get(connectionId) ?? 0) + 1)
     schemaIndexes.delete(connectionId)
@@ -613,6 +708,9 @@ export const useExplorerStore = defineStore('explorer', () => {
       }
     }
     snapshots.value = kept
+    snapshotFailures.value = Object.fromEntries(
+      Object.entries(snapshotFailures.value).filter(([key]) => !key.startsWith(`${connectionId}/`)),
+    )
   }
 
   /** An empty part of the index, with the names it saw. */
@@ -852,6 +950,7 @@ export const useExplorerStore = defineStore('explorer', () => {
     // The watch of the field runs later, and the tree is empty now.
     applyFilter('')
     snapshots.value = {}
+    snapshotFailures.value = {}
     pendingSnapshots.clear()
     clearCount += 1
     schemaIndexes.clear()
@@ -1239,6 +1338,8 @@ export const useExplorerStore = defineStore('explorer', () => {
     snapshots,
     snapshotOptions,
     readSnapshot,
+    retrySnapshot,
+    autocompleteLimits,
     forgetSnapshots,
     addRoot,
     removeRoot,
