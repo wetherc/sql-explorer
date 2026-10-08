@@ -146,7 +146,9 @@ The filter keeps 6 of the 18 rows of the result.
   was not used for the longest time closes. A session in a transaction or with
   a running statement does not close.
 - A second connection of the record reads the catalog for the explorer, so
-  the tree does not wait behind a statement. The temporary tables and the
+  the tree does not wait behind a statement. A third connection reads the
+  whole schema of a database for the completions. The tree does not wait for
+  that read, which can take up to 60 seconds. The temporary tables and the
   attached databases of a tab do not show in the tree. A SQLite database in
   memory has one session alone, and the tree reads it on that session.
 - Passwords go into the keychain of the operating system. The settings file

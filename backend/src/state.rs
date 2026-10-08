@@ -24,6 +24,21 @@ use tokio_util::sync::CancellationToken;
 /// stood idle still answers.
 pub const HEALTH_CHECK_AFTER: Duration = Duration::from_secs(30);
 
+/// The work that a second driver of a connection does.
+///
+/// Each role has a driver of its own, because one driver runs one exchange
+/// at a time. A read of the whole schema can take a minute on a large
+/// database or on Athena. On a shared driver, each read of the tree waits
+/// behind it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BackgroundRole {
+    /// The reads of the tree, of the properties dialog and of the drafts of
+    /// the menu.
+    Catalog,
+    /// The reads of the whole schema for the completions of the editor.
+    Snapshot,
+}
+
 /// What the user interface learns about one connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -138,12 +153,12 @@ pub struct RunningRequest {
 /// The state that every command shares.
 pub struct AppState {
     pub connections: Mutex<HashMap<String, OpenConnection>>,
-    /// A second driver for each connection that has asked for one. Background
-    /// work runs there, so that it never waits behind a statement of the user
-    /// and no statement of the user waits behind it.
-    /// The record of each one carries the moment of its last answer, so that
+    /// The second drivers of each connection, one for each role that asked
+    /// for one. Background work runs there, so that it never waits behind a
+    /// statement of the user and no statement of the user waits behind it.
+    /// The record of each one keeps the moment of its last answer, so that
     /// a read can confirm a driver that stood idle.
-    pub background: Mutex<HashMap<String, Arc<Session>>>,
+    pub background: Mutex<HashMap<(String, BackgroundRole), Arc<Session>>>,
     /// One record for each statement that runs, keyed by the identifier the
     /// user interface gave it.
     pub running: Mutex<HashMap<String, RunningRequest>>,
@@ -251,54 +266,68 @@ impl AppState {
     /// metadata read of that connection opens a new second connection. A
     /// driver that is busy stays, because a read still runs on it.
     async fn reap_idle_background(&self) {
-        let held: Vec<(String, Arc<Session>)> = self
-            .background
+        let held: Vec<Arc<Session>> = self.background.lock().await.values().cloned().collect();
+        let mut gone: Vec<Arc<Session>> = Vec::new();
+        for session in held {
+            if session.idle_past(SESSION_IDLE_REAP).await && session.driver.try_lock().is_ok() {
+                gone.push(session);
+            }
+        }
+        // A read that ran during the sweep can have put a new driver in the
+        // slot, and that one stays.
+        self.background
             .lock()
             .await
-            .iter()
-            .map(|(id, session)| (id.clone(), session.clone()))
-            .collect();
-        let mut gone: Vec<(String, Arc<Session>)> = Vec::new();
-        for (id, session) in held {
-            if session.idle_past(SESSION_IDLE_REAP).await && session.driver.try_lock().is_ok() {
-                gone.push((id, session));
-            }
-        }
-        let mut background = self.background.lock().await;
-        for (id, session) in gone {
-            // A read that ran during the sweep can have put a new driver in
-            // the slot, and that one stays.
-            if background
-                .get(&id)
-                .is_some_and(|current| Arc::ptr_eq(current, &session))
-            {
-                background.remove(&id);
-            }
-        }
+            .retain(|_, current| !gone.iter().any(|session| Arc::ptr_eq(current, session)));
     }
 
-    /// Drops the background driver of a connection, so that the next
+    /// Drops each background driver of a connection, so that the next
     /// metadata read opens a fresh one.
     pub async fn clear_background(&self, connection_id: &str) {
-        self.background.lock().await.remove(connection_id);
+        self.background
+            .lock()
+            .await
+            .retain(|(id, _), _| id != connection_id);
     }
 
-    /// Returns the background session of a connection, when one is open.
-    pub async fn background_session(&self, connection_id: &str) -> Option<Arc<Session>> {
-        self.background.lock().await.get(connection_id).cloned()
+    /// Drops the background driver of a connection that runs on the given
+    /// session, and leaves the drivers of the other roles. A driver that a
+    /// read put in the slot in the meantime stays. Returns true when the
+    /// session was a background driver of the connection.
+    pub async fn drop_background(&self, connection_id: &str, session: &Arc<Session>) -> bool {
+        let mut background = self.background.lock().await;
+        let before = background.len();
+        background.retain(|(id, _), current| id != connection_id || !Arc::ptr_eq(current, session));
+        background.len() < before
     }
 
-    /// Keeps a background driver for a connection and returns its session.
+    /// Returns the background session of a connection for one role, when
+    /// one is open.
+    pub async fn background_session(
+        &self,
+        connection_id: &str,
+        role: BackgroundRole,
+    ) -> Option<Arc<Session>> {
+        self.background
+            .lock()
+            .await
+            .get(&(connection_id.to_string(), role))
+            .cloned()
+    }
+
+    /// Keeps a background driver for one role of a connection and returns
+    /// its session.
     pub async fn set_background_driver(
         &self,
         connection_id: &str,
+        role: BackgroundRole,
         driver: Box<dyn DatabaseDriver>,
     ) -> Arc<Session> {
         let held = Arc::new(Session::new(driver));
         self.background
             .lock()
             .await
-            .insert(connection_id.to_string(), held.clone());
+            .insert((connection_id.to_string(), role), held.clone());
         held
     }
 
@@ -327,9 +356,9 @@ impl AppState {
     }
 
     /// Removes an open connection, together with its sessions and its
-    /// background driver. Returns true when one was present.
+    /// background drivers. Returns true when one was present.
     pub async fn remove(&self, connection_id: &str) -> bool {
-        self.background.lock().await.remove(connection_id);
+        self.clear_background(connection_id).await;
         self.connections
             .lock()
             .await
@@ -350,7 +379,7 @@ impl AppState {
         }
         connections.remove(connection_id);
         drop(connections);
-        self.background.lock().await.remove(connection_id);
+        self.clear_background(connection_id).await;
         true
     }
 
@@ -763,17 +792,23 @@ mod tests {
     async fn a_sweep_closes_a_background_driver_that_stood_idle() {
         let state = state();
         let idle = state
-            .set_background_driver("c1", Box::new(StubDriver))
+            .set_background_driver("c1", BackgroundRole::Catalog, Box::new(StubDriver))
             .await;
         let fresh = state
-            .set_background_driver("c2", Box::new(StubDriver))
+            .set_background_driver("c2", BackgroundRole::Catalog, Box::new(StubDriver))
             .await;
         idle.age(SESSION_IDLE_REAP).await;
 
         state.reap_idle_sessions().await;
 
-        assert!(state.background_session("c1").await.is_none());
-        let kept = state.background_session("c2").await.unwrap();
+        assert!(state
+            .background_session("c1", BackgroundRole::Catalog)
+            .await
+            .is_none());
+        let kept = state
+            .background_session("c2", BackgroundRole::Catalog)
+            .await
+            .unwrap();
         assert!(Arc::ptr_eq(&kept, &fresh));
     }
 
@@ -781,32 +816,94 @@ mod tests {
     async fn a_sweep_keeps_a_background_driver_that_a_read_holds() {
         let state = state();
         let busy = state
-            .set_background_driver("c1", Box::new(StubDriver))
+            .set_background_driver("c1", BackgroundRole::Catalog, Box::new(StubDriver))
             .await;
         busy.age(SESSION_IDLE_REAP).await;
         let _reading = busy.driver.lock().await;
 
         state.reap_idle_sessions().await;
 
-        assert!(state.background_session("c1").await.is_some());
+        assert!(state
+            .background_session("c1", BackgroundRole::Catalog)
+            .await
+            .is_some());
     }
 
     #[tokio::test]
     async fn a_sweep_leaves_the_background_driver_that_a_read_opened_during_it() {
         let state = state();
         let idle = state
-            .set_background_driver("c1", Box::new(StubDriver))
+            .set_background_driver("c1", BackgroundRole::Catalog, Box::new(StubDriver))
             .await;
         idle.age(SESSION_IDLE_REAP).await;
         // The read opens a new driver while the sweep looks at the old one.
         let opened = state
-            .set_background_driver("c1", Box::new(StubDriver))
+            .set_background_driver("c1", BackgroundRole::Catalog, Box::new(StubDriver))
             .await;
 
         state.reap_idle_sessions().await;
 
-        let kept = state.background_session("c1").await.unwrap();
+        let kept = state
+            .background_session("c1", BackgroundRole::Catalog)
+            .await
+            .unwrap();
         assert!(Arc::ptr_eq(&kept, &opened));
+    }
+
+    #[tokio::test]
+    async fn each_role_of_a_connection_has_a_driver_of_its_own() {
+        let state = state();
+        let catalog = state
+            .set_background_driver("c1", BackgroundRole::Catalog, Box::new(StubDriver))
+            .await;
+        let snapshot = state
+            .set_background_driver("c1", BackgroundRole::Snapshot, Box::new(StubDriver))
+            .await;
+        assert!(!Arc::ptr_eq(&catalog, &snapshot));
+
+        // A drop names the session, so the driver of the other role stays.
+        assert!(state.drop_background("c1", &snapshot).await);
+        assert!(state
+            .background_session("c1", BackgroundRole::Snapshot)
+            .await
+            .is_none());
+        let kept = state
+            .background_session("c1", BackgroundRole::Catalog)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&kept, &catalog));
+
+        // A session that is not in a slot of the connection drops nothing.
+        assert!(!state.drop_background("c1", &snapshot).await);
+        assert!(!state.drop_background("c2", &catalog).await);
+        assert!(state
+            .background_session("c1", BackgroundRole::Catalog)
+            .await
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn a_clear_drops_every_role_of_one_connection() {
+        let state = state();
+        for role in [BackgroundRole::Catalog, BackgroundRole::Snapshot] {
+            state
+                .set_background_driver("c1", role, Box::new(StubDriver))
+                .await;
+        }
+        let other = state
+            .set_background_driver("c2", BackgroundRole::Snapshot, Box::new(StubDriver))
+            .await;
+
+        state.clear_background("c1").await;
+
+        for role in [BackgroundRole::Catalog, BackgroundRole::Snapshot] {
+            assert!(state.background_session("c1", role).await.is_none());
+        }
+        let kept = state
+            .background_session("c2", BackgroundRole::Snapshot)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&kept, &other));
     }
 
     #[tokio::test]

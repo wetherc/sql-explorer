@@ -100,9 +100,13 @@ children, with a **Retry** button that reads it again.
 
 ## The tree's connection
 
-The tree, completion and the menu's drafts read the catalog on a second
-connection of the same record, so catalog reads don't wait behind a tab's
-statement. A tab's temporary tables and the databases it attaches stay in that
+The tree, the Properties dialog and the menu's drafts read the catalog on a
+second connection of the same record, so catalog reads don't wait behind a tab's
+statement. Completion reads each database's full schema on a third connection,
+because that read can take up to a minute on a large database or on Athena, and
+the tree would otherwise wait for it. The **Load schema on a separate
+connection** setting controls that third connection. With the setting off, the
+schema read runs on the session that the tabs share. A tab's temporary tables and the databases it attaches stay in that
 tab's session, so the tree doesn't show them, even after a refresh.
 
 A SQLite in-memory database exists in one session only, and a second connection

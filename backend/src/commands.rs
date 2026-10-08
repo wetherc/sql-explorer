@@ -18,8 +18,8 @@ use crate::secrets::{self, SecretStore};
 use crate::session::{Session, DEFAULT_SESSION};
 use crate::sql::ParamValues;
 use crate::state::{
-    AppState, ConnectionHealth, ConnectionInfo, ConnectionStatusEvent, OpenConnection,
-    CONNECTION_STATUS_EVENT,
+    AppState, BackgroundRole, ConnectionHealth, ConnectionInfo, ConnectionStatusEvent,
+    OpenConnection, CONNECTION_STATUS_EVENT,
 };
 use crate::storage::{AwsCredentialSource, DbType, SavedConnection};
 use crate::store;
@@ -219,7 +219,7 @@ pub async fn connect<R: Runtime>(
     match open_driver(&full).await {
         Ok(driver) => {
             // A connection that is still open under the identifier goes
-            // first, with its statements and its background driver.
+            // first, with its statements and its background drivers.
             if state.remove(&id).await {
                 stop_requests(state.take_requests_of(&id).await).await;
             }
@@ -477,8 +477,8 @@ async fn ensure_session_healthy<R: Runtime>(
         Err(Error::Cancelled) => Err(Error::Cancelled),
         Ok(driver) => {
             let replacement = open.sessions.insert(key, Session::new(driver)).await;
-            // The background driver shares the fate of the session that
-            // stopped answering, so the next metadata read opens a new one.
+            // The background drivers share the fate of the session that
+            // stopped answering, so the next metadata read opens new ones.
             state.clear_background(connection_id).await;
             announce(app, connection_id, ConnectionHealth::Connected, None);
             Ok(replacement)
@@ -517,7 +517,7 @@ async fn metadata_read<'a, R: Runtime>(
     connection_id: &'a str,
 ) -> Result<CatalogRead<'a>> {
     let open = ensure_healthy(app, state, connection_id).await?;
-    let session = background_session(state, connection_id, &open).await?;
+    let session = background_session(state, connection_id, &open, BackgroundRole::Catalog).await?;
     Ok(CatalogRead::new(
         state,
         connection_id,
@@ -612,11 +612,14 @@ impl<'a> CatalogRead<'a> {
             "A read of the catalog of '{}' passed its limit, so its session closes.",
             self.connection_id
         );
-        if let Some(background) = self.state.background_session(self.connection_id).await {
-            if Arc::ptr_eq(&background, &self.session) {
-                self.state.clear_background(self.connection_id).await;
-                return;
-            }
+        // The background driver of the other role stays, because its reads
+        // do not use this session.
+        if self
+            .state
+            .drop_background(self.connection_id, &self.session)
+            .await
+        {
+            return;
         }
         // The read ran on the default session, because no second connection
         // could open. The next command opens a new default session.
@@ -1361,13 +1364,6 @@ pub async fn table_details<R: Runtime>(
 /// The number of columns a snapshot keeps when the caller names no bound.
 pub const DEFAULT_SNAPSHOT_COLUMNS: usize = 20_000;
 
-/// Reads every relation and every column of one database, for the
-/// completions of the editor.
-///
-/// The read runs on a second driver of the same record, so that it never
-/// waits behind a statement of the user and no statement of the user waits
-/// behind it. A caller that asks for the one session, and a second driver
-/// that cannot open, put the read on the session of the user instead.
 /// What a read of one schema carries.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1380,6 +1376,15 @@ pub struct SnapshotRequest {
     pub own_connection: Option<bool>,
 }
 
+/// Reads every relation and every column of one database, for the
+/// completions of the editor.
+///
+/// The read runs on a second driver of the same record, so that it never
+/// waits behind a statement of the user and no statement of the user waits
+/// behind it. The reads of the tree use a different driver, because a read
+/// of a large schema can keep its driver for up to [`CATALOG_LIMIT`]. A
+/// caller that asks for the one session, and a second driver that cannot
+/// open, put the read on the session of the user instead.
 #[tauri::command]
 pub async fn schema_snapshot<R: Runtime>(
     app: AppHandle<R>,
@@ -1393,7 +1398,15 @@ pub async fn schema_snapshot<R: Runtime>(
         .max(1);
 
     let session = match request.own_connection.unwrap_or(true) {
-        true => background_session(&state, &request.connection_id, &open).await?,
+        true => {
+            background_session(
+                &state,
+                &request.connection_id,
+                &open,
+                BackgroundRole::Snapshot,
+            )
+            .await?
+        }
         false => open.default_session().await?,
     };
 
@@ -1424,10 +1437,10 @@ async fn background_answers(session: &Arc<Session>) -> bool {
     healthy
 }
 
-/// Returns the background session of a connection, and opens one when the
-/// connection has none or when the one it has stopped answering. A driver
-/// that cannot open gives the default session, because a snapshot that waits
-/// is better than no completions.
+/// Returns the background session of a connection for one role, and opens
+/// one when the connection has none or when the one it has stopped
+/// answering. A driver that cannot open gives the default session, because a
+/// snapshot that waits is better than no completions.
 ///
 /// A connection with one session alone gives its default session and opens
 /// no second connection. A second connection to a SQLite database in memory
@@ -1436,18 +1449,17 @@ async fn background_session(
     state: &AppState,
     connection_id: &str,
     open: &OpenConnection,
+    role: BackgroundRole,
 ) -> Result<Arc<Session>> {
     if open.single_session {
         return open.default_session().await;
     }
-    if let Some(session) = state.background_session(connection_id).await {
+    if let Some(session) = state.background_session(connection_id, role).await {
         if background_answers(&session).await {
             return Ok(session);
         }
-        log::warn!(
-            "The second connection of '{connection_id}' stopped answering. Opening it again."
-        );
-        state.clear_background(connection_id).await;
+        log::warn!("The {role:?} driver of '{connection_id}' stopped answering. Opening it again.");
+        state.drop_background(connection_id, &session).await;
     }
     let full = match with_secrets(state, open.descriptor.clone()).await {
         Ok(full) => full,
@@ -1457,7 +1469,9 @@ async fn background_session(
         }
     };
     match open_driver(&full).await {
-        Ok(driver) => Ok(state.set_background_driver(connection_id, driver).await),
+        Ok(driver) => Ok(state
+            .set_background_driver(connection_id, role, driver)
+            .await),
         Err(error) => {
             log::warn!(
                 "A second connection for '{connection_id}' could not open, so the schema is \
@@ -1496,7 +1510,8 @@ pub async fn script_object<R: Runtime>(
 
     // The work only reads the catalog, so it runs on the driver of the
     // metadata reads and leaves the sessions of the tabs free.
-    let session = background_session(&state, &connection_id, &open).await?;
+    let session =
+        background_session(&state, &connection_id, &open, BackgroundRole::Catalog).await?;
     let read = CatalogRead::new(&state, &connection_id, session, CATALOG_LIMIT);
     let mut guard = read.lock().await?;
     let relation = match target {
@@ -4429,7 +4444,10 @@ mod tests {
         let mut guard = read.lock().await.unwrap();
         let tables = read.run(guard.list_tables("main", None)).await.unwrap();
         assert_eq!(tables[0].name, "kept");
-        assert!(state.background_session("s1").await.is_none());
+        assert!(state
+            .background_session("s1", BackgroundRole::Catalog)
+            .await
+            .is_none());
     }
 
     #[tokio::test]
@@ -5113,6 +5131,7 @@ mod tests {
         let session = state
             .set_background_driver(
                 "s1",
+                BackgroundRole::Catalog,
                 Box::new(PingDriver {
                     pings: pings.clone(),
                     answers,
@@ -5130,18 +5149,24 @@ mod tests {
         let (session, pings) = background_stub(&state, true).await;
 
         // A driver that answered a moment ago goes out without a ping.
-        let fresh = background_session(&state, "s1", &open).await.unwrap();
+        let fresh = background_session(&state, "s1", &open, BackgroundRole::Catalog)
+            .await
+            .unwrap();
         assert!(Arc::ptr_eq(&fresh, &session));
         assert_eq!(pings.load(std::sync::atomic::Ordering::SeqCst), 0);
 
         session.age(crate::state::HEALTH_CHECK_AFTER).await;
-        let checked = background_session(&state, "s1", &open).await.unwrap();
+        let checked = background_session(&state, "s1", &open, BackgroundRole::Catalog)
+            .await
+            .unwrap();
         assert!(Arc::ptr_eq(&checked, &session));
         assert_eq!(pings.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         // The ping moved the moment of the last answer, so the next read
         // sends no second ping.
-        background_session(&state, "s1", &open).await.unwrap();
+        background_session(&state, "s1", &open, BackgroundRole::Catalog)
+            .await
+            .unwrap();
         assert_eq!(pings.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
@@ -5153,12 +5178,34 @@ mod tests {
         let (session, pings) = background_stub(&state, false).await;
         session.age(crate::state::HEALTH_CHECK_AFTER).await;
 
-        let opened = background_session(&state, "s1", &open).await.unwrap();
+        let opened = background_session(&state, "s1", &open, BackgroundRole::Catalog)
+            .await
+            .unwrap();
 
         assert_eq!(pings.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(!Arc::ptr_eq(&opened, &session));
         // The new driver reaches the database.
         opened.driver.lock().await.ping().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_read_of_the_tree_does_not_wait_behind_a_read_of_the_schema() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (app, state) = state_with_sqlite(descriptor).await;
+        let open = state.connection("s1").await.unwrap();
+        let snapshot = background_session(&state, "s1", &open, BackgroundRole::Snapshot)
+            .await
+            .unwrap();
+        // The read of the schema keeps its driver for the whole test.
+        let _reading = snapshot.driver.lock().await;
+
+        let read = metadata_read(app.handle(), &state, "s1").await.unwrap();
+        assert!(!Arc::ptr_eq(&read.session, &snapshot));
+        let mut guard = tokio::time::timeout(std::time::Duration::from_secs(5), read.lock())
+            .await
+            .expect("the tree waited behind the read of the schema")
+            .unwrap();
+        assert!(read.run(guard.list_tables("main", None)).await.is_ok());
     }
 
     #[tokio::test]
@@ -5403,7 +5450,9 @@ mod tests {
         let (_dir, descriptor) = temp_sqlite();
         let (_app, state) = state_with_sqlite(descriptor).await;
         let (driver, calls) = catalog_driver(Some(false));
-        let background = state.set_background_driver("s1", driver).await;
+        let background = state
+            .set_background_driver("s1", BackgroundRole::Catalog, driver)
+            .await;
 
         let read = CatalogRead::new(&state, "s1", background, SHORT);
         let _guard = read.lock().await.unwrap();
@@ -5411,7 +5460,35 @@ mod tests {
 
         assert!(matches!(outcome, Err(Error::Timeout(0))));
         assert_eq!(stops(&calls), 1);
-        assert!(state.background_session("s1").await.is_none());
+        assert!(state
+            .background_session("s1", BackgroundRole::Catalog)
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_read_of_the_schema_past_its_limit_leaves_the_driver_of_the_tree() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (_app, state) = state_with_sqlite(descriptor).await;
+        let (_catalog, _pings) = background_stub(&state, true).await;
+        let (driver, calls) = catalog_driver(Some(false));
+        let snapshot = state
+            .set_background_driver("s1", BackgroundRole::Snapshot, driver)
+            .await;
+
+        let read = CatalogRead::new(&state, "s1", snapshot, SHORT);
+        let outcome: Result<()> = read.run(std::future::pending()).await;
+
+        assert!(matches!(outcome, Err(Error::Timeout(0))));
+        assert_eq!(stops(&calls), 1);
+        assert!(state
+            .background_session("s1", BackgroundRole::Snapshot)
+            .await
+            .is_none());
+        assert!(state
+            .background_session("s1", BackgroundRole::Catalog)
+            .await
+            .is_some());
     }
 
     #[tokio::test]
@@ -5473,7 +5550,10 @@ mod tests {
         let outcome: Result<()> = read.run(std::future::pending()).await;
 
         assert!(outcome.is_err());
-        let kept = state.background_session("s1").await.unwrap();
+        let kept = state
+            .background_session("s1", BackgroundRole::Catalog)
+            .await
+            .unwrap();
         assert!(Arc::ptr_eq(&kept, &background));
         assert!(Arc::ptr_eq(
             &open.default_session().await.unwrap(),
@@ -5512,13 +5592,18 @@ mod tests {
         let (_dir, descriptor) = temp_sqlite();
         let (_app, state) = state_with_sqlite(descriptor).await;
         let (driver, calls) = catalog_driver(Some(false));
-        let background = state.set_background_driver("s1", driver).await;
+        let background = state
+            .set_background_driver("s1", BackgroundRole::Catalog, driver)
+            .await;
         let _other = background.driver.lock().await;
 
         let read = CatalogRead::new(&state, "s1", background.clone(), SHORT);
         assert!(matches!(read.lock().await, Err(Error::Timeout(0))));
 
         assert_eq!(stops(&calls), 0);
-        assert!(state.background_session("s1").await.is_some());
+        assert!(state
+            .background_session("s1", BackgroundRole::Catalog)
+            .await
+            .is_some());
     }
 }
