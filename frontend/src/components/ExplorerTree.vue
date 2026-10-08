@@ -4,7 +4,7 @@
     class="explorer-scroll"
     role="tree"
     aria-label="Database objects"
-    :aria-busy="anyLoading"
+    :aria-busy="busy"
     :tabindex="activeDrawn ? -1 : 0"
     :style="{ '--tree-row-height': `${ROW_HEIGHT}px` }"
     @keydown="onKeyDown"
@@ -151,8 +151,10 @@ const props = withDefaults(
     nodes: ExplorerNode[]
     openKeys: Set<string>
     selectedKey?: string | null
+    /** True while a read of the tree runs, which the store counts. */
+    busy?: boolean
   }>(),
-  { selectedKey: null },
+  { selectedKey: null, busy: false },
 )
 
 const emit = defineEmits<{
@@ -238,7 +240,10 @@ const rows = computed<Row[]>(() => {
         return
       }
       const children = node.children ?? []
-      const failure = node.loading ? null : (node.error ?? null)
+      // The store clears the failure as a read starts, so the rows do not
+      // read the mark of the read. A start or an end of a read then builds
+      // no row again and measures no width again.
+      const failure = node.error ?? null
       if (children.length > 0) {
         walk(children, depth + 1)
       } else if (failure) {
@@ -376,9 +381,6 @@ const activeKey = computed(() => {
   }
   return keys[0] ?? null
 })
-
-/** True while a branch of the tree reads its children. */
-const anyLoading = computed(() => nodeRows.value.some((row) => row.node.loading))
 
 /** True when the row with the tab stop is among the drawn rows. */
 const activeDrawn = computed(() => windowRows.value.some((row) => row.key === activeKey.value))

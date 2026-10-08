@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { nextTick, reactive } from 'vue'
 import ExplorerTree from '@/components/ExplorerTree.vue'
 import { mountWithPlugins } from './mount'
 import type { ExplorerNode } from '@/stores/explorer'
@@ -156,15 +157,21 @@ describe('ExplorerTree as a tree a reader can follow', () => {
     expect(wrapper.emitted('activate')).toBeUndefined()
   })
 
-  it('hides the failure while the branch reads again', () => {
-    const failed = { ...node({ loading: true }), error: 'The server went away.' }
-    const wrapper = mountTree([failed], new Set(['db']))
-    expect(wrapper.find('[data-test="tree-error"]').exists()).toBe(false)
+  it('tells a reader when a branch reads', () => {
+    const busy = mountWithPlugins(ExplorerTree, {
+      props: { nodes: [node({ loading: true })], openKeys: new Set(), busy: true },
+    })
+    expect(busy.attributes('aria-busy')).toBe('true')
+    expect(mountTree([node()]).attributes('aria-busy')).toBe('false')
   })
 
-  it('tells a reader when a branch reads', () => {
-    expect(mountTree([node({ loading: true })]).attributes('aria-busy')).toBe('true')
-    expect(mountTree([node()]).attributes('aria-busy')).toBe('false')
+  it('builds no row again when a branch starts or ends a read', async () => {
+    const branch = reactive(node({ loaded: true, children: [] }))
+    const wrapper = mountTree([branch], new Set(['db']))
+    const rows = (wrapper.vm as unknown as { rows: unknown[] }).rows
+    branch.loading = true
+    await nextTick()
+    expect((wrapper.vm as unknown as { rows: unknown[] }).rows).toBe(rows)
   })
 
   it('takes the tab stop itself while its row is out of view, and passes the focus on', async () => {

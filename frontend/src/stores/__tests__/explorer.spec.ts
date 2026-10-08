@@ -1424,10 +1424,13 @@ describe('explorer store', () => {
     expect(root.error).toBe('gone')
     expect(useUiStore().notices[0]?.level).toBe('error')
 
-    // A read again clears the failure.
+    // A read again clears the failure as it starts, so the tree shows no
+    // failure beside the mark of the read.
     apiStub.listDatabases.mockResolvedValue([])
-    await explorer.expand(root)
+    const again = explorer.expand(root)
+    expect(root.loading).toBe(true)
     expect(root.error).toBeNull()
+    await again
     expect(root.loaded).toBe(true)
   })
 

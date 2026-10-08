@@ -126,6 +126,9 @@ describe('DbExplorer', () => {
     await settle()
     expect(second.loaded).toBe(true)
     expect(second.children?.map((node) => node.label)).toEqual(['Other'])
+    // The first read still runs, so the tree tells a reader that it reads.
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[role="tree"]').attributes('aria-busy')).toBe('true')
   })
 
   it('keeps only the nodes that match the filter', async () => {

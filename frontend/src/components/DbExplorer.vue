@@ -31,6 +31,7 @@
         :nodes="explorer.visibleNodes"
         :open-keys="openKeys"
         :selected-key="selectedKey"
+        :busy="explorer.loading"
         @activate="onActivate"
         @expand="onExpand"
         @collapse="onCollapse"
