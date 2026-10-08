@@ -507,6 +507,15 @@
       @cancel="askingPlan = false"
     />
 
+    <RunFileDialog
+      :open="runFilePrompt !== null"
+      :path="runFilePrompt?.file.path ?? ''"
+      :format="runFilePrompt?.file.format ?? 'csv'"
+      :several="runFilePrompt?.several ?? false"
+      @run="answerRunFile"
+      @cancel="answerRunFile(null)"
+    />
+
     <ConfirmDialog
       :open="pendingConnection !== null"
       title="Change the connection?"
@@ -529,13 +538,14 @@ import SqlEditor from './SqlEditor.vue'
 import ResultsGrid from './ResultsGrid.vue'
 import QueryMessages from './QueryMessages.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
+import RunFileDialog from './RunFileDialog.vue'
 import { api } from '@/lib/api'
 import { appleKeyboard, chordLabel, forgetTabActions, registerTabActions } from '@/lib/commands'
 import { errorAdvice, errorIcon, fullErrorText, isCancellation, toErrorPayload } from '@/lib/errors'
 import { exportFileName, toCsv, toInsertStatements, toJson, toMarkdown } from '@/lib/export'
 import { bytesToBase64, toXlsx } from '@/lib/xlsx'
 import { formatClockTime, formatRowCount } from '@/lib/format'
-import { savedFileNote } from '@/lib/runFile'
+import { savedFileNote, savedSetsMessage } from '@/lib/runFile'
 import { useConnectionsStore } from '@/stores/connections'
 import { useExplorerStore } from '@/stores/explorer'
 import { baseName, useFilesStore } from '@/stores/files'
@@ -554,6 +564,7 @@ import {
   type ExportSummary,
   type ParamValue,
   type ResultSet,
+  type RunFileSummary,
 } from '@/types/api'
 import type { ErrorMarker } from './SqlEditor.vue'
 import type { ExportAllFormat, ExportFormat } from './ResultsGrid.vue'
@@ -1030,13 +1041,50 @@ function runToFile(): void {
   })
 }
 
-/** Asks for the file of a run to a file, then runs the statement. */
+/**
+ * The question that waits after the save dialog of a run to a file, with the
+ * function that gives the answer to the run.
+ */
+const runFilePrompt = ref<{
+  file: ChosenRunFile
+  several: boolean
+  answer: (eachSet: boolean | null) => void
+} | null>(null)
+
+/** Asks where the results of the run go. Gives null when the user cancels. */
+function askRunFile(file: ChosenRunFile, several: boolean): Promise<boolean | null> {
+  return new Promise((answer) => {
+    runFilePrompt.value = { file, several, answer }
+  })
+}
+
+function answerRunFile(eachSet: boolean | null): void {
+  const prompt = runFilePrompt.value
+  runFilePrompt.value = null
+  prompt?.answer(eachSet)
+}
+
+/** True when the statement can give more than one result. A failed check
+ *  counts as one result, and the run itself counts the results again. */
+async function mayGiveSeveralSets(text: string): Promise<boolean> {
+  try {
+    return await api.severalResultSets(text, dialect.value)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Asks for the file of a run to a file, then asks where the results go when
+ * the script can give more than one, then runs the statement.
+ */
 async function saveRun(
   connectionId: string,
   text: string,
   values: Record<string, unknown> | undefined,
   start: TextStart | undefined,
 ): Promise<void> {
+  const several = await mayGiveSeveralSets(text)
   let file: ChosenRunFile | null
   try {
     file = await api.chooseRunFile({ defaultName: exportFileName(props.tab.title, 'csv') })
@@ -1047,16 +1095,28 @@ async function saveRun(
   if (!file) {
     return
   }
+  const eachSet = several ? await askRunFile(file, several) : false
+  if (eachSet === null) {
+    return
+  }
   const summary = await queries.runToFile(
     props.tab.id,
     connectionId,
     text,
-    file.ticket,
+    { ticket: file.ticket, eachSet },
     values,
     start,
   )
   if (summary) {
-    reportExport(summary)
+    reportRunFile(summary)
+  }
+}
+
+/** Tells the user what a run to a file saved. */
+function reportRunFile(summary: RunFileSummary): void {
+  reportExport(summary, savedSetsMessage(summary) ?? undefined)
+  if (summary.skippedSets > 0) {
+    ui.info('Only the first result went to the file.')
   }
 }
 
@@ -1187,8 +1247,9 @@ async function onExportAll(pane: ResultPane, format: ExportAllFormat): Promise<v
   }
 }
 
-/** Tells the user how an export of all rows ended. */
-function reportExport(summary: ExportSummary): void {
+/** Tells the user how an export of all rows ended. A caller can give the
+ *  words for an export that saved every row. */
+function reportExport(summary: ExportSummary, saved?: string): void {
   const rows = summary.rows.toLocaleString()
   if (summary.sheetFull) {
     ui.warn(
@@ -1201,7 +1262,7 @@ function reportExport(summary: ExportSummary): void {
       'You can raise the export limit in Settings.',
     )
   } else {
-    ui.success(`Exported ${rows} rows to ${summary.path}.`)
+    ui.success(saved ?? `Exported ${rows} rows to ${summary.path}.`)
   }
   // The backend names a problem with the content of the file, for example
   // text that an Excel cell could not keep whole.

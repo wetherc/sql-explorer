@@ -253,7 +253,12 @@ export interface ExportRequest {
 export interface ChosenRunFile {
   ticket: string
   path: string
+  /** The format that the extension of the path sets. */
+  format: RunFileFormat
 }
+
+/** The formats of a run to a file. */
+export type RunFileFormat = 'csv' | 'json' | 'xlsx'
 
 /** What a run to a file sends. */
 export interface RunToFileRequest {
@@ -262,8 +267,12 @@ export interface RunToFileRequest {
   query: string
   /** The ticket that `chooseRunFile` gave. */
   ticket: string
-  /** The row limit of the file. */
+  /** The row limit of the file. Each result set has this limit. */
   maxRows: number
+  /** True when each result set goes to the file: a CSV or JSON run writes
+   *  a file for each set, and an Excel run writes a sheet for each set.
+   *  False sends the first set alone. */
+  eachSet?: boolean
   tabId?: string
   queryParams?: Record<string, unknown>
   /** The limits of the grid. */
@@ -341,6 +350,27 @@ export interface ExportSummary {
   cutCells: number
   /** A warning for the user about the content of the file, or null. */
   warning: string | null
+}
+
+/** What one result set of a run to a file put in its file. */
+export interface SavedSet {
+  path: string
+  /** The sheet of the set, in an Excel file with a sheet for each set. */
+  sheet: string | null
+  rows: number
+  /** True when the export row limit or the room of a sheet stopped the set. */
+  truncated: boolean
+  /** True when the sheet of the set was full and rows were left out. */
+  sheetFull: boolean
+}
+
+/** What a run to a file wrote. The totals cover every file, and the path is
+ *  the path of the chosen file. */
+export interface RunFileSummary extends ExportSummary {
+  /** Each set that went to a file, in the order of the run. */
+  sets: SavedSet[]
+  /** The number of sets that went to the grid alone. */
+  skippedSets: number
 }
 
 /** What a request to save one file carries. The backend asks the user for

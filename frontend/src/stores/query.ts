@@ -11,16 +11,24 @@ import { scanCost } from '@/lib/format'
 import { pauseSeconds, releaseKept, spillRequest } from '@/lib/kept'
 import { ResultTable, type ResultStreamHandlers } from '@/lib/results'
 import { MessageLevel, PlanMode } from '@/types/api'
-import type { SavedFile } from '@/lib/runFile'
+import { savedFile, type SavedFile } from '@/lib/runFile'
 import type {
   ChosenMessagesFile,
   ErrorPayload,
   ExecOptions,
-  ExportSummary,
   KeptSet,
   Message,
   QueryStats,
+  RunFileSummary,
 } from '@/types/api'
+
+/** The file of a run to a file, and where its result sets go. */
+export interface RunFileTarget {
+  /** The ticket that `chooseRunFile` gave. */
+  ticket: string
+  /** True when each result set goes to the file, not the first alone. */
+  eachSet: boolean
+}
 
 /** One gigabyte, as a storage unit counts it. */
 const BYTES_IN_GIGABYTE = 1024 ** 3
@@ -354,9 +362,9 @@ export const useQueryStore = defineStore('query', () => {
    *
    * The identifier of the request lets the user stop the statement while it
    * runs. The caller gives the call that reaches the backend, so that a run
-   * and a plan share the state of the tab. A run that `savesFirstSet` sends
-   * its first set to a file, so a cut of that set at the row limit gives no
-   * warning.
+   * and a plan share the state of the tab. A run to a file sends its first
+   * `savedSets` sets to the file, so a cut of such a set at the row limit
+   * gives no warning.
    */
   async function runRequest(
     tabId: string,
@@ -370,7 +378,7 @@ export const useQueryStore = defineStore('query', () => {
     label?: string,
     queryParams?: Record<string, unknown>,
     origin?: { sent: string; start: EditorPosition },
-    savesFirstSet = false,
+    savedSets = 0,
   ): Promise<boolean> {
     const trimmed = query.trim()
     if (trimmed === '') {
@@ -493,11 +501,7 @@ export const useQueryStore = defineStore('query', () => {
       const paused = new Set(
         state.panes.filter((pane) => pane.pausedUntil !== undefined).map((pane) => pane.result),
       )
-      if (
-        run.fresh
-          .slice(savesFirstSet ? 1 : 0)
-          .some((table) => table.truncated && !paused.has(table))
-      ) {
+      if (run.fresh.slice(savedSets).some((table) => table.truncated && !paused.has(table))) {
         ui.warn('Results stopped at the row limit. Raise the limit in Settings to see more rows.')
       }
     } catch (error) {
@@ -618,20 +622,20 @@ export const useQueryStore = defineStore('query', () => {
 
   /**
    * Runs a statement for one tab and writes the rows of its first result
-   * set to the file of the ticket. The grid shows the first rows, as in a
-   * normal run, and the first result records the file. Gives back what the
-   * file received, or null when the run failed.
+   * set, or of each set, to the file of the ticket. The grid shows the first
+   * rows, as in a normal run, and each saved result records its file. Gives
+   * back what the files received, or null when the run failed.
    */
   async function runToFile(
     tabId: string,
     connectionId: string,
     query: string,
-    ticket: string,
+    target: RunFileTarget,
     queryParams?: Record<string, unknown>,
     start?: EditorPosition,
-  ): Promise<ExportSummary | null> {
+  ): Promise<RunFileSummary | null> {
     const text = query.trim()
-    let summary = null as ExportSummary | null
+    let summary = null as RunFileSummary | null
     await runRequest(
       tabId,
       connectionId,
@@ -642,8 +646,9 @@ export const useQueryStore = defineStore('query', () => {
             connectionId,
             requestId,
             query: text,
-            ticket,
+            ticket: target.ticket,
             maxRows: settings.settings.exportRowLimit,
+            eachSet: target.eachSet,
             tabId,
             queryParams,
             options,
@@ -655,13 +660,18 @@ export const useQueryStore = defineStore('query', () => {
       undefined,
       queryParams,
       start ? { sent: query, start } : undefined,
-      true,
+      target.eachSet ? Infinity : 1,
     )
     // A tab that closed during the run has no state and no result.
     const state = peekState(tabId)
-    const first = state ? panesOfLastRun(state)[0] : undefined
-    if (summary && first) {
-      first.savedFile = { path: summary.path, rows: summary.rows, truncated: summary.truncated }
+    if (summary && state) {
+      const panes = panesOfLastRun(state)
+      summary.sets.forEach((set, index) => {
+        const pane = panes[index]
+        if (pane) {
+          pane.savedFile = savedFile(set)
+        }
+      })
     }
     return summary
   }

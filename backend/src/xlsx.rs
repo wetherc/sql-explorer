@@ -25,18 +25,35 @@ pub const MAX_SHEET_ROWS: usize = 1_048_576;
 /// The largest number of columns a sheet holds. The last column is XFD.
 pub const MAX_SHEET_COLUMNS: usize = 16_384;
 
-/// The name of the sheet part inside the container.
+/// The name of the first sheet part inside the container.
+#[cfg(test)]
 const SHEET_PART: &str = "xl/worksheets/sheet1.xml";
 
-const CONTENT_TYPES: &str = concat!(
-    r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
-    r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">"#,
-    r#"<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>"#,
-    r#"<Default Extension="xml" ContentType="application/xml"/>"#,
-    r#"<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>"#,
-    r#"<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>"#,
-    "</Types>",
-);
+/// The name of the part of the sheet with the given number, from 1.
+fn sheet_part(number: usize) -> String {
+    format!("xl/worksheets/sheet{number}.xml")
+}
+
+/// Writes the part that names the type of each part. Each sheet needs a
+/// line of its own.
+fn content_types(sheets: usize) -> String {
+    let mut out = concat!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
+        r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">"#,
+        r#"<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>"#,
+        r#"<Default Extension="xml" ContentType="application/xml"/>"#,
+        r#"<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>"#,
+    )
+    .to_string();
+    for number in 1..=sheets {
+        out.push_str(&format!(
+            r#"<Override PartName="/{}" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>"#,
+            sheet_part(number)
+        ));
+    }
+    out.push_str("</Types>");
+    out
+}
 
 const ROOT_RELATIONSHIPS: &str = concat!(
     r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
@@ -45,12 +62,21 @@ const ROOT_RELATIONSHIPS: &str = concat!(
     "</Relationships>",
 );
 
-const WORKBOOK_RELATIONSHIPS: &str = concat!(
-    r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
-    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
-    r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>"#,
-    "</Relationships>",
-);
+/// Writes the part that links the workbook to each of its sheets.
+fn workbook_relationships(sheets: usize) -> String {
+    let mut out = concat!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+    )
+    .to_string();
+    for number in 1..=sheets {
+        out.push_str(&format!(
+            r#"<Relationship Id="rId{number}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{number}.xml"/>"#
+        ));
+    }
+    out.push_str("</Relationships>");
+    out
+}
 
 /// Names a fault of the container as a fault of the file. A writer of an
 /// archive fails when the file below it fails, so the reader of the message
@@ -286,18 +312,24 @@ pub fn sheet_name(name: &str) -> String {
     }
 }
 
-/// Writes the workbook part, which names the one sheet of the file.
-fn workbook_xml(sheet: &str) -> String {
-    format!(
-        concat!(
-            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
-            r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" "#,
-            r#"xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">"#,
-            r#"<sheets><sheet name="{}" sheetId="1" r:id="rId1"/></sheets>"#,
-            "</workbook>",
-        ),
-        escape_xml(sheet)
+/// Writes the workbook part, which names each sheet of the file in order.
+fn workbook_xml(sheets: &[String]) -> String {
+    let mut out = concat!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
+        r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" "#,
+        r#"xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">"#,
+        "<sheets>",
     )
+    .to_string();
+    for (index, sheet) in sheets.iter().enumerate() {
+        let number = index + 1;
+        out.push_str(&format!(
+            r#"<sheet name="{}" sheetId="{number}" r:id="rId{number}"/>"#,
+            escape_xml(sheet)
+        ));
+    }
+    out.push_str("</sheets></workbook>");
+    out
 }
 
 /// Writes one cell of the sheet. A cell that holds no value is left out of
@@ -375,16 +407,21 @@ fn header_xml(columns: &[String]) -> String {
     out
 }
 
-/// Writes one sheet into a ZIP container, one row at a time.
+/// Writes the sheets of a workbook into a ZIP container, one row at a time.
 ///
-/// The static parts go in first, and the sheet part stays open until
-/// `finish`. A row that arrives past the bound of a sheet is left out and
-/// reported, so the caller can mark the result as truncated.
+/// The sheet parts go in first, one after the other, and each sheet stays
+/// open until the next sheet starts or until `finish`. The parts that name
+/// the sheets go in at `finish`, when the number of sheets is known. A row
+/// that arrives past the bound of a sheet is left out and reported, so the
+/// caller can mark the result as truncated.
 pub struct SheetWriter<W: Write + Seek> {
     zip: ZipWriter<W>,
-    /// The number of rows written, the header row among them.
+    /// The names of the sheets, in the order of the file.
+    sheets: Vec<String>,
+    /// The number of rows written to the open sheet, the header row among
+    /// them.
     rows: usize,
-    /// The letters of each column, made once for the whole sheet.
+    /// The letters of each column, made once for each sheet.
     letters: Vec<String>,
     /// For each column, true when a text value can go in as a number.
     numeric: Vec<bool>,
@@ -403,7 +440,7 @@ impl<W: Write + Seek> SheetWriter<W> {
         Self::create_typed(writer, sheet, columns, vec![true; columns.len()])
     }
 
-    /// Starts the container and writes the header row of the sheet.
+    /// Starts the container and writes the header row of the first sheet.
     /// `numeric` gives, for each column, whether a text value can go in as a
     /// number cell. A column without a flag counts as a text column.
     ///
@@ -416,32 +453,46 @@ impl<W: Write + Seek> SheetWriter<W> {
         columns: &[String],
         numeric: Vec<bool>,
     ) -> Result<Self> {
-        if columns.len() > MAX_SHEET_COLUMNS {
-            return Err(crate::error::Error::Unsupported(format!(
-                "Excel sheets allow at most {MAX_SHEET_COLUMNS} columns, but this result has {}. Export it as CSV or JSON instead.",
-                columns.len()
-            )));
-        }
-        let mut zip = ZipWriter::new(writer);
-        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-        for (name, body) in [
-            ("[Content_Types].xml", CONTENT_TYPES.to_string()),
-            ("_rels/.rels", ROOT_RELATIONSHIPS.to_string()),
-            ("xl/workbook.xml", workbook_xml(&sheet_name(sheet))),
-            (
-                "xl/_rels/workbook.xml.rels",
-                WORKBOOK_RELATIONSHIPS.to_string(),
-            ),
-        ] {
-            zip.start_file(name, options).map_err(zip_fault)?;
-            zip.write_all(body.as_bytes())?;
-        }
+        check_columns(columns)?;
+        let mut writer = Self {
+            zip: ZipWriter::new(writer),
+            sheets: Vec::new(),
+            rows: 0,
+            letters: Vec::new(),
+            numeric: Vec::new(),
+            line: String::new(),
+            cut_cells: 0,
+        };
+        writer.start_sheet(sheet, columns, numeric)?;
+        Ok(writer)
+    }
 
+    /// Closes the open sheet and starts the next one with its header row.
+    /// The caller gives each sheet a name that no other sheet of the file
+    /// has, because Excel repairs a file with two sheets of the same name.
+    pub fn next_sheet(
+        &mut self,
+        sheet: &str,
+        columns: &[String],
+        numeric: Vec<bool>,
+    ) -> Result<()> {
+        check_columns(columns)?;
+        self.zip.write_all(SHEET_END.as_bytes())?;
+        self.start_sheet(sheet, columns, numeric)
+    }
+
+    /// Starts the part of a new sheet and writes its header row.
+    fn start_sheet(&mut self, sheet: &str, columns: &[String], numeric: Vec<bool>) -> Result<()> {
+        self.sheets.push(sheet_name(sheet));
         // A full sheet can pass 4 GB, and a ZIP entry above that size needs
         // the ZIP64 fields, which the writer adds only when it is told first.
-        zip.start_file(SHEET_PART, options.large_file(true))
+        self.zip
+            .start_file(
+                sheet_part(self.sheets.len()),
+                part_options().large_file(true),
+            )
             .map_err(zip_fault)?;
-        zip.write_all(
+        self.zip.write_all(
             concat!(
                 r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
                 r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">"#,
@@ -449,16 +500,11 @@ impl<W: Write + Seek> SheetWriter<W> {
             )
             .as_bytes(),
         )?;
-
-        zip.write_all(header_xml(columns).as_bytes())?;
-        Ok(Self {
-            zip,
-            rows: 1,
-            letters: (1..=columns.len()).map(column_name).collect(),
-            numeric,
-            line: String::new(),
-            cut_cells: 0,
-        })
+        self.zip.write_all(header_xml(columns).as_bytes())?;
+        self.rows = 1;
+        self.letters = (1..=columns.len()).map(column_name).collect();
+        self.numeric = numeric;
+        Ok(())
     }
 
     /// Writes one row of data. Returns false when the sheet is full, and
@@ -508,11 +554,43 @@ impl<W: Write + Seek> SheetWriter<W> {
         Ok(())
     }
 
-    /// Closes the sheet and the container, and gives the writer back.
+    /// Closes the open sheet, writes the parts that name the sheets, and
+    /// closes the container. Gives the writer back.
     pub fn finish(mut self) -> Result<W> {
-        self.zip.write_all(b"</sheetData></worksheet>")?;
+        self.zip.write_all(SHEET_END.as_bytes())?;
+        let count = self.sheets.len();
+        for (name, body) in [
+            ("[Content_Types].xml", content_types(count)),
+            ("_rels/.rels", ROOT_RELATIONSHIPS.to_string()),
+            ("xl/workbook.xml", workbook_xml(&self.sheets)),
+            ("xl/_rels/workbook.xml.rels", workbook_relationships(count)),
+        ] {
+            self.zip
+                .start_file(name, part_options())
+                .map_err(zip_fault)?;
+            self.zip.write_all(body.as_bytes())?;
+        }
         self.zip.finish().map_err(zip_fault)
     }
+}
+
+/// The text that closes the part of a sheet.
+const SHEET_END: &str = "</sheetData></worksheet>";
+
+/// The options of each part of the container.
+fn part_options() -> SimpleFileOptions {
+    SimpleFileOptions::default().compression_method(CompressionMethod::Deflated)
+}
+
+/// Refuses a result with more columns than a sheet allows.
+fn check_columns(columns: &[String]) -> Result<()> {
+    if columns.len() > MAX_SHEET_COLUMNS {
+        return Err(crate::error::Error::Unsupported(format!(
+            "Excel sheets allow at most {MAX_SHEET_COLUMNS} columns, but this result has {}. Export it as CSV or JSON instead.",
+            columns.len()
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -705,6 +783,35 @@ mod tests {
         assert!(part_of(bytes.clone(), "[Content_Types].xml").contains("/xl/workbook.xml"));
         assert!(part_of(bytes.clone(), "_rels/.rels").contains("xl/workbook.xml"));
         assert!(part_of(bytes, "xl/_rels/workbook.xml.rels").contains("worksheets/sheet1.xml"));
+    }
+
+    #[test]
+    fn each_sheet_gets_a_part_and_a_name_of_its_own() {
+        let mut writer =
+            SheetWriter::create(Cursor::new(Vec::new()), "Result 1", &["id".to_string()]).unwrap();
+        writer.set_rows(MAX_SHEET_ROWS);
+        assert!(!writer.row(&[json!(1)]).unwrap());
+        writer
+            .next_sheet("Result 2", &["name".to_string()], vec![false])
+            .unwrap();
+        // The next sheet starts with room for its rows again.
+        assert!(writer.row(&[json!("12")]).unwrap());
+        let wide: Vec<String> = (0..=MAX_SHEET_COLUMNS).map(|i| i.to_string()).collect();
+        assert!(writer.next_sheet("Result 3", &wide, Vec::new()).is_err());
+        let bytes = writer.finish().unwrap().into_inner();
+
+        let second = part_of(bytes.clone(), "xl/worksheets/sheet2.xml");
+        assert!(second.contains(">name</t>"));
+        // The column of the second sheet is a text column.
+        assert!(second.contains(
+            "<row r=\"2\"><c r=\"A2\" t=\"inlineStr\"><is><t xml:space=\"preserve\">12</t>"
+        ));
+        let workbook = part_of(bytes.clone(), "xl/workbook.xml");
+        assert!(workbook.contains(r#"<sheet name="Result 1" sheetId="1" r:id="rId1"/>"#));
+        assert!(workbook.contains(r#"<sheet name="Result 2" sheetId="2" r:id="rId2"/>"#));
+        assert!(part_of(bytes.clone(), "[Content_Types].xml").contains("/xl/worksheets/sheet2.xml"));
+        let links = part_of(bytes, "xl/_rels/workbook.xml.rels");
+        assert!(links.contains(r#"Id="rId2""#) && links.contains("worksheets/sheet2.xml"));
     }
 
     #[test]

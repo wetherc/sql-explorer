@@ -16,6 +16,7 @@ import type {
   ExportRequest,
   ExportSummary,
   KeptExportRequest,
+  RunFileSummary,
   FolderEntry,
   MenuCommandState,
   ObjectType,
@@ -166,13 +167,19 @@ export const api = {
     return call('choose_run_file', request)
   },
 
+  /** True when a statement can give more than one result set. The check
+   *  reads the text alone, so a procedure can still give more sets. */
+  severalResultSets(query: string, dialect: Dialect): Promise<boolean> {
+    return invoke('several_result_sets', { query, dialect })
+  },
+
   /**
-   * Runs a script one time. The rows of the first result set go to the
-   * file of the ticket, and the first rows of each set reach the handlers
-   * as in `executeQuery`. Gives back what the file received.
+   * Runs a script one time. The rows of the first result set, or of each
+   * set, go to the file of the ticket, and the first rows of each set reach
+   * the handlers as in `executeQuery`. Gives back what the files received.
    */
-  runToFile(request: RunToFileRequest, handlers: ResultStreamHandlers): Promise<ExportSummary> {
-    return streamed<ExportSummary>('run_to_file', { ...request }, handlers)
+  runToFile(request: RunToFileRequest, handlers: ResultStreamHandlers): Promise<RunFileSummary> {
+    return streamed<RunFileSummary>('run_to_file', { ...request }, handlers)
   },
 
   /** Asks the user for a text file that gets every message of the runs of

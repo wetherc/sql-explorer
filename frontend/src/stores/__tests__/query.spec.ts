@@ -880,6 +880,8 @@ describe('a run to a file', () => {
     sheetFull: false,
     cutCells: 0,
     warning: null,
+    sets: [{ path: '/a/out.csv', sheet: null, rows: 50, truncated: false, sheetFull: false }],
+    skippedSets: 0,
   }
 
   /** A run whose first set, cut at the grid limit, also went to a file. */
@@ -898,7 +900,7 @@ describe('a run to a file', () => {
       't1',
       'c1',
       ' SELECT 1 ',
-      'k1',
+      { ticket: 'k1', eachSet: false },
       { a: 1 },
       {
         line: 1,
@@ -912,6 +914,7 @@ describe('a run to a file', () => {
         query: 'SELECT 1',
         ticket: 'k1',
         maxRows: useSettingsStore().settings.exportRowLimit,
+        eachSet: false,
         tabId: 't1',
         queryParams: { a: 1 },
         options: { maxRows: 10000, timeoutSecs: 300 },
@@ -930,15 +933,59 @@ describe('a run to a file', () => {
       { columns: [], rows: [[2]], truncated: true },
     ])
     const queries = useQueryStore()
-    await queries.runToFile('t1', 'c1', 'SELECT 1; SELECT 2', 'k1')
+    await queries.runToFile('t1', 'c1', 'SELECT 1; SELECT 2', {
+      ticket: 'k1',
+      eachSet: false,
+    })
     expect(queries.stateFor('t1').panes[1]!.savedFile).toBeUndefined()
     expect(useUiStore().notices.some((notice) => notice.level === 'warning')).toBe(true)
+  })
+
+  it('records the file of each saved set and warns for no cut of a saved set', async () => {
+    const stream = streamed({
+      ...response(),
+      results: [
+        { columns: [], rows: [[1]], truncated: true },
+        { columns: [], rows: [[2]], truncated: true },
+        { columns: [], rows: [[3]], truncated: false },
+      ],
+    })
+    const sheets = {
+      ...summary,
+      path: '/a/out.xlsx',
+      sets: [
+        { path: '/a/out.xlsx', sheet: 'Result 1', rows: 9, truncated: false, sheetFull: false },
+        { path: '/a/out.xlsx', sheet: 'Result 2', rows: 8, truncated: true, sheetFull: false },
+      ],
+    }
+    apiStub.runToFile.mockImplementation(async (request: unknown, handlers: never) => {
+      await stream(request, handlers)
+      return sheets
+    })
+    const queries = useQueryStore()
+    await queries.runToFile('t1', 'c1', 'SELECT 1; SELECT 2', { ticket: 'k1', eachSet: true })
+    expect(apiStub.runToFile).toHaveBeenCalledWith(
+      expect.objectContaining({ eachSet: true }),
+      expect.anything(),
+    )
+    const panes = queries.stateFor('t1').panes
+    expect(panes[1]!.savedFile).toEqual({
+      path: '/a/out.xlsx',
+      rows: 8,
+      truncated: true,
+      sheet: 'Result 2',
+    })
+    // The run gave a third set that no file took, and no pane is cut there.
+    expect(panes[2]!.savedFile).toBeUndefined()
+    expect(useUiStore().notices.some((notice) => notice.level === 'warning')).toBe(false)
   })
 
   it('gives null for a run that failed', async () => {
     apiStub.runToFile.mockRejectedValue({ category: 'query', message: 'bad', detail: null })
     const queries = useQueryStore()
-    expect(await queries.runToFile('t1', 'c1', 'SELECT 1', 'k1')).toBeNull()
+    expect(
+      await queries.runToFile('t1', 'c1', 'SELECT 1', { ticket: 'k1', eachSet: false }),
+    ).toBeNull()
     expect(queries.stateFor('t1').failed).toBe(true)
   })
 
@@ -948,7 +995,9 @@ describe('a run to a file', () => {
       queries.clear('t1')
       return summary
     })
-    expect(await queries.runToFile('t1', 'c1', 'SELECT 1', 'k1')).toEqual(summary)
+    expect(
+      await queries.runToFile('t1', 'c1', 'SELECT 1', { ticket: 'k1', eachSet: false }),
+    ).toEqual(summary)
     expect(queries.peekState('t1')).toBeUndefined()
   })
 })
@@ -983,7 +1032,7 @@ describe('the file of the messages of a tab', () => {
       expect.anything(),
     )
     apiStub.runToFile.mockResolvedValue(null)
-    await queries.runToFile('t1', 'c1', 'SELECT 1', 'k1')
+    await queries.runToFile('t1', 'c1', 'SELECT 1', { ticket: 'k1', eachSet: false })
     expect(apiStub.runToFile).toHaveBeenCalledWith(
       expect.objectContaining({ messagesFile: 'f1' }),
       expect.anything(),

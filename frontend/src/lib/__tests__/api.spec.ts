@@ -428,6 +428,12 @@ describe('api', () => {
       query: 'SELECT :id',
       dialect: Dialect.MsSql,
     })
+
+    await api.severalResultSets('SELECT 1; SELECT 2', Dialect.MsSql)
+    expect(invoke).toHaveBeenCalledWith('several_result_sets', {
+      query: 'SELECT 1; SELECT 2',
+      dialect: Dialect.MsSql,
+    })
   })
 
   it('sends the preview request with and without a limit', async () => {

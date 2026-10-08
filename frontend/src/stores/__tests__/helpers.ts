@@ -24,6 +24,7 @@ export function makeApiStub() {
     saveRunMessages: vi.fn(),
     saveShownMessages: vi.fn(),
     runToFile: vi.fn(),
+    severalResultSets: vi.fn(),
     explainQuery: vi.fn(),
     queryParameters: vi.fn(),
     cancelQuery: vi.fn(),

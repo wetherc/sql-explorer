@@ -1,5 +1,15 @@
-import { describe, expect, it } from 'vitest'
-import { savedFileNote } from '@/lib/runFile'
+import { afterEach, describe, expect, it } from 'vitest'
+import {
+  SET_CHOICE_KEY,
+  eachSetLabel,
+  loadSetChoice,
+  saveSetChoice,
+  savedFile,
+  savedFileNote,
+  savedSetsMessage,
+  secondFileName,
+} from '@/lib/runFile'
+import type { RunFileSummary, SavedSet } from '@/types/api'
 
 describe('savedFileNote', () => {
   it('names the preview and the whole file', () => {
@@ -23,6 +33,98 @@ describe('savedFileNote', () => {
     )
     expect(savedFileNote(1, false, { path: '/a/out.json', rows: 1, truncated: false })).toBe(
       'The row was saved to /a/out.json.',
+    )
+  })
+
+  it('names the sheet of a result in an Excel file with a sheet for each result', () => {
+    const file = { path: '/a/out.xlsx', rows: 2, truncated: false, sheet: 'Result 2' }
+    expect(savedFileNote(2, false, file)).toBe(
+      'All 2 rows were saved to the "Result 2" sheet of /a/out.xlsx.',
+    )
+  })
+})
+
+const set = (sheet: string | null): SavedSet => ({
+  path: '/a/out.xlsx',
+  sheet,
+  rows: 4,
+  truncated: true,
+  sheetFull: false,
+})
+
+describe('savedFile', () => {
+  it('keeps the sheet of a set only when it has one', () => {
+    expect(savedFile(set(null))).toEqual({ path: '/a/out.xlsx', rows: 4, truncated: true })
+    expect(savedFile(set('Result 1')).sheet).toBe('Result 1')
+  })
+})
+
+describe('the choice of the result sets', () => {
+  afterEach(() => {
+    localStorage.clear()
+  })
+
+  it('remembers the last choice', () => {
+    expect(loadSetChoice()).toBe('first')
+    saveSetChoice('each')
+    expect(localStorage.getItem(SET_CHOICE_KEY)).toBe('each')
+    expect(loadSetChoice()).toBe('each')
+  })
+
+  it('falls back on the first result when the store refuses', () => {
+    localStorage.setItem(SET_CHOICE_KEY, 'each')
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      get() {
+        throw new Error('blocked')
+      },
+    })
+    try {
+      expect(() => saveSetChoice('each')).not.toThrow()
+      expect(loadSetChoice()).toBe('first')
+    } finally {
+      Object.defineProperty(globalThis, 'localStorage', descriptor!)
+    }
+  })
+
+  it('names the choice for the format', () => {
+    expect(eachSetLabel('xlsx')).toBe('One sheet per result set')
+    expect(eachSetLabel('json')).toBe('One file per result set')
+  })
+})
+
+describe('secondFileName', () => {
+  it('puts the number before the extension', () => {
+    expect(secondFileName('/a/orders.csv')).toBe('orders-2.csv')
+    expect(secondFileName('C:\\a\\b.c.json')).toBe('b.c-2.json')
+    expect(secondFileName('/a/plain')).toBe('plain-2')
+    expect(secondFileName('/a/.hidden')).toBe('.hidden-2')
+  })
+})
+
+describe('savedSetsMessage', () => {
+  const summary = (sets: SavedSet[]): RunFileSummary => ({
+    rows: 8,
+    truncated: false,
+    path: '/a/out.xlsx',
+    sheetFull: false,
+    cutCells: 0,
+    warning: null,
+    sets,
+    skippedSets: 0,
+  })
+
+  it('has no words for one saved set', () => {
+    expect(savedSetsMessage(summary([set(null)]))).toBeNull()
+  })
+
+  it('counts the sheets or the files', () => {
+    expect(savedSetsMessage(summary([set('Result 1'), set('Result 2')]))).toBe(
+      'Saved 8 rows to 2 sheets in /a/out.xlsx.',
+    )
+    expect(savedSetsMessage(summary([set(null), set(null), set(null)]))).toBe(
+      'Saved 8 rows to 3 files, starting with /a/out.xlsx.',
     )
   })
 })

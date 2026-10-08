@@ -260,10 +260,7 @@ const MSSQL_WRITE_WORDS: [&str; 14] = [
 /// have a writing word outside a quoted region or a comment. The check reads
 /// the text alone, so a function of the server that writes can still pass.
 pub fn only_reads(script: &str, dialect: Dialect) -> bool {
-    let statements: Vec<String> = split_batches(script, dialect)
-        .iter()
-        .flat_map(|batch| split_statements(&batch.text, dialect))
-        .collect();
+    let statements = statements_of(script, dialect);
     if statements.is_empty() {
         return false;
     }
@@ -273,6 +270,44 @@ pub fn only_reads(script: &str, dialect: Dialect) -> bool {
             "select" | "with" | "show"
         ) && !holds_a_write_word(statement, dialect)
     })
+}
+
+/// The statements of a script, batch by batch.
+fn statements_of(script: &str, dialect: Dialect) -> Vec<String> {
+    split_batches(script, dialect)
+        .iter()
+        .flat_map(|batch| split_statements(&batch.text, dialect))
+        .collect()
+}
+
+/// The first words of the statements that give rows.
+const ROW_WORDS: [&str; 9] = [
+    "select", "with", "values", "table", "show", "describe", "desc", "explain", "pragma",
+];
+
+/// The first words of the statements that call a procedure. A procedure can
+/// give any number of result sets.
+const CALL_WORDS: [&str; 3] = ["exec", "execute", "call"];
+
+/// True when a script can give more than one result set: two statements
+/// that give rows, a batch that runs more than one time and has such a
+/// statement, or a call of a procedure. The check reads the text alone, so
+/// it can give true for a script that gives one set, for example a `WITH`
+/// statement that inserts rows.
+pub fn may_give_several_sets(script: &str, dialect: Dialect) -> bool {
+    let mut sets = 0u64;
+    for batch in split_batches(script, dialect) {
+        for statement in split_statements(&batch.text, dialect) {
+            let word = leading_keyword(&statement, dialect);
+            if CALL_WORDS.contains(&word.as_str()) {
+                return true;
+            }
+            if ROW_WORDS.contains(&word.as_str()) {
+                sets += u64::from(batch.runs);
+            }
+        }
+    }
+    sets > 1
 }
 
 /// True when the statement has a writing word outside a quoted region or a
@@ -1969,6 +2004,24 @@ mod tests {
                 }
             ]
         );
+    }
+
+    #[test]
+    fn a_script_with_two_reads_can_give_several_sets() {
+        assert!(may_give_several_sets("SELECT 1; SELECT 2", Dialect::Sqlite));
+        assert!(!may_give_several_sets(
+            "SELECT 1; DELETE FROM t",
+            Dialect::Sqlite
+        ));
+        assert!(!may_give_several_sets("SELECT 1", Dialect::Postgres));
+        assert!(may_give_several_sets("EXEC dbo.report", Dialect::MsSql));
+        assert!(may_give_several_sets("CALL report()", Dialect::MySql));
+        // A batch that runs two times gives its set two times.
+        assert!(may_give_several_sets("SELECT 1;\nGO 2\n", Dialect::MsSql));
+        assert!(!may_give_several_sets(
+            "INSERT INTO t VALUES (1);\nGO 2\n",
+            Dialect::MsSql
+        ));
     }
 
     #[test]

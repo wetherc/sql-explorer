@@ -62,10 +62,30 @@ count, as **Export all rows** does.
 
 Because the statement runs only once, **Run to file…** accepts any statement,
 including ones that change data, and it runs a whole script when you select
-one. The file gets the first result set. The grid shows every result set of the
-script, each up to the grid's row limit, and **Messages** lists what the server
-sent. A statement that returns no result set writes no file, and the run
-reports an error after the statement has run.
+one. The grid shows every result set of the script, each up to the grid's row
+limit, and **Messages** lists what the server sent. A statement that returns no
+result set writes no file, and the run reports an error after the statement has
+run.
+
+When the text can return more than one result set, for example two `SELECT`
+statements or a procedure call, a second dialog opens after the save dialog and
+asks where the results go:
+
+- **First result only** writes the first result set to the file, and the other
+  results appear in the grid alone.
+- **One file per result set** (CSV and JSON) writes the first result to the
+  file you chose and each later result to a file beside it: `orders.csv`,
+  `orders-2.csv`, `orders-3.csv` and so on. When a name is already taken, the
+  app adds a number, as in `orders-2 (2).csv`, so it never replaces a file you
+  didn't choose.
+- **One sheet per result set** (Excel) writes each result to a sheet of its own
+  in the file you chose, named **Result 1**, **Result 2** and so on.
+
+The dialog selects the choice you made last time, and the export row limit
+applies to each result separately. The note above each grid names the file or
+sheet of its result. The app can't always tell from the text how many results a
+procedure returns, so when a run with **First result only** returns more than
+one, a notice says "Only the first result went to the file."
 
 **Stop** and the connection's time limit work as they do for a normal run. The
 rows go to a temporary file beside the one you chose, so a stopped or failed run

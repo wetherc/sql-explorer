@@ -2308,7 +2308,7 @@ pub async fn save_workspace<R: Runtime>(
 }
 
 /// The form a file export takes.
-#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ExportFormat {
     Csv,
@@ -3123,7 +3123,9 @@ const EXPORT_QUEUE: usize = 1024;
 
 /// One piece of an export on its way to the writer thread.
 enum Piece {
-    Begin(Vec<crate::db::ColumnInfo>),
+    /// Starts a set. The name, when there is one, names a new sheet of an
+    /// xlsx file. A set without a name takes the name of the file.
+    Begin(Vec<crate::db::ColumnInfo>, Option<String>),
     Row(Vec<serde_json::Value>),
     /// The run ended well, so the writer closes the file and renames it.
     Finish,
@@ -3141,7 +3143,8 @@ type WriterFault = Arc<std::sync::Mutex<Option<Error>>>;
 /// on a thread of their own, so a slow disk does not stop the async thread
 /// that serves the other commands. The sink keeps the counts and the limits,
 /// so it answers `Stop` without a wait for the writer. It answers `Stop` for
-/// a row of a second set, because the export writes one file.
+/// a row of a second set, because the export writes one file, unless the
+/// sink puts each set of an xlsx file on a sheet of its own.
 struct FileSink {
     pieces: std::sync::mpsc::SyncSender<Piece>,
     fault: WriterFault,
@@ -3160,6 +3163,20 @@ struct FileSink {
     saw_set: bool,
     /// True once the first set ended.
     set_done: bool,
+    /// True when each set goes to a sheet of its own in an xlsx file.
+    sheet_per_set: bool,
+    /// The counts of each set that the file received.
+    sets: Vec<SetCount>,
+}
+
+/// What one result set put in a file.
+#[derive(Debug, Clone, Default)]
+struct SetCount {
+    /// The sheet of the set in an xlsx file with a sheet for each set.
+    sheet: Option<String>,
+    rows: usize,
+    truncated: bool,
+    sheet_full: bool,
 }
 
 impl FileSink {
@@ -3168,6 +3185,19 @@ impl FileSink {
     async fn create(path: &std::path::Path, format: ExportFormat) -> Result<Self> {
         let target = path.to_path_buf();
         let writer = off_thread(move || ExportWriter::create(&target, format)).await?;
+        Self::start(writer, path, format)
+    }
+
+    /// Creates the temporary file on the current thread and starts the
+    /// writer thread. A sink that starts a file in the middle of a run uses
+    /// this, because the methods of a sink are not async.
+    fn create_now(path: &std::path::Path, format: ExportFormat) -> Result<Self> {
+        let writer = wait_in_place(|| ExportWriter::create(path, format))?;
+        Self::start(writer, path, format)
+    }
+
+    /// Starts the writer thread for a writer whose file is open.
+    fn start(writer: ExportWriter, path: &std::path::Path, format: ExportFormat) -> Result<Self> {
         let (pieces, queue) = std::sync::mpsc::sync_channel(EXPORT_QUEUE);
         let (sender, done) = tokio::sync::oneshot::channel();
         let fault = WriterFault::default();
@@ -3198,7 +3228,16 @@ impl FileSink {
             sheet_full: false,
             saw_set: false,
             set_done: false,
+            sheet_per_set: false,
+            sets: Vec::new(),
         }
+    }
+
+    /// Puts each set on a sheet of its own. Only an xlsx file has sheets,
+    /// so a sink of another format keeps the first set alone.
+    fn sheet_per_set(mut self) -> Self {
+        self.sheet_per_set = self.sheet_room.is_some();
+        self
     }
 
     /// The error that stopped the writer thread. A thread that stopped
@@ -3278,7 +3317,7 @@ fn write_pieces(
 ) {
     for piece in queue {
         let step = match piece {
-            Piece::Begin(columns) => writer.begin(columns),
+            Piece::Begin(columns, sheet) => writer.begin(columns, sheet),
             Piece::Row(row) => writer.row(&row),
             Piece::Finish => {
                 let _ = done.send(writer.finish());
@@ -3348,7 +3387,7 @@ impl ExportWriter {
             .ok_or_else(|| Error::Anyhow(anyhow::anyhow!("The export file is closed.")))
     }
 
-    fn begin(&mut self, columns: Vec<crate::db::ColumnInfo>) -> Result<()> {
+    fn begin(&mut self, columns: Vec<crate::db::ColumnInfo>, sheet: Option<String>) -> Result<()> {
         use std::io::Write;
         self.began = true;
         match self.format {
@@ -3374,15 +3413,18 @@ impl ExportWriter {
                     .iter()
                     .map(|column| crate::xlsx::is_numeric_type(&column.type_name))
                     .collect();
+                let title = sheet.unwrap_or_else(|| self.sheet_title.clone());
+                // A set after the first starts the next sheet of the file.
+                if let Some(open) = self.sheet.as_mut() {
+                    open.next_sheet(&title, &names, numeric)?;
+                    return Ok(());
+                }
                 let file = self
                     .out
                     .take()
                     .ok_or_else(|| Error::Anyhow(anyhow::anyhow!("The export file is closed.")))?;
                 self.sheet = Some(crate::xlsx::SheetWriter::create_typed(
-                    file,
-                    &self.sheet_title,
-                    &names,
-                    numeric,
+                    file, &title, &names, numeric,
                 )?);
             }
         }
@@ -3471,11 +3513,21 @@ impl Drop for ExportWriter {
 
 impl crate::db::sink::RowSink for FileSink {
     fn begin_set(&mut self, columns: Vec<crate::db::ColumnInfo>) -> Result<()> {
-        if self.saw_set {
+        if self.saw_set && !self.sheet_per_set {
             return Ok(());
         }
         self.saw_set = true;
-        self.send(Piece::Begin(columns))
+        let sheet = self
+            .sheet_per_set
+            .then(|| format!("Result {}", self.sets.len() + 1));
+        if self.sheet_per_set {
+            self.sheet_room = Some(crate::xlsx::MAX_SHEET_ROWS - 1);
+        }
+        self.sets.push(SetCount {
+            sheet: sheet.clone(),
+            ..SetCount::default()
+        });
+        self.send(Piece::Begin(columns, sheet))
     }
 
     fn row(&mut self, row: Vec<serde_json::Value>) -> Result<crate::db::sink::SinkControl> {
@@ -3489,12 +3541,19 @@ impl crate::db::sink::RowSink for FileSink {
             if *room == 0 {
                 self.truncated = true;
                 self.sheet_full = true;
+                if let Some(count) = self.sets.last_mut() {
+                    count.truncated = true;
+                    count.sheet_full = true;
+                }
                 return Ok(crate::db::sink::SinkControl::Stop);
             }
             *room -= 1;
         }
         self.send(Piece::Row(row))?;
         self.rows += 1;
+        if let Some(count) = self.sets.last_mut() {
+            count.rows += 1;
+        }
         Ok(crate::db::sink::SinkControl::Continue)
     }
 
@@ -3503,7 +3562,11 @@ impl crate::db::sink::RowSink for FileSink {
             return Ok(());
         }
         self.truncated = self.truncated || truncated;
-        self.set_done = true;
+        if let Some(count) = self.sets.last_mut() {
+            count.truncated = count.truncated || truncated;
+        }
+        // A sink with a sheet for each set takes the sets that follow.
+        self.set_done = !self.sheet_per_set;
         Ok(())
     }
 
@@ -4974,6 +5037,58 @@ mod tests {
         // The writer thread removes the part after the queue closes.
         assert!(wait_for_empty(folder.path()));
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn only_an_excel_file_puts_each_set_on_a_sheet() {
+        use crate::db::sink::{RowSink, SinkControl};
+        use crate::db::ColumnInfo;
+        let folder = tempfile::tempdir().unwrap();
+        let mut csv = FileSink::create(&folder.path().join("a.csv"), ExportFormat::Csv)
+            .await
+            .unwrap()
+            .sheet_per_set();
+        assert!(!csv.sheet_per_set);
+        // An end without a set counts no set, and a message goes nowhere.
+        csv.message(crate::db::Message::info("rows"));
+        csv.end_set(true).unwrap();
+        assert!(csv.sets.is_empty());
+        assert!(csv.truncated);
+
+        let path = folder.path().join("b.xlsx");
+        let mut sink = FileSink::create(&path, ExportFormat::Xlsx)
+            .await
+            .unwrap()
+            .sheet_per_set();
+        sink.begin_set(vec![ColumnInfo::new("id", "int")]).unwrap();
+        sink.sheet_room = Some(0);
+        // The first sheet is full, and the next set gets a sheet with room.
+        assert_eq!(
+            sink.row(vec![serde_json::json!(1)]).unwrap(),
+            SinkControl::Stop
+        );
+        sink.end_set(false).unwrap();
+        sink.begin_set(vec![ColumnInfo::new("id", "int")]).unwrap();
+        assert_eq!(
+            sink.row(vec![serde_json::json!(2)]).unwrap(),
+            SinkControl::Continue
+        );
+        sink.end_set(true).unwrap();
+        let counts: Vec<(Option<String>, usize, bool, bool)> = sink
+            .sets
+            .iter()
+            .map(|set| (set.sheet.clone(), set.rows, set.truncated, set.sheet_full))
+            .collect();
+        assert_eq!(
+            counts,
+            vec![
+                (Some("Result 1".to_string()), 0, true, true),
+                (Some("Result 2".to_string()), 1, true, false),
+            ]
+        );
+        let summary = sink.finish().await.unwrap();
+        assert_eq!(summary.rows, 1);
+        assert!(summary.sheet_full);
     }
 
     #[tokio::test]

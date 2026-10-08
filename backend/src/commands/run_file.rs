@@ -6,6 +6,10 @@
 //! goes to the file writer, up to the export row limit. The rows up to the
 //! row limit of the grid also go to the window, as in a normal run.
 //!
+//! The user can also send each result set to the file. Each set of a CSV or
+//! a JSON run then goes to a file of its own beside the chosen file, and
+//! each set of an Excel run goes to a sheet of its own in the chosen file.
+//!
 //! The user chooses the file before the run starts, in a separate command.
 //! The interface clears the results of the tab when a run starts, so a user
 //! who closes the dialog keeps the old results. The backend keeps the chosen
@@ -13,8 +17,9 @@
 //! ticket, so it never writes to a path that the user did not accept.
 
 use super::{
-    driver_for_request, end_message_log, finish_run, in_sent_text, prepare_parameters, run_bounded,
-    session_for, stop_grace, Bounded, ExportFormat, ExportSummary, FileSink,
+    cut_cells_warning, driver_for_request, end_message_log, finish_run, in_sent_text, off_thread,
+    prepare_parameters, run_bounded, session_for, stop_grace, Bounded, ExportFormat, ExportSummary,
+    FileSink,
 };
 use crate::db::columnar::ChunkSink;
 use crate::db::sink::{RowSink, SinkControl};
@@ -103,6 +108,8 @@ pub struct ChooseRunFileRequest {
 pub struct ChosenRunFile {
     pub ticket: String,
     pub path: String,
+    /// The format that the extension of the path sets.
+    pub format: ExportFormat,
 }
 
 /// Asks the user for the file of a run. The dialog offers CSV, JSON and
@@ -140,7 +147,17 @@ fn remember_choice(chosen: &ChosenFiles, path: PathBuf) -> ChosenRunFile {
     ChosenRunFile {
         ticket: chosen.remember(path, format),
         path: shown,
+        format,
     }
+}
+
+/// Tells the interface whether a statement can give more than one result
+/// set, so the interface can ask where the sets after the first go. The
+/// check reads the text alone. A procedure can give sets that the text does
+/// not show, so the run itself also counts the sets.
+#[tauri::command]
+pub async fn several_result_sets(query: String, dialect: crate::sql::Dialect) -> Result<bool> {
+    off_thread(move || Ok(crate::sql::may_give_several_sets(&query, dialect))).await
 }
 
 /// What one run to a file sends.
@@ -152,8 +169,13 @@ pub struct RunToFileRequest {
     pub query: String,
     /// The ticket of the file that `choose_run_file` gave.
     pub ticket: String,
-    /// The row limit of the file.
+    /// The row limit of the file. Each set has this limit.
     pub max_rows: usize,
+    /// True when each result set goes to the file: a CSV or a JSON run
+    /// writes a file for each set, and an Excel run writes a sheet for each
+    /// set. False sends the first set alone to the file.
+    #[serde(default)]
+    pub each_set: bool,
     /// The tab that runs the statement. A request without a tab runs on the
     /// default session.
     #[serde(default)]
@@ -175,9 +197,9 @@ fn unknown_ticket() -> Error {
     Error::Invalid("The file choice for this run has expired. Run to file again.".to_string())
 }
 
-/// Runs a script one time. The rows of the first result set go to the file
-/// that the user chose, and the first rows of each set go to the window as
-/// binary chunks, as `execute_query` sends them.
+/// Runs a script one time. The rows of the first result set, or of each
+/// set, go to the file that the user chose, and the first rows of each set
+/// go to the window as binary chunks, as `execute_query` sends them.
 ///
 /// The statement runs one time, so a statement that changes data is
 /// accepted, as in a normal run. A stop, an error or the time limit removes
@@ -191,13 +213,14 @@ pub async fn run_to_file<R: Runtime>(
     state: tauri::State<'_, AppState>,
     chosen: tauri::State<'_, ChosenFiles>,
     on_chunk: Channel<InvokeResponseBody>,
-) -> Result<ExportSummary> {
+) -> Result<RunFileSummary> {
     let RunToFileRequest {
         connection_id,
         request_id,
         query,
         ticket,
         max_rows,
+        each_set,
         tab_id,
         query_params,
         options,
@@ -225,7 +248,14 @@ pub async fn run_to_file<R: Runtime>(
         let (query, bound) = prepare_parameters(&query, open.dialect, query_params.as_ref())?;
         // The drop of the sink before `finish` removes the part of the file
         // that was written.
-        let sink = FileSink::create(&file.path, file.format).await?;
+        let layout = SetLayout::new(each_set, file.format);
+        let first = FileSink::create(&file.path, file.format).await?;
+        let first = if layout == SetLayout::Sheets {
+            first.sheet_per_set()
+        } else {
+            first
+        };
+        let sink = SetFiles::new(first, file.format, layout);
         Ok::<_, Error>((
             open,
             session,
@@ -286,41 +316,233 @@ pub async fn run_to_file<R: Runtime>(
             return Err(error);
         }
     };
-    let written = if file.saw_set {
-        file.finish().await
-    } else {
-        Err(Error::Unsupported(
-            "The statement returned no result set, so no file was written.".to_string(),
-        ))
-    };
+    let written = file.finish().await;
     // The run itself ended well, so the window gets its numbers also when
     // the file failed. The error of the file then travels on the answer.
     grid.finish(summary)?;
     let written = written?;
     log::info!(
-        "Wrote {} rows to the file '{}' and showed the first rows.",
-        written.rows,
-        written.path
+        "Wrote {} rows of {} result sets to the file '{}' and showed the first rows.",
+        written.file.rows,
+        written.sets.len(),
+        written.file.path
     );
     Ok(written)
 }
 
-/// A sink that gives each row of the first result set to the file, and the
-/// first rows of each set to the grid.
+/// Where the result sets of a run go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SetLayout {
+    /// The first set goes to the chosen file. The other sets go to the grid
+    /// alone.
+    First,
+    /// Each set goes to a file of its own. The first set goes to the chosen
+    /// file.
+    Files,
+    /// Each set goes to a sheet of its own in the chosen xlsx file.
+    Sheets,
+}
+
+impl SetLayout {
+    fn new(each_set: bool, format: ExportFormat) -> Self {
+        match (each_set, format) {
+            (false, _) => SetLayout::First,
+            (true, ExportFormat::Xlsx) => SetLayout::Sheets,
+            (true, _) => SetLayout::Files,
+        }
+    }
+}
+
+/// What one result set put in the file of a run.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedSet {
+    /// The file of the set.
+    pub path: String,
+    /// The sheet of the set, in an xlsx file with a sheet for each set.
+    pub sheet: Option<String>,
+    pub rows: usize,
+    /// True when the export row limit or the room of a sheet stopped the
+    /// set.
+    pub truncated: bool,
+    /// True when the sheet of the set was full and rows were left out.
+    pub sheet_full: bool,
+}
+
+/// What a run to a file wrote.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunFileSummary {
+    /// The totals of every file. The path is the path of the chosen file.
+    #[serde(flatten)]
+    pub file: ExportSummary,
+    /// Each set that went to a file, in the order of the run.
+    pub sets: Vec<SavedSet>,
+    /// The number of sets that went to the grid alone.
+    pub skipped_sets: usize,
+}
+
+/// The number of names that the file of a set can try before the run
+/// fails.
+const MAX_NAME_TRIES: usize = 20;
+
+/// The path of the file of a set after the first: `orders-2.csv` beside
+/// `orders.csv`. The save dialog asked the user before it let the run
+/// replace the chosen file, but no dialog asked about this path, so a name
+/// that is taken gets a number: `orders-2 (2).csv`.
+fn set_path(chosen: &Path, number: usize) -> Result<PathBuf> {
+    let stem = chosen
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let extension = chosen
+        .extension()
+        .map(|extension| format!(".{}", extension.to_string_lossy()))
+        .unwrap_or_default();
+    (1..=MAX_NAME_TRIES)
+        .map(|attempt| {
+            let name = if attempt == 1 {
+                format!("{stem}-{number}{extension}")
+            } else {
+                format!("{stem}-{number} ({attempt}){extension}")
+            };
+            chosen.with_file_name(name)
+        })
+        // A link that points nowhere also takes the name.
+        .find(|path| std::fs::symlink_metadata(path).is_err())
+        .ok_or_else(|| {
+            Error::Invalid(format!(
+                "Couldn't find a free file name for result {number} beside '{}'.",
+                chosen.display()
+            ))
+        })
+}
+
+/// A sink that sends the result sets of a run to their files, in the
+/// layout that the user chose.
+struct SetFiles {
+    /// The files of the run, in the order of the sets. The first file is
+    /// the file that the user chose.
+    files: Vec<FileSink>,
+    format: ExportFormat,
+    layout: SetLayout,
+    /// The number of sets that began.
+    sets: usize,
+    /// The number of sets that went to no file.
+    skipped: usize,
+    /// True while the open set goes to a file.
+    open: bool,
+}
+
+impl SetFiles {
+    fn new(first: FileSink, format: ExportFormat, layout: SetLayout) -> Self {
+        Self {
+            files: vec![first],
+            format,
+            layout,
+            sets: 0,
+            skipped: 0,
+            open: false,
+        }
+    }
+
+    /// The file of the open set.
+    fn current(&mut self) -> &mut FileSink {
+        let last = self.files.len() - 1;
+        &mut self.files[last]
+    }
+
+    /// Closes each file and gives what the run wrote. A run that gave no
+    /// result set writes no file. A failure of one file removes the files
+    /// that did not finish.
+    async fn finish(self) -> Result<RunFileSummary> {
+        if self.sets == 0 {
+            return Err(Error::Unsupported(
+                "The statement returned no result set, so no file was written.".to_string(),
+            ));
+        }
+        let mut sets = Vec::new();
+        let mut total: Option<ExportSummary> = None;
+        for file in self.files {
+            let counts = file.sets.clone();
+            let written = file.finish().await?;
+            sets.extend(counts.into_iter().map(|count| SavedSet {
+                path: written.path.clone(),
+                sheet: count.sheet,
+                rows: count.rows,
+                truncated: count.truncated,
+                sheet_full: count.sheet_full,
+            }));
+            total = Some(match total {
+                None => written,
+                Some(total) => ExportSummary {
+                    rows: total.rows + written.rows,
+                    truncated: total.truncated || written.truncated,
+                    sheet_full: total.sheet_full || written.sheet_full,
+                    cut_cells: total.cut_cells + written.cut_cells,
+                    ..total
+                },
+            });
+        }
+        let mut file = total.expect("a run with a set has a file");
+        file.warning = cut_cells_warning(file.cut_cells);
+        Ok(RunFileSummary {
+            file,
+            sets,
+            skipped_sets: self.skipped,
+        })
+    }
+}
+
+impl RowSink for SetFiles {
+    fn begin_set(&mut self, columns: Vec<ColumnInfo>) -> Result<()> {
+        self.sets += 1;
+        self.open = self.layout != SetLayout::First || self.sets == 1;
+        if !self.open {
+            self.skipped += 1;
+            return Ok(());
+        }
+        if self.layout == SetLayout::Files && self.sets > 1 {
+            let path = set_path(&self.files[0].final_path, self.sets)?;
+            self.files.push(FileSink::create_now(&path, self.format)?);
+        }
+        self.current().begin_set(columns)
+    }
+
+    /// Gives the row to the file of the open set. The answer is `Stop` when
+    /// that file takes no more rows of the set, or when the set goes to no
+    /// file.
+    fn row(&mut self, row: Vec<serde_json::Value>) -> Result<SinkControl> {
+        if !self.open {
+            return Ok(SinkControl::Stop);
+        }
+        self.current().row(row)
+    }
+
+    fn end_set(&mut self, truncated: bool) -> Result<()> {
+        if !self.open {
+            return Ok(());
+        }
+        self.current().end_set(truncated)
+    }
+
+    fn message(&mut self, _message: Message) {}
+}
+
+/// A sink that gives each row to the file sink, and the first rows of each
+/// set to the grid. The file sink decides which sets go to a file.
 ///
 /// The sink never answers `Stop`. A `Stop` ends the whole run, and SQLite
 /// then skips the statements after the one that stopped, so a script would
 /// run fewer statements than a normal run. The driver stops each set at the
 /// limit of the file, and the sink drops the rows past the limit of the
 /// grid. The file sink itself drops the rows past the room of an Excel
-/// sheet and the rows of the sets after the first.
+/// sheet and the rows of the sets that go to no file.
 struct TeeSink<F: RowSink, G: RowSink> {
     file: F,
     grid: G,
     /// The row limit of the grid.
     grid_rows: usize,
-    /// The number of sets that began.
-    sets: usize,
     /// The rows of the open set that went to the grid.
     shown: usize,
     /// True when the open set had more rows than the grid takes.
@@ -333,56 +555,33 @@ impl<F: RowSink, G: RowSink> TeeSink<F, G> {
             file,
             grid,
             grid_rows,
-            sets: 0,
             shown: 0,
             cut: false,
         }
-    }
-
-    /// True while the open set goes to the file.
-    fn in_file(&self) -> bool {
-        self.sets <= 1
     }
 }
 
 impl<F: RowSink, G: RowSink> RowSink for TeeSink<F, G> {
     fn begin_set(&mut self, columns: Vec<ColumnInfo>) -> Result<()> {
-        self.sets += 1;
         self.shown = 0;
         self.cut = false;
-        if self.in_file() {
-            self.file.begin_set(columns.clone())?;
-        }
+        self.file.begin_set(columns.clone())?;
         self.grid.begin_set(columns)
     }
 
     fn row(&mut self, row: Vec<serde_json::Value>) -> Result<SinkControl> {
-        let to_grid = self.shown < self.grid_rows;
-        if to_grid {
+        if self.shown < self.grid_rows {
             self.shown += 1;
+            self.grid.row(row.clone())?;
         } else {
             self.cut = true;
         }
-        match (self.in_file(), to_grid) {
-            (true, true) => {
-                self.grid.row(row.clone())?;
-                self.file.row(row)?;
-            }
-            (true, false) => {
-                self.file.row(row)?;
-            }
-            (false, true) => {
-                self.grid.row(row)?;
-            }
-            (false, false) => {}
-        }
+        self.file.row(row)?;
         Ok(SinkControl::Continue)
     }
 
     fn end_set(&mut self, truncated: bool) -> Result<()> {
-        if self.in_file() {
-            self.file.end_set(truncated)?;
-        }
+        self.file.end_set(truncated)?;
         self.grid.end_set(truncated || self.cut)
     }
 
@@ -399,6 +598,7 @@ mod tests {
     use crate::db::sink::BufferSink;
     use crate::db::sink::RunSummary;
     use crate::db::QueryResponse;
+    use crate::sql::Dialect;
     use std::sync::{Arc, Mutex};
     use tauri::Manager;
 
@@ -454,7 +654,7 @@ mod tests {
     }
 
     #[test]
-    fn the_sets_after_the_first_go_to_the_grid_alone() {
+    fn each_set_reaches_the_file_sink_and_the_grid() {
         let mut tee = TeeSink::new(BufferSink::new(100), BufferSink::new(100), 2);
         tee.begin_set(columns()).unwrap();
         tee.row(row(1)).unwrap();
@@ -469,7 +669,8 @@ mod tests {
         tee.end_set(false).unwrap();
 
         let file = response(tee.file);
-        assert_eq!(file.results.len(), 1);
+        assert_eq!(file.results.len(), 2);
+        assert_eq!(file.results[1].rows.len(), 4);
         let grid = response(tee.grid);
         assert_eq!(grid.results.len(), 2);
         assert_eq!(grid.results[1].rows, vec![row(0), row(1)]);
@@ -485,11 +686,146 @@ mod tests {
         let mut tee = TeeSink::new(BufferSink::new(100), BufferSink::new(100), 0);
         assert!(tee.row(row(1)).is_err());
         assert!(tee.end_set(false).is_err());
-        // A set after the first reaches the file no more, so only the grid
-        // can fail there.
-        let mut tee = TeeSink::new(BufferSink::new(100), BufferSink::new(100), 1);
-        tee.sets = 2;
-        assert!(tee.row(row(1)).is_err());
+    }
+
+    /// A sink of the files of a run, with its first file at the path.
+    async fn set_files(path: &Path, each_set: bool) -> SetFiles {
+        let format = format_for_path(path);
+        let layout = SetLayout::new(each_set, format);
+        let first = FileSink::create(path, format).await.unwrap();
+        let first = if layout == SetLayout::Sheets {
+            first.sheet_per_set()
+        } else {
+            first
+        };
+        SetFiles::new(first, format, layout)
+    }
+
+    /// Sends sets with the given numbers of rows to a sink.
+    fn send_sets(sink: &mut impl RowSink, sets: &[usize]) {
+        for (index, count) in sets.iter().enumerate() {
+            sink.begin_set(vec![ColumnInfo::new(format!("c{index}"), "int")])
+                .unwrap();
+            for value in 0..*count {
+                sink.row(row(value as i64)).unwrap();
+            }
+            sink.message(Message::info("rows"));
+            sink.end_set(false).unwrap();
+        }
+    }
+
+    #[test]
+    fn the_choice_and_the_format_set_the_layout() {
+        assert_eq!(SetLayout::new(false, ExportFormat::Xlsx), SetLayout::First);
+        assert_eq!(SetLayout::new(true, ExportFormat::Xlsx), SetLayout::Sheets);
+        assert_eq!(SetLayout::new(true, ExportFormat::Json), SetLayout::Files);
+    }
+
+    #[tokio::test]
+    async fn the_first_set_alone_goes_to_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.csv");
+        let mut sink = set_files(&path, false).await;
+        sink.begin_set(columns()).unwrap();
+        sink.row(row(1)).unwrap();
+        sink.end_set(false).unwrap();
+        sink.begin_set(columns()).unwrap();
+        // The file takes no rows of the second set.
+        assert_eq!(sink.row(row(2)).unwrap(), SinkControl::Stop);
+        sink.end_set(false).unwrap();
+
+        let summary = sink.finish().await.unwrap();
+        assert_eq!(summary.skipped_sets, 1);
+        assert_eq!(summary.sets.len(), 1);
+        assert_eq!(summary.file.rows, 1);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn each_set_goes_to_a_file_beside_the_chosen_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.csv");
+        // A file with the name of the second set stays as it is.
+        std::fs::write(dir.path().join("out-2.csv"), "mine").unwrap();
+        let mut sink = set_files(&path, true).await;
+        send_sets(&mut sink, &[2, 3, 1]);
+
+        let summary = sink.finish().await.unwrap();
+        assert_eq!(summary.skipped_sets, 0);
+        assert_eq!(summary.file.rows, 6);
+        assert_eq!(summary.file.path, path.to_string_lossy());
+        let paths: Vec<String> = summary.sets.iter().map(|set| set.path.clone()).collect();
+        let named = |name: &str| dir.path().join(name).to_string_lossy().to_string();
+        assert_eq!(
+            paths,
+            vec![named("out.csv"), named("out-2 (2).csv"), named("out-3.csv")]
+        );
+        assert_eq!(
+            summary.sets.iter().map(|set| set.rows).collect::<Vec<_>>(),
+            vec![2, 3, 1]
+        );
+        assert!(summary.sets.iter().all(|set| set.sheet.is_none()));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("out-2.csv")).unwrap(),
+            "mine"
+        );
+        let third = std::fs::read_to_string(dir.path().join("out-3.csv")).unwrap();
+        assert!(third.contains("c2"));
+    }
+
+    #[tokio::test]
+    async fn each_set_of_an_excel_run_goes_to_a_sheet() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.xlsx");
+        let mut sink = set_files(&path, true).await;
+        send_sets(&mut sink, &[2, 1]);
+
+        let summary = sink.finish().await.unwrap();
+        assert_eq!(summary.file.rows, 3);
+        let sheets: Vec<Option<String>> =
+            summary.sets.iter().map(|set| set.sheet.clone()).collect();
+        assert_eq!(
+            sheets,
+            vec![Some("Result 1".to_string()), Some("Result 2".to_string())]
+        );
+        assert!(summary.sets.iter().all(|set| set.path == summary.file.path));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_run_without_a_set_finishes_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = set_files(&dir.path().join("out.json"), true).await;
+        let error = sink.finish().await.unwrap_err();
+        assert!(error.to_string().contains("no result set"));
+    }
+
+    #[test]
+    fn the_file_of_a_set_never_takes_a_name_in_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let chosen = dir.path().join("a.b.csv");
+        assert_eq!(set_path(&chosen, 4).unwrap(), dir.path().join("a.b-4.csv"));
+        assert_eq!(
+            set_path(Path::new("/x/plain"), 2).unwrap(),
+            PathBuf::from("/x/plain-2")
+        );
+        std::fs::write(dir.path().join("a.b-4.csv"), "").unwrap();
+        for attempt in 2..=MAX_NAME_TRIES {
+            std::fs::write(dir.path().join(format!("a.b-4 ({attempt}).csv")), "").unwrap();
+        }
+        let error = set_path(&chosen, 4).unwrap_err();
+        assert!(error.to_string().contains("free file name for result 4"));
+    }
+
+    #[tokio::test]
+    async fn a_set_whose_file_cannot_start_fails_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.csv");
+        let mut sink = set_files(&path, true).await;
+        send_sets(&mut sink, &[1]);
+        // The folder goes away, so the file of the second set cannot start.
+        sink.files[0].final_path = dir.path().join("gone").join("out.csv");
+        assert!(sink.begin_set(columns()).is_err());
     }
 
     #[test]
@@ -605,6 +941,7 @@ mod tests {
             query: query.into(),
             ticket: ticket.into(),
             max_rows,
+            each_set: false,
             tab_id: Some("t1".into()),
             query_params: None,
             options: Some(ExecOptions {
@@ -640,7 +977,7 @@ mod tests {
         app: &tauri::App<tauri::test::MockRuntime>,
         request: RunToFileRequest,
         channel: Channel<InvokeResponseBody>,
-    ) -> Result<ExportSummary> {
+    ) -> Result<RunFileSummary> {
         run_to_file(
             app.handle().clone(),
             request,
@@ -661,9 +998,9 @@ mod tests {
         let summary = run(&app, request(&ticket, &numbers(5), 100), channel)
             .await
             .unwrap();
-        assert_eq!(summary.rows, 5);
-        assert!(!summary.truncated);
-        assert_eq!(summary.path, path.to_string_lossy());
+        assert_eq!(summary.file.rows, 5);
+        assert!(!summary.file.truncated);
+        assert_eq!(summary.file.path, path.to_string_lossy());
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text.lines().count(), 6);
         // The grid takes three rows, so its set is cut.
@@ -684,8 +1021,8 @@ mod tests {
         let summary = run(&app, request(&ticket, &numbers(10), 4), channel)
             .await
             .unwrap();
-        assert_eq!(summary.rows, 4);
-        assert!(summary.truncated);
+        assert_eq!(summary.file.rows, 4);
+        assert!(summary.file.truncated);
         let values: Vec<serde_json::Value> =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(values.len(), 4);
@@ -705,7 +1042,7 @@ mod tests {
         let summary = run(&app, request(&ticket, &script, 100), channel)
             .await
             .unwrap();
-        assert_eq!(summary.rows, 5);
+        assert_eq!(summary.file.rows, 5);
         assert_eq!(cut_flags(&frames), vec![true, false]);
         // The statement after the sets ran, so the table is there.
         let (channel, _) = frame_channel();
@@ -721,7 +1058,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(check.rows, 1);
+        assert_eq!(check.file.rows, 1);
     }
 
     #[tokio::test]
@@ -820,6 +1157,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_script_can_write_each_of_its_sets() {
+        let (dir, app) = app().await;
+        let path = dir.path().join("out.json");
+        let ticket = choose(&app, &path);
+        let (channel, frames) = frame_channel();
+        let mut files_request =
+            request(&ticket, &format!("{}; SELECT 'a' AS name", numbers(5)), 100);
+        files_request.each_set = true;
+
+        let summary = run(&app, files_request, channel).await.unwrap();
+        assert_eq!(summary.file.rows, 6);
+        assert_eq!(summary.sets.len(), 2);
+        assert_eq!(summary.skipped_sets, 0);
+        assert!(dir.path().join("out-2.json").exists());
+        assert_eq!(cut_flags(&frames), vec![true, false]);
+
+        // An Excel run puts each set on a sheet of the chosen file.
+        let path = dir.path().join("out.xlsx");
+        let ticket = choose(&app, &path);
+        let (channel, _) = frame_channel();
+        let mut sheets_request = request(&ticket, "SELECT 1 AS a; SELECT 2 AS b", 100);
+        sheets_request.each_set = true;
+        let summary = run(&app, sheets_request, channel).await.unwrap();
+        let sheets: Vec<Option<String>> =
+            summary.sets.iter().map(|set| set.sheet.clone()).collect();
+        assert_eq!(
+            sheets,
+            vec![Some("Result 1".to_string()), Some("Result 2".to_string())]
+        );
+        assert!(!dir.path().join("out-2.xlsx").exists());
+    }
+
+    #[tokio::test]
+    async fn the_text_tells_whether_a_run_can_give_several_sets() {
+        let several = |query: &str| several_result_sets(query.to_string(), Dialect::Sqlite);
+        assert!(several("SELECT 1; SELECT 2").await.unwrap());
+        assert!(!several("SELECT 1").await.unwrap());
+    }
+
+    #[tokio::test]
     async fn a_run_without_options_uses_the_limits_of_the_connection() {
         let (dir, app) = app().await;
         let path = dir.path().join("out.csv");
@@ -829,7 +1206,7 @@ mod tests {
         request.options = None;
 
         let summary = run(&app, request, channel).await.unwrap();
-        assert_eq!(summary.rows, 5);
+        assert_eq!(summary.file.rows, 5);
         assert_eq!(cut_flags(&frames), vec![false]);
     }
 }

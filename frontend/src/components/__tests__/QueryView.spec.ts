@@ -2286,6 +2286,14 @@ describe('QueryView run to file', () => {
     sheetFull: false,
     cutCells: 0,
     warning: null,
+    sets: [{ path: '/tmp/all.csv', sheet: null, rows: 40000, truncated: false, sheetFull: false }],
+    skippedSets: 0,
+  }
+
+  /** Clicks a control of the dialog that asks where the results go. */
+  async function clickRunFile(test: string, inner = '') {
+    ;(document.querySelector(`[data-test="${test}"] ${inner}`.trim()) as HTMLElement).click()
+    await settle()
   }
 
   /** A run to a file whose grid gets one row of a set that the limit cut. */
@@ -2312,14 +2320,75 @@ describe('QueryView run to file', () => {
       defaultName: expect.stringMatching(/^Query_1-.*\.csv$/),
     })
     expect(apiStub.runToFile).toHaveBeenCalledWith(
-      expect.objectContaining({ connectionId: 'c1', query: 'SELECT 1', ticket: 'k1' }),
+      expect.objectContaining({
+        connectionId: 'c1',
+        query: 'SELECT 1',
+        ticket: 'k1',
+        eachSet: false,
+      }),
       expect.anything(),
     )
     expect(apiStub.executeQuery).not.toHaveBeenCalled()
+    // A statement with one result asks nothing after the save dialog.
+    expect(document.querySelector('[data-test="run-file-run"]')).toBeNull()
     expect(wrapper.find('[data-test="grid-saved-file"]').text()).toBe(
       'Showing the first 1 row. All 40,000 rows were saved to /tmp/all.csv.',
     )
     expect(lastNotice()?.level).toBe('success')
+  })
+
+  it('asks where the results of a script go and remembers the answer', async () => {
+    localStorage.clear()
+    apiStub.severalResultSets.mockResolvedValue(true)
+    apiStub.chooseRunFile.mockResolvedValue({ ticket: 'k1', path: '/tmp/all.xlsx', format: 'xlsx' })
+    savedRun()
+    apiStub.runToFile.mockResolvedValue({
+      ...summary,
+      path: '/tmp/all.xlsx',
+      rows: 3,
+      sets: [
+        { path: '/tmp/all.xlsx', sheet: 'Result 1', rows: 1, truncated: false, sheetFull: false },
+        { path: '/tmp/all.xlsx', sheet: 'Result 2', rows: 2, truncated: false, sheetFull: false },
+      ],
+    })
+    const wrapper = await mountView('SELECT 1; SELECT 2')
+
+    await wrapper.find('[data-test="run-to-file-button"]').trigger('click')
+    await settle()
+    expect(apiStub.severalResultSets).toHaveBeenCalledWith('SELECT 1; SELECT 2', 'msSql')
+    expect(document.body.textContent).toContain('One sheet per result set')
+    expect(apiStub.runToFile).not.toHaveBeenCalled()
+    await clickRunFile('run-file-each', 'input')
+    await clickRunFile('run-file-run')
+
+    expect(apiStub.runToFile).toHaveBeenCalledWith(
+      expect.objectContaining({ ticket: 'k1', eachSet: true }),
+      expect.anything(),
+    )
+    expect(lastNotice()?.message).toBe('Saved 3 rows to 2 sheets in /tmp/all.xlsx.')
+    expect(localStorage.getItem('sql-explorer.runFileSets')).toBe('each')
+  })
+
+  it('runs nothing when the user cancels the question about the results', async () => {
+    apiStub.severalResultSets.mockResolvedValue(true)
+    apiStub.chooseRunFile.mockResolvedValue({ ticket: 'k1', path: '/tmp/all.csv', format: 'csv' })
+    const wrapper = await mountView('SELECT 1; SELECT 2')
+    await wrapper.find('[data-test="run-to-file-button"]').trigger('click')
+    await settle()
+    await clickRunFile('run-file-cancel')
+    expect(apiStub.runToFile).not.toHaveBeenCalled()
+  })
+
+  it('says when results after the first went to the grid alone', async () => {
+    apiStub.severalResultSets.mockRejectedValue(new Error('no lexer'))
+    apiStub.chooseRunFile.mockResolvedValue({ ticket: 'k1', path: '/tmp/all.csv', format: 'csv' })
+    apiStub.runToFile.mockResolvedValue({ ...summary, skippedSets: 2 })
+    const wrapper = await mountView('EXEC report')
+    await wrapper.find('[data-test="run-to-file-button"]').trigger('click')
+    await settle()
+    // A failed check counts as one result, so the run starts at once.
+    expect(apiStub.runToFile).toHaveBeenCalled()
+    expect(lastNotice()?.message).toBe('Only the first result went to the file.')
   })
 
   it('runs nothing when the user closes the save dialog', async () => {
