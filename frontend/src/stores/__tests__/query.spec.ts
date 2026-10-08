@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { makeApiStub, connectionFixture, streamed } from './helpers'
+import { makeApiStub, connectionFixture, infoFixture, streamed } from './helpers'
 
 const apiStub = makeApiStub()
 vi.mock('@/lib/api', () => ({ api: apiStub, CONNECTION_STATUS_EVENT: 'connection-status' }))
@@ -67,6 +67,7 @@ describe('newQueryState', () => {
       stats: null,
       exporting: null,
       messagesFile: null,
+      openTransactionOn: null,
     })
   })
 })
@@ -279,6 +280,66 @@ describe('query store', () => {
     apiStub.executeQuery.mockImplementation(streamed(response()))
     await queries.execute('t1', 'c1', 'SELECT 1')
     expect(warn).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the open transaction that the end of a run reports', async () => {
+    const ends = [{ openTransaction: true }, {}, { openTransaction: false }]
+    apiStub.executeQuery.mockImplementation(
+      async (_request: unknown, handlers: import('@/lib/results').ResultStreamHandlers) => {
+        handlers.onEnd({
+          messages: [],
+          rowsAffected: null,
+          elapsedMs: 1,
+          stats: null,
+          ...ends.shift(),
+        })
+      },
+    )
+    const queries = useQueryStore()
+    await queries.execute('t1', 'c1', 'BEGIN')
+    expect(queries.stateFor('t1').openTransactionOn).toBe('c1')
+    // An end that doesn't know the state changes nothing.
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    expect(queries.stateFor('t1').openTransactionOn).toBe('c1')
+    await queries.execute('t1', 'c1', 'COMMIT')
+    expect(queries.stateFor('t1').openTransactionOn).toBeNull()
+  })
+
+  it('forgets the open transaction of a session that a stop reset', async () => {
+    const held = heldRun()
+    const queries = useQueryStore()
+    queries.stateFor('t1').openTransactionOn = 'c1'
+    const running = queries.execute('t1', 'c1', 'UPDATE t SET a = 1')
+    await Promise.resolve()
+    held.release({ category: 'timeout', message: 'Timed out.', detail: null, sessionReset: true })
+    await running
+    expect(queries.stateFor('t1').openTransactionOn).toBeNull()
+
+    // A failure that keeps the session keeps the transaction.
+    const again = heldRun()
+    queries.stateFor('t1').openTransactionOn = 'c1'
+    const failing = queries.execute('t1', 'c1', 'UPDATE t SET a = 1')
+    await Promise.resolve()
+    again.release({ category: 'database', message: 'Bad.', detail: null })
+    await failing
+    expect(queries.stateFor('t1').openTransactionOn).toBe('c1')
+  })
+
+  it('forgets an open transaction when the tab or the connection lets go of the session', async () => {
+    const queries = useQueryStore()
+    const connections = useConnectionsStore()
+    connections.active = { c1: infoFixture('c1'), c2: infoFixture('c2') }
+    queries.stateFor('t1').openTransactionOn = 'c1'
+    queries.stateFor('t2').openTransactionOn = 'c2'
+    queries.stateFor('t3')
+
+    queries.forgetTransaction('t1')
+    queries.forgetTransaction('none')
+    expect(queries.stateFor('t1').openTransactionOn).toBeNull()
+
+    delete connections.active.c2
+    await Promise.resolve()
+    expect(queries.stateFor('t2').openTransactionOn).toBeNull()
   })
 
   it('refuses an empty statement', async () => {

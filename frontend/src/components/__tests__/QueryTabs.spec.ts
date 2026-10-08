@@ -143,6 +143,18 @@ describe('QueryTabs', () => {
     expect(wrapper.text()).toContain(', last run failed')
   })
 
+  it('marks a tab whose session has an open transaction', async () => {
+    const wrapper = mountWithPlugins(QueryTabs)
+    const tabs = useTabsStore()
+    const open = tabs.add()
+    tabs.add()
+    useQueryStore().stateFor(open.id).openTransactionOn = 'c1'
+    await settle()
+
+    expect(wrapper.findAll('[data-test="tab-transaction"]')).toHaveLength(1)
+    expect(wrapper.text()).toContain(', open transaction')
+  })
+
   it('names the tab and its connection in the tooltip of the title', async () => {
     const wrapper = mountWithPlugins(QueryTabs)
     await useConnectionsStore().load()
@@ -392,6 +404,28 @@ describe('QueryTabs asking before it loses work', () => {
     await settle()
     expect(document.body.textContent).toContain('Report has unsaved changes')
     expect(document.body.textContent).toContain('A statement is still running in Report')
+
+    const confirm = document.querySelector('[data-test="confirm-accept"]') as HTMLElement
+    confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+    expect(tabs.tabs).toHaveLength(0)
+  })
+
+  it('asks before it closes a tab with an open transaction', async () => {
+    apiStub.releaseSession.mockResolvedValue(undefined)
+    const wrapper = mountWithPlugins(QueryTabs)
+    const tabs = useTabsStore()
+    const tab = tabs.add({ query: 'BEGIN', title: 'Report' })
+    const state = useQueryStore().stateFor(tab.id)
+    state.openTransactionOn = 'c1'
+    await settle()
+
+    await wrapper.find('[data-test="close-tab"]').trigger('click')
+    await settle()
+    expect(tabs.tabs).toHaveLength(1)
+    expect(document.body.textContent).toContain(
+      'This tab has an open transaction. Closing it rolls the transaction back.',
+    )
 
     const confirm = document.querySelector('[data-test="confirm-accept"]') as HTMLElement
     confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))

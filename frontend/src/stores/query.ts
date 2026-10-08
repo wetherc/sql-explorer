@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { markRaw, reactive, ref, toRaw } from 'vue'
+import { markRaw, reactive, ref, toRaw, watch } from 'vue'
 import { api } from '@/lib/api'
 import { createId } from './connections'
 import { useConnectionsStore } from './connections'
@@ -144,6 +144,9 @@ export interface QueryState {
   /** The text file that gets every message of each run of the tab, until
    *  the user stops it or closes the tab. */
   messagesFile: ChosenMessagesFile | null
+  /** The connection whose session of this tab is inside an open
+   *  transaction, or null. Closing the tab rolls that transaction back. */
+  openTransactionOn: string | null
 }
 
 /** Builds the state a tab starts with. */
@@ -167,6 +170,7 @@ export function newQueryState(): QueryState {
     stats: null,
     exporting: null,
     messagesFile: null,
+    openTransactionOn: null,
   }
 }
 
@@ -499,6 +503,9 @@ export const useQueryStore = defineStore('query', () => {
             state.elapsedMs = end.elapsedMs
             state.stats = end.stats
             sessionReset ||= end.sessionReset === true
+            if (end.openTransaction !== undefined) {
+              state.openTransactionOn = end.openTransaction ? connectionId : null
+            }
             attachKept(state, run, end.kept ?? [])
           },
         },
@@ -545,6 +552,10 @@ export const useQueryStore = defineStore('query', () => {
       state.requestId = null
       state.requestConnectionId = null
       state.startedAt = null
+    }
+    // A session that closed after the failure rolled its transaction back.
+    if (failure?.sessionReset) {
+      state.openTransactionOn = null
     }
     if (sessionReset && !run.abandoned) {
       addMessage(state, { level: MessageLevel.Warning, text: SESSION_RESET_TEXT, detail: null })
@@ -846,6 +857,30 @@ export const useQueryStore = defineStore('query', () => {
     }
   }
 
+  /**
+   * Forgets the open transaction of one tab, because the tab released its
+   * session, for example when it moved to another connection.
+   */
+  function forgetTransaction(tabId: string): void {
+    const state = peekState(tabId)
+    if (state) {
+      state.openTransactionOn = null
+    }
+  }
+
+  // A disconnect closes every session of the connection, and the server
+  // rolls back their transactions.
+  watch(
+    () => Object.keys(connections.active),
+    (open) => {
+      for (const state of Object.values(states)) {
+        if (state.openTransactionOn !== null && !open.includes(state.openTransactionOn)) {
+          state.openTransactionOn = null
+        }
+      }
+    },
+  )
+
   /** Removes the error marker of one tab, for example after an edit. */
   function clearErrorLocation(tabId: string): void {
     const state = peekState(tabId)
@@ -909,6 +944,7 @@ export const useQueryStore = defineStore('query', () => {
     runToFile,
     explain,
     cancel,
+    forgetTransaction,
     clearErrorLocation,
     selectPane,
     togglePin,

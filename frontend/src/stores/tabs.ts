@@ -145,6 +145,8 @@ export const useTabsStore = defineStore('tabs', () => {
       return
     }
     const queries = useQueryStore()
+    // The release rolls back the transaction of the session.
+    queries.forgetTransaction(tab.id)
     void queries
       .cancel(tab.id)
       .then(() => api.releaseSession(connectionId, tab.id))

@@ -6,6 +6,7 @@
 //! the same time, because each tab has its own session.
 
 use crate::db::drivers::{CancelHandle, DatabaseDriver};
+use crate::sql::Dialect;
 use crate::state::HEALTH_CHECK_AFTER;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -62,6 +63,13 @@ pub struct Session {
     /// True when this session took the place of a session that stopped
     /// answering, until a run on it tells the tab.
     replaced: AtomicBool,
+    /// True when the last probe found the session inside an open
+    /// transaction.
+    in_transaction: AtomicBool,
+    /// True when a script of the session mentioned a mode in which a
+    /// statement that only reads can open a transaction, such as
+    /// `SET IMPLICIT_TRANSACTIONS ON` or `SET autocommit = 0`.
+    probe_every_run: AtomicBool,
 }
 
 /// What one run tells the tab about the session it ran on.
@@ -71,6 +79,9 @@ pub struct SessionReport {
     /// place, so the temporary tables, the open transaction and the `SET`
     /// options of the old session are gone.
     pub reset: bool,
+    /// True when the session is inside an open transaction after the run,
+    /// and `None` when the state is not known.
+    pub open_transaction: Option<bool>,
 }
 
 impl Session {
@@ -90,7 +101,39 @@ impl Session {
             health: Mutex::new(()),
             broken: AtomicBool::new(false),
             replaced: AtomicBool::new(false),
+            in_transaction: AtomicBool::new(false),
+            probe_every_run: AtomicBool::new(false),
         }
+    }
+
+    /// True when the last probe found an open transaction.
+    pub fn in_transaction(&self) -> bool {
+        self.in_transaction.load(Ordering::SeqCst)
+    }
+
+    /// Records the result of a probe of the transaction.
+    pub fn set_in_transaction(&self, open: bool) {
+        self.in_transaction.store(open, Ordering::SeqCst);
+    }
+
+    /// True when the transaction of the session can have changed in a run
+    /// of `script`, so a probe must read it again.
+    ///
+    /// A script that only reads cannot open or end a transaction, unless
+    /// the session runs in a mode in which each read opens one. A script
+    /// that names such a mode makes every later run of the session probe.
+    /// A read that fails inside an open transaction can end it, for
+    /// example with `XACT_ABORT` on MS SQL Server.
+    pub fn needs_transaction_probe(&self, script: &str, dialect: Dialect, failed: bool) -> bool {
+        if crate::sql::only_reads(script, dialect) {
+            return self.probe_every_run.load(Ordering::SeqCst)
+                || (failed && self.in_transaction());
+        }
+        let lower = script.to_ascii_lowercase();
+        if lower.contains("implicit_transactions") || lower.contains("autocommit") {
+            self.probe_every_run.store(true, Ordering::SeqCst);
+        }
+        true
     }
 
     /// Records that this session takes the place of a session that stopped
@@ -607,6 +650,35 @@ mod tests {
         session.mark_replacement();
         assert!(session.take_replaced());
         assert!(!session.take_replaced());
+    }
+
+    #[test]
+    fn a_run_that_only_reads_needs_no_probe_of_the_transaction() {
+        let session = Session::new(Box::new(StubDriver::plain()));
+        assert!(!session.needs_transaction_probe("SELECT 1", Dialect::MsSql, false));
+        assert!(!session.needs_transaction_probe("SELECT 1", Dialect::MsSql, true));
+        assert!(session.needs_transaction_probe("BEGIN TRAN", Dialect::MsSql, false));
+        assert!(session.needs_transaction_probe("COMMIT", Dialect::Postgres, false));
+        assert!(session.needs_transaction_probe("EXEC p", Dialect::MsSql, false));
+
+        // A read that fails inside a transaction can end it.
+        session.set_in_transaction(true);
+        assert!(session.in_transaction());
+        assert!(!session.needs_transaction_probe("SELECT 1", Dialect::MsSql, false));
+        assert!(session.needs_transaction_probe("SELECT 1", Dialect::MsSql, true));
+    }
+
+    #[test]
+    fn a_mode_that_opens_a_transaction_on_a_read_makes_each_run_probe() {
+        for script in ["SET IMPLICIT_TRANSACTIONS ON", "SET autocommit = 0"] {
+            let session = Session::new(Box::new(StubDriver::plain()));
+            assert!(session.needs_transaction_probe(script, Dialect::MySql, false));
+            assert!(session.needs_transaction_probe("SELECT 1", Dialect::MySql, false));
+        }
+        // A read that names the mode in its text changes nothing.
+        let session = Session::new(Box::new(StubDriver::plain()));
+        assert!(!session.needs_transaction_probe("SELECT 'autocommit'", Dialect::MySql, false));
+        assert!(!session.needs_transaction_probe("SELECT 1", Dialect::MySql, false));
     }
 
     #[tokio::test]

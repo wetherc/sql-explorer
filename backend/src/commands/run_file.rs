@@ -18,15 +18,14 @@
 
 use super::{
     cut_cells_warning, driver_for_request, end_message_log, finish_run, in_sent_text, off_thread,
-    prepare_parameters, run_bounded, session_for, stop_grace, Bounded, ExportFormat, ExportSummary,
-    FileSink,
+    prepare_parameters, run_bounded, session_after_run, session_for, stop_grace, Bounded,
+    ExportFormat, ExportSummary, FileSink,
 };
 use crate::db::columnar::ChunkSink;
 use crate::db::sink::{RowSink, SinkControl};
 use crate::db::{ColumnInfo, ExecOptions, Message};
 use crate::error::{Error, Result};
 use crate::message_log::{MessageLogs, MessageTee};
-use crate::session::SessionReport;
 use crate::sql::ParamValues;
 use crate::state::AppState;
 use std::path::{Path, PathBuf};
@@ -351,10 +350,19 @@ pub async fn run_to_file<R: Runtime>(
 
     let TeeSink { file, grid, .. } = sink;
     let mut grid = grid.into_inner();
-    grid.report_session(SessionReport {
-        reset: session.take_replaced(),
-    });
     let finished = finish_run(&state, &connection_id, &open, &key, &session, outcome).await;
+    grid.report_session(
+        session_after_run(
+            &state,
+            &connection_id,
+            &open,
+            &key,
+            &session,
+            &ran,
+            finished.is_err(),
+        )
+        .await,
+    );
     end_message_log(
         logs.as_deref(),
         &request_id,

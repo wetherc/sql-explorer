@@ -60,6 +60,24 @@
           <span v-if="!isRunning(tab) && hasFailed(tab)" class="app-visually-hidden"
             >, last run failed</span
           >
+          <v-tooltip
+            v-if="hasOpenTransaction(tab)"
+            location="bottom"
+            text="Open transaction on this tab's session"
+          >
+            <template #activator="{ props: tip }">
+              <v-icon
+                v-bind="tip"
+                size="x-small"
+                class="transaction-mark"
+                aria-hidden="true"
+                data-test="tab-transaction"
+              >
+                mdi-database-lock-outline
+              </v-icon>
+            </template>
+          </v-tooltip>
+          <span v-if="hasOpenTransaction(tab)" class="app-visually-hidden">, open transaction</span>
           <span v-if="tab.dirty" class="dirty-mark" aria-hidden="true">●</span>
           <span v-if="tab.dirty" class="app-visually-hidden">, has changes</span>
           <v-icon
@@ -277,6 +295,11 @@ function hasFailed(tab: QueryTab): boolean {
   return queries.peekState(tab.id)?.failed ?? false
 }
 
+/** True when the tab's session is inside a transaction that it didn't end. */
+function hasOpenTransaction(tab: QueryTab): boolean {
+  return (queries.peekState(tab.id)?.openTransactionOn ?? null) !== null
+}
+
 /**
  * The full name of a tab and the connection it runs against, because the
  * strip cuts a long name short.
@@ -309,16 +332,20 @@ const closeMessage = computed(() => {
   if (isRunning(tab)) {
     parts.push(`A statement is still running in ${tab.title} and will be stopped.`)
   }
+  if (hasOpenTransaction(tab)) {
+    parts.push('This tab has an open transaction. Closing it rolls the transaction back.')
+  }
   return parts.join(' ')
 })
 
 /**
  * Closes one tab. A tab whose changes are not saved asks first, because the
  * text of the statement is lost with it. A tab with a running statement
- * asks too, because the close stops that statement.
+ * asks too, because the close stops that statement, and so does a tab with
+ * an open transaction, because the close rolls it back.
  */
 function askClose(tab: QueryTab): void {
-  if (tab.dirty || isRunning(tab)) {
+  if (tab.dirty || isRunning(tab) || hasOpenTransaction(tab)) {
     pendingClose.value = tab
     return
   }
@@ -405,6 +432,11 @@ defineExpose({ renameActiveTab, closeActiveTab })
   margin-left: 6px;
   font-size: var(--app-text-xs);
   color: rgb(var(--v-theme-error));
+}
+
+.transaction-mark {
+  margin-left: 6px;
+  color: rgb(var(--v-theme-warning));
 }
 
 .dirty-mark {

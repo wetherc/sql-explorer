@@ -411,6 +411,10 @@ struct RunEnd<'a> {
     /// and a new session took its place.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     session_reset: bool,
+    /// True when the session is inside an open transaction after the run.
+    /// The field is missing when the state is not known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    open_transaction: Option<bool>,
 }
 
 /// A sink that sends the rows to the user interface as binary chunks. It
@@ -528,6 +532,7 @@ impl ChunkSink {
             stats: summary.stats,
             kept: &self.kept,
             session_reset: self.session.reset,
+            open_transaction: self.session.open_transaction,
         };
         let json = serde_json::to_string(&end)?;
         let mut buffer = Vec::new();
@@ -1222,13 +1227,17 @@ mod tests {
         assert_eq!(value["rowsAffected"], 0);
         assert_eq!(value["messages"], json!([]));
         assert!(value.get("sessionReset").is_none());
+        assert!(value.get("openTransaction").is_none());
     }
 
     #[test]
     fn the_end_of_a_run_reports_a_new_session() {
         let (channel, messages) = collecting_channel();
         let mut sink = ChunkSink::new(channel, 10);
-        sink.report_session(SessionReport { reset: true });
+        sink.report_session(SessionReport {
+            reset: true,
+            open_transaction: Some(true),
+        });
         sink.fail(5).unwrap();
 
         let frames = frames_of(&messages.lock().unwrap());
@@ -1237,6 +1246,7 @@ mod tests {
         };
         let value: JsonValue = serde_json::from_str(summary).unwrap();
         assert_eq!(value["sessionReset"], true);
+        assert_eq!(value["openTransaction"], true);
     }
 
     #[test]

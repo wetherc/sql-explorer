@@ -357,6 +357,9 @@ export interface RunEnd {
   /** True when the tab's session closed before or during the run and a new
    *  session took its place. */
   sessionReset?: boolean
+  /** True when the tab's session is inside an open transaction after the
+   *  run. Missing when the backend doesn't know. */
+  openTransaction?: boolean
 }
 
 /** What the reader of a run tells its caller. */

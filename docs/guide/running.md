@@ -31,6 +31,15 @@ While a statement runs, its tab shows a spinner, so you can see which tabs are
 busy from any tab. When a tab's last run failed, the tab shows a red dot until
 the next run starts.
 
+When a tab's session is inside a transaction that it hasn't committed or rolled
+back, the tab shows a lock icon with the tooltip "Open transaction on this tab's
+session". Closing that tab asks you first, because closing it rolls the
+transaction back. The application checks the transaction after a run that can
+start or end one, such as a `BEGIN`, a `COMMIT`, a write or a procedure call. A
+run of plain `SELECT` statements skips the check, unless the tab turned on
+`IMPLICIT_TRANSACTIONS` or turned off `autocommit`, where a read can start a
+transaction too.
+
 ## Stopping a statement
 
 While a statement runs, a **Stop** button appears beside **Run**, and

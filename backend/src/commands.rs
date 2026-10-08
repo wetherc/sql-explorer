@@ -17,7 +17,7 @@ use crate::history::HistoryEntry;
 use crate::message_log::{MessageLogs, MessageTee};
 use crate::script::{self, ScriptStatement};
 use crate::secrets::{self, SecretStore};
-use crate::session::{Session, SessionReport, DEFAULT_SESSION};
+use crate::session::{Session, DEFAULT_SESSION};
 use crate::spill::SpillSink;
 use crate::sql::ParamValues;
 use crate::state::{
@@ -34,6 +34,9 @@ use tokio_util::sync::CancellationToken;
 mod paused;
 pub mod run_file;
 pub mod run_messages;
+mod session_report;
+
+use session_report::session_after_run;
 
 /// Opens the driver that belongs to the engine of the record.
 pub async fn open_driver(connection: &SavedConnection) -> Result<Box<dyn DatabaseDriver>> {
@@ -1276,10 +1279,19 @@ pub async fn execute_query<R: Runtime>(
     sources.extend(paused.map(|(set, read)| (set, crate::kept::KeptSource::PausedRead(read))));
     let kept = state.kept.keep(&request_id, &connection_id, sources);
     sink.announce_kept(kept);
-    sink.report_session(SessionReport {
-        reset: session.take_replaced(),
-    });
     let finished = finish_run(&state, &connection_id, &open, &key, &session, outcome).await;
+    sink.report_session(
+        session_after_run(
+            &state,
+            &connection_id,
+            &open,
+            &key,
+            &session,
+            &ran,
+            finished.is_err(),
+        )
+        .await,
+    );
     end_message_log(
         logs.as_deref(),
         &request_id,
@@ -1419,13 +1431,7 @@ async fn finish_run<T>(
             // returns at once and does not wait for that open, which can take
             // the full connect time of a server that does not answer. The
             // other sessions of the connection stay as they are.
-            session.mark_broken();
-            if still_in_use(state, connection_id, open, session_key, session).await {
-                open.sessions.release(session_key).await;
-                log::info!(
-                    "A session of '{connection_id}' closed after a stop. The next request opens \
-                     a new one."
-                );
+            if release_broken(state, connection_id, open, session_key, session).await {
                 // The tab learns that its temporary tables, its transaction
                 // and its options are gone.
                 return Err(Error::SessionReset(Box::new(error)));
@@ -1433,6 +1439,28 @@ async fn finish_run<T>(
             Err(error)
         }
     }
+}
+
+/// Marks a session on which nothing can be sent again, and takes it out of
+/// its slot. The next request of the tab opens a new session. Returns true
+/// when the session left its slot, and false when the tab or the
+/// connection closed first.
+async fn release_broken(
+    state: &AppState,
+    connection_id: &str,
+    open: &OpenConnection,
+    session_key: &str,
+    session: &Arc<Session>,
+) -> bool {
+    session.mark_broken();
+    if !still_in_use(state, connection_id, open, session_key, session).await {
+        return false;
+    }
+    open.sessions.release(session_key).await;
+    log::info!(
+        "A session of '{connection_id}' closed after a stop. The next request opens a new one."
+    );
+    true
 }
 
 /// True when the connection is still open with the same pool of sessions.
