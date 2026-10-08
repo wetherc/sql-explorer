@@ -195,6 +195,39 @@ describe('files store', () => {
     expect(apiStub.listFolder).not.toHaveBeenCalledWith('/data/shut')
   })
 
+  it('reads the open folders below a refreshed folder side by side', async () => {
+    const files = useFilesStore()
+    apiStub.fileRoots.mockResolvedValue(['/data'])
+    await files.restoreRoots()
+    apiStub.listFolder.mockResolvedValue([entry('slow', 'folder'), entry('quick', 'folder')])
+    await files.expand('/data')
+    apiStub.listFolder.mockResolvedValue([])
+    await files.expand('/data/slow')
+    await files.expand('/data/quick')
+
+    let releaseQuick: (value: ReturnType<typeof entry>[]) => void = () => {}
+    apiStub.listFolder.mockImplementation((path: string) => {
+      if (path === '/data') {
+        return Promise.resolve([entry('slow', 'folder'), entry('quick', 'folder')])
+      }
+      // The slow folder never answers.
+      return path === '/data/slow'
+        ? new Promise(() => {})
+        : new Promise((resolve) => {
+            releaseQuick = resolve
+          })
+    })
+    void files.refresh('/data')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(files.rows.map((row) => row.name)).toEqual(['data', 'slow', 'quick'])
+
+    releaseQuick([entry('a.sql', 'file', '/data/quick')])
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    // The panel sees the write into the child, which is the reactive form.
+    expect(files.rows.map((row) => row.name)).toEqual(['data', 'slow', 'quick', 'a.sql'])
+    expect(files.rows[2]?.loading).toBe(false)
+  })
+
   it('reads a folder again while an older read of it runs', async () => {
     const files = useFilesStore()
     apiStub.fileRoots.mockResolvedValue(['/data'])

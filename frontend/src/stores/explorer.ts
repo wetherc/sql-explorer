@@ -895,13 +895,17 @@ export const useExplorerStore = defineStore('explorer', () => {
     await reopen(await load(node, true), open)
   }
 
-  /** Reads each open branch among the children that a read just gave. */
+  /**
+   * Reads each open branch among the children that a read just gave. The
+   * branches are read side by side, so a slow branch does not keep the
+   * branches after it empty.
+   */
   async function reopen(children: ExplorerNode[], open: ReadonlySet<string>): Promise<void> {
-    for (const child of children) {
-      if (open.has(child.key) && isExpandable(child)) {
-        await reopen(await load(child, true), open)
-      }
-    }
+    await Promise.all(
+      children
+        .filter((child) => open.has(child.key) && isExpandable(child))
+        .map(async (child) => reopen(await load(child, true), open)),
+    )
   }
 
   /**

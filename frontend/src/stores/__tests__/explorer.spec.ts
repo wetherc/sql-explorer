@@ -1522,6 +1522,25 @@ describe('explorer store', () => {
     expect(root.children![1]!.loaded).toBe(false)
   })
 
+  it('reads the open branches below a refreshed node side by side', async () => {
+    apiStub.listDatabases.mockResolvedValue([{ name: 'Slow' }, { name: 'Quick' }])
+    apiStub.listSchemas.mockResolvedValue([{ name: 'dbo' }])
+    const explorer = await readyStore(true)
+    const root = explorer.addRoot('c1')
+    await explorer.expand(root)
+    const open = new Set([root.key, ...root.children!.map((child) => child.key)])
+
+    // The first database never answers.
+    apiStub.listSchemas.mockImplementation((_connectionId: string, database: string) =>
+      database === 'Slow' ? new Promise(() => {}) : Promise.resolve([{ name: 'audit' }]),
+    )
+    void explorer.refresh(root, open)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const [slow, quick] = root.children!
+    expect(slow!.loading).toBe(true)
+    expect(quick!.children?.map((child) => child.label)).toEqual(['audit'])
+  })
+
   it('drops the answer of a read that a refresh passed', async () => {
     let releaseFirst: (value: { name: string }[]) => void = () => {}
     apiStub.listDatabases.mockReturnValueOnce(

@@ -183,8 +183,10 @@ export const useFilesStore = defineStore('files', () => {
       if (!isLast()) {
         return
       }
-      children = entries.map((entry) => nodeOfEntry(entry, node.depth + 1))
-      node.children = children
+      node.children = entries.map((entry) => nodeOfEntry(entry, node.depth + 1))
+      // The list comes back through the node, so each child is the reactive
+      // form of it, and the panel sees the writes of the reads below.
+      children = node.children
       node.loaded = true
     } catch (error) {
       if (isLast()) {
@@ -200,11 +202,13 @@ export const useFilesStore = defineStore('files', () => {
         node.loading = false
       }
     }
-    for (const child of children) {
-      if (child.entryType === 'folder' && openPaths.value.has(child.path)) {
-        await readFolder(child)
-      }
-    }
+    // The folders are read side by side, so a slow folder, such as one on a
+    // share of the network, does not keep the folders after it empty.
+    await Promise.all(
+      children
+        .filter((child) => child.entryType === 'folder' && openPaths.value.has(child.path))
+        .map(readFolder),
+    )
   }
 
   /**
