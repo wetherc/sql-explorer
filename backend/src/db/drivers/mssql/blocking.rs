@@ -23,18 +23,24 @@ const PERMISSION_QUERY: &str = "SELECT CAST(CASE \
           AND HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'VIEW DATABASE STATE') = 1 THEN 1 \
      ELSE 0 END AS int)";
 
-/// One row for each request that waits for another session. The object of
-/// a lock on a key, a page or a row is found through `sys.partitions` of the
-/// current database alone, and other waits give the resource text of the
-/// server. A blocking session with no request is idle, so its statement is
-/// the last one it sent.
-fn waits_query() -> String {
-    format!(
-        "SELECT TOP ({ROW_LIMIT}) \
-           CAST(r.session_id AS bigint), wt.text, CAST(r.wait_time AS bigint), \
-           CAST(r.blocking_session_id AS bigint), s.login_name, s.host_name, s.program_name, \
-           s.status, bt.text, \
-           COALESCE(CASE \
+/// The note of a report that gives lock resources in place of the names of
+/// the objects.
+const NAMES_LOCKED: &str = "Some objects are shown by their lock resource, because a \
+     pending schema change locks their names.";
+
+/// The name of the object of each wait. The object of a lock on a key, a
+/// page or a row is found through `sys.partitions` of the current database
+/// alone, and other waits give the resource text of the server.
+///
+/// `OBJECT_NAME` waits for the schema lock of the object. A session that
+/// waits for a schema change, such as `TRUNCATE TABLE` behind a statement
+/// that reads the table, makes that lock wait. Without `names`, every wait
+/// gives the resource text, and the query reads no name.
+fn object_column(names: bool) -> &'static str {
+    if !names {
+        return "NULLIF(r.wait_resource, '')";
+    }
+    "COALESCE(CASE \
              WHEN wl.resource_type = 'OBJECT' THEN \
                QUOTENAME(DB_NAME(wl.resource_database_id)) + '.' + \
                QUOTENAME(OBJECT_SCHEMA_NAME(CAST(wl.resource_associated_entity_id AS int), \
@@ -44,7 +50,19 @@ fn waits_query() -> String {
              WHEN wp.object_id IS NOT NULL THEN \
                QUOTENAME(DB_NAME()) + '.' + QUOTENAME(OBJECT_SCHEMA_NAME(wp.object_id)) + '.' + \
                QUOTENAME(OBJECT_NAME(wp.object_id)) \
-           END, NULLIF(r.wait_resource, '')), \
+           END, NULLIF(r.wait_resource, ''))"
+}
+
+/// One row for each request that waits for another session. See
+/// [`object_column`] for the object of each wait. A blocking session with no
+/// request is idle, so its statement is the last one it sent.
+fn waits_query(names: bool) -> String {
+    let object = object_column(names);
+    format!(
+        "SELECT TOP ({ROW_LIMIT}) \
+           CAST(r.session_id AS bigint), wt.text, CAST(r.wait_time AS bigint), \
+           CAST(r.blocking_session_id AS bigint), s.login_name, s.host_name, s.program_name, \
+           s.status, bt.text, {object}, \
            COALESCE(wl.request_mode, r.wait_type) \
          FROM sys.dm_exec_requests AS r \
          JOIN sys.dm_exec_sessions AS s ON s.session_id = r.blocking_session_id \
@@ -106,7 +124,20 @@ impl MssqlDriver {
                 ..BlockingReport::default()
             });
         }
-        let batch = format!("{};\n{};", waits_query(), open_transactions_query());
+        match self.report_rows(true).await {
+            Err(error) if error.is_lock_wait() => {
+                let mut report = self.report_rows(false).await?;
+                report.notes.push(NAMES_LOCKED.to_string());
+                Ok(report)
+            }
+            other => other,
+        }
+    }
+
+    /// Reads the waits and the open transactions. See [`object_column`] for
+    /// `names`.
+    async fn report_rows(&mut self, names: bool) -> Result<BlockingReport> {
+        let batch = format!("{};\n{};", waits_query(names), open_transactions_query());
         let mut sets = self
             .client
             .simple_query(batch)
@@ -166,7 +197,11 @@ mod tests {
 
     #[test]
     fn the_queries_name_the_row_limit() {
-        assert!(waits_query().contains(&format!("TOP ({ROW_LIMIT})")));
+        assert!(waits_query(true).contains(&format!("TOP ({ROW_LIMIT})")));
+        assert!(waits_query(true).contains("OBJECT_NAME"));
+        // A report whose names are locked reads no name.
+        assert!(!waits_query(false).contains("OBJECT_NAME"));
+        assert!(waits_query(false).contains("NULLIF(r.wait_resource, '')"));
         assert!(open_transactions_query().contains("@@SPID"));
     }
 }
