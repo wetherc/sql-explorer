@@ -301,14 +301,30 @@ export interface SaveShownMessagesRequest {
  * backend can still read, so an export of all rows does not run the query
  * again.
  */
-export interface KeptSet {
+export interface KeptSet extends KeptInfo {
   /** The number of the set in its run, from zero. */
   set: number
   /** The identifier that `exportKept` and `releaseKept` take. */
   id: string
+}
+
+/**
+ * Where the full rows of a kept set come from: the result files of an
+ * Athena query, a file on this computer, or a read that stopped on the
+ * server and can go on.
+ */
+export type KeptOrigin = 'athena' | 'spill' | 'paused'
+
+/** What the interface shows about the full rows of one kept set. */
+export interface KeptInfo {
+  origin: KeptOrigin
+  /** The moment the backend kept the set, in milliseconds since the epoch. */
+  keptAt: number
   /** The number of rows in the file on this computer that keeps every row
    *  of the set. Only a saved full result has this count. */
   savedRows?: number
+  /** The size of that file in bytes. */
+  savedBytes?: number
   /** The seconds the read of the set stays paused at the row limit, for a
    *  set whose statement stays open on the server. */
   pausedSecs?: number

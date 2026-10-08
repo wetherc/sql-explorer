@@ -119,6 +119,24 @@ impl KeptSource {
         matches!(self, KeptSource::SpillFile(_))
     }
 
+    /// The place of the full rows, as the window names it. The sources of
+    /// the tests stand in for a result outside the application.
+    pub fn origin(&self) -> KeptOrigin {
+        match self {
+            KeptSource::SpillFile(_) => KeptOrigin::Spill,
+            KeptSource::PausedRead(_) => KeptOrigin::Paused,
+            _ => KeptOrigin::Athena,
+        }
+    }
+
+    /// The bytes of a spill file. Other sources use no local disk.
+    pub fn saved_bytes(&self) -> Option<u64> {
+        match self {
+            KeptSource::SpillFile(file) => Some(file.bytes()),
+            _ => None,
+        }
+    }
+
     /// The number of rows that a spill file contains. Other sources do not
     /// know their number of rows.
     pub fn saved_rows(&self) -> Option<u64> {
@@ -174,6 +192,19 @@ impl KeptResult {
     }
 }
 
+/// The place of the full rows of a kept set. The export menu and the grid
+/// tell the user where the rows come from with this value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum KeptOrigin {
+    /// The result files of an Athena statement in S3.
+    Athena,
+    /// A spill file on the local disk.
+    Spill,
+    /// A read that paused at the row limit on the server.
+    Paused,
+}
+
 /// The identifier of one kept set, as the frame at the end of the run gives
 /// it to the window.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -183,14 +214,29 @@ pub struct KeptSet {
     pub set: u32,
     /// The identifier that `export_kept` and `release_kept` take.
     pub id: String,
+    pub origin: KeptOrigin,
+    /// The moment that the registry got the set, in milliseconds since the
+    /// Unix epoch, so the grid can show the age of the kept result.
+    pub kept_at: u64,
     /// The number of rows that a spill file of the set contains, so the
     /// grid can tell the user that every row is on this computer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub saved_rows: Option<u64>,
+    /// The bytes of the spill file of the set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saved_bytes: Option<u64>,
     /// The seconds the read stays paused, for a set whose read paused at
     /// the row limit. The window shows the time that is left.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paused_secs: Option<u64>,
+}
+
+/// The time of the system clock in milliseconds since the Unix epoch. A
+/// clock before the epoch gives zero.
+pub fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64)
 }
 
 /// The identifier of one kept set: the identifier of the request of the run
@@ -239,22 +285,25 @@ impl KeptResults {
         if sources.is_empty() {
             return Vec::new();
         }
+        let kept_at = unix_millis();
         let mut entries = self.entries();
         let mut removed = Vec::new();
         let mut kept = Vec::with_capacity(sources.len());
         for (set, source) in sources {
             let id = kept_id(request_id, set);
-            let saved_rows = source.saved_rows();
-            let paused_secs = source.paused_secs();
+            let set = KeptSet {
+                set,
+                id: id.clone(),
+                origin: source.origin(),
+                kept_at,
+                saved_rows: source.saved_rows(),
+                saved_bytes: source.saved_bytes(),
+                paused_secs: source.paused_secs(),
+            };
             let mut entry = KeptResult::new(connection_id, source);
             entry.kept_at = now;
-            removed.extend(entries.insert(id.clone(), Arc::new(entry)));
-            kept.push(KeptSet {
-                set,
-                id,
-                saved_rows,
-                paused_secs,
-            });
+            removed.extend(entries.insert(id, Arc::new(entry)));
+            kept.push(set);
         }
         removed.extend(prune(&mut entries, now));
         // The drop of a spill file removes the file from the disk, so the
@@ -455,30 +504,20 @@ pub(crate) mod tests {
     #[test]
     fn each_cut_set_gets_an_identifier_of_the_run_and_the_set() {
         let registry = KeptResults::default();
+        let before = unix_millis();
         let kept = registry.keep("r1", "c1", vec![(0, fixed(1)), (2, fixed(1))]);
-        assert_eq!(
-            kept,
-            vec![
-                KeptSet {
-                    set: 0,
-                    id: "r1:0".into(),
-                    saved_rows: None,
-                    paused_secs: None,
-                },
-                KeptSet {
-                    set: 2,
-                    id: "r1:2".into(),
-                    saved_rows: None,
-                    paused_secs: None,
-                },
-            ]
-        );
+        let after = unix_millis();
+        let ids: Vec<_> = kept.iter().map(|set| (set.set, set.id.as_str())).collect();
+        assert_eq!(ids, vec![(0, "r1:0"), (2, "r1:2")]);
+        assert!(kept
+            .iter()
+            .all(|set| set.kept_at >= before && set.kept_at <= after));
         assert_eq!(registry.len(), 2);
         assert_eq!(registry.get("r1:2").unwrap().connection_id, "c1");
         assert!(registry.get("r1:1").is_none());
         assert_eq!(
             serde_json::to_value(&kept[0]).unwrap(),
-            json!({ "set": 0, "id": "r1:0" })
+            json!({ "set": 0, "id": "r1:0", "origin": "athena", "keptAt": kept[0].kept_at })
         );
     }
 
@@ -574,12 +613,20 @@ pub(crate) mod tests {
         assert_eq!(kept[0].saved_rows, Some(3));
         assert_eq!(
             serde_json::to_value(&kept[0]).unwrap(),
-            json!({ "set": 0, "id": "r1:0", "savedRows": 3 })
+            json!({
+                "set": 0,
+                "id": "r1:0",
+                "origin": "spill",
+                "keptAt": kept[0].kept_at,
+                "savedRows": 3,
+                "savedBytes": bytes,
+            })
         );
         let entry = registry.get("r1:0").unwrap();
         assert!(entry.source.is_spill());
         assert!(!fixed(1).is_spill());
         assert_eq!(fixed(1).saved_rows(), None);
+        assert_eq!(fixed(1).saved_bytes(), None);
 
         let mut sink = BufferSink::new(10);
         entry
@@ -650,9 +697,12 @@ pub(crate) mod tests {
         );
         assert_eq!(kept[0].paused_secs, Some(60));
         assert_eq!(kept[1].paused_secs, None);
+        assert_eq!(kept[0].origin, KeptOrigin::Paused);
+        let mut value = serde_json::to_value(&kept[0]).unwrap();
+        value.as_object_mut().unwrap().remove("keptAt");
         assert_eq!(
-            serde_json::to_value(&kept[0]).unwrap(),
-            json!({ "set": 0, "id": "r1:0", "pausedSecs": 60 })
+            value,
+            json!({ "set": 0, "id": "r1:0", "origin": "paused", "pausedSecs": 60 })
         );
 
         // A paused read gives its rows to an export alone.

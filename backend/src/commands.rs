@@ -5593,10 +5593,11 @@ mod tests {
         .await
         .unwrap();
         let end = end_frame(&messages.lock().unwrap());
-        assert_eq!(
-            end["kept"],
-            serde_json::json!([{ "set": 0, "id": "r1:0", "savedRows": 50 }])
-        );
+        let kept = &end["kept"][0];
+        assert_eq!(kept["id"], "r1:0");
+        assert_eq!(kept["origin"], "spill");
+        assert_eq!(kept["savedRows"], 50);
+        assert!(kept["savedBytes"].as_u64().unwrap() > 0);
         assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 1);
 
         // The export reads the file, and the statement does not run again.

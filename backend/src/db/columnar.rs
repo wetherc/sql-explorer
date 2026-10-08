@@ -1278,7 +1278,10 @@ mod tests {
         sink.announce_kept(vec![KeptSet {
             set: 1,
             id: "r1:1".into(),
+            origin: crate::kept::KeptOrigin::Athena,
+            kept_at: 7,
             saved_rows: None,
+            saved_bytes: None,
             paused_secs: None,
         }]);
         sink.finish(RunSummary::default()).unwrap();
@@ -1288,7 +1291,10 @@ mod tests {
             panic!("the last frame does not end the run");
         };
         let value: JsonValue = serde_json::from_str(summary).unwrap();
-        assert_eq!(value["kept"], json!([{ "set": 1, "id": "r1:1" }]));
+        assert_eq!(
+            value["kept"],
+            json!([{ "set": 1, "id": "r1:1", "origin": "athena", "keptAt": 7 }])
+        );
     }
 
     #[test]

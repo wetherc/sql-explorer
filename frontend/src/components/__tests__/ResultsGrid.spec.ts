@@ -686,36 +686,68 @@ describe('ResultsGrid', () => {
     expect(item?.classList.contains('v-list-item--disabled')).toBe(true)
   })
 
-  it('says that a whole export of a kept result does not run the query again', async () => {
-    const kept = mountWithPlugins(ResultsGrid, {
-      props: { result: result({ truncated: true }), kept: true },
+  /** The note under the CSV entry of the whole export, for the given props. */
+  async function exportAllNoteOf(props: Record<string, unknown>): Promise<string> {
+    const grid = mountWithPlugins(ResultsGrid, {
+      props: { result: result({ truncated: true }), ...props },
     })
-    await kept.find('[data-test="grid-export"]').trigger('click')
+    await grid.find('[data-test="grid-export"]').trigger('click')
     await new Promise((resolve) => setTimeout(resolve, 0))
-    const item = document.querySelector('[data-test="grid-export-all-csv"]')
-    expect(item?.textContent).toContain("Uses the saved result, so the query doesn't run again")
+    const text = document.querySelector('[data-test="grid-export-all-csv"]')?.textContent ?? ''
+    grid.unmount()
+    return text
+  }
+
+  it('says where a whole export takes its rows from', async () => {
+    const athena = { origin: 'athena', keptAt: 0 }
+    expect(await exportAllNoteOf({ kept: athena })).toContain(
+      "From the saved result (doesn't run again)",
+    )
+    const spill = { origin: 'spill', keptAt: 0, savedRows: 9, savedBytes: 9 }
+    expect(await exportAllNoteOf({ kept: spill })).toContain('From the rows saved on this computer')
+    expect(await exportAllNoteOf({ runMs: 252_000 })).toContain(
+      'Runs the query again (last run took 4 min 12 s)',
+    )
   })
 
-  it('says that every row of a saved full result is on this computer', async () => {
-    const saved = mountWithPlugins(ResultsGrid, {
-      props: { result: result({ truncated: true }), kept: true, savedRows: 52310 },
-    })
-    expect(saved.find('[data-test="grid-truncated"]').text()).toContain(
-      'All 52,310 rows are saved on this computer for export.',
-    )
-    await saved.find('[data-test="grid-export"]').trigger('click')
-    await new Promise((resolve) => setTimeout(resolve, 0))
-    const item = document.querySelector('[data-test="grid-export-all-json"]')
-    expect(item?.textContent).toContain(
-      "All 52,310 rows are saved on this computer, so exporting doesn't run the query again",
-    )
+  it('says where the full rows of a cut result are and how old they are', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(10 * 3_600_000)
+      const grid = mountWithPlugins(ResultsGrid, {
+        props: {
+          result: result({ truncated: true }),
+          kept: { origin: 'athena', keptAt: 7 * 3_600_000 + 1 },
+        },
+      })
+      const note = () => grid.find('[data-test="grid-full-result"]').text()
+      expect(note()).toBe('Saved on Athena, 2 h ago')
+      // The age moves while the grid stays open.
+      vi.advanceTimersByTime(60_000)
+      await nextTick()
+      expect(note()).toBe('Saved on Athena, 3 h ago')
+
+      await grid.setProps({
+        kept: { origin: 'spill', keptAt: 0, savedRows: 52310, savedBytes: 412 * 1024 ** 2 },
+      })
+      expect(note()).toBe('Saved on this computer, 52,310 rows, 412 MB')
+      await grid.setProps({ kept: null })
+      expect(grid.find('[data-test="grid-full-result"]').exists()).toBe(false)
+      grid.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('shows a paused result with its time left, its export and its release', async () => {
     vi.useFakeTimers({ now: 1_000_000 })
     try {
       const paused = mountWithPlugins(ResultsGrid, {
-        props: { result: result({ truncated: true }), kept: true, pausedUntil: 1_125_000 },
+        props: {
+          result: result({ truncated: true }),
+          kept: { origin: 'paused', keptAt: 1_000_000 },
+          pausedUntil: 1_125_000,
+        },
       })
       const banner = paused.find('[data-test="grid-paused"]')
       expect(banner.text()).toContain('Showing the first 3 rows.')
@@ -746,19 +778,19 @@ describe('ResultsGrid', () => {
       await paused.find('[data-test="grid-export"]').trigger('click')
       await vi.advanceTimersByTimeAsync(0)
       const item = document.querySelector('[data-test="grid-export-all-csv"]')
-      expect(item?.textContent).toContain("Continues the paused query, so it doesn't run again")
+      expect(item?.textContent).toContain('Continues the paused read')
 
-      // The end of the pause stops the clock and shows the row limit again.
+      // The end of the pause stops both clocks and shows the row limit again.
       const stopped = vi.spyOn(globalThis, 'clearInterval')
-      await paused.setProps({ pausedUntil: undefined, kept: false })
+      await paused.setProps({ pausedUntil: undefined, kept: null })
       expect(paused.find('[data-test="grid-paused"]').exists()).toBe(false)
       expect(paused.find('[data-test="grid-truncated"]').exists()).toBe(true)
-      expect(stopped).toHaveBeenCalledTimes(1)
+      expect(stopped).toHaveBeenCalledTimes(2)
 
-      // A grid that leaves while paused stops its clock too.
+      // A grid that leaves while paused stops its clocks too.
       await paused.setProps({ pausedUntil: 2_000_000 })
       paused.unmount()
-      expect(stopped).toHaveBeenCalledTimes(2)
+      expect(stopped).toHaveBeenCalledTimes(4)
       stopped.mockRestore()
     } finally {
       vi.useRealTimers()

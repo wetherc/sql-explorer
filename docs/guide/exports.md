@@ -18,13 +18,17 @@ it to the clipboard. The grid's menu offers two types of export:
 
 **Export all rows** runs the statement that produced the result, on that run's
 connection. A pinned result from an older run therefore writes its own rows,
-even after you change the tab's text or connection.
+even after you change the tab's text or connection. Each entry says where its
+rows come from. An entry that runs the query again says **Runs the query again**
+and how long the last run took, for example **Runs the query again (last run
+took 4 min 12 s)**, so you can judge the cost before you click.
 
 On Athena, the statement doesn't run again. Athena saves the full result of
 every query in S3, so the export reads the rest of the rows from that saved
 result, and you don't pay for a second scan. The export entries then say
-**Uses the saved result, so the query doesn't run again**, and the tab stays
-free for other statements while the export runs. The app forgets a saved
+**From the saved result (doesn't run again)**, the warning above the grid says
+how old the saved result is, for example **Saved on Athena, 3 h ago**, and the
+tab stays free for other statements while the export runs. The app forgets a saved
 result when you run the tab again (unless you pinned the result), close the
 result or the tab, or disconnect. It also forgets a result after 12 hours,
 and forgets the oldest one when it has more than 64. If Athena no
@@ -117,10 +121,10 @@ option is off by default.
 With the option on, a run doesn't stop reading at the grid's row limit. It keeps
 reading up to the export row limit, shows the first rows in the grid as usual,
 and writes every row of the result to a temporary file on your computer. The
-warning above the grid then says how many rows were saved, and the **Export all
-rows** entries say **All N rows are saved on this computer, so exporting doesn't
-run the query again**. The export reads the file, so the server does no more
-work and the export finishes much sooner.
+warning above the grid then gives the row count and the file's size, for example
+**Saved on this computer, 52,310 rows, 412 MB**, and the **Export all rows**
+entries say **From the rows saved on this computer**. The export reads the
+file, so the server does no more work and the export finishes much sooner.
 
 Runs take longer with the option on, because the statement keeps running until
 it reaches the end of its result or the export row limit. The tab shows the
@@ -168,7 +172,8 @@ buttons. **Export all rows** writes every row to a CSV, JSON or Excel file:
 first the rows that the grid shows, then the rest of the read. **Release** ends
 the statement and frees the tab. An export takes the paused read once, so after
 the export, or after an export that fails, the result is no longer paused and
-a second export runs the query again.
+a second export runs the query again. While the query is paused, the **Export
+all rows** entries of the grid's menu say **Continues the paused read**.
 
 A paused query costs the server something for as long as it waits:
 

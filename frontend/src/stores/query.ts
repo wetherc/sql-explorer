@@ -16,6 +16,7 @@ import type {
   ChosenMessagesFile,
   ErrorPayload,
   ExecOptions,
+  KeptInfo,
   KeptSet,
   Message,
   QueryStats,
@@ -72,9 +73,11 @@ export interface ResultPane {
    *  the read and the backend can still give every row. The export of all
    *  rows then reads that result and does not run the statement again. */
   keptId?: string
-  /** The number of rows that the backend saved in a file on this computer,
-   *  when the user turned on saved full results and the set fit the limits. */
-  savedRows?: number
+  /** Where the kept rows of the set are, for the grid and the export menu. */
+  kept?: KeptInfo
+  /** The time the run of the set took, once the run has ended. An export of
+   *  all rows that runs the query again takes about as long. */
+  elapsedMs?: number
   /** The moment, in milliseconds since the epoch, when the paused read of
    *  the set ends, while the server keeps its statement open. The export of
    *  all rows continues that read. */
@@ -329,8 +332,9 @@ export const useQueryStore = defineStore('query', () => {
       const table = run.fresh[entry.set]
       const pane = state.panes.find((pane) => table !== undefined && pane.result === table)
       if (pane) {
+        const { origin, keptAt, savedRows, savedBytes } = entry
         pane.keptId = entry.id
-        pane.savedRows = entry.savedRows
+        pane.kept = { origin, keptAt, savedRows, savedBytes }
         if (entry.pausedSecs !== undefined) {
           const limit = entry.pausedSecs * 1000
           pane.pausedUntil = Date.now() + limit
@@ -358,6 +362,7 @@ export const useQueryStore = defineStore('query', () => {
       releaseKept([pane])
     }
     pane.keptId = undefined
+    pane.kept = undefined
     pane.pausedUntil = undefined
   }
 
@@ -506,6 +511,11 @@ export const useQueryStore = defineStore('query', () => {
             if (end.openTransaction !== undefined) {
               state.openTransactionOn = end.openTransaction ? connectionId : null
             }
+            for (const pane of state.panes) {
+              if (run.fresh.includes(pane.result)) {
+                pane.elapsedMs = end.elapsedMs
+              }
+            }
             attachKept(state, run, end.kept ?? [])
           },
         },
@@ -637,7 +647,7 @@ export const useQueryStore = defineStore('query', () => {
       return
     }
     const unsaved = panesOfLastRun(state).some(
-      (pane) => pane.truncated && pane.savedRows === undefined,
+      (pane) => pane.truncated && pane.kept?.origin !== 'spill',
     )
     if (unsaved && state.messages.some((message) => message.level === MessageLevel.Warning)) {
       ui.warn("A result wasn't saved on this computer. Messages has the reason.")

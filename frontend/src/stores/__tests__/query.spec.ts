@@ -1274,8 +1274,8 @@ describe('kept results', () => {
           { rows: [[2]], truncated: true },
         ],
         kept: [
-          { set: 0, id: `${request}:0` },
-          { set: 1, id: `${request}:1` },
+          { set: 0, id: `${request}:0`, origin: 'athena', keptAt: 5 },
+          { set: 1, id: `${request}:1`, origin: 'athena', keptAt: 5 },
         ],
       }),
     )
@@ -1323,7 +1323,7 @@ describe('kept results', () => {
           rowsAffected: null,
           elapsedMs: 1,
           stats: null,
-          kept: [{ set: 0, id: 'r1:0' }],
+          kept: [{ set: 0, id: 'r1:0', origin: 'athena', keptAt: 5 }],
         })
       },
     )
@@ -1370,7 +1370,7 @@ describe('kept results', () => {
     apiStub.executeQuery.mockImplementationOnce(
       streamed({
         results: [{ rows: [[1]], truncated: true }],
-        kept: [{ set: 0, id: `${request}:0`, pausedSecs: seconds }],
+        kept: [{ set: 0, id: `${request}:0`, origin: 'paused', keptAt: 0, pausedSecs: seconds }],
       }),
     )
   }
@@ -1389,6 +1389,7 @@ describe('kept results', () => {
       // The end of the pause forgets the read, as the backend does.
       vi.advanceTimersByTime(60_000)
       expect(pane.keptId).toBeUndefined()
+      expect(pane.kept).toBeUndefined()
       expect(pane.pausedUntil).toBeUndefined()
     } finally {
       vi.useRealTimers()
@@ -1434,12 +1435,19 @@ describe('kept results', () => {
     apiStub.executeQuery.mockImplementationOnce(
       streamed({
         results: [{ rows: [[1]], truncated: true }],
-        kept: [{ set: 0, id: 'r1:0', savedRows: 52310 }],
+        kept: [
+          { set: 0, id: 'r1:0', origin: 'spill', keptAt: 5, savedRows: 52310, savedBytes: 80 },
+        ],
+        elapsedMs: 900,
       }),
     )
     const queries = useQueryStore()
     await queries.execute('t1', 'c1', 'SELECT 1')
-    expect(queries.stateFor('t1').panes[0]).toMatchObject({ keptId: 'r1:0', savedRows: 52310 })
+    expect(queries.stateFor('t1').panes[0]).toMatchObject({
+      keptId: 'r1:0',
+      kept: { origin: 'spill', keptAt: 5, savedRows: 52310, savedBytes: 80 },
+      elapsedMs: 900,
+    })
   })
 
   it('points at Messages when a cut result was not saved and a warning came', async () => {
@@ -1467,7 +1475,7 @@ describe('kept results', () => {
       await run({
         results: cut,
         messages: [warning],
-        kept: [{ set: 0, id: 'r2:0', savedRows: 9 }],
+        kept: [{ set: 0, id: 'r2:0', origin: 'spill', keptAt: 5, savedRows: 9, savedBytes: 9 }],
       }),
     ).not.toContain(notice)
     expect(await run({ results: [{ rows: [[1]] }], messages: [warning] })).not.toContain(notice)

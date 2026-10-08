@@ -1918,14 +1918,14 @@ describe('QueryView edge paths', () => {
       warning: null,
     })
     apiStub.executeQuery.mockImplementation(
-      streamed({ ...response, kept: [{ set: 0, id: 'r1:0' }] }),
+      streamed({ ...response, kept: [{ set: 0, id: 'r1:0', origin: 'athena', keptAt: 5 }] }),
     )
     const wrapper = await mountView()
     await wrapper.find('[data-test="run-button"]').trigger('click')
     await settle()
 
     const grid = wrapper.findComponent({ name: 'ResultsGrid' })
-    expect(grid.props('kept')).toBe(true)
+    expect(grid.props('kept')).toEqual({ origin: 'athena', keptAt: 5 })
     await grid.vm.$emit('export-all', 'json')
     await settle()
 
@@ -1943,13 +1943,17 @@ describe('QueryView edge paths', () => {
   /** Runs a statement whose result paused at the row limit, and gives its grid. */
   async function pausedGrid() {
     apiStub.executeQuery.mockImplementation(
-      streamed({ ...response, kept: [{ set: 0, id: 'r1:0', pausedSecs: 600 }] }),
+      streamed({
+        ...response,
+        kept: [{ set: 0, id: 'r1:0', origin: 'paused', keptAt: 0, pausedSecs: 600 }],
+      }),
     )
     const wrapper = await mountView()
     await wrapper.find('[data-test="run-button"]').trigger('click')
     await settle()
     const grid = wrapper.findComponent({ name: 'ResultsGrid' })
     expect(grid.props('pausedUntil')).toEqual(expect.any(Number))
+    expect(grid.props('kept')).toMatchObject({ origin: 'paused' })
     return grid
   }
 
@@ -1959,7 +1963,7 @@ describe('QueryView edge paths', () => {
     await settle()
     expect(apiStub.releaseKept).toHaveBeenCalledWith('r1:0')
     expect(grid.props('pausedUntil')).toBeUndefined()
-    expect(grid.props('kept')).toBe(false)
+    expect(grid.props('kept')).toBeNull()
   })
 
   it('ends the pause of a result after its export, and keeps it when the dialog closes', async () => {
@@ -1981,7 +1985,7 @@ describe('QueryView edge paths', () => {
     await grid.vm.$emit('export-all', 'csv')
     await settle()
     expect(grid.props('pausedUntil')).toBeUndefined()
-    expect(grid.props('kept')).toBe(false)
+    expect(grid.props('kept')).toBeNull()
     expect(apiStub.releaseKept).not.toHaveBeenCalled()
   })
 

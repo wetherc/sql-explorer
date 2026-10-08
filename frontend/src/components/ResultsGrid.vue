@@ -155,9 +155,9 @@
     <div v-else-if="truncated" class="px-3 py-1">
       <v-alert type="warning" density="compact" variant="tonal" data-test="grid-truncated">
         Showing the first {{ rowTotal.toLocaleString() }} rows because of the row limit.
-        <template v-if="savedRows !== undefined">
-          All {{ savedRows.toLocaleString() }} rows are saved on this computer for export.
-        </template>
+        <div v-if="fullResultNote" class="app-text-sm" data-test="grid-full-result">
+          {{ fullResultNote }}
+        </div>
       </v-alert>
     </div>
 
@@ -372,7 +372,8 @@ import type { SortKey } from '@/lib/format'
 import { toTabSeparated } from '@/lib/export'
 import type { ResultTable } from '@/lib/results'
 import { FALLBACK_CHAR_WIDTH } from '@/lib/textWidth'
-import type { CellValue, ResultSet } from '@/types/api'
+import { exportAllNote, keptNote } from '@/lib/kept'
+import type { CellValue, KeptInfo, ResultSet } from '@/types/api'
 
 /** The forms an export can take. */
 export type ExportFormat = 'csv' | 'json' | 'markdown' | 'insert' | 'xlsx'
@@ -400,12 +401,13 @@ const props = withDefaults(
     /** The note for a result whose rows also went to a file. It takes the
      *  place of the row limit warning. */
     savedNote?: string | null
-    /** True when the backend kept the full result, so the export of all
-     *  rows reads it and does not run the query again. */
-    kept?: boolean
-    /** The number of rows that the backend saved on this computer, when it
-     *  saved the full result there. */
-    savedRows?: number
+    /** Where the backend kept the full rows of a cut result, when it kept
+     *  them. The export of all rows then reads them and does not run the
+     *  query again. */
+    kept?: KeptInfo | null
+    /** The time the run of the result took, for the note of an export that
+     *  runs the query again. */
+    runMs?: number | null
     /** The moment, in milliseconds since the epoch, when the paused read of
      *  the result ends. */
     pausedUntil?: number
@@ -414,26 +416,46 @@ const props = withDefaults(
     pausedUntil: undefined,
     busy: false,
     exporting: false,
-    kept: false,
+    kept: null,
+    runMs: null,
     rows: undefined,
     truncated: undefined,
-    savedRows: undefined,
     savedNote: null,
   },
 )
 
 /** The note under each command that exports all rows. */
 const exportAllSubtitle = computed(() =>
-  props.exporting
-    ? 'An export is already running.'
-    : props.pausedUntil !== undefined
-      ? "Continues the paused query, so it doesn't run again"
-      : props.savedRows !== undefined
-        ? `All ${props.savedRows.toLocaleString()} rows are saved on this computer, so exporting doesn't run the query again`
-        : props.kept
-          ? "Uses the saved result, so the query doesn't run again"
-          : 'Re-runs the query and streams rows from the server',
+  props.exporting ? 'An export is already running.' : exportAllNote(props.kept, props.runMs),
 )
+
+/**
+ * The time of the clock, which moves each minute while the grid shows a
+ * kept result, so the age of that result stays current. A grid without a
+ * kept result runs no timer.
+ */
+const keptNow = ref(Date.now())
+let clock: ReturnType<typeof setInterval> | undefined
+function stopClock(): void {
+  clearInterval(clock)
+  clock = undefined
+}
+watch(
+  () => props.kept !== null,
+  (shown) => {
+    stopClock()
+    keptNow.value = Date.now()
+    if (shown) {
+      clock = setInterval(() => {
+        keptNow.value = Date.now()
+      }, 60_000)
+    }
+  },
+  { immediate: true },
+)
+
+/** Where the full rows of a cut result are, when the backend kept them. */
+const fullResultNote = computed(() => (props.kept ? keptNote(props.kept, keptNow.value) : ''))
 
 /** The number of rows of the result, which grows while the set streams. */
 const rowTotal = computed(() => props.rows ?? props.result.rowCount)
@@ -558,6 +580,7 @@ watch(scrollArea, (element, previous) => {
 
 onBeforeUnmount(() => {
   stopPauseClock()
+  stopClock()
   sizeObserver?.disconnect()
   if (filterTimer !== null) {
     clearTimeout(filterTimer)
