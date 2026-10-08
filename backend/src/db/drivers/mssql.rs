@@ -649,7 +649,14 @@ impl MssqlDriver {
     ///
     /// The packet ends the whole batch and rolls back the statement that it
     /// ends, so a batch that [`Self::may_end_early`] refuses arrives with
-    /// `may_end_early` false and keeps the walk.
+    /// `may_end_early` false and keeps the walk. The walk then receives every
+    /// row of each set from the server and drops the rows past the limit.
+    /// A batch of more than one statement, and a session inside a
+    /// transaction with `XACT_ABORT` on, take this path. TDS has no message
+    /// that ends one set and lets the rest of the batch run. A server cursor
+    /// would change the locks and the plan of the statement, and a change of
+    /// `XACT_ABORT` for the read would stay on the session when a time limit
+    /// drops the run.
     ///
     /// The `DONE` token of each statement ends its result set. A statement
     /// with no result set, such as an `UPDATE`, sends its count of changed
@@ -1371,7 +1378,7 @@ impl DatabaseDriver for MssqlDriver {
         database: &str,
         max_columns: usize,
     ) -> Result<SchemaSnapshot> {
-        let query = snapshot_query(&Dialect::MsSql.quote_identifier(database));
+        let query = snapshot_query(&Dialect::MsSql.quote_identifier(database), max_columns);
         let mut stream = self.client.query(query, &[&database]).await?;
         let mut snapshot = SchemaSnapshot {
             database: database.to_string(),
@@ -1583,7 +1590,30 @@ fn relation_of(name: &str, word: &str, target: Option<&str>) -> Table {
 /// which gives the default schema of the user. A synonym with a target on
 /// another server, in another database, or of another type gets one row with
 /// no column, so its name stays in the snapshot.
-fn snapshot_query(catalog: &str) -> String {
+///
+/// The server sends the first `max_columns + 1` rows with a column, and each
+/// row with no column. The fold stops at the first row after the count of
+/// columns reaches the bound, and that row is among the rows sent, so the
+/// fold still marks the snapshot as not complete. The rows past it do not
+/// cross the network. `ROW_NUMBER` counts only the rows with a column, so a
+/// synonym with no column does not use up the bound.
+fn snapshot_query(catalog: &str, max_columns: usize) -> String {
+    let bound = max_columns.saturating_add(1).min(i64::MAX as usize);
+    format!(
+        "SELECT w.sch, w.rel, w.typ, w.col, w.dtype, w.ord \
+         FROM (SELECT u.*, ROW_NUMBER() OVER ( \
+             PARTITION BY CASE WHEN u.col IS NULL THEN 0 ELSE 1 END \
+             ORDER BY u.sch, u.rel, u.ord) AS n \
+           FROM ({}) AS u (sch, rel, typ, col, dtype, ord)) AS w \
+         WHERE w.col IS NULL OR w.n <= {bound} \
+         ORDER BY w.sch, w.rel, w.ord",
+        snapshot_rows(catalog)
+    )
+}
+
+/// The rows of [`snapshot_query`] before the bound: one row for each column
+/// of a relation, and the rows of the synonyms.
+fn snapshot_rows(catalog: &str) -> String {
     format!(
         "SELECT c.TABLE_SCHEMA, c.TABLE_NAME, t.TABLE_TYPE, c.COLUMN_NAME, c.DATA_TYPE, \
          c.ORDINAL_POSITION \
@@ -1603,8 +1633,7 @@ fn snapshot_query(catalog: &str) -> String {
            JOIN {catalog}.INFORMATION_SCHEMA.TABLES AS bt \
              ON bt.TABLE_SCHEMA = bc.TABLE_SCHEMA AND bt.TABLE_NAME = bc.TABLE_NAME) \
            ON bc.TABLE_SCHEMA = OBJECT_SCHEMA_NAME(b.id, DB_ID(@P1)) \
-           AND bc.TABLE_NAME = OBJECT_NAME(b.id, DB_ID(@P1)) \
-         ORDER BY 1, 2, 6"
+           AND bc.TABLE_NAME = OBJECT_NAME(b.id, DB_ID(@P1))"
     )
 }
 
@@ -3354,15 +3383,23 @@ mod tests {
 
     #[test]
     fn the_snapshot_statement_reads_the_columns_and_the_relation_type() {
-        let text = snapshot_query("[Sales]");
+        let text = snapshot_query("[Sales]", 10);
         assert!(text.contains("FROM [Sales].INFORMATION_SCHEMA.COLUMNS AS c"));
         assert!(text.contains("JOIN [Sales].INFORMATION_SCHEMA.TABLES AS t"));
-        assert!(text.ends_with("ORDER BY 1, 2, 6"));
+        assert!(text.ends_with("ORDER BY w.sch, w.rel, w.ord"));
+    }
+
+    #[test]
+    fn the_snapshot_statement_sends_one_column_past_the_bound() {
+        let text = snapshot_query("[Sales]", 10);
+        assert!(text.contains("PARTITION BY CASE WHEN u.col IS NULL THEN 0 ELSE 1 END"));
+        assert!(text.contains("WHERE w.col IS NULL OR w.n <= 11 "));
+        assert!(snapshot_query("[Sales]", usize::MAX).contains(&format!("w.n <= {} ", i64::MAX)));
     }
 
     #[test]
     fn the_snapshot_statement_gives_a_synonym_the_columns_of_its_target() {
-        let text = snapshot_query("[Sales]");
+        let text = snapshot_query("[Sales]", 10);
         assert!(text.contains("UNION ALL SELECT s.name, sy.name, N'SYNONYM', bc.COLUMN_NAME"));
         assert!(text.contains("FROM [Sales].sys.synonyms AS sy"));
         // The target resolves in the database of the snapshot, and an

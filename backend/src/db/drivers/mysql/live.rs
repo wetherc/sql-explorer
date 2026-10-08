@@ -111,6 +111,16 @@ async fn triggers_and_events(variable: &str, tag: &str) {
         assert!(snapshot.complete);
         assert_eq!(snapshot.relations.len(), 2);
         assert_eq!(snapshot.column_count, 5);
+
+        // A bound under the count of columns keeps that many columns and
+        // marks the snapshot as not complete. A bound of the exact count
+        // gives the whole snapshot.
+        let snapshot = driver.schema_snapshot(&database, 3).await.unwrap();
+        assert!(!snapshot.complete);
+        assert_eq!(snapshot.column_count, 3);
+        let snapshot = driver.schema_snapshot(&database, 5).await.unwrap();
+        assert!(snapshot.complete);
+        assert_eq!(snapshot.column_count, 5);
     };
     live::with_cleanup(body, scratch.remove()).await;
 }

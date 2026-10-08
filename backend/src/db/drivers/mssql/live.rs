@@ -2,11 +2,50 @@
 //! `SQLX_LIVE_MSSQL` names the server, see [`crate::db::drivers::live`].
 
 use crate::db::drivers::live::{self, Server};
-use crate::db::drivers::DatabaseDriver;
-use crate::db::{ObjectType, RelationType, Table, Trigger, TriggerEvent, TriggerTiming};
+use crate::db::drivers::{add_snapshot_column, add_snapshot_relation, DatabaseDriver};
+use crate::db::{
+    ObjectType, RelationType, SchemaSnapshot, Table, Trigger, TriggerEvent, TriggerTiming,
+};
 use crate::storage::DbType;
 
 const FIXTURE: &str = include_str!("../../../../live/fixtures/mssql.sql");
+
+/// Folds the rows of a whole snapshot again under a lower bound, as the
+/// driver folds the rows of the server. A relation with no column stands
+/// for one row with no column.
+fn fold_with_bound(whole: &SchemaSnapshot, bound: usize) -> SchemaSnapshot {
+    let mut snapshot = SchemaSnapshot {
+        database: whole.database.clone(),
+        complete: true,
+        ..SchemaSnapshot::default()
+    };
+    'rows: for relation in &whole.relations {
+        let schema = relation.schema.clone();
+        let name = relation.name.clone();
+        if relation.columns.is_empty() {
+            let kept =
+                add_snapshot_relation(&mut snapshot, bound, schema, name, relation.relation_type);
+            if !kept {
+                break;
+            }
+            continue;
+        }
+        for column in &relation.columns {
+            let kept = add_snapshot_column(
+                &mut snapshot,
+                bound,
+                schema.clone(),
+                name.clone(),
+                relation.relation_type,
+                column.clone(),
+            );
+            if !kept {
+                break 'rows;
+            }
+        }
+    }
+    snapshot
+}
 
 /// The databases of one test, with the session that made them.
 struct Scratch {
@@ -296,6 +335,14 @@ async fn live_the_triggers_of_a_relation_leave_out_a_trigger_of_the_database() {
         keys.sort();
         keys.dedup();
         assert_eq!(keys.len(), count);
+
+        // The server cuts the rows at the bound, and the snapshot of each
+        // bound is the one that the fold makes from every row.
+        let total = snapshot.column_count;
+        for bound in [0, 1, 7, total - 1, total] {
+            let cut = driver.schema_snapshot(&database, bound).await.unwrap();
+            assert_eq!(cut, fold_with_bound(&snapshot, bound), "bound {bound}");
+        }
     };
     live::with_cleanup(body, scratch.remove()).await;
 }

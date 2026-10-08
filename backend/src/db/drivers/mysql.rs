@@ -777,7 +777,9 @@ impl DatabaseDriver for MysqlDriver {
 
     /// Reads every relation and every column of one database in one
     /// statement. MySQL holds no schema level, so the schema of a relation
-    /// stays absent.
+    /// stays absent. The limit is one row past the count of columns, so the
+    /// server sends no column that the snapshot drops, and the walk can tell
+    /// that the snapshot is not complete.
     async fn schema_snapshot(
         &mut self,
         database: &str,
@@ -785,15 +787,7 @@ impl DatabaseDriver for MysqlDriver {
     ) -> Result<SchemaSnapshot> {
         let rows: Vec<(String, String, String, String)> = self
             .conn()?
-            .exec(
-                "SELECT c.TABLE_NAME, t.TABLE_TYPE, c.COLUMN_NAME, c.COLUMN_TYPE \
-                 FROM information_schema.COLUMNS AS c \
-                 JOIN information_schema.TABLES AS t \
-                   ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME \
-                 WHERE c.TABLE_SCHEMA = ? \
-                 ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION",
-                (database,),
-            )
+            .exec(SNAPSHOT_QUERY, (database, snapshot_limit(max_columns)))
             .await?;
         let mut snapshot = SchemaSnapshot {
             database: database.to_string(),
@@ -1017,6 +1011,24 @@ fn object_query_text(database: Option<&str>, name: &str, object_type: ObjectType
         ObjectType::Event => CreateQuery::new(format!("SHOW CREATE EVENT {name};"), 3),
     };
     query.with_delimiter()
+}
+
+/// Reads every column of every relation of one database for the schema
+/// snapshot. The second parameter is the limit of the rows, see
+/// [`snapshot_limit`].
+const SNAPSHOT_QUERY: &str = "SELECT c.TABLE_NAME, t.TABLE_TYPE, c.COLUMN_NAME, c.COLUMN_TYPE \
+     FROM information_schema.COLUMNS AS c \
+     JOIN information_schema.TABLES AS t \
+       ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME \
+     WHERE c.TABLE_SCHEMA = ? \
+     ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION \
+     LIMIT ?";
+
+/// The limit of the rows of [`SNAPSHOT_QUERY`]: one row past the count of
+/// columns. Each row is one column, so that row tells the walk that the
+/// snapshot is not complete.
+fn snapshot_limit(max_columns: usize) -> u64 {
+    max_columns.saturating_add(1) as u64
 }
 
 /// Lists the triggers of one table in the order that they fire. The
@@ -1401,6 +1413,13 @@ mod tests {
             .limit_lock_waits(Duration::from_secs(5))
             .await
             .is_err());
+    }
+
+    #[test]
+    fn the_snapshot_reads_one_row_past_the_count_of_columns() {
+        assert!(SNAPSHOT_QUERY.ends_with("LIMIT ?"));
+        assert_eq!(snapshot_limit(10), 11);
+        assert_eq!(snapshot_limit(usize::MAX), usize::MAX as u64);
     }
 
     #[test]
