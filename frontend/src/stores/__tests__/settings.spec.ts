@@ -31,6 +31,8 @@ describe('parseSettings', () => {
       exportRowLimit: 2000,
       keepFullResults: true,
       fullResultsDiskGb: 8,
+      pauseAtRowLimit: true,
+      pauseLimitMinutes: 20,
       athenaPricePerTerabyte: 6.25,
       athenaScanWarningGb: 50,
       schemaSnapshotColumns: 40000,
@@ -47,6 +49,8 @@ describe('parseSettings', () => {
       exportRowLimit: 2000,
       keepFullResults: true,
       fullResultsDiskGb: 8,
+      pauseAtRowLimit: true,
+      pauseLimitMinutes: 20,
       athenaPricePerTerabyte: 6.25,
       athenaScanWarningGb: 50,
       schemaSnapshotColumns: 40000,
@@ -62,6 +66,7 @@ describe('parseSettings', () => {
         wordWrap: 1,
         maxRows: null,
         keepFullResults: 'yes',
+        pauseAtRowLimit: 'yes',
       }),
     )
     expect(parsed).toEqual(defaultSettings())
@@ -74,6 +79,8 @@ describe('parseSettings', () => {
     expect(parseSettings(JSON.stringify({ maxRows: 0 })).maxRows).toBe(1)
     expect(parseSettings(JSON.stringify({ fullResultsDiskGb: 0 })).fullResultsDiskGb).toBe(1)
     expect(parseSettings(JSON.stringify({ fullResultsDiskGb: 5000 })).fullResultsDiskGb).toBe(1024)
+    expect(parseSettings(JSON.stringify({ pauseLimitMinutes: 0 })).pauseLimitMinutes).toBe(1)
+    expect(parseSettings(JSON.stringify({ pauseLimitMinutes: 90 })).pauseLimitMinutes).toBe(60)
     expect(parseSettings(JSON.stringify({ fontSize: Number.NaN })).fontSize).toBe(13)
   })
 })

@@ -8,7 +8,7 @@ import { useSettingsStore } from './settings'
 import { useUiStore } from './ui'
 import { isCancellation, toErrorPayload } from '@/lib/errors'
 import { scanCost } from '@/lib/format'
-import { releaseKept, spillRequest } from '@/lib/kept'
+import { pauseSeconds, releaseKept, spillRequest } from '@/lib/kept'
 import { ResultTable, type ResultStreamHandlers } from '@/lib/results'
 import { MessageLevel, PlanMode } from '@/types/api'
 import type { SavedFile } from '@/lib/runFile'
@@ -63,6 +63,10 @@ export interface ResultPane {
   /** The number of rows that the backend saved in a file on this computer,
    *  when the user turned on saved full results and the set fit the limits. */
   savedRows?: number
+  /** The moment, in milliseconds since the epoch, when the paused read of
+   *  the set ends, while the server keeps its statement open. The export of
+   *  all rows continues that read. */
+  pausedUntil?: number
   /** The statement, the values and the connection that made the result, or
    *  null for a plan. The export of every row runs this again, and not the
    *  text of the editor or the connection that the tab names now, which the
@@ -299,10 +303,34 @@ export const useQueryStore = defineStore('query', () => {
       if (pane) {
         pane.keptId = entry.id
         pane.savedRows = entry.savedRows
+        if (entry.pausedSecs !== undefined) {
+          const limit = entry.pausedSecs * 1000
+          pane.pausedUntil = Date.now() + limit
+          // The backend ends the read at the same time, and the registry
+          // then forgets it.
+          setTimeout(() => {
+            if (pane.keptId === entry.id) {
+              endPause(pane)
+            }
+          }, limit)
+        }
       } else {
         releaseKept([{ keptId: entry.id }])
       }
     }
+  }
+
+  /**
+   * Forgets the paused read of a pane after an export took it, after the
+   * user released it, or after its time ran out. With `release`, the
+   * backend also lets the read go.
+   */
+  function endPause(pane: ResultPane, release = false): void {
+    if (release) {
+      releaseKept([pane])
+    }
+    pane.keptId = undefined
+    pane.pausedUntil = undefined
   }
 
   function paneOf(state: QueryState, paneId: string): ResultPane | undefined {
@@ -352,8 +380,15 @@ export const useQueryStore = defineStore('query', () => {
     state.requestId = requestId
     state.requestConnectionId = connectionId
     state.error = null
-    // A result the user kept stays. Every other result goes.
+    // A result the user kept stays. Every other result goes. A paused read
+    // keeps the session of the tab, so the new run ends it, also for a
+    // pinned result.
     releaseKept(state.panes.filter((pane) => !pane.pinned))
+    for (const pane of state.panes) {
+      if (pane.pinned && pane.pausedUntil !== undefined) {
+        endPause(pane, true)
+      }
+    }
     state.panes = state.panes.filter((pane) => pane.pinned)
     state.messages = []
     state.droppedMessages = 0
@@ -442,7 +477,15 @@ export const useQueryStore = defineStore('query', () => {
       )
       recordScan(state.stats)
       succeeded = true
-      if (run.fresh.slice(savesFirstSet ? 1 : 0).some((table) => table.truncated)) {
+      // A paused result shows its own notice in the grid.
+      const paused = new Set(
+        state.panes.filter((pane) => pane.pausedUntil !== undefined).map((pane) => pane.result),
+      )
+      if (
+        run.fresh
+          .slice(savesFirstSet ? 1 : 0)
+          .some((table) => table.truncated && !paused.has(table))
+      ) {
         ui.warn('Results stopped at the row limit. Raise the limit in Settings to see more rows.')
       }
     } catch (error) {
@@ -511,13 +554,14 @@ export const useQueryStore = defineStore('query', () => {
   ): Promise<boolean> {
     const text = query.trim()
     const spill = spillRequest(settings.settings)
+    const pauseSecs = pauseSeconds(settings.settings)
     const succeeded = await runRequest(
       tabId,
       connectionId,
       text,
       (requestId, options, handlers) =>
         api.executeQuery(
-          { connectionId, requestId, query: text, tabId, queryParams, options, spill },
+          { connectionId, requestId, query: text, tabId, queryParams, options, spill, pauseSecs },
           handlers,
         ),
       undefined,
@@ -751,5 +795,6 @@ export const useQueryStore = defineStore('query', () => {
     selectPane,
     togglePin,
     closePane,
+    endPause,
   }
 })

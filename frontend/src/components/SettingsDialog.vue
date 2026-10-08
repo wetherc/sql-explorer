@@ -83,6 +83,23 @@
           data-test="setting-full-results-disk"
           @update:model-value="(value) => settings.update({ fullResultsDiskGb: value })"
         />
+        <v-switch
+          :model-value="settings.settings.pauseAtRowLimit"
+          color="primary"
+          label="Pause queries at the row limit"
+          hint="When a result passes the row limit, the query pauses with its statement still open on the server, so Export all rows continues it without running it again. Only a single read statement in a tab pauses. While paused, the tab can't run anything else, and the server can keep locks on the rows it read. Not used while full results are saved on this computer."
+          persistent-hint
+          data-test="setting-pause-at-row-limit"
+          @update:model-value="(value) => settings.update({ pauseAtRowLimit: value === true })"
+        />
+        <NumberSetting
+          :model-value="settings.settings.pauseLimitMinutes"
+          label="Pause time limit (minutes)"
+          hint="From 1 to 60. A paused query that isn't exported by then is released."
+          :disabled="!settings.settings.pauseAtRowLimit"
+          data-test="setting-pause-limit"
+          @update:model-value="(value) => settings.update({ pauseLimitMinutes: value })"
+        />
 
         <v-divider />
         <div class="settings-group">Athena</div>

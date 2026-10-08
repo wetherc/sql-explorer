@@ -147,6 +147,8 @@ export const api = {
       queryParams?: Record<string, unknown>
       options?: ExecOptions
       spill?: SpillRequest
+      /** The seconds the read may pause at the row limit, or 0. */
+      pauseSecs?: number
     },
     handlers: ResultStreamHandlers,
   ): Promise<void> {

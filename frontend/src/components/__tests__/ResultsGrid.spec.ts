@@ -711,6 +711,60 @@ describe('ResultsGrid', () => {
     )
   })
 
+  it('shows a paused result with its time left, its export and its release', async () => {
+    vi.useFakeTimers({ now: 1_000_000 })
+    try {
+      const paused = mountWithPlugins(ResultsGrid, {
+        props: { result: result({ truncated: true }), kept: true, pausedUntil: 1_125_000 },
+      })
+      const banner = paused.find('[data-test="grid-paused"]')
+      expect(banner.text()).toContain('Showing the first 3 rows.')
+      expect(banner.text()).toContain('the server keeps the statement open')
+      expect(banner.text()).toContain('released automatically in 2:05')
+      expect(paused.find('[data-test="grid-truncated"]').exists()).toBe(false)
+
+      // The time left counts down each second, and never below zero.
+      vi.advanceTimersByTime(2000)
+      await nextTick()
+      expect(paused.find('[data-test="grid-paused"]').text()).toContain('in 2:03')
+      vi.advanceTimersByTime(200_000)
+      await nextTick()
+      expect(paused.find('[data-test="grid-paused"]').text()).toContain('in 0:00')
+
+      await paused.find('[data-test="grid-paused-release"]').trigger('click')
+      expect(paused.emitted('release')).toHaveLength(1)
+
+      await paused.find('[data-test="grid-paused-export"]').trigger('click')
+      await vi.advanceTimersByTimeAsync(0)
+      const items = [...document.querySelectorAll('[data-test="grid-paused-export-item"]')]
+      expect(items.map((item) => item.textContent?.trim())).toEqual(['CSV', 'JSON', 'Excel'])
+      for (const item of items) {
+        item.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      }
+      expect(paused.emitted('export-all')).toEqual([['csv'], ['json'], ['xlsx']])
+
+      await paused.find('[data-test="grid-export"]').trigger('click')
+      await vi.advanceTimersByTimeAsync(0)
+      const item = document.querySelector('[data-test="grid-export-all-csv"]')
+      expect(item?.textContent).toContain("Continues the paused query, so it doesn't run again")
+
+      // The end of the pause stops the clock and shows the row limit again.
+      const stopped = vi.spyOn(globalThis, 'clearInterval')
+      await paused.setProps({ pausedUntil: undefined, kept: false })
+      expect(paused.find('[data-test="grid-paused"]').exists()).toBe(false)
+      expect(paused.find('[data-test="grid-truncated"]').exists()).toBe(true)
+      expect(stopped).toHaveBeenCalledTimes(1)
+
+      // A grid that leaves while paused stops its clock too.
+      await paused.setProps({ pausedUntil: 2_000_000 })
+      paused.unmount()
+      expect(stopped).toHaveBeenCalledTimes(2)
+      stopped.mockRestore()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('names the export after the selection once rows are selected', async () => {
     const wrapper = mountWithPlugins(ResultsGrid, { props: { result: result() } })
     await wrapper.findAll('[data-test="grid-row"]')[0]!.trigger('click')

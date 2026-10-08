@@ -256,6 +256,7 @@ describe('query store', () => {
         tabId: 't1',
         queryParams: undefined,
         options: { maxRows: 25, timeoutSecs: 300 },
+        pauseSecs: 0,
       },
       // The second argument holds the handlers that read the rows.
       expect.anything(),
@@ -1043,6 +1044,91 @@ describe('kept results', () => {
     expect(apiStub.executeQuery.mock.calls[1]![0]).toMatchObject({
       spill: { maxRows: 5000, maxBytes: 3 * 1024 ** 3 },
     })
+  })
+
+  it('asks the backend to pause a read only when Settings turns it on and nothing is saved', async () => {
+    const queries = useQueryStore()
+    const settings = useSettingsStore()
+    apiStub.executeQuery.mockImplementation(streamed({ results: [{ rows: [[1]] }] }))
+    const sent = async () => {
+      await queries.execute('t1', 'c1', 'SELECT 1')
+      return (
+        apiStub.executeQuery.mock.calls[apiStub.executeQuery.mock.calls.length - 1]![0] as {
+          pauseSecs: number
+        }
+      ).pauseSecs
+    }
+    expect(await sent()).toBe(0)
+    settings.update({ pauseAtRowLimit: true, pauseLimitMinutes: 7 })
+    expect(await sent()).toBe(420)
+    // Saved full results give every row, so the read does not pause.
+    settings.update({ keepFullResults: true })
+    expect(await sent()).toBe(0)
+  })
+
+  /** A run whose first set paused at the row limit for `seconds`. */
+  function pausedRun(request: string, seconds = 600) {
+    apiStub.executeQuery.mockImplementationOnce(
+      streamed({
+        results: [{ rows: [[1]], truncated: true }],
+        kept: [{ set: 0, id: `${request}:0`, pausedSecs: seconds }],
+      }),
+    )
+  }
+
+  it('marks a paused result with the end of its pause and gives no row limit warning', async () => {
+    vi.useFakeTimers({ now: 1_000_000 })
+    try {
+      const queries = useQueryStore()
+      const warn = vi.spyOn(useUiStore(), 'warn')
+      pausedRun('r1', 60)
+      await queries.execute('t1', 'c1', 'SELECT 1')
+      const pane = queries.stateFor('t1').panes[0]!
+      expect(pane).toMatchObject({ keptId: 'r1:0', pausedUntil: 1_060_000 })
+      expect(warn).not.toHaveBeenCalled()
+
+      // The end of the pause forgets the read, as the backend does.
+      vi.advanceTimersByTime(60_000)
+      expect(pane.keptId).toBeUndefined()
+      expect(pane.pausedUntil).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('leaves a pane alone when its pause ends after the pane moved on', async () => {
+    vi.useFakeTimers()
+    try {
+      const queries = useQueryStore()
+      pausedRun('r1', 60)
+      await queries.execute('t1', 'c1', 'SELECT 1')
+      const pane = queries.stateFor('t1').panes[0]!
+      queries.endPause(pane)
+      pane.keptId = 'other'
+      vi.advanceTimersByTime(60_000)
+      expect(pane.keptId).toBe('other')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('releases a paused read on request and on the next run, also when pinned', async () => {
+    const queries = useQueryStore()
+    pausedRun('r1')
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    const first = queries.stateFor('t1').panes[0]!
+    queries.endPause(first, true)
+    expect(await released()).toEqual(['r1:0'])
+    expect(first.pausedUntil).toBeUndefined()
+
+    pausedRun('r2')
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    const pinned = queries.stateFor('t1').panes[0]!
+    queries.togglePin('t1', pinned.id)
+    apiStub.executeQuery.mockImplementationOnce(streamed({ results: [{ rows: [[2]] }] }))
+    await queries.execute('t1', 'c1', 'SELECT 2')
+    expect(await released()).toEqual(['r1:0', 'r2:0'])
+    expect(pinned).toMatchObject({ pinned: true, keptId: undefined, pausedUntil: undefined })
   })
 
   it('records the rows that the backend saved on this computer', async () => {

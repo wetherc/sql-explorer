@@ -336,8 +336,10 @@
                 "
                 :kept="pane.keptId !== undefined"
                 :saved-rows="pane.savedRows"
+                :paused-until="pane.pausedUntil"
                 @export="onExport"
                 @export-all="(format: ExportAllFormat) => onExportAll(pane, format)"
+                @release="queries.endPause(pane, true)"
                 @copied="onCopied"
                 @copy-failed="onCopyFailed"
               />
@@ -1143,6 +1145,9 @@ async function onExportAll(pane: ResultPane, format: ExportAllFormat): Promise<v
   }
   const requestId = `export-${props.tab.id}-${Date.now()}`
   state.exporting = { connectionId: run.connectionId, requestId, stopping: false }
+  // The export takes the rest of a paused read once, so after it the pane
+  // has no paused read, whatever the outcome.
+  const paused = pane.pausedUntil !== undefined
   try {
     const defaultName = exportFileName(props.tab.title, format)
     const maxRows = settings.settings.exportRowLimit
@@ -1161,8 +1166,14 @@ async function onExportAll(pane: ResultPane, format: ExportAllFormat): Promise<v
     if (!summary) {
       return
     }
+    if (paused) {
+      queries.endPause(pane)
+    }
     reportExport(summary)
   } catch (error) {
+    if (paused) {
+      queries.endPause(pane, true)
+    }
     if (isCancellation(toErrorPayload(error))) {
       ui.info('Export stopped.')
     } else {

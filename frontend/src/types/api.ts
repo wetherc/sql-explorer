@@ -283,6 +283,9 @@ export interface KeptSet {
   /** The number of rows in the file on this computer that keeps every row
    *  of the set. Only a saved full result has this count. */
   savedRows?: number
+  /** The seconds the read of the set stays paused at the row limit, for a
+   *  set whose statement stays open on the server. */
+  pausedSecs?: number
 }
 
 /**

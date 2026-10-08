@@ -18,6 +18,17 @@ export function spillRequest(
 }
 
 /**
+ * The seconds that a read of a normal run may pause at the row limit, or 0
+ * for a read that ends there. Saved full results already give every row for
+ * an export, so a run that saves them never pauses.
+ */
+export function pauseSeconds(
+  settings: Pick<Settings, 'pauseAtRowLimit' | 'pauseLimitMinutes' | 'keepFullResults'>,
+): number {
+  return settings.pauseAtRowLimit && !settings.keepFullResults ? settings.pauseLimitMinutes * 60 : 0
+}
+
+/**
  * Lets the backend forget the kept result of each pane that leaves the
  * interface. The release is not awaited, and a release that fails needs no
  * notice, because the backend removes an old kept result on its own.

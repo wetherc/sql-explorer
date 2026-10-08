@@ -791,6 +791,19 @@ describe('AppLayout dialog state', () => {
     await disk!.vm.$emit('update:focused', false)
     expect(useSettingsStore().settings.fullResultsDiskGb).toBe(16)
 
+    const pause = wrapper
+      .findAllComponents({ name: 'VSwitch' })
+      .find((item) => item.attributes('data-test') === 'setting-pause-at-row-limit')
+    await pause!.vm.$emit('update:modelValue', true)
+    expect(useSettingsStore().settings.pauseAtRowLimit).toBe(true)
+
+    const pauseLimit = wrapper
+      .findAllComponents({ name: 'VTextField' })
+      .find((item) => item.attributes('data-test') === 'setting-pause-limit')
+    await pauseLimit!.vm.$emit('update:modelValue', '25')
+    await pauseLimit!.vm.$emit('update:focused', false)
+    expect(useSettingsStore().settings.pauseLimitMinutes).toBe(25)
+
     const columns = wrapper
       .findAllComponents({ name: 'VTextField' })
       .find((item) => item.attributes('data-test') === 'setting-snapshot-columns')

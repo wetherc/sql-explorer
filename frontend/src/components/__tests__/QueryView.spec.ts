@@ -1939,6 +1939,60 @@ describe('QueryView edge paths', () => {
     expect(useUiStore().notices.some((notice) => notice.level === 'success')).toBe(true)
   })
 
+  /** Runs a statement whose result paused at the row limit, and gives its grid. */
+  async function pausedGrid() {
+    apiStub.executeQuery.mockImplementation(
+      streamed({ ...response, kept: [{ set: 0, id: 'r1:0', pausedSecs: 600 }] }),
+    )
+    const wrapper = await mountView()
+    await wrapper.find('[data-test="run-button"]').trigger('click')
+    await settle()
+    const grid = wrapper.findComponent({ name: 'ResultsGrid' })
+    expect(grid.props('pausedUntil')).toEqual(expect.any(Number))
+    return grid
+  }
+
+  it('releases a paused result when the user asks', async () => {
+    const grid = await pausedGrid()
+    await grid.vm.$emit('release')
+    await settle()
+    expect(apiStub.releaseKept).toHaveBeenCalledWith('r1:0')
+    expect(grid.props('pausedUntil')).toBeUndefined()
+    expect(grid.props('kept')).toBe(false)
+  })
+
+  it('ends the pause of a result after its export, and keeps it when the dialog closes', async () => {
+    const grid = await pausedGrid()
+    // The user closed the save dialog, so the read stays paused.
+    apiStub.exportKept.mockResolvedValueOnce(null)
+    await grid.vm.$emit('export-all', 'csv')
+    await settle()
+    expect(grid.props('pausedUntil')).toEqual(expect.any(Number))
+
+    apiStub.exportKept.mockResolvedValueOnce({
+      rows: 40000,
+      truncated: false,
+      path: '/tmp/all.csv',
+      sheetFull: false,
+      cutCells: 0,
+      warning: null,
+    })
+    await grid.vm.$emit('export-all', 'csv')
+    await settle()
+    expect(grid.props('pausedUntil')).toBeUndefined()
+    expect(grid.props('kept')).toBe(false)
+    expect(apiStub.releaseKept).not.toHaveBeenCalled()
+  })
+
+  it('ends and releases the pause of a result whose export failed', async () => {
+    const grid = await pausedGrid()
+    apiStub.exportKept.mockRejectedValueOnce(new Error('The disk is full.'))
+    await grid.vm.$emit('export-all', 'csv')
+    await settle()
+    expect(grid.props('pausedUntil')).toBeUndefined()
+    expect(apiStub.releaseKept).toHaveBeenCalledWith('r1:0')
+  })
+
   it('asks the backend for an Excel file of every row', async () => {
     apiStub.exportQuery.mockResolvedValue({
       rows: 40000,

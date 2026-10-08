@@ -42,6 +42,14 @@ export interface Settings {
   /** The disk space in gigabytes that all saved results together can use. */
   fullResultsDiskGb: number
   /**
+   * True when a read that reaches the row limit pauses there, and the server
+   * keeps the statement open, so an export of all rows continues the same
+   * read and does not run the statement again.
+   */
+  pauseAtRowLimit: boolean
+  /** The minutes a paused read waits for an export before it ends. */
+  pauseLimitMinutes: number
+  /**
    * The price of one terabyte that Athena scans, in US dollars. The rate
    * changes by region and by contract, so the figure is an estimate.
    */
@@ -75,6 +83,8 @@ export function defaultSettings(): Settings {
     exportRowLimit: 1000000,
     keepFullResults: false,
     fullResultsDiskGb: 2,
+    pauseAtRowLimit: false,
+    pauseLimitMinutes: 10,
     athenaPricePerTerabyte: 5,
     athenaScanWarningGb: 100,
     schemaSnapshotColumns: 20000,
@@ -118,6 +128,11 @@ export function normaliseSettings(candidate: Partial<Settings>, fallback: Settin
         ? candidate.keepFullResults
         : fallback.keepFullResults,
     fullResultsDiskGb: numberOr(candidate.fullResultsDiskGb, fallback.fullResultsDiskGb, 1, 1024),
+    pauseAtRowLimit:
+      typeof candidate.pauseAtRowLimit === 'boolean'
+        ? candidate.pauseAtRowLimit
+        : fallback.pauseAtRowLimit,
+    pauseLimitMinutes: numberOr(candidate.pauseLimitMinutes, fallback.pauseLimitMinutes, 1, 60),
     // The price keeps its fraction, so it does not go through `numberOr`.
     athenaPricePerTerabyte: priceOr(
       candidate.athenaPricePerTerabyte,
