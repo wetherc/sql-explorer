@@ -535,6 +535,49 @@ describe('connections store', () => {
     expect(connections.lastError.c1).toBe('the socket closed')
   })
 
+  it('keeps a report that arrives while the open connections are read', async () => {
+    apiStub.getConnections.mockResolvedValue([connectionFixture(), connectionFixture({ id: 'c2' })])
+    let answer: (value: unknown) => void = () => {}
+    apiStub.listActiveConnections.mockReturnValue(
+      new Promise((resolve) => {
+        answer = resolve
+      }),
+    )
+    const connections = useConnectionsStore()
+    connections.select('c1')
+    const loading = connections.load()
+    await vi.waitFor(() => expect(apiStub.listActiveConnections).toHaveBeenCalled())
+
+    // The backend read the list before these reports, so the list names
+    // both connections as open.
+    connections.applyStatus({
+      connectionId: 'c1',
+      health: ConnectionHealth.Disconnected,
+      message: 'the socket closed',
+    })
+    connections.applyStatus({
+      connectionId: 'c2',
+      health: ConnectionHealth.Reconnecting,
+      message: null,
+    })
+    answer([infoFixture('c1'), infoFixture('c2')])
+    await loading
+
+    expect(connections.isActive('c1')).toBe(false)
+    expect(connections.health.c1).toBe(ConnectionHealth.Disconnected)
+    expect(connections.selectedId).toBeNull()
+    expect(connections.isActive('c2')).toBe(true)
+    expect(connections.health.c2).toBe(ConnectionHealth.Reconnecting)
+    // The load applies the reports again without a second notice.
+    expect(useUiStore().notices).toHaveLength(1)
+
+    // A later load starts from the list alone.
+    apiStub.listActiveConnections.mockResolvedValue([infoFixture('c1'), infoFixture('c2')])
+    await connections.load()
+    expect(connections.isActive('c1')).toBe(true)
+    expect(connections.health.c2).toBe(ConnectionHealth.Connected)
+  })
+
   it('takes the tree of a dropped connection away', () => {
     const connections = useConnectionsStore()
     const explorer = useExplorerStore()

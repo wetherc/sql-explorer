@@ -237,8 +237,19 @@ export const useConnectionsStore = defineStore('connections', () => {
     }
   }
 
+  /**
+   * The reports of the backend that arrived while a load ran, one list for
+   * each load that runs. A load builds the state from what the backend said
+   * when it read the list of open connections. A report that arrives during
+   * the read can be newer than that list, so the load applies these reports
+   * again after it sets the state.
+   */
+  const reportsDuringLoad = new Set<ConnectionStatusEvent[]>()
+
   async function load(): Promise<void> {
     loading.value = true
+    const reports: ConnectionStatusEvent[] = []
+    reportsDuringLoad.add(reports)
     try {
       saved.value = await api.getConnections()
       const open = await api.listActiveConnections()
@@ -258,9 +269,13 @@ export const useConnectionsStore = defineStore('connections', () => {
       }
       active.value = map
       health.value = knownHealth
+      for (const event of reports) {
+        recordStatus(event)
+      }
     } catch (error) {
       ui.reportError(error)
     } finally {
+      reportsDuringLoad.delete(reports)
       loading.value = false
     }
   }
@@ -384,8 +399,11 @@ export const useConnectionsStore = defineStore('connections', () => {
     selectedId.value = id
   }
 
-  /** Records a change of state that the backend reported. */
-  function applyStatus(event: ConnectionStatusEvent): void {
+  /**
+   * Sets the health and the open connections from one report of the
+   * backend. It shows no notice, so a load can apply a report again.
+   */
+  function recordStatus(event: ConnectionStatusEvent): void {
     health.value = { ...health.value, [event.connectionId]: event.health }
     if (event.health === ConnectionHealth.Disconnected) {
       const rest = { ...active.value }
@@ -394,6 +412,16 @@ export const useConnectionsStore = defineStore('connections', () => {
       if (selectedId.value === event.connectionId) {
         selectedId.value = firstActiveId()
       }
+    }
+  }
+
+  /** Records a change of state that the backend reported. */
+  function applyStatus(event: ConnectionStatusEvent): void {
+    for (const reports of reportsDuringLoad) {
+      reports.push(event)
+    }
+    recordStatus(event)
+    if (event.health === ConnectionHealth.Disconnected) {
       // The tree of a dropped connection names the objects of a session that
       // is gone, so its root goes. A connect after the drop reads it again.
       useExplorerStore().removeRoot(event.connectionId)

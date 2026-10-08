@@ -111,6 +111,26 @@ describe('AppLayout', () => {
     wrapper.unmount()
   })
 
+  it('keeps a drop that the backend reports while it reads the connections', async () => {
+    let answer: (value: unknown) => void = () => {}
+    apiStub.listActiveConnections.mockReturnValue(
+      new Promise((resolve) => {
+        answer = resolve
+      }),
+    )
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const handler = apiStub.onConnectionStatus.mock.calls[0]?.[0] as (event: unknown) => void
+    handler({ connectionId: 'c1', health: ConnectionHealth.Disconnected, message: null })
+    answer([infoFixture()])
+    await settle()
+
+    expect(useConnectionsStore().isActive('c1')).toBe(false)
+    expect(useConnectionsStore().health.c1).toBe(ConnectionHealth.Disconnected)
+    expect(useExplorerStore().roots).toHaveLength(0)
+    wrapper.unmount()
+  })
+
   it('listens before it reads', async () => {
     const calls: string[] = []
     apiStub.onConnectionStatus.mockImplementation(async () => {
