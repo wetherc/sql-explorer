@@ -7,7 +7,7 @@ license = "MIT"
 repository = "https://github.com/wetherc/sql-explorer"
 homepage = "https://sql-explorer.tbmh.org/"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.89"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

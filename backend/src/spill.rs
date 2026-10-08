@@ -17,9 +17,14 @@
 //! private to one process, so it has no header and no version.
 //!
 //! The writes and the reads run on threads of their own, so a slow disk does
-//! not stop the async threads that serve the other commands. The files stand
-//! in one folder under the cache folder of the application. The start of the
-//! application empties that folder, because a crash leaves its files there.
+//! not stop the async threads that serve the other commands.
+//!
+//! Each process of the application writes its files in a folder of its own,
+//! under the `spill` folder in the cache folder of the application. A lock
+//! file beside each folder has an exclusive lock while its process runs. The
+//! operating system ends the lock when the process ends, also after a crash.
+//! At the start, a process removes each folder whose lock is free, so a
+//! second running process does not remove the files of the first one.
 
 use crate::db::sink::{RowSink, SinkControl};
 use crate::db::{ColumnInfo, ExecOptions};
@@ -37,6 +42,14 @@ pub use sink::SpillSink;
 
 /// The name of the folder of the spill files, under the cache folder.
 pub const SPILL_FOLDER: &str = "spill";
+
+/// The extension of the lock file beside the folder of each process.
+const LOCK_EXTENSION: &str = "lock";
+
+/// The file under the `spill` folder that each start locks while it removes
+/// the old folders and makes its own. Two starts at the same time then do not
+/// remove the folder that the other start makes.
+const START_LOCK: &str = ".start";
 
 /// The bytes that a writer collects before it sends them to its thread. A
 /// set whose rows take fewer bytes never opens a file unless the grid limit
@@ -150,17 +163,106 @@ pub fn decode_row(reader: &mut impl Read) -> Result<Vec<JsonValue>> {
     Ok(row)
 }
 
-/// Empties the folder of the spill files under the cache folder, or makes
-/// it, and gives its path. The files of an earlier process of the
-/// application are then gone.
-pub fn prepare_folder(cache: &Path) -> Result<PathBuf> {
-    let folder = cache.join(SPILL_FOLDER);
-    match std::fs::remove_dir_all(&folder) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
-        _ => {}
+/// The folder of the spill files of this process, with the open lock file
+/// that tells other processes that the folder is in use. The lock ends when
+/// the value drops or the process ends.
+#[derive(Debug)]
+pub struct SpillFolder {
+    path: PathBuf,
+    _lock: Option<std::fs::File>,
+}
+
+impl SpillFolder {
+    /// The path of the folder.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
-    std::fs::create_dir_all(&folder)?;
-    Ok(folder)
+}
+
+/// A folder without a lock, for the tests.
+impl From<PathBuf> for SpillFolder {
+    fn from(path: PathBuf) -> Self {
+        Self { path, _lock: None }
+    }
+}
+
+/// Removes a file or a folder. A path that is already gone is not an error.
+fn remove_path(path: &Path) -> std::io::Result<()> {
+    let removal = if path.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    match removal {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
+/// Removes the folder and the lock file of a process that ended. Gives false
+/// when another process has the lock.
+fn remove_ended(lock_path: &Path) -> Result<bool> {
+    let lock = std::fs::File::open(lock_path)?;
+    match lock.try_lock() {
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(false),
+        locked => locked.map_err(std::io::Error::from)?,
+    }
+    remove_path(&lock_path.with_extension(""))?;
+    remove_path(lock_path)?;
+    Ok(true)
+}
+
+/// Removes each entry of the `spill` folder that no running process uses. A
+/// folder without a lock file and a loose file are left over from a crash.
+fn remove_unused(root: &Path) -> Result<()> {
+    let mut locks = Vec::new();
+    let mut others = Vec::new();
+    for entry in std::fs::read_dir(root)? {
+        let path = entry?.path();
+        if path.file_name() == Some(START_LOCK.as_ref()) {
+            continue;
+        }
+        if path.extension() == Some(LOCK_EXTENSION.as_ref()) {
+            locks.push(path);
+        } else {
+            others.push(path);
+        }
+    }
+    for lock in &locks {
+        remove_ended(lock)?;
+    }
+    for path in others {
+        if !path.with_extension(LOCK_EXTENSION).exists() {
+            remove_path(&path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Makes the `spill` folder under the cache folder, removes the folders of
+/// the processes that ended, and makes the locked folder of this process.
+pub fn prepare_folder(cache: &Path) -> Result<SpillFolder> {
+    let root = cache.join(SPILL_FOLDER);
+    std::fs::create_dir_all(&root)?;
+    let start = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(root.join(START_LOCK))?;
+    start.lock()?;
+    remove_unused(&root)?;
+
+    // The lock file comes before the folder, so a folder without a lock
+    // file is always a leftover.
+    let name = uuid::Uuid::new_v4().simple().to_string();
+    let path = root.join(&name);
+    let lock = std::fs::File::create_new(path.with_extension(LOCK_EXTENSION))?;
+    lock.try_lock().map_err(std::io::Error::from)?;
+    std::fs::create_dir(&path)?;
+    Ok(SpillFolder {
+        path,
+        _lock: Some(lock),
+    })
 }
 
 /// Prepares the folder of the spill files under the cache folder of the
@@ -536,21 +638,52 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_start_empties_the_folder_of_an_earlier_process() {
+    fn the_start_removes_only_the_folders_of_ended_processes() {
         let cache = tempfile::tempdir().unwrap();
-        // A first start makes the folder.
-        let folder = prepare_folder(cache.path()).unwrap();
-        assert_eq!(folder, cache.path().join(SPILL_FOLDER));
-        std::fs::write(folder.join("rows-left.spill"), b"x").unwrap();
-        std::fs::create_dir(folder.join("inner")).unwrap();
-        // A second start removes what the first one left.
-        let again = prepare_folder(cache.path()).unwrap();
-        assert_eq!(std::fs::read_dir(&again).unwrap().count(), 0);
+        let root = cache.path().join(SPILL_FOLDER);
+        // A first process that still runs, and a second one that ended.
+        let running = prepare_folder(cache.path()).unwrap();
+        let ended = prepare_folder(cache.path()).unwrap();
+        let ended_path = ended.path().to_path_buf();
+        drop(ended);
+        assert_eq!(running.path().parent(), Some(root.as_path()));
+        std::fs::write(running.path().join("rows-1.spill"), b"x").unwrap();
+        std::fs::write(ended_path.join("rows-2.spill"), b"x").unwrap();
+        // Leftovers of a crash: a loose file and a folder without a lock.
+        std::fs::write(root.join("rows-left.spill"), b"x").unwrap();
+        std::fs::create_dir(root.join("inner")).unwrap();
+
+        let third = prepare_folder(cache.path()).unwrap();
+        assert!(running.path().join("rows-1.spill").exists());
+        assert!(!ended_path.exists());
+        assert!(!ended_path.with_extension(LOCK_EXTENSION).exists());
+        let mut names: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        let mut expected = vec![START_LOCK.to_string()];
+        for folder in [&running, &third] {
+            let name = folder.path().file_name().unwrap().to_str().unwrap();
+            expected.push(name.to_string());
+            expected.push(format!("{name}.{LOCK_EXTENSION}"));
+        }
+        expected.sort();
+        assert_eq!(names, expected);
 
         // A cache path that is a file cannot contain the folder.
         let file = cache.path().join("file");
         std::fs::write(&file, b"x").unwrap();
         assert!(prepare_folder(&file).is_err());
+    }
+
+    #[test]
+    fn a_path_that_is_gone_needs_no_removal() {
+        let cache = tempfile::tempdir().unwrap();
+        assert!(remove_path(&cache.path().join("gone")).is_ok());
+        let file = cache.path().join("file");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(remove_path(&file.join("below")).is_err());
     }
 
     #[test]
@@ -560,7 +693,12 @@ pub(crate) mod tests {
         start_folder(Err(tauri::Error::UnknownPath), &kept);
         assert_eq!(kept.spill_folder(), None);
         start_folder(Ok(cache.path().to_path_buf()), &kept);
-        assert_eq!(kept.spill_folder(), Some(cache.path().join(SPILL_FOLDER)));
+        let folder = kept.spill_folder().unwrap();
+        assert_eq!(
+            folder.parent(),
+            Some(cache.path().join(SPILL_FOLDER).as_path())
+        );
+        assert!(folder.is_dir());
     }
 
     #[test]

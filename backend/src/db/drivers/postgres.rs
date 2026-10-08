@@ -2472,10 +2472,10 @@ fn offset_text(east: i32) -> String {
     let sign = if east < 0 { '-' } else { '+' };
     let whole = east.unsigned_abs();
     let mut text = format!("{sign}{:02}", whole / 3600);
-    if whole % 3600 != 0 {
+    if !whole.is_multiple_of(3600) {
         text.push_str(&format!(":{:02}", whole % 3600 / 60));
     }
-    if whole % 60 != 0 {
+    if !whole.is_multiple_of(60) {
         text.push_str(&format!(":{:02}", whole % 60));
     }
     text

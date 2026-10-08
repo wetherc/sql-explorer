@@ -24,7 +24,7 @@
 use crate::db::sink::RowSink;
 use crate::db::ExecOptions;
 use crate::error::Result;
-use crate::spill::DiskUse;
+use crate::spill::{DiskUse, SpillFolder};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -71,6 +71,10 @@ pub enum KeptSource {
     /// A read that gives no set, for the tests of the export.
     #[cfg(test)]
     Empty,
+    /// A source that calls a function when it drops, for the tests of the
+    /// registry lock.
+    #[cfg(test)]
+    Probe(#[allow(dead_code, reason = "the probe acts only through its drop")] tests::DropProbe),
 }
 
 impl KeptSource {
@@ -101,7 +105,7 @@ impl KeptSource {
             #[cfg(test)]
             KeptSource::Pending => std::future::pending().await,
             #[cfg(test)]
-            KeptSource::Empty => Ok(()),
+            KeptSource::Empty | KeptSource::Probe(_) => Ok(()),
         }
     }
 
@@ -168,10 +172,10 @@ pub struct KeptResults {
     /// The bytes of every spill file, also the files that a run still
     /// writes.
     disk: DiskUse,
-    /// The folder of the spill files. The start of the application sets
-    /// it after it removes the files of an earlier process, and a run
-    /// writes no spill file before that.
-    spill_folder: OnceLock<PathBuf>,
+    /// The folder of the spill files of this process. The start of the
+    /// application sets it after it removes the files of the processes
+    /// that ended, and a run writes no spill file before that.
+    spill_folder: OnceLock<SpillFolder>,
 }
 
 impl KeptResults {
@@ -201,20 +205,25 @@ impl KeptResults {
             return Vec::new();
         }
         let mut entries = self.entries();
+        let mut removed = Vec::new();
         let mut kept = Vec::with_capacity(sources.len());
         for (set, source) in sources {
             let id = kept_id(request_id, set);
             let saved_rows = source.saved_rows();
             let mut entry = KeptResult::new(connection_id, source);
             entry.kept_at = now;
-            entries.insert(id.clone(), Arc::new(entry));
+            removed.extend(entries.insert(id.clone(), Arc::new(entry)));
             kept.push(KeptSet {
                 set,
                 id,
                 saved_rows,
             });
         }
-        prune(&mut entries, now);
+        removed.extend(prune(&mut entries, now));
+        // The drop of a spill file removes the file from the disk, so the
+        // removed entries drop after the lock ends.
+        drop(entries);
+        drop(removed);
         kept
     }
 
@@ -226,23 +235,30 @@ impl KeptResults {
 
     fn get_at(&self, id: &str, now: Instant) -> Option<Arc<KeptResult>> {
         let mut entries = self.entries();
-        prune(&mut entries, now);
-        entries.get(id).cloned()
+        let removed = prune(&mut entries, now);
+        let entry = entries.get(id).cloned();
+        drop(entries);
+        drop(removed);
+        entry
     }
 
     /// Removes one kept result. Returns true when the registry contained it.
     /// An export that reads the result at this moment keeps its own
     /// reference, so it ends normally.
     pub fn release(&self, id: &str) -> bool {
-        self.entries().remove(id).is_some()
+        // The lock ends at the end of the statement, before the drop of
+        // the entry.
+        let removed = self.entries().remove(id);
+        removed.is_some()
     }
 
     /// Removes each kept result of one connection, and gives their number.
     pub fn release_connection(&self, connection_id: &str) -> usize {
-        let mut entries = self.entries();
-        let before = entries.len();
-        entries.retain(|_, entry| entry.connection_id != connection_id);
-        before - entries.len()
+        let removed: Vec<_> = self
+            .entries()
+            .extract_if(|_, entry| entry.connection_id == connection_id)
+            .collect();
+        removed.len()
     }
 
     /// Removes the oldest kept spill file, so a new spill gets its disk.
@@ -267,14 +283,16 @@ impl KeptResults {
     }
 
     /// Sets the folder of the spill files. A second call changes nothing.
-    pub fn set_spill_folder(&self, folder: PathBuf) {
-        let _ = self.spill_folder.set(folder);
+    pub fn set_spill_folder(&self, folder: impl Into<SpillFolder>) {
+        let _ = self.spill_folder.set(folder.into());
     }
 
     /// The folder of the spill files, when the start of the application
     /// prepared it.
     pub fn spill_folder(&self) -> Option<PathBuf> {
-        self.spill_folder.get().cloned()
+        self.spill_folder
+            .get()
+            .map(|folder| folder.path().to_path_buf())
     }
 
     /// The number of kept results.
@@ -285,17 +303,23 @@ impl KeptResults {
 }
 
 /// Removes the entries past [`KEPT_RESULT_AGE`], and then the oldest entries
-/// past [`MAX_KEPT_RESULTS`].
-fn prune(entries: &mut HashMap<String, Arc<KeptResult>>, now: Instant) {
-    entries.retain(|_, entry| now.saturating_duration_since(entry.kept_at) < KEPT_RESULT_AGE);
+/// past [`MAX_KEPT_RESULTS`]. Gives the removed entries, so the caller can
+/// drop them after the lock of the registry ends.
+#[must_use]
+fn prune(entries: &mut HashMap<String, Arc<KeptResult>>, now: Instant) -> Vec<Arc<KeptResult>> {
+    let mut removed: Vec<_> = entries
+        .extract_if(|_, entry| now.saturating_duration_since(entry.kept_at) >= KEPT_RESULT_AGE)
+        .map(|(_, entry)| entry)
+        .collect();
     while entries.len() > MAX_KEPT_RESULTS {
         let oldest = entries
             .iter()
             .min_by_key(|(_, entry)| entry.kept_at)
             .map(|(id, _)| id.clone())
             .expect("the map has entries");
-        entries.remove(&oldest);
+        removed.extend(entries.remove(&oldest));
     }
+    removed
 }
 
 #[cfg(test)]
@@ -311,6 +335,68 @@ pub(crate) mod tests {
             columns: vec![ColumnInfo::new("n", "int")],
             rows: (0..rows).map(|row| vec![json!(row)]).collect(),
         }
+    }
+
+    /// A function that a source calls when it drops.
+    pub(crate) struct DropProbe(Option<Box<dyn FnOnce() + Send + Sync>>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            if let Some(call) = self.0.take() {
+                call();
+            }
+        }
+    }
+
+    /// A source that records, when it drops, whether the lock of the
+    /// registry was free.
+    fn probe(registry: &Arc<KeptResults>, free: &Arc<Mutex<Vec<bool>>>) -> KeptSource {
+        let registry = registry.clone();
+        let free = free.clone();
+        KeptSource::Probe(DropProbe(Some(Box::new(move || {
+            let unlocked = registry.entries.try_lock().is_ok();
+            free.lock().unwrap().push(unlocked);
+        }))))
+    }
+
+    #[tokio::test]
+    async fn a_removed_entry_drops_after_the_lock_ends() {
+        let registry = Arc::new(KeptResults::default());
+        let free = Arc::new(Mutex::new(Vec::new()));
+        let start = Instant::now();
+        let later = start + KEPT_RESULT_AGE;
+
+        // A release and the release of a connection.
+        registry.keep_at("a", "c1", vec![(0, probe(&registry, &free))], start);
+        let mut sink = BufferSink::new(10);
+        let entry = registry.get_at("a:0", start).unwrap();
+        entry
+            .source
+            .read(&ExecOptions::default(), &mut sink)
+            .await
+            .unwrap();
+        drop(entry);
+        assert!(registry.release("a:0"));
+        registry.keep_at("b", "c2", vec![(0, probe(&registry, &free))], start);
+        assert_eq!(registry.release_connection("c2"), 1);
+
+        // The age limit, in a read and in a new entry.
+        registry.keep_at("c", "c1", vec![(0, probe(&registry, &free))], start);
+        assert!(registry.get_at("c:0", later).is_none());
+        registry.keep_at("d", "c1", vec![(0, probe(&registry, &free))], start);
+        registry.keep_at("e", "c1", vec![(0, fixed(1))], later);
+
+        // The count limit, and a second entry with the same identifier.
+        registry.keep_at("f", "c1", vec![(0, probe(&registry, &free))], later);
+        registry.keep_at("f", "c1", vec![(0, fixed(1))], later);
+        registry.keep_at("g", "c1", vec![(0, probe(&registry, &free))], later);
+        for n in 0..MAX_KEPT_RESULTS {
+            let at = later + Duration::from_secs(1 + n as u64);
+            registry.keep_at(&format!("n{n}"), "c1", vec![(0, fixed(1))], at);
+        }
+        assert!(registry.get("g:0").is_none());
+
+        assert_eq!(*free.lock().unwrap(), vec![true; 6]);
     }
 
     #[test]

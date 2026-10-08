@@ -5303,7 +5303,9 @@ mod tests {
         };
         // No folder before the start prepares it.
         assert_eq!(plan(request, Dialect::Sqlite, "SELECT 1"), None);
-        state.kept.set_spill_folder("/spill".into());
+        state
+            .kept
+            .set_spill_folder(std::path::PathBuf::from("/spill"));
         assert_eq!(
             plan(request, Dialect::Sqlite, "SELECT 1"),
             Some("/spill".into())

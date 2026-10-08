@@ -278,7 +278,7 @@ fn write_bits(buffer: &mut Vec<u8>, rows: &[Vec<JsonValue>], set: impl Fn(&[Json
             byte = 0;
         }
     }
-    if rows.len() % 8 != 0 {
+    if !rows.len().is_multiple_of(8) {
         buffer.push(byte);
     }
 }
@@ -288,7 +288,7 @@ fn write_bits(buffer: &mut Vec<u8>, rows: &[Vec<JsonValue>], set: impl Fn(&[Json
 /// array needs a start that the width divides. The count starts at the first
 /// byte of the message, so the buffer must hold the whole message.
 fn pad_to(buffer: &mut Vec<u8>, width: usize) {
-    while buffer.len() % width != 0 {
+    while !buffer.len().is_multiple_of(width) {
         buffer.push(0);
     }
 }
@@ -646,7 +646,7 @@ mod tests {
         }
 
         fn align(&mut self, width: usize) {
-            while self.at % width != 0 {
+            while !self.at.is_multiple_of(width) {
                 self.at += 1;
             }
         }
