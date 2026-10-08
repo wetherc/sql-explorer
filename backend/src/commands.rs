@@ -2935,8 +2935,8 @@ struct ExportWriter {
     final_path: std::path::PathBuf,
     temp_path: std::path::PathBuf,
     out: Option<std::io::BufWriter<std::fs::File>>,
-    /// The writer of the sheet, which holds the file while a set is open in
-    /// the xlsx form.
+    /// The writer of the sheet. In the xlsx form it owns the file from the
+    /// start of the set until `finish`.
     sheet: Option<crate::xlsx::SheetWriter<std::io::BufWriter<std::fs::File>>>,
     /// The name the one sheet of an xlsx file carries.
     sheet_title: String,
@@ -3068,7 +3068,7 @@ impl ExportWriter {
                         writeln!(out, "\n]")?;
                     }
                 }
-                // The sheet holds the file while it is open, so the close of
+                // The sheet owns the file while it is open, so the close of
                 // the container gives the file back.
                 ExportFormat::Xlsx => {
                     if let Some(sheet) = self.sheet.take() {
@@ -3115,8 +3115,8 @@ impl crate::db::sink::RowSink for FileSink {
         if self.set_done {
             return Ok(crate::db::sink::SinkControl::Stop);
         }
-        // A sheet holds a bounded number of rows. The rows past the bound
-        // stay out of the file, and the summary reports the result as
+        // A sheet has a limit of MAX_SHEET_ROWS rows. The rows past the
+        // limit stay out of the file, and the summary reports the result as
         // truncated.
         if let Some(room) = self.sheet_room.as_mut() {
             if *room == 0 {

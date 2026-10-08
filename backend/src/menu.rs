@@ -173,8 +173,8 @@ pub fn names_a_command(id: &str) -> bool {
 ///
 /// The state of a command lives in the interface, which tells the backend
 /// what changed. Each pair names the identifier of a command and its new
-/// state. An item that the menu does not hold is left alone, so an
-/// identifier of a command that carries no item costs nothing.
+/// state. The walk skips an identifier that names no item of the menu, so
+/// the window can send a command that has no menu item.
 ///
 /// Each call to the menu from a thread other than the main thread waits for
 /// the main thread. The caller therefore runs this function on the main
