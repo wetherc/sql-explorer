@@ -167,6 +167,8 @@ export interface ExplorerNode {
   dimmed?: boolean
   /** Why the last read of the children failed, or null after a read that did not fail. */
   error?: string | null
+  /** True when the last read failed because another session kept a lock. */
+  lockWait?: boolean
 }
 
 /** Selects the icon of a node. */
@@ -1040,6 +1042,7 @@ export const useExplorerStore = defineStore('explorer', () => {
     const isCurrent = () => isLast() && (!wasInTree || inTree(node))
     node.loading = true
     node.error = null
+    node.lockWait = false
     loadingNodes.add(node)
     loading.value = true
     try {
@@ -1060,7 +1063,9 @@ export const useExplorerStore = defineStore('explorer', () => {
       if (isCurrent()) {
         // The tree shows the failure on the node with a way to read it
         // again, so the notice in the corner leaves on its own.
-        node.error = ui.reportError(error, { kept: true }).message
+        const payload = ui.reportError(error, { kept: true })
+        node.error = payload.message
+        node.lockWait = payload.lockWait === true
         setChildren(node, [])
         node.loaded = false
       }

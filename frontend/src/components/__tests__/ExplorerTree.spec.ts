@@ -155,6 +155,15 @@ describe('ExplorerTree as a tree a reader can follow', () => {
     await wrapper.find('[data-test="tree-retry"]').trigger('click')
     expect(wrapper.emitted('retry')?.[0]?.[0]).toMatchObject({ key: 'db' })
     expect(wrapper.emitted('activate')).toBeUndefined()
+    expect(wrapper.find('[data-test="tree-blocking"]').exists()).toBe(false)
+  })
+
+  it('offers the blocking sessions for a read that waited for a lock', async () => {
+    const failed = { ...node(), error: 'Another session has locked this object.', lockWait: true }
+    const wrapper = mountTree([failed], new Set(['db']))
+    await wrapper.find('[data-test="tree-blocking"]').trigger('click')
+    expect(wrapper.emitted('blocking')?.[0]?.[0]).toMatchObject({ key: 'db' })
+    expect(wrapper.emitted('activate')).toBeUndefined()
   })
 
   it('tells a reader when a branch reads', () => {

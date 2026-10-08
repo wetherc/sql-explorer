@@ -37,6 +37,7 @@
         @collapse="onCollapse"
         @context="onContext"
         @retry="onRetry"
+        @blocking="onBlocking"
       />
 
       <EmptyState v-else icon="mdi-database-off-outline" :title="emptyTitle" :hint="emptyHint">
@@ -133,11 +134,19 @@
       :node="propertiesNode"
       @close="propertiesOpen = false"
     />
+
+    <BlockingSessionsDialog
+      v-if="blockingConnection"
+      :open="blockingOpen"
+      :connection-id="blockingConnection"
+      @close="blockingOpen = false"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, reactive, ref, watch, type ComponentPublicInstance } from 'vue'
+import BlockingSessionsDialog from './BlockingSessionsDialog.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import EmptyState from './EmptyState.vue'
 import ExplorerTree from './ExplorerTree.vue'
@@ -168,6 +177,9 @@ const selectedKey = ref<string | null>(null)
 const menu = reactive({ open: false, x: 0, y: 0, node: null as ExplorerNode | null })
 const propertiesOpen = ref(false)
 const propertiesNode = ref<ExplorerNode | null>(null)
+/** The connection whose blocking sessions the dialog lists. */
+const blockingConnection = ref<string | null>(null)
+const blockingOpen = ref(false)
 /** The connection that waits on an answer, while statements run on it. */
 const pendingDisconnect = ref<string | null>(null)
 
@@ -237,6 +249,12 @@ async function onExpand(node: ExplorerNode): Promise<void> {
 /** Reads a branch again after its read failed. The node stays open. */
 async function onRetry(node: ExplorerNode): Promise<void> {
   await explorer.expand(node)
+}
+
+/** Lists the sessions that block others, after a read waited for a lock. */
+function onBlocking(node: ExplorerNode): void {
+  blockingConnection.value = node.connectionId
+  blockingOpen.value = true
 }
 
 function onCollapse(node: ExplorerNode): void {

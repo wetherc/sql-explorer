@@ -660,6 +660,23 @@ describe('DbExplorer', () => {
     expect(spy).toHaveBeenCalledWith(root)
   })
 
+  it('lists the blocking sessions of the node that waited for a lock', async () => {
+    apiStub.blockingSessions.mockResolvedValue({ sessions: [], openTransactions: [], notes: [] })
+    const wrapper = await mountExplorer()
+    const explorer = useExplorerStore()
+    explorer.addRoot('c1')
+    await wrapper.vm.$nextTick()
+    wrapper.findComponent({ name: 'ExplorerTree' }).vm.$emit('blocking', explorer.roots[0]!)
+    await settle()
+    expect(apiStub.blockingSessions).toHaveBeenCalledWith('c1', null)
+    expect(document.querySelector('[data-test="blocking-dialog"]')).not.toBeNull()
+
+    ;(document.querySelector('[data-test="blocking-close"]') as HTMLElement).click()
+    await settle()
+    const dialog = wrapper.findComponent({ name: 'BlockingSessionsDialog' })
+    expect(dialog.props('open')).toBe(false)
+  })
+
   it('moves the focus into the menu and back to the row', async () => {
     const wrapper = await mountExplorer()
     useExplorerStore().addRoot('c1')

@@ -89,6 +89,15 @@
             data-test="tree-retry"
             @click.stop="emit('retry', row.node)"
           />
+          <v-btn
+            v-if="row.node.lockWait"
+            size="x-small"
+            variant="text"
+            color="primary"
+            text="Show what's blocking"
+            data-test="tree-blocking"
+            @click.stop="emit('blocking', row.node)"
+          />
         </div>
 
         <div
@@ -162,6 +171,7 @@ const emit = defineEmits<{
   (event: 'expand', node: ExplorerNode): void
   (event: 'collapse', node: ExplorerNode): void
   (event: 'retry', node: ExplorerNode): void
+  (event: 'blocking', node: ExplorerNode): void
   (event: 'context', payload: { x: number; y: number; node: ExplorerNode }): void
 }>()
 

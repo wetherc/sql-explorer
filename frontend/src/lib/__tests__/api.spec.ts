@@ -66,6 +66,14 @@ describe('api', () => {
     await api.releaseSession('c1', 't1')
     expect(invoke).toHaveBeenCalledWith('release_session', { connectionId: 'c1', tabId: 't1' })
 
+    await api.blockingSessions('c1')
+    expect(invoke).toHaveBeenCalledWith('blocking_sessions', {
+      connectionId: 'c1',
+      blockedBy: null,
+    })
+    await api.blockingSessions('c1', 52)
+    expect(invoke).toHaveBeenCalledWith('blocking_sessions', { connectionId: 'c1', blockedBy: 52 })
+
     await api.listDatabases('c1')
     expect(invoke).toHaveBeenCalledWith('list_databases', { connectionId: 'c1' })
 

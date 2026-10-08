@@ -30,6 +30,7 @@ export function makeApiStub() {
     queryParameters: vi.fn(),
     cancelQuery: vi.fn(),
     releaseSession: vi.fn(),
+    blockingSessions: vi.fn(),
     listDatabases: vi.fn(),
     listSchemas: vi.fn(),
     listTables: vi.fn(),

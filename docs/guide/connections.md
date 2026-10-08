@@ -149,3 +149,20 @@ such as an `ALTER TABLE` in an open transaction, the read of that table fails
 with a message about the lock, and the rest of the tree keeps loading. The
 limit applies only to the explorer's own connection. Statements in your tabs
 wait for locks as the server's settings decide.
+
+## Seeing other sessions
+
+The explorer's list of blocking sessions reads the server's session and lock
+views, and each engine limits what a login sees there:
+
+- **MS SQL Server**: `VIEW SERVER STATE`, or `VIEW SERVER PERFORMANCE STATE` on
+  SQL Server 2022. On Azure SQL Database, `VIEW DATABASE STATE` in the database
+  you're connected to. Without it, the list shows your own sessions only.
+- **PostgreSQL**: every role sees the waits and the session numbers, but the
+  statements, states and times of other users' sessions stay hidden unless the
+  role is a superuser or a member of `pg_read_all_stats`.
+- **MySQL and MariaDB**: the `PROCESS` privilege and read access to
+  `performance_schema`. Row lock waits come from InnoDB, and metadata lock
+  waits, such as a wait behind an `ALTER TABLE`, need `performance_schema` and
+  its `wait/lock/metadata/sql/mdl` instrument to be on. MariaDB turns
+  `performance_schema` off by default.

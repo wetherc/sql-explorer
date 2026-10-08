@@ -708,6 +708,51 @@ export interface ErrorPayload {
   /** True when the tab's session closed after the failure, so the next run
    *  opens a new session. */
   sessionReset?: boolean
+  /** True when a read stopped because another session kept a lock on the
+   *  object, so the interface can offer the report of the blocking sessions. */
+  lockWait?: boolean
+}
+
+/** The sessions of a server that wait for locks, and the sessions that keep locks. */
+export interface BlockingReport {
+  /** One row for each wait. A session that waits for two sessions gives two rows. */
+  sessions: BlockingSession[]
+  /** The sessions inside a transaction that keep locks, the oldest first. */
+  openTransactions: OpenTransaction[]
+  /** The limits of the report, such as a missing permission. */
+  notes: string[]
+}
+
+/** One wait for a lock: the session that waits and the session that keeps the lock. */
+export interface BlockingSession {
+  waitingSession: number
+  waitingStatement: string | null
+  waitMs: number | null
+  blockingSession: number
+  blockingLogin: string | null
+  blockingHost: string | null
+  blockingProgram: string | null
+  /** The state of the blocking session as the server names it, such as `sleeping`. */
+  blockingStatus: string | null
+  /** The statement that the blocking session runs, or the last one it ran. */
+  blockingStatement: string | null
+  /** The object of the lock, such as a table. */
+  object: string | null
+  /** The lock that the waiting session asked for, as the server names it. */
+  lockMode: string | null
+}
+
+/** One session inside a transaction that keeps locks. */
+export interface OpenTransaction {
+  session: number
+  login: string | null
+  host: string | null
+  program: string | null
+  status: string | null
+  /** The statement that the session runs, or the last one it ran. */
+  statement: string | null
+  /** How long the transaction has been open, in seconds. */
+  openSecs: number | null
 }
 
 /** Builds the options that a new connection starts with. */

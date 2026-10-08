@@ -1570,6 +1570,7 @@ describe('explorer store', () => {
     expect(root.loaded).toBe(false)
     expect(root.children).toEqual([])
     expect(root.error).toBe('gone')
+    expect(root.lockWait).toBe(false)
     expect(useUiStore().notices[0]?.level).toBe('error')
 
     // A read again clears the failure as it starts, so the tree shows no
@@ -1580,6 +1581,26 @@ describe('explorer store', () => {
     expect(root.error).toBeNull()
     await again
     expect(root.loaded).toBe(true)
+  })
+
+  it('marks a read that stopped behind the lock of another session', async () => {
+    apiStub.listDatabases.mockRejectedValue({
+      category: 'database',
+      message: 'Another session has locked this object.',
+      detail: null,
+      lockWait: true,
+    })
+    const explorer = await readyStore()
+    const root = explorer.addRoot('c1')
+    await explorer.expand(root)
+    expect(root.lockWait).toBe(true)
+
+    // The mark goes away as the next read starts.
+    apiStub.listDatabases.mockResolvedValue([])
+    const again = explorer.expand(root)
+    expect(root.lockWait).toBe(false)
+    await again
+    expect(root.lockWait).toBe(false)
   })
 
   it('takes no answer and no failure for a root that the user closed', async () => {

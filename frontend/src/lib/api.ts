@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { ResultStream, type ResultStreamHandlers } from '@/lib/results'
 import type { Dialect } from '@/types/api'
 import type {
+  BlockingReport,
   ColumnRef,
   ConnectionInfo,
   ConstraintRef,
@@ -236,6 +237,15 @@ export const api = {
    *  another connection. */
   releaseSession(connectionId: string, tabId: string): Promise<void> {
     return invoke('release_session', { connectionId, tabId })
+  },
+
+  /**
+   * Lists the sessions of the server that wait for locks and the sessions
+   * that keep locks. With `blockedBy`, the report keeps the rows of that one
+   * blocking session alone.
+   */
+  blockingSessions(connectionId: string, blockedBy: number | null = null): Promise<BlockingReport> {
+    return invoke('blocking_sessions', { connectionId, blockedBy })
   },
 
   listDatabases(connectionId: string): Promise<DatabaseRef[]> {

@@ -98,6 +98,29 @@ When a branch can't load, for example because the server stopped answering or
 your login can't read that catalog, the branch shows the error in place of its
 children, with a **Retry** button that reads it again.
 
+## Blocked reads
+
+On MS SQL Server, PostgreSQL and MySQL, a catalog read gives up after 5 seconds
+when another session has locked the object it needs, for example a table that
+another session altered inside a transaction it hasn't committed yet. The
+branch then shows a **Show what's blocking** button beside **Retry**.
+
+The button opens a list of the sessions on the server that are waiting for a
+lock. Each wait names the session that has the lock, the locked object, the
+lock mode and how long the wait has lasted. Below the waits, the dialog lists
+the sessions that have an open transaction, oldest first. The session that
+stopped your read is usually in that second list, because your read no longer
+waits for it. Each entry shows the session's login, host, program and status,
+and the statement it's running or ran last, with a button that copies the
+statement. Click **Refresh** to read the list again.
+
+To unblock the tree, commit or roll back the other session's transaction, then
+click **Retry**.
+
+What the list shows depends on your login's permissions, and a note at the top
+of the dialog says when something is hidden. The "Seeing other sessions"
+section of the Connections page names the permission for each engine.
+
 ## The tree's connection
 
 The tree, the Properties dialog and the menu's drafts read the catalog on a
