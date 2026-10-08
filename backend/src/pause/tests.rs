@@ -600,7 +600,8 @@ async fn paused_read_into<G: RowSink + 'static>(
 pub(crate) async fn paused_chunk_read(driver: RowsDriver, grid: usize) -> PausedRead {
     let channel = tauri::ipc::Channel::new(|_| Ok(()));
     let chunks = crate::db::columnar::ChunkSink::new(channel, grid);
-    paused_read_into(driver, chunks, grid).await.0
+    let grid_sink = crate::message_log::MessageTee::new(chunks, None);
+    paused_read_into(driver, grid_sink, grid).await.0
 }
 
 #[tokio::test]

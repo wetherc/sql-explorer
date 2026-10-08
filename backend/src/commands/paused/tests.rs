@@ -41,8 +41,11 @@ fn a_run_pauses_only_one_read_of_a_tab_on_a_driver_that_can_pause() {
     assert_eq!(point(60, true, &plain, "SELECT 1"), None);
 }
 
-fn grid(rows: usize) -> ChunkSink {
-    ChunkSink::new(Channel::new(|_| Ok(())), rows)
+fn grid(rows: usize) -> GridSink {
+    crate::message_log::MessageTee::new(
+        crate::db::columnar::ChunkSink::new(Channel::new(|_| Ok(())), rows),
+        None,
+    )
 }
 
 /// A slot of its own for the driver, under the key `t1`.
@@ -290,6 +293,7 @@ async fn a_run_in_a_tab_pauses_and_a_new_run_of_the_tab_releases_it() {
         }),
         spill: None,
         pause_secs: 60,
+        messages_file: None,
     };
     let ends = Arc::new(std::sync::Mutex::new(Vec::new()));
     let channel = || {
@@ -362,6 +366,7 @@ async fn a_run_stopped_by_its_time_limit_still_ends_its_channel() {
         }),
         spill: None,
         pause_secs: 60,
+        messages_file: None,
     };
     let error = execute_query(app.handle().clone(), request, app.state(), channel)
         .await
@@ -400,6 +405,7 @@ async fn a_stop_while_a_run_waits_for_the_driver_ends_the_run() {
         options: None,
         spill: None,
         pause_secs: 0,
+        messages_file: None,
     };
     let stopper = app.handle().clone();
     let (outcome, ()) = tokio::join!(
@@ -470,6 +476,7 @@ async fn a_run_that_asks_for_a_spill_ends_at_the_limit() {
             max_bytes: 1 << 20,
         }),
         pause_secs: 60,
+        messages_file: None,
     };
     execute_query(
         app.handle().clone(),
@@ -481,4 +488,61 @@ async fn a_run_that_asks_for_a_spill_ends_at_the_limit() {
     .unwrap();
     assert!(app.state::<AppState>().kept.get("r1:0").is_none());
     assert!(tab.driver.try_lock().is_ok());
+}
+
+#[tokio::test]
+async fn a_run_that_logs_its_messages_still_pauses() {
+    use crate::message_log::MessageLogs;
+    let (_dir, descriptor) = temp_sqlite();
+    let (app, state) = state_with_sqlite(descriptor).await;
+    let open = state.connection("s1").await.unwrap();
+    let paused = open
+        .sessions
+        .insert("t1", session(RowsDriver::new(5)))
+        .await;
+    app.manage(state);
+    app.manage(MessageLogs::default());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("paused.txt");
+    let id = app.state::<MessageLogs>().remember(path.clone());
+
+    let request = ExecuteRequest {
+        connection_id: "s1".into(),
+        request_id: "r1".into(),
+        query: "SELECT n".into(),
+        tab_id: Some("t1".into()),
+        query_params: None,
+        options: Some(ExecOptions {
+            max_rows: 2,
+            timeout_secs: 30,
+            one_statement: false,
+        }),
+        spill: None,
+        pause_secs: 60,
+        messages_file: Some(id),
+    };
+    execute_query(
+        app.handle().clone(),
+        request,
+        app.state(),
+        Channel::new(|_| Ok(())),
+    )
+    .await
+    .unwrap();
+    // The pause point and the wait of the pausing sink pass through the
+    // copy of the messages, so the read paused and stays live.
+    let registry = &app.state::<AppState>().kept;
+    assert!(matches!(
+        registry
+            .get("r1:0")
+            .map(|kept| matches!(&kept.source, KeptSource::PausedRead(read) if read.is_live())),
+        Some(true)
+    ));
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.ends_with("\nstart\n"));
+
+    release_session("s1".into(), "t1".into(), app.state())
+        .await
+        .unwrap();
+    drop(paused.driver.lock().await);
 }

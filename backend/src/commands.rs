@@ -14,6 +14,7 @@ use crate::db::{
 use crate::error::{Error, Result};
 use crate::files;
 use crate::history::HistoryEntry;
+use crate::message_log::{MessageLogs, MessageTee};
 use crate::script::{self, ScriptStatement};
 use crate::secrets::{self, SecretStore};
 use crate::session::{Session, DEFAULT_SESSION};
@@ -32,6 +33,7 @@ use tokio_util::sync::CancellationToken;
 
 mod paused;
 pub mod run_file;
+pub mod run_messages;
 
 /// Opens the driver that belongs to the engine of the record.
 pub async fn open_driver(connection: &SavedConnection) -> Result<Box<dyn DatabaseDriver>> {
@@ -1045,6 +1047,10 @@ pub struct ExecuteRequest {
     /// never pauses, because the spill file then gives the full result.
     #[serde(default)]
     pub pause_secs: u64,
+    /// The identifier of the file that gets every message of the run, from
+    /// `choose_messages_file`.
+    #[serde(default)]
+    pub messages_file: Option<String>,
 }
 
 /// What a run that keeps its full result sets on the local disk asks for.
@@ -1145,11 +1151,16 @@ pub async fn execute_query<R: Runtime>(
         options,
         spill,
         pause_secs,
+        messages_file,
     } = request;
     let started = std::time::Instant::now();
     // The record goes in first, so a Stop while the session opens still
     // reaches the run.
     let token = state.start_request(&request_id, &connection_id).await;
+    let logs = tauri::Manager::try_state::<MessageLogs>(&app);
+    let log = logs
+        .as_ref()
+        .map(|logs| logs.start(&request_id, messages_file.as_deref()));
     let prepared = async {
         let (open, session, key) =
             session_for(&app, &state, &connection_id, tab_id.as_deref(), &token).await?;
@@ -1164,13 +1175,15 @@ pub async fn execute_query<R: Runtime>(
             state.end_request(&request_id).await;
             // The window waits for the end frame of every run, so a run that
             // fails before it starts sends one too.
-            let _ = ChunkSink::new(on_chunk, 0).fail(started.elapsed().as_millis() as u64);
+            let mut sink = ChunkSink::new(on_chunk, 0);
+            end_message_log(logs.as_deref(), &request_id, Some(&error), &mut sink).await;
+            let _ = sink.fail(started.elapsed().as_millis() as u64);
             return Err(error);
         }
     };
 
     let channel = on_chunk.clone();
-    let grid = ChunkSink::new(on_chunk, options.max_rows);
+    let grid = MessageTee::new(ChunkSink::new(on_chunk, options.max_rows), log);
     let point = paused::pause_point(
         paused::pause_seconds(pause_secs, spill.is_some()),
         key != DEFAULT_SESSION,
@@ -1244,7 +1257,9 @@ pub async fn execute_query<R: Runtime>(
     state.end_request(&request_id).await;
     // A limit that stopped a run that can pause took its sink, so the end
     // frame goes out through a new one.
-    let mut sink = grid.unwrap_or_else(|| ChunkSink::new(channel, 0));
+    let mut sink = grid
+        .map(MessageTee::into_inner)
+        .unwrap_or_else(|| ChunkSink::new(channel, 0));
     // A set that the row limit cut can stay in the registry, also when a
     // later statement of the script failed, because the grid shows that set.
     // A stop, a time limit or an error can end a set early, so a spill file
@@ -1257,7 +1272,15 @@ pub async fn execute_query<R: Runtime>(
     sources.extend(paused.map(|(set, read)| (set, crate::kept::KeptSource::PausedRead(read))));
     let kept = state.kept.keep(&request_id, &connection_id, sources);
     sink.announce_kept(kept);
-    match finish_run(&state, &connection_id, &open, &key, &session, outcome).await {
+    let finished = finish_run(&state, &connection_id, &open, &key, &session, outcome).await;
+    end_message_log(
+        logs.as_deref(),
+        &request_id,
+        finished.as_ref().err(),
+        &mut sink,
+    )
+    .await;
+    match finished {
         Ok(summary) => sink.finish(summary),
         Err(error) => {
             // The messages that the server sent before the failure still
@@ -1266,6 +1289,24 @@ pub async fn execute_query<R: Runtime>(
             let _ = sink.fail(started.elapsed().as_millis() as u64);
             Err(error)
         }
+    }
+}
+
+/// Ends the message log of a run and closes its file. A file that the
+/// messages did not reach gives the window a warning, which goes out before
+/// the frame that ends the run.
+async fn end_message_log(
+    logs: Option<&MessageLogs>,
+    request_id: &str,
+    error: Option<&Error>,
+    sink: &mut ChunkSink,
+) {
+    let Some(logs) = logs else {
+        return;
+    };
+    let ending = logs.end(request_id, error);
+    if let Ok(Some(warning)) = off_thread(move || Ok(ending.close())).await {
+        crate::db::sink::RowSink::message(sink, crate::db::Message::warning(warning));
     }
 }
 
@@ -5154,6 +5195,7 @@ mod tests {
             options: None,
             spill: None,
             pause_secs: 0,
+            messages_file: None,
         }
     }
 
@@ -5191,6 +5233,139 @@ mod tests {
         assert!(matches!(&error, Error::NotConnected(id) if id == "missing"));
         assert_eq!(error.category(), crate::error::ErrorCategory::NotConnected);
         assert_eq!(*frame_types.lock().unwrap(), vec![FRAME_END]);
+    }
+
+    /// A request of a run that sends its messages to the file `id`.
+    fn logged_request(query: &str, id: &str) -> ExecuteRequest {
+        ExecuteRequest {
+            messages_file: Some(id.to_string()),
+            ..run_request("s1", query)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_run_sends_its_messages_and_its_error_to_the_chosen_file() {
+        use crate::message_log::MessageLogs;
+        use tauri::Manager;
+        let (_dir, descriptor) = temp_sqlite();
+        let (app, state) = state_with_sqlite(descriptor).await;
+        app.manage(state);
+        app.manage(MessageLogs::default());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("messages.txt");
+        let id = app.state::<MessageLogs>().remember(path.clone());
+
+        let (channel, _) = message_channel();
+        execute_query(
+            app.handle().clone(),
+            logged_request("SELECT 1", &id),
+            app.state::<AppState>(),
+            channel,
+        )
+        .await
+        .unwrap();
+        let (channel, _) = message_channel();
+        execute_query(
+            app.handle().clone(),
+            logged_request("SELECT * FROM missing", &id),
+            app.state::<AppState>(),
+            channel,
+        )
+        .await
+        .unwrap_err();
+        // A run that fails before it reaches the server writes its error.
+        let (channel, _) = message_channel();
+        execute_query(
+            app.handle().clone(),
+            ExecuteRequest {
+                connection_id: "gone".into(),
+                ..logged_request("SELECT 1", &id)
+            },
+            app.state::<AppState>(),
+            channel,
+        )
+        .await
+        .unwrap_err();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text
+            .lines()
+            .filter(|line| !line.starts_with("-- Run started "))
+            .collect();
+        assert_eq!(text.matches("-- Run started ").count(), 3);
+        assert_eq!(lines[0], "1 row returned.");
+        assert!(lines[1].starts_with("Error: ") && lines[1].contains("missing"));
+        assert_eq!(
+            lines.last().unwrap(),
+            &"Error: Connection 'gone' isn't open. Connect to it first."
+        );
+    }
+
+    #[tokio::test]
+    async fn a_file_that_the_messages_cannot_reach_gives_a_warning() {
+        use crate::message_log::MessageLogs;
+        use tauri::Manager;
+        let (_dir, descriptor) = temp_sqlite();
+        let (app, state) = state_with_sqlite(descriptor).await;
+        app.manage(state);
+        app.manage(MessageLogs::default());
+        // A folder cannot take the messages.
+        let dir = tempfile::tempdir().unwrap();
+        let id = app
+            .state::<MessageLogs>()
+            .remember(dir.path().to_path_buf());
+
+        let (channel, messages) = message_channel();
+        execute_query(
+            app.handle().clone(),
+            logged_request("SELECT 1", &id),
+            app.state::<AppState>(),
+            channel,
+        )
+        .await
+        .unwrap();
+        let frames = messages.lock().unwrap();
+        assert!(frames.iter().any(|frame| {
+            frame[0] == crate::db::columnar::FRAME_MESSAGE
+                && String::from_utf8_lossy(frame).contains("Couldn't save the messages")
+        }));
+    }
+
+    #[tokio::test]
+    async fn a_run_that_spills_keeps_its_file_and_logs_its_messages() {
+        use crate::message_log::MessageLogs;
+        use tauri::Manager;
+        let (_dir, descriptor) = temp_sqlite();
+        let (app, state) = state_with_sqlite(descriptor).await;
+        let folder = tempfile::tempdir().unwrap();
+        state.kept.set_spill_folder(folder.path().to_path_buf());
+        app.manage(state);
+        app.manage(MessageLogs::default());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("spill.txt");
+        let id = app.state::<MessageLogs>().remember(path.clone());
+
+        let (channel, messages) = message_channel();
+        execute_query(
+            app.handle().clone(),
+            ExecuteRequest {
+                messages_file: Some(id),
+                ..spill_request(&numbers(50, "x"), 10)
+            },
+            app.state::<AppState>(),
+            channel,
+        )
+        .await
+        .unwrap();
+        // The spill file reached the grid through the copy of the
+        // messages, so the run keeps it.
+        let end = end_frame(&messages.lock().unwrap());
+        assert_eq!(end["kept"][0]["savedRows"], 50);
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("50 rows returned."));
+        assert!(app.state::<AppState>().kept.release("r1:0"));
+        assert!(crate::spill::tests::wait_for_empty(folder.path()));
     }
 
     /// The messages that a test channel received.

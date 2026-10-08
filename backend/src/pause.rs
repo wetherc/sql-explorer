@@ -497,7 +497,7 @@ struct Parked<G> {
 /// A read that paused at the row limit, as the registry of kept results
 /// keeps it. The drop of the value releases the read, because the sink then
 /// finds the command end gone.
-pub struct PausedRead<G = crate::db::columnar::ChunkSink> {
+pub struct PausedRead<G = crate::message_log::GridSink> {
     parked: Mutex<Option<Parked<G>>>,
     slot: SessionSlot,
     limit: Duration,

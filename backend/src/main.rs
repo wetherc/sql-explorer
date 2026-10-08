@@ -11,6 +11,7 @@ mod history;
 mod jsonfile;
 mod kept;
 mod menu;
+mod message_log;
 mod pause;
 mod script;
 mod secrets;
@@ -42,6 +43,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new(secrets::build_store()))
         .manage(commands::run_file::ChosenFiles::default())
+        .manage(message_log::MessageLogs::default())
         .setup(|app| {
             spawn_session_reaper(app.handle().clone(), SESSION_REAP_INTERVAL);
 
@@ -78,6 +80,10 @@ fn main() {
             commands::execute_query,
             commands::run_file::choose_run_file,
             commands::run_file::run_to_file,
+            commands::run_messages::choose_messages_file,
+            commands::run_messages::forget_messages_file,
+            commands::run_messages::save_run_messages,
+            commands::run_messages::save_shown_messages,
             commands::explain_query,
             commands::query_parameters,
             commands::cancel_query,

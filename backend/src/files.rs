@@ -40,7 +40,10 @@ const TEXT_CHECK_BYTES: usize = 8 * 1024;
 /// Gives a function that turns a fault of the file system into an error that
 /// names the path and the reason of the operating system, such as "No such
 /// file or directory". The `ErrorKind` of the fault stays the same.
-fn on_path<'a>(action: &'a str, path: &'a Path) -> impl FnOnce(std::io::Error) -> Error + 'a {
+pub(crate) fn on_path<'a>(
+    action: &'a str,
+    path: &'a Path,
+) -> impl FnOnce(std::io::Error) -> Error + 'a {
     move |error| {
         Error::Io(std::io::Error::new(
             error.kind(),

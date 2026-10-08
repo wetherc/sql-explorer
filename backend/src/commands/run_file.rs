@@ -13,13 +13,14 @@
 //! ticket, so it never writes to a path that the user did not accept.
 
 use super::{
-    driver_for_request, finish_run, in_sent_text, prepare_parameters, run_bounded, session_for,
-    stop_grace, Bounded, ExportFormat, ExportSummary, FileSink,
+    driver_for_request, end_message_log, finish_run, in_sent_text, prepare_parameters, run_bounded,
+    session_for, stop_grace, Bounded, ExportFormat, ExportSummary, FileSink,
 };
 use crate::db::columnar::ChunkSink;
 use crate::db::sink::{RowSink, SinkControl};
 use crate::db::{ColumnInfo, ExecOptions, Message};
 use crate::error::{Error, Result};
+use crate::message_log::{MessageLogs, MessageTee};
 use crate::sql::ParamValues;
 use crate::state::AppState;
 use std::path::{Path, PathBuf};
@@ -163,6 +164,10 @@ pub struct RunToFileRequest {
     /// the window, and the time limit applies to the whole run.
     #[serde(default)]
     pub options: Option<ExecOptions>,
+    /// The identifier of the file that gets every message of the run, from
+    /// `choose_messages_file`.
+    #[serde(default)]
+    pub messages_file: Option<String>,
 }
 
 /// The message for a ticket that the backend does not know.
@@ -196,10 +201,15 @@ pub async fn run_to_file<R: Runtime>(
         tab_id,
         query_params,
         options,
+        messages_file,
     } = request;
     let started = std::time::Instant::now();
     let elapsed = || started.elapsed().as_millis() as u64;
     let token = state.start_request(&request_id, &connection_id).await;
+    let logs = tauri::Manager::try_state::<MessageLogs>(&app);
+    let log = logs
+        .as_ref()
+        .map(|logs| logs.start(&request_id, messages_file.as_deref()));
     let prepared = async {
         let file = chosen.take(&ticket).ok_or_else(unknown_ticket)?;
         let (open, session, key) =
@@ -233,12 +243,15 @@ pub async fn run_to_file<R: Runtime>(
         Err(error) => {
             state.end_request(&request_id).await;
             // The window waits for the end frame of every run.
-            let _ = ChunkSink::new(on_chunk, 0).fail(elapsed());
+            let mut sink = ChunkSink::new(on_chunk, 0);
+            end_message_log(logs.as_deref(), &request_id, Some(&error), &mut sink).await;
+            let _ = sink.fail(elapsed());
             return Err(error);
         }
     };
 
-    let mut sink = TeeSink::new(file, ChunkSink::new(on_chunk, grid_rows), grid_rows);
+    let grid = MessageTee::new(ChunkSink::new(on_chunk, grid_rows), log);
+    let mut sink = TeeSink::new(file, grid, grid_rows);
     let outcome = match driver_for_request(&state, &request_id, &session, &token).await {
         Ok(mut guard) => {
             run_bounded(
@@ -256,7 +269,16 @@ pub async fn run_to_file<R: Runtime>(
     state.end_request(&request_id).await;
 
     let TeeSink { file, grid, .. } = sink;
-    let summary = match finish_run(&state, &connection_id, &open, &key, &session, outcome).await {
+    let mut grid = grid.into_inner();
+    let finished = finish_run(&state, &connection_id, &open, &key, &session, outcome).await;
+    end_message_log(
+        logs.as_deref(),
+        &request_id,
+        finished.as_ref().err(),
+        &mut grid,
+    )
+    .await;
+    let summary = match finished {
         Ok(summary) => summary,
         Err(error) => {
             drop(file);
@@ -590,6 +612,7 @@ mod tests {
                 timeout_secs: 30,
                 one_statement: false,
             }),
+            messages_file: None,
         }
     }
 
@@ -740,6 +763,48 @@ mod tests {
         assert!(!path.exists());
         assert_eq!(frame_types(&frames), vec![FRAME_END]);
         assert!(!has_part_file(dir.path()));
+    }
+
+    #[tokio::test]
+    async fn a_run_to_file_sends_its_messages_to_the_chosen_file() {
+        use crate::message_log::MessageLogs;
+        let (dir, app) = app().await;
+        app.manage(MessageLogs::default());
+        let log_path = dir.path().join("messages.txt");
+        let id = app.state::<MessageLogs>().remember(log_path.clone());
+        let ticket = choose(&app, &dir.path().join("out.csv"));
+        let logged = |ticket: &str, query: &str| RunToFileRequest {
+            messages_file: Some(id.clone()),
+            ..request(ticket, query, 100)
+        };
+
+        let (channel, _) = frame_channel();
+        run(&app, logged(&ticket, &numbers(5)), channel)
+            .await
+            .unwrap();
+        let ticket = choose(&app, &dir.path().join("failed.csv"));
+        let (channel, _) = frame_channel();
+        run(
+            &app,
+            logged(&ticket, "SELECT * FROM missing_table"),
+            channel,
+        )
+        .await
+        .unwrap_err();
+        let (channel, _) = frame_channel();
+        run(&app, logged("nothing", "SELECT 1"), channel)
+            .await
+            .unwrap_err();
+
+        let text = std::fs::read_to_string(&log_path).unwrap();
+        let lines: Vec<&str> = text
+            .lines()
+            .filter(|line| !line.starts_with("-- Run started "))
+            .collect();
+        assert_eq!(lines[0], "5 rows returned.");
+        assert!(lines[1].starts_with("Error: ") && lines[1].contains("missing_table"));
+        let last = lines.last().unwrap();
+        assert!(last.starts_with("Error: ") && last.contains("expired"));
     }
 
     #[tokio::test]

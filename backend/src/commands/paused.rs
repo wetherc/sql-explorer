@@ -5,11 +5,11 @@ use super::{
     arm, armed_driver, finish_export, run_bounded, stop_grace, Bounded, ExportFormat,
     ExportSummary, FileSink,
 };
-use crate::db::columnar::ChunkSink;
 use crate::db::sink::{PausePoint, RunSummary};
 use crate::db::{ExecOptions, QueryParams};
 use crate::error::{Error, Result};
 use crate::kept::KeptResult;
+use crate::message_log::GridSink;
 use crate::pause::{
     pause_limit, spawn_read, task_fault, AbortOnDrop, Handoff, PauseControl, PausedRead,
     PausingSink, SessionSlot, SharedSink,
@@ -63,7 +63,7 @@ fn one_read(query: &str, dialect: Dialect) -> bool {
 /// How the part of a run that the window waits for ended.
 enum Progress {
     /// The read paused at the row limit.
-    Paused(Handoff<ChunkSink>),
+    Paused(Handoff<GridSink>),
     /// The read ended before the row limit, or the driver failed.
     Ended(RunSummary),
 }
@@ -73,7 +73,7 @@ pub(super) struct PausableRun {
     pub outcome: Bounded<RunSummary>,
     /// The sink of the grid, or `None` when a limit stopped the task and the
     /// sink went with it.
-    pub grid: Option<ChunkSink>,
+    pub grid: Option<GridSink>,
     /// The number of the set that paused, and the read, when it paused.
     pub paused: Option<(u32, PausedRead)>,
 }
@@ -96,7 +96,7 @@ pub(super) struct PausableRequest<'a> {
 /// The driver runs in a task that owns the lock of the driver, so the lock
 /// stays taken while the read is paused. The time limit and the Stop button
 /// cover the run until it pauses or ends, and the paused time does not count.
-pub(super) async fn run(request: PausableRequest<'_>, grid: ChunkSink) -> PausableRun {
+pub(super) async fn run(request: PausableRequest<'_>, grid: GridSink) -> PausableRun {
     let PausableRequest {
         state,
         request_id,
