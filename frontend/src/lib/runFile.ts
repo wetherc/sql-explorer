@@ -12,6 +12,8 @@ export interface SavedFile {
   /** The sheet of the result, in an Excel file with a sheet for each
    *  result. */
   sheet?: string
+  /** True when the Excel sheet was full and rows were left out. */
+  sheetFull?: boolean
 }
 
 /** The file of one saved result set, for the note above its grid. */
@@ -19,6 +21,9 @@ export function savedFile(set: SavedSet): SavedFile {
   const file: SavedFile = { path: set.path, rows: set.rows, truncated: set.truncated }
   if (set.sheet) {
     file.sheet = set.sheet
+  }
+  if (set.sheetFull) {
+    file.sheetFull = true
   }
   return file
 }
@@ -28,7 +33,8 @@ function savedRows(file: SavedFile): string {
   const target = file.sheet ? `the "${file.sheet}" sheet of ${file.path}` : file.path
   if (file.truncated) {
     const verb = file.rows === 1 ? 'was' : 'were'
-    return `The first ${formatRowCount(file.rows)} ${verb} saved to ${target}.`
+    const saved = `The first ${formatRowCount(file.rows)} ${verb} saved to ${target}.`
+    return file.sheetFull ? `${saved} The Excel sheet has no room for more rows.` : saved
   }
   return file.rows === 1
     ? `The row was saved to ${target}.`
@@ -42,6 +48,27 @@ function savedRows(file: SavedFile): string {
 export function savedFileNote(shown: number, cut: boolean, file: SavedFile): string {
   const saved = savedRows(file)
   return cut ? `Showing the first ${formatRowCount(shown)}. ${saved}` : saved
+}
+
+/** The rows below the header that one Excel sheet has room for. */
+export const SHEET_ROW_ROOM = 1_048_575
+
+/** True when the export row limit lets a result set fill an Excel sheet. */
+export function excelRowsOver(format: RunFileFormat, rowLimit: number): boolean {
+  return format === 'xlsx' && rowLimit > SHEET_ROW_ROOM
+}
+
+/** The name of a CSV file in place of the chosen file: `orders.csv` for
+ *  `/a/orders.xlsx`. */
+export function csvFileName(path: string): string {
+  return `${nameParts(path)[0]}.csv`
+}
+
+/** The stem and the extension, with its dot, of the file name in a path. */
+function nameParts(path: string): [string, string] {
+  const name = path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1)
+  const dot = name.lastIndexOf('.')
+  return dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, '']
 }
 
 /** Where a run to a file sends the result sets after the first. */
@@ -78,9 +105,8 @@ export function eachSetLabel(format: RunFileFormat): string {
 /** The name of the file of the second result set beside the chosen file:
  *  `orders-2.csv` beside `/a/orders.csv`. */
 export function secondFileName(path: string): string {
-  const name = path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1)
-  const dot = name.lastIndexOf('.')
-  return dot > 0 ? `${name.slice(0, dot)}-2${name.slice(dot)}` : `${name}-2`
+  const [stem, extension] = nameParts(path)
+  return `${stem}-2${extension}`
 }
 
 /**

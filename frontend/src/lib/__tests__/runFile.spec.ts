@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   SET_CHOICE_KEY,
+  SHEET_ROW_ROOM,
+  csvFileName,
   eachSetLabel,
+  excelRowsOver,
   loadSetChoice,
   saveSetChoice,
   savedFile,
@@ -36,6 +39,13 @@ describe('savedFileNote', () => {
     )
   })
 
+  it('says when the Excel sheet had no room for more rows', () => {
+    const file = { path: '/a/out.xlsx', rows: 1048575, truncated: true, sheetFull: true }
+    expect(savedFileNote(10, true, file)).toBe(
+      'Showing the first 10 rows. The first 1,048,575 rows were saved to /a/out.xlsx. The Excel sheet has no room for more rows.',
+    )
+  })
+
   it('names the sheet of a result in an Excel file with a sheet for each result', () => {
     const file = { path: '/a/out.xlsx', rows: 2, truncated: false, sheet: 'Result 2' }
     expect(savedFileNote(2, false, file)).toBe(
@@ -56,6 +66,23 @@ describe('savedFile', () => {
   it('keeps the sheet of a set only when it has one', () => {
     expect(savedFile(set(null))).toEqual({ path: '/a/out.xlsx', rows: 4, truncated: true })
     expect(savedFile(set('Result 1')).sheet).toBe('Result 1')
+  })
+
+  it('marks a set whose sheet was full', () => {
+    expect(savedFile({ ...set(null), sheetFull: true }).sheetFull).toBe(true)
+  })
+})
+
+describe('the room of an Excel sheet', () => {
+  it('flags a row limit past the room of a sheet for an Excel file alone', () => {
+    expect(excelRowsOver('xlsx', SHEET_ROW_ROOM)).toBe(false)
+    expect(excelRowsOver('xlsx', SHEET_ROW_ROOM + 1)).toBe(true)
+    expect(excelRowsOver('csv', SHEET_ROW_ROOM + 1)).toBe(false)
+  })
+
+  it('names a CSV file in place of the chosen file', () => {
+    expect(csvFileName('/a/orders.xlsx')).toBe('orders.csv')
+    expect(csvFileName('C:\\a\\plain')).toBe('plain.csv')
   })
 })
 

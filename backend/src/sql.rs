@@ -272,6 +272,17 @@ pub fn only_reads(script: &str, dialect: Dialect) -> bool {
     })
 }
 
+/// True when the text runs one statement once, and that statement only
+/// reads. Such a text gives at most one result set, and a stop of its read
+/// changes no data.
+pub fn one_read(script: &str, dialect: Dialect) -> bool {
+    let runs: usize = split_batches(script, dialect)
+        .iter()
+        .map(|batch| split_statements(&batch.text, dialect).len() * batch.runs as usize)
+        .sum();
+    runs == 1 && only_reads(script, dialect)
+}
+
 /// The statements of a script, batch by batch.
 fn statements_of(script: &str, dialect: Dialect) -> Vec<String> {
     split_batches(script, dialect)
@@ -2004,6 +2015,16 @@ mod tests {
                 }
             ]
         );
+    }
+
+    #[test]
+    fn one_read_is_one_statement_that_runs_once_and_only_reads() {
+        assert!(one_read("/* note */ SELECT 1", Dialect::Postgres));
+        assert!(!one_read("SELECT 1; SELECT 2", Dialect::Postgres));
+        assert!(!one_read("", Dialect::Postgres));
+        assert!(!one_read("EXEC dbo.report", Dialect::MsSql));
+        assert!(!one_read("SELECT 1;\nGO 2\n", Dialect::MsSql));
+        assert!(!one_read("DELETE FROM t", Dialect::Sqlite));
     }
 
     #[test]

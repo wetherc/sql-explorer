@@ -512,8 +512,10 @@
       :path="runFilePrompt?.file.path ?? ''"
       :format="runFilePrompt?.file.format ?? 'csv'"
       :several="runFilePrompt?.several ?? false"
+      :row-limit="settings.settings.exportRowLimit"
       @run="answerRunFile"
       @cancel="answerRunFile(null)"
+      @csv="answerRunFile('csv')"
     />
 
     <ConfirmDialog
@@ -545,7 +547,7 @@ import { errorAdvice, errorIcon, fullErrorText, isCancellation, toErrorPayload }
 import { exportFileName, toCsv, toInsertStatements, toJson, toMarkdown } from '@/lib/export'
 import { bytesToBase64, toXlsx } from '@/lib/xlsx'
 import { formatClockTime, formatRowCount } from '@/lib/format'
-import { savedFileNote, savedSetsMessage } from '@/lib/runFile'
+import { csvFileName, excelRowsOver, savedFileNote, savedSetsMessage } from '@/lib/runFile'
 import { useConnectionsStore } from '@/stores/connections'
 import { useExplorerStore } from '@/stores/explorer'
 import { baseName, useFilesStore } from '@/stores/files'
@@ -1048,17 +1050,24 @@ function runToFile(): void {
 const runFilePrompt = ref<{
   file: ChosenRunFile
   several: boolean
-  answer: (eachSet: boolean | null) => void
+  answer: (choice: RunFileChoice) => void
 } | null>(null)
 
-/** Asks where the results of the run go. Gives null when the user cancels. */
-function askRunFile(file: ChosenRunFile, several: boolean): Promise<boolean | null> {
+/**
+ * The answer of the question after the save dialog: true when each result
+ * goes to the file, false for the first result alone, 'csv' to choose a CSV
+ * file in place of the Excel file, and null for a cancel.
+ */
+type RunFileChoice = boolean | 'csv' | null
+
+/** Asks where the results of the run go. */
+function askRunFile(file: ChosenRunFile, several: boolean): Promise<RunFileChoice> {
   return new Promise((answer) => {
     runFilePrompt.value = { file, several, answer }
   })
 }
 
-function answerRunFile(eachSet: boolean | null): void {
+function answerRunFile(eachSet: RunFileChoice): void {
   const prompt = runFilePrompt.value
   runFilePrompt.value = null
   prompt?.answer(eachSet)
@@ -1076,7 +1085,8 @@ async function mayGiveSeveralSets(text: string): Promise<boolean> {
 
 /**
  * Asks for the file of a run to a file, then asks where the results go when
- * the script can give more than one, then runs the statement.
+ * the script can give more than one or when an Excel sheet has too little
+ * room, then runs the statement.
  */
 async function saveRun(
   connectionId: string,
@@ -1085,17 +1095,24 @@ async function saveRun(
   start: TextStart | undefined,
 ): Promise<void> {
   const several = await mayGiveSeveralSets(text)
+  let defaultName = exportFileName(props.tab.title, 'csv')
   let file: ChosenRunFile | null
-  try {
-    file = await api.chooseRunFile({ defaultName: exportFileName(props.tab.title, 'csv') })
-  } catch (error) {
-    ui.reportError(error)
-    return
-  }
-  if (!file) {
-    return
-  }
-  const eachSet = several ? await askRunFile(file, several) : false
+  let eachSet: RunFileChoice
+  do {
+    try {
+      file = await api.chooseRunFile({ defaultName })
+    } catch (error) {
+      ui.reportError(error)
+      return
+    }
+    if (!file) {
+      return
+    }
+    const asks = several || excelRowsOver(file.format, settings.settings.exportRowLimit)
+    eachSet = asks ? await askRunFile(file, several) : false
+    // A CSV file in place of the Excel file opens the save dialog again.
+    defaultName = csvFileName(file.path)
+  } while (eachSet === 'csv')
   if (eachSet === null) {
     return
   }
@@ -1114,7 +1131,10 @@ async function saveRun(
 
 /** Tells the user what a run to a file saved. */
 function reportRunFile(summary: RunFileSummary): void {
-  reportExport(summary, savedSetsMessage(summary) ?? undefined)
+  reportExport(summary, savedSetsMessage(summary) ?? undefined, [
+    `Saved ${summary.rows.toLocaleString()} rows. An Excel sheet has no room for more, so the rest weren't saved.`,
+    'Run to file as CSV to save every row.',
+  ])
   if (summary.skippedSets > 0) {
     ui.info('Only the first result went to the file.')
   }
@@ -1248,13 +1268,16 @@ async function onExportAll(pane: ResultPane, format: ExportAllFormat): Promise<v
 }
 
 /** Tells the user how an export of all rows ended. A caller can give the
- *  words for an export that saved every row. */
-function reportExport(summary: ExportSummary, saved?: string): void {
+ *  words for an export that saved every row, and the words and the advice
+ *  for a full Excel sheet. */
+function reportExport(summary: ExportSummary, saved?: string, sheetFull?: [string, string]): void {
   const rows = summary.rows.toLocaleString()
   if (summary.sheetFull) {
     ui.warn(
-      `Export stopped at ${rows} rows because an Excel sheet has no room for more rows.`,
-      'Export to CSV to get every row.',
+      ...(sheetFull ?? [
+        `Export stopped at ${rows} rows because an Excel sheet has no room for more rows.`,
+        'Export to CSV to get every row.',
+      ]),
     )
   } else if (summary.truncated) {
     ui.warn(

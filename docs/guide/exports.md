@@ -87,6 +87,16 @@ sheet of its result. The app can't always tell from the text how many results a
 procedure returns, so when a run with **First result only** returns more than
 one, a notice says "Only the first result went to the file."
 
+An Excel sheet has room for 1,048,575 rows below its header. When you choose an
+`.xlsx` file and the export row limit in Settings is higher than that, a dialog
+after the save dialog warns you before the run starts, and **Save as CSV instead…**
+opens the save dialog again with a `.csv` name. If you run anyway and a result
+fills its sheet, the rest of that result isn't saved, and the note above the
+grid and the notice in the corner both say so. For a single query that only
+reads, the app also stops reading from the server at that point, once the grid
+has its rows. A script keeps running to its end, so every statement in it still
+runs.
+
 **Stop** and the connection's time limit work as they do for a normal run. The
 rows go to a temporary file beside the one you chose, so a stopped or failed run
 leaves no file behind.

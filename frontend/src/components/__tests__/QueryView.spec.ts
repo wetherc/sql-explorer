@@ -19,6 +19,7 @@ const { useConnectionsStore } = await import('@/stores/connections')
 const { useFilesStore } = await import('@/stores/files')
 const { useLayoutStore } = await import('@/stores/layout')
 const { useQueryStore } = await import('@/stores/query')
+const { useSettingsStore } = await import('@/stores/settings')
 const { useTabsStore } = await import('@/stores/tabs')
 const { useUiStore } = await import('@/stores/ui')
 
@@ -2389,6 +2390,37 @@ describe('QueryView run to file', () => {
     // A failed check counts as one result, so the run starts at once.
     expect(apiStub.runToFile).toHaveBeenCalled()
     expect(lastNotice()?.message).toBe('Only the first result went to the file.')
+  })
+
+  it('offers a CSV file when the row limit is past the room of an Excel sheet', async () => {
+    apiStub.chooseRunFile
+      .mockResolvedValueOnce({ ticket: 'k1', path: '/tmp/big.xlsx', format: 'xlsx' })
+      .mockResolvedValueOnce({ ticket: 'k2', path: '/tmp/big.csv', format: 'csv' })
+    apiStub.runToFile.mockResolvedValue(summary)
+    const wrapper = await mountView()
+    useSettingsStore().update({ exportRowLimit: 2_000_000 })
+    await wrapper.find('[data-test="run-to-file-button"]').trigger('click')
+    await settle()
+    expect(document.querySelector('[data-test="run-file-excel-limit"]')).not.toBeNull()
+    await clickRunFile('run-file-csv')
+
+    expect(apiStub.chooseRunFile).toHaveBeenLastCalledWith({ defaultName: 'big.csv' })
+    expect(apiStub.runToFile).toHaveBeenCalledWith(
+      expect.objectContaining({ ticket: 'k2', eachSet: false }),
+      expect.anything(),
+    )
+  })
+
+  it('says when a full Excel sheet left rows out of the file', async () => {
+    apiStub.chooseRunFile.mockResolvedValue({ ticket: 'k1', path: '/tmp/a.xlsx', format: 'xlsx' })
+    apiStub.runToFile.mockResolvedValue({ ...summary, rows: 1048575, sheetFull: true })
+    const wrapper = await mountView()
+    await wrapper.find('[data-test="run-to-file-button"]').trigger('click')
+    await settle()
+    expect(lastNotice()?.message).toBe(
+      "Saved 1,048,575 rows. An Excel sheet has no room for more, so the rest weren't saved.",
+    )
+    expect(lastNotice()?.detail).toBe('Run to file as CSV to save every row.')
   })
 
   it('runs nothing when the user closes the save dialog', async () => {

@@ -5,7 +5,14 @@ import { mountWithPlugins, settle } from './mount'
 
 async function mountDialog(props: Record<string, unknown> = {}) {
   const wrapper = mountWithPlugins(RunFileDialog, {
-    props: { open: true, path: '/a/orders.csv', format: 'csv', several: true, ...props },
+    props: {
+      open: true,
+      path: '/a/orders.csv',
+      format: 'csv',
+      several: true,
+      rowLimit: 1_000_000,
+      ...props,
+    },
   })
   await settle()
   return wrapper
@@ -73,6 +80,24 @@ describe('RunFileDialog', () => {
     expect(document.querySelector('[data-test="run-file-sets"]')).toBeNull()
     click('[data-test="run-file-run"]')
     expect(wrapper.emitted('run')).toEqual([[false]])
+  })
+
+  it('warns when the row limit is past the room of an Excel sheet', async () => {
+    const wrapper = await mountDialog({ format: 'xlsx', path: '/a/orders.xlsx' })
+    expect(document.querySelector('[data-test="run-file-excel-limit"]')).toBeNull()
+
+    await wrapper.setProps({ rowLimit: 5_000_000 })
+    await settle()
+    const warning = document.querySelector('[data-test="run-file-excel-limit"]')
+    expect(warning?.textContent).toContain('1,048,575 rows')
+    expect(warning?.textContent).toContain('5,000,000')
+    click('[data-test="run-file-csv"]')
+    expect(wrapper.emitted('csv')).toHaveLength(1)
+  })
+
+  it('gives no Excel warning for a CSV file', async () => {
+    await mountDialog({ rowLimit: 5_000_000 })
+    expect(document.querySelector('[data-test="run-file-excel-limit"]')).toBeNull()
   })
 
   it('reports a cancel from the button and from the overlay', async () => {

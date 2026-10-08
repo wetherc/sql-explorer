@@ -15,7 +15,7 @@ use crate::pause::{
     PausingSink, SessionSlot, SharedSink,
 };
 use crate::session::Session;
-use crate::sql::{only_reads, split_batches, split_statements, Dialect};
+use crate::sql::{one_read, Dialect};
 use crate::state::AppState;
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio_util::sync::CancellationToken;
@@ -48,16 +48,6 @@ pub(super) fn pause_seconds(seconds: u64, spills: bool) -> u64 {
     } else {
         seconds
     }
-}
-
-/// True when the text runs one statement once, and that statement only
-/// reads.
-fn one_read(query: &str, dialect: Dialect) -> bool {
-    let runs: usize = split_batches(query, dialect)
-        .iter()
-        .map(|batch| split_statements(&batch.text, dialect).len() * batch.runs as usize)
-        .sum();
-    runs == 1 && only_reads(query, dialect)
 }
 
 /// How the part of a run that the window waits for ended.

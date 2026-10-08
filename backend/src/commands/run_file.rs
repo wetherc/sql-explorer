@@ -281,7 +281,8 @@ pub async fn run_to_file<R: Runtime>(
     };
 
     let grid = MessageTee::new(ChunkSink::new(on_chunk, grid_rows), log);
-    let mut sink = TeeSink::new(file, grid, grid_rows);
+    let may_stop = !each_set && crate::sql::one_read(&ran, open.dialect);
+    let mut sink = TeeSink::new(file, grid, grid_rows).stopping_when_full(may_stop);
     let outcome = match driver_for_request(&state, &request_id, &session, &token).await {
         Ok(mut guard) => {
             run_bounded(
@@ -532,17 +533,24 @@ impl RowSink for SetFiles {
 /// A sink that gives each row to the file sink, and the first rows of each
 /// set to the grid. The file sink decides which sets go to a file.
 ///
-/// The sink never answers `Stop`. A `Stop` ends the whole run, and SQLite
-/// then skips the statements after the one that stopped, so a script would
-/// run fewer statements than a normal run. The driver stops each set at the
-/// limit of the file, and the sink drops the rows past the limit of the
-/// grid. The file sink itself drops the rows past the room of an Excel
-/// sheet and the rows of the sets that go to no file.
+/// A `Stop` ends the whole run, and SQLite then skips the statements after
+/// the one that stopped. So for a script, the sink never answers `Stop`, and
+/// the script runs the same statements as a normal run. The driver stops
+/// each set at the limit of the file, and the sink drops the rows past the
+/// limit of the grid. The file sink itself drops the rows past the room of
+/// an Excel sheet and the rows of the sets that go to no file.
+///
+/// A run of one statement that only reads can stop early. When the grid has
+/// its rows and the file takes no more, for example because the Excel sheet
+/// is full, the sink answers `Stop` and the driver reads no more rows.
 struct TeeSink<F: RowSink, G: RowSink> {
     file: F,
     grid: G,
     /// The row limit of the grid.
     grid_rows: usize,
+    /// True when the sink can stop the run, because the run is one
+    /// statement that only reads and sends one set to the file.
+    may_stop: bool,
     /// The rows of the open set that went to the grid.
     shown: usize,
     /// True when the open set had more rows than the grid takes.
@@ -555,9 +563,17 @@ impl<F: RowSink, G: RowSink> TeeSink<F, G> {
             file,
             grid,
             grid_rows,
+            may_stop: false,
             shown: 0,
             cut: false,
         }
+    }
+
+    /// Lets the sink stop the run when the grid and the file take no more
+    /// rows.
+    fn stopping_when_full(mut self, may_stop: bool) -> Self {
+        self.may_stop = may_stop;
+        self
     }
 }
 
@@ -576,7 +592,10 @@ impl<F: RowSink, G: RowSink> RowSink for TeeSink<F, G> {
         } else {
             self.cut = true;
         }
-        self.file.row(row)?;
+        let file = self.file.row(row)?;
+        if self.may_stop && self.cut && file == SinkControl::Stop {
+            return Ok(SinkControl::Stop);
+        }
         Ok(SinkControl::Continue)
     }
 
@@ -632,6 +651,34 @@ mod tests {
         assert_eq!(grid.results[0].rows, vec![row(0), row(1)]);
         assert!(grid.results[0].truncated);
         assert_eq!(grid.messages.len(), 1);
+    }
+
+    #[test]
+    fn one_read_stops_when_the_grid_and_the_file_are_full() {
+        for may_stop in [true, false] {
+            let mut tee = TeeSink::new(BufferSink::new(2), BufferSink::new(100), 1)
+                .stopping_when_full(may_stop);
+            tee.begin_set(columns()).unwrap();
+            let answers: Vec<SinkControl> =
+                (0..4).map(|value| tee.row(row(value)).unwrap()).collect();
+            let full = if may_stop {
+                SinkControl::Stop
+            } else {
+                SinkControl::Continue
+            };
+            assert_eq!(
+                answers,
+                vec![SinkControl::Continue, SinkControl::Continue, full, full]
+            );
+        }
+        // While the grid takes rows, a full file does not stop the run.
+        let mut tee =
+            TeeSink::new(BufferSink::new(0), BufferSink::new(100), 2).stopping_when_full(true);
+        tee.begin_set(columns()).unwrap();
+        assert_eq!(tee.row(row(1)).unwrap(), SinkControl::Continue);
+        assert_eq!(tee.row(row(2)).unwrap(), SinkControl::Continue);
+        assert_eq!(tee.row(row(3)).unwrap(), SinkControl::Stop);
+        assert_eq!(response(tee.grid).results[0].rows.len(), 2);
     }
 
     #[test]
