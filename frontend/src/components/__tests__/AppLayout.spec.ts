@@ -152,6 +152,27 @@ describe('AppLayout', () => {
     wrapper.unmount()
   })
 
+  it('keeps a tab that the menu opens before the tabs of the last session are back', async () => {
+    let answer: (value: unknown) => void = () => {}
+    apiStub.getWorkspace.mockReturnValue(
+      new Promise((resolve) => {
+        answer = resolve
+      }),
+    )
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const handler = apiStub.onMenuCommand.mock.calls[0]?.[0] as (id: string) => void
+    handler('tab.new')
+    await settle()
+    answer({ tabs: [{ id: 'a', query: 'SELECT 1', title: 'Orders' }], activeTabId: 'a' })
+    await settle()
+
+    const tabs = useTabsStore()
+    expect(tabs.tabs.map((tab) => tab.title)).toEqual(['Orders', 'Query 1'])
+    expect(tabs.activeTab?.title).toBe('Query 1')
+    wrapper.unmount()
+  })
+
   it('runs the command that the menu of the system names', async () => {
     const wrapper = mountWithPlugins(AppLayout)
     await settle()

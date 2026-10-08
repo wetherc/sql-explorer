@@ -89,6 +89,10 @@ export const useTabsStore = defineStore('tabs', () => {
    *  file then stays as it is until the user opens a tab, so a restart
    *  can try it again. */
   let restoreFailed = false
+  /** True while restore() reads the workspace file. A write in that time
+   *  would replace the tabs of the last session before the read gets them.
+   *  The restore records a change when it ends, so a write follows. */
+  let readingWorkspace = false
 
   /** Records that the workspace record changed. */
   function changed(): void {
@@ -269,7 +273,7 @@ export const useTabsStore = defineStore('tabs', () => {
   }
 
   async function writeWorkspace(): Promise<void> {
-    if (restoreFailed && tabs.value.length === 0) {
+    if (readingWorkspace || (restoreFailed && tabs.value.length === 0)) {
       return
     }
     try {
@@ -295,9 +299,9 @@ export const useTabsStore = defineStore('tabs', () => {
    * agrees does not. A file that the application cannot read keeps the mark
    * from the workspace record, because the tab then holds the only copy.
    */
-  async function reconcileFiles(): Promise<void> {
+  async function reconcileFiles(list: QueryTab[]): Promise<void> {
     await Promise.all(
-      tabs.value.map(async (tab) => {
+      list.map(async (tab) => {
         if (tab.filePath === null) {
           return
         }
@@ -314,29 +318,22 @@ export const useTabsStore = defineStore('tabs', () => {
     changed()
   }
 
+  /**
+   * Puts the tabs of the last session back.
+   *
+   * The menu of the system, a key or a button can open a tab before the read
+   * of the workspace file ends. The restored tabs therefore go in front of the
+   * tabs that are open, and do not replace them. This covers every path that
+   * opens a tab, and no command has to wait for the read. A tab that the user
+   * opened stays the active tab.
+   */
   async function restore(): Promise<void> {
+    let workspace: Workspace
+    readingWorkspace = true
     try {
-      const workspace = parseWorkspace(await api.getWorkspace())
-      tabs.value = workspace.tabs.map((tab) => ({ ...tab }))
-      // The workspace file holds no copy of the saved text, so a tab that
-      // carries the mark stays marked until the next save.
-      cleanText.clear()
-      for (const tab of tabs.value) {
-        if (!tab.dirty) {
-          cleanText.set(tab.id, tab.query)
-        }
-      }
-      activeTabId.value = workspace.activeTabId
-      // The counter continues after the highest restored title, so a new
-      // tab does not repeat the name of a restored one.
-      counter = tabs.value.reduce((highest, tab) => {
-        const match = /^Query (\d+)$/.exec(tab.title)
-        return match ? Math.max(highest, Number(match[1])) : highest
-      }, tabs.value.length)
+      workspace = parseWorkspace(await api.getWorkspace())
     } catch (error) {
       restoreFailed = true
-      tabs.value = []
-      activeTabId.value = null
       const payload = toErrorPayload(error)
       useUiStore().reportError({
         ...payload,
@@ -345,8 +342,41 @@ export const useTabsStore = defineStore('tabs', () => {
       })
       changed()
       return
+    } finally {
+      readingWorkspace = false
     }
-    await reconcileFiles()
+    const opened = tabs.value
+    const restored: QueryTab[] = workspace.tabs.map((tab) => ({ ...tab }))
+    // The workspace file holds no copy of the saved text, so a tab that
+    // carries the mark stays marked until the next save.
+    for (const tab of restored) {
+      if (!tab.dirty) {
+        cleanText.set(tab.id, tab.query)
+      }
+    }
+    tabs.value = [...restored, ...opened]
+    activeTabId.value = activeTabId.value ?? workspace.activeTabId
+    // The counter continues after the highest restored title, so a new
+    // tab does not repeat the name of a restored one.
+    counter = restored.reduce(
+      (highest, tab) => {
+        const match = /^Query (\d+)$/.exec(tab.title)
+        return match ? Math.max(highest, Number(match[1])) : highest
+      },
+      Math.max(counter, restored.length),
+    )
+    // A tab that opened during the read took the next free number of that
+    // moment, which a restored tab can have as well.
+    const restoredTitles = new Set(restored.map((tab) => tab.title))
+    for (const tab of opened) {
+      if (/^Query \d+$/.test(tab.title) && restoredTitles.has(tab.title)) {
+        tab.title = nextTitle()
+      }
+    }
+    changed()
+    // The tabs of the store are reactive, so the compare changes them and
+    // not the plain records of the file.
+    await reconcileFiles(tabs.value.slice(0, restored.length))
   }
 
   /** Sets or clears the file that a tab writes back to. */

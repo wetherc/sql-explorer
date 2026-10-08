@@ -459,6 +459,65 @@ describe('tabs store', () => {
     expect(apiStub.saveWorkspace).toHaveBeenCalledTimes(2)
   })
 
+  it('keeps a tab that opens while the workspace file is read', async () => {
+    let answer: (value: unknown) => void = () => {}
+    apiStub.getWorkspace.mockReturnValue(
+      new Promise((resolve) => {
+        answer = resolve
+      }),
+    )
+    apiStub.readTextFile.mockResolvedValue({ contents: 'SELECT 1', encoding: 'utf8' })
+    apiStub.saveWorkspace.mockResolvedValue(undefined)
+    const tabs = useTabsStore()
+    const restoring = tabs.restore()
+
+    const opened = tabs.add({ query: 'SELECT 9' })
+    const file = tabs.add({ query: 'SELECT 8', title: 'b.sql', filePath: '/data/b.sql' })
+    expect(opened.title).toBe('Query 1')
+    // A write during the read would replace the tabs of the last session.
+    await tabs.persist()
+    expect(apiStub.saveWorkspace).not.toHaveBeenCalled()
+
+    answer({
+      tabs: [
+        { id: 'a', query: 'SELECT 1', title: 'Query 1', filePath: '/data/a.sql' },
+        { id: 'b', query: 'SELECT 2', title: 'Query 2' },
+      ],
+      activeTabId: 'a',
+    })
+    await restoring
+
+    expect(tabs.tabs.map((tab) => tab.id)).toEqual(['a', 'b', opened.id, file.id])
+    expect(tabs.activeTabId).toBe(file.id)
+    // The opened tab takes a number that no restored tab has.
+    expect(opened.title).toBe('Query 3')
+    expect(file.title).toBe('b.sql')
+    expect(tabs.add().title).toBe('Query 4')
+    // The files of the restored tabs alone are compared with the disk.
+    expect(apiStub.readTextFile).toHaveBeenCalledTimes(1)
+    expect(apiStub.readTextFile).toHaveBeenCalledWith('/data/a.sql')
+
+    await tabs.persist()
+    expect(apiStub.saveWorkspace).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps a tab that opens while a workspace file it cannot read is read', async () => {
+    let fail: (reason: unknown) => void = () => {}
+    apiStub.getWorkspace.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        fail = reject
+      }),
+    )
+    const tabs = useTabsStore()
+    const restoring = tabs.restore()
+    const opened = tabs.add()
+    fail(new Error('gone'))
+    await restoring
+
+    expect(tabs.tabs).toEqual([opened])
+    expect(tabs.activeTabId).toBe(opened.id)
+  })
+
   it('restores the file that a tab came from', async () => {
     apiStub.getWorkspace.mockResolvedValue({
       tabs: [{ id: 'a', query: 'SELECT 1', filePath: '/data/a.sql' }],
