@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b3341"/>
+      <stop offset="1" stop-color="#141820"/>
+    </linearGradient>
+    <linearGradient id="side" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2f6cc0"/>
+      <stop offset="0.35" stop-color="#6aa9ff"/>
+      <stop offset="1" stop-color="#2a5fa8"/>
+    </linearGradient>
+    <linearGradient id="top" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#cfe3ff"/>
+      <stop offset="1" stop-color="#8fbfff"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#c9d1de"/>
+    </linearGradient>
+    <linearGradient id="handle" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#d9b3f2"/>
+      <stop offset="1" stop-color="#a96fd6"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+    <!-- Cut a gap around the lens so the lens reads apart from the cylinder. -->
+    <mask id="lens-gap">
+      <rect width="1024" height="1024" fill="#fff"/>
+      <circle cx="636" cy="636" r="196" fill="#000"/>
+      <line x1="636" y1="636" x2="824" y2="824" stroke="#000" stroke-width="104" stroke-linecap="round"/>
+    </mask>
+  </defs>
+
+  <!-- Tile on the macOS icon grid: 824 px body, 100 px margin. -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)" filter="url(#shadow)"/>
+  <rect x="101.5" y="101.5" width="821" height="821" rx="183.5" fill="none" stroke="#fff" stroke-opacity="0.08" stroke-width="3"/>
+
+  <g transform="translate(-18 -18)">
+    <!-- Database cylinder of three segments. -->
+    <g mask="url(#lens-gap)">
+      <path d="M232 296 V676 A200 64 0 0 0 632 676 V296 Z" fill="url(#side)"/>
+      <path d="M232 423 A200 64 0 0 0 632 423 M232 550 A200 64 0 0 0 632 550"
+            fill="none" stroke="#1b2a40" stroke-width="16"/>
+      <ellipse cx="432" cy="296" rx="200" ry="64" fill="url(#top)"/>
+    </g>
+
+    <!-- Magnifier with result rows in the lens. -->
+    <line x1="636" y1="636" x2="814" y2="814" stroke="url(#handle)" stroke-width="72" stroke-linecap="round"/>
+    <circle cx="636" cy="636" r="124" fill="#11151b"/>
+    <rect x="566" y="582" width="140" height="22" rx="11" fill="#6aa9ff"/>
+    <rect x="566" y="625" width="104" height="22" rx="11" fill="#5cc8ff" fill-opacity="0.75"/>
+    <rect x="566" y="668" width="124" height="22" rx="11" fill="#6aa9ff" fill-opacity="0.5"/>
+    <circle cx="636" cy="636" r="146" fill="none" stroke="url(#ring)" stroke-width="44"/>
+  </g>
+</svg>
