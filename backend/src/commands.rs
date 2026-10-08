@@ -180,11 +180,17 @@ fn refuse_password_in_string(connection: &SavedConnection) -> Result<()> {
     Ok(())
 }
 
-/// The saved record of one connection, out of the file of connections.
-fn saved_record<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<Option<SavedConnection>> {
-    Ok(store::read_connections(app)?
-        .into_iter()
-        .find(|record| record.id == id))
+/// The saved record of one connection, out of the file of connections. The
+/// read runs on a blocking thread, because the first read of the file goes
+/// to the disk.
+async fn saved_record<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<Option<SavedConnection>> {
+    let id = id.to_owned();
+    with_app(app, move |app| {
+        Ok(store::read_connections(app)?
+            .into_iter()
+            .find(|record| record.id == id))
+    })
+    .await
 }
 
 /// Opens a connection that the file of connections holds.
@@ -200,7 +206,7 @@ pub async fn connect<R: Runtime>(
     state: tauri::State<'_, AppState>,
 ) -> Result<ConnectionInfo> {
     let id = connection_id;
-    let Some(record) = saved_record(&app, &id)? else {
+    let Some(record) = saved_record(&app, &id).await? else {
         return Err(Error::Configuration(format!(
             "No saved connection has the ID '{id}'."
         )));
@@ -246,7 +252,7 @@ async fn with_secrets_for_test<R: Runtime>(
     state: &AppState,
     connection: SavedConnection,
 ) -> Result<SavedConnection> {
-    let Some(saved) = saved_record(app, &connection.id)? else {
+    let Some(saved) = saved_record(app, &connection.id).await? else {
         return Ok(connection);
     };
     if saved.without_secrets() == connection.without_secrets() {
@@ -1865,7 +1871,7 @@ pub async fn quote_identifier(
 
 #[tauri::command]
 pub async fn get_connections<R: Runtime>(app: AppHandle<R>) -> Result<Vec<SavedConnection>> {
-    store::read_connections(&app)
+    off_thread(move || store::read_connections(&app)).await
 }
 
 #[tauri::command]
@@ -1880,7 +1886,8 @@ pub async fn save_connection<R: Runtime>(
     // A stored secret belongs to the server it was saved for. When the
     // record names another server and gives no new secret, the old secret
     // goes, so a changed host cannot receive the password of the old one.
-    let moved = saved_record(&app, &connection.id)?
+    let moved = saved_record(&app, &connection.id)
+        .await?
         .is_some_and(|saved| target_changed(&saved, &connection));
     let no_keys = connection.options.aws_credential_source != AwsCredentialSource::Keys;
     let writes = [
@@ -1909,7 +1916,8 @@ pub async fn save_connection<R: Runtime>(
     })
     .await?;
 
-    store::write_connection(&app, &connection.without_secrets())
+    let record = connection.without_secrets();
+    off_thread(move || store::write_connection(&app, &record)).await
 }
 
 /// The secret to store: the new one, or an empty text that takes the stored
@@ -1955,7 +1963,7 @@ pub async fn delete_connection<R: Runtime>(
     state: tauri::State<'_, AppState>,
 ) -> Result<()> {
     close_deleted_connection(&app, &state, &id).await;
-    store::delete_connection(&app, &id)
+    off_thread(move || store::delete_connection(&app, &id)).await
 }
 
 /// Closes a connection that the user deletes: its statements stop, the
@@ -4084,9 +4092,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_saved_connection_reads_back_without_its_secret_and_deletes() {
+        use tauri::Manager;
+        let app = app_with_store();
+        app.manage(state());
+        let mut record = sqlite_connection("/tmp/saved.db");
+        record.password = Some("secret".into());
+
+        save_connection(app.handle().clone(), record.clone(), app.state())
+            .await
+            .unwrap();
+        let listed = get_connections(app.handle().clone()).await.unwrap();
+        let found = listed.iter().find(|saved| saved.id == record.id).unwrap();
+        assert_eq!(found.password, None);
+
+        delete_connection(app.handle().clone(), record.id.clone(), app.state())
+            .await
+            .unwrap();
+        let listed = get_connections(app.handle().clone()).await.unwrap();
+        assert!(listed.iter().all(|saved| saved.id != record.id));
+    }
+
+    #[tokio::test]
     async fn an_identifier_that_no_record_carries_cannot_open() {
         let app = app_with_store();
-        assert!(saved_record(app.handle(), "nowhere").unwrap().is_none());
+        assert!(saved_record(app.handle(), "nowhere")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[test]

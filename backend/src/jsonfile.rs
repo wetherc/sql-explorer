@@ -1,8 +1,9 @@
 //! Small JSON files that keep one object of named values each.
 //!
 //! Each file has a lock and a copy in memory. A read takes the copy, and a
-//! change writes the whole file before the copy changes, so a failed write
-//! leaves both the file and the copy as they were.
+//! change writes the whole file before the copy changes. A failed write
+//! leaves the file as it was and drops the copy, so the next read loads the
+//! file again.
 //!
 //! A write goes to a temporary file first. The temporary file is flushed to
 //! the disk and then renamed over the old one, so a crash during the write
@@ -174,7 +175,12 @@ pub fn read(path: &Path) -> Result<Values> {
 }
 
 /// Changes the values of a file and writes the file, under the lock of that
-/// file. The copy in memory changes only after the write worked.
+/// file.
+///
+/// The change works on the copy in memory and takes it out of the slot. A
+/// write that fails leaves the slot empty, and the next read then loads the
+/// file, which the failed write did not change. The change therefore needs
+/// no second copy of the old values.
 pub fn update<T>(path: &Path, change: impl FnOnce(&mut Values) -> T) -> Result<T> {
     let cached = entry(path);
     let mut slot = lock(&cached);
@@ -182,18 +188,10 @@ pub fn update<T>(path: &Path, change: impl FnOnce(&mut Values) -> T) -> Result<T
         Some(values) => values,
         None => load(path)?,
     };
-    let before = values.clone();
     let answer = change(&mut values);
-    match store(path, &values) {
-        Ok(()) => {
-            *slot = Some(values);
-            Ok(answer)
-        }
-        Err(error) => {
-            *slot = Some(before);
-            Err(error)
-        }
-    }
+    store(path, &values)?;
+    *slot = Some(values);
+    Ok(answer)
 }
 
 /// Tests that read the list of problems take this lock, because the list is
@@ -268,6 +266,9 @@ mod tests {
         // The folder in the place of the temporary file is not a file, so
         // the clean-up leaves it.
         assert!(path.with_file_name("d.json.tmp").is_dir());
+        // The failed write dropped the copy in memory, so the read below
+        // loads the file again.
+        assert!(lock(&entry(&path)).is_none());
         assert_eq!(read(&path).unwrap()["k"], json!("old"));
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("old"));
