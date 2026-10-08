@@ -6,6 +6,8 @@ use crate::db::{ColumnInfo, Message};
 use crate::error::Result;
 use crate::kept::{KeptResults, KeptSource, UnsavedReason};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// The rows of a spill after which the sink always reports its progress.
@@ -75,6 +77,8 @@ pub struct SpillSink<'k, G: RowSink> {
     reported_at: Instant,
     /// The time between two progress reports.
     progress_interval: Duration,
+    /// The flag that the user sets to stop the spill of the run.
+    stop: Option<Arc<AtomicBool>>,
 }
 
 impl<'k, G: RowSink> SpillSink<'k, G> {
@@ -98,6 +102,28 @@ impl<'k, G: RowSink> SpillSink<'k, G> {
             reported_rows: 0,
             reported_at: Instant::now(),
             progress_interval: PROGRESS_INTERVAL,
+            stop: None,
+        }
+    }
+
+    /// Lets the flag stop the spill. The open spill and its file then go,
+    /// the read stops at the row limit of the grid, and the later sets of
+    /// the run do not spill.
+    pub fn with_stop(mut self, stop: Arc<AtomicBool>) -> Self {
+        self.stop = Some(stop);
+        self
+    }
+
+    /// Ends the spill of the run when the user stopped it.
+    fn check_stop(&mut self) {
+        let stopped = self
+            .stop
+            .as_ref()
+            .is_some_and(|stop| stop.load(Ordering::Relaxed));
+        if stopped && self.halted.is_none() {
+            self.writer = None;
+            self.halted = Some(UnsavedReason::StoppedSaving);
+            self.grid.not_kept(UnsavedReason::StoppedSaving);
         }
     }
 
@@ -165,6 +191,7 @@ impl<G: RowSink> RowSink for SpillSink<'_, G> {
     }
 
     fn row(&mut self, row: Vec<serde_json::Value>) -> Result<SinkControl> {
+        self.check_stop();
         if let Some(writer) = self.writer.as_mut() {
             let kept = self.kept;
             if let Err(end) = writer.write(&row, &mut || kept.release_oldest_spill()) {
@@ -363,6 +390,48 @@ mod tests {
         sink.halted = Some(UnsavedReason::DiskLimit);
         send_set(&mut sink, 2 * PROGRESS_CHECK_ROWS as usize, false);
         assert_eq!(sink.into_grid().progress.len(), 2);
+    }
+
+    #[test]
+    fn a_stop_ends_the_spill_and_the_read_at_the_grid_limit() {
+        let folder = tempfile::tempdir().unwrap();
+        let kept = KeptResults::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut sink = SpillSink::new(Grid::new(2), 2, folder.path().into(), u64::MAX, &kept)
+            .with_stop(stop.clone());
+        sink.begin_set(columns()).unwrap();
+        for value in 0..4 {
+            assert_eq!(sink.row(row(value)).unwrap(), SinkControl::Continue);
+        }
+        stop.store(true, Ordering::Relaxed);
+        // The first row after the stop goes past the grid limit, so the
+        // read ends there.
+        assert_eq!(sink.row(row(4)).unwrap(), SinkControl::Stop);
+        sink.end_set(false).unwrap();
+        // A later set does not spill, and it names the same reason.
+        assert_eq!(send_set(&mut sink, 3, false), SinkControl::Stop);
+        let grid = sink.into_grid();
+        assert_eq!(
+            grid.reasons,
+            vec![UnsavedReason::StoppedSaving, UnsavedReason::StoppedSaving]
+        );
+        let (response, sources) = grid.response();
+        assert!(sources.is_empty());
+        assert!(response.results[0].truncated);
+        assert_eq!(kept.disk_use().bytes(), 0);
+        assert!(wait_for_empty(folder.path()));
+    }
+
+    #[test]
+    fn a_stop_after_the_cap_keeps_the_reason_of_the_cap() {
+        let folder = tempfile::tempdir().unwrap();
+        let kept = KeptResults::default();
+        let stop = Arc::new(AtomicBool::new(true));
+        let mut sink =
+            SpillSink::new(Grid::new(2), 2, folder.path().into(), u64::MAX, &kept).with_stop(stop);
+        sink.halted = Some(UnsavedReason::DiskLimit);
+        send_set(&mut sink, 1, false);
+        assert_eq!(sink.into_grid().reasons, vec![UnsavedReason::DiskLimit]);
     }
 
     #[test]

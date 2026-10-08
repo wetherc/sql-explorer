@@ -128,6 +128,7 @@ fn main() {
             commands::export_query,
             commands::export_kept,
             commands::release_kept,
+            commands::saved::stop_saving,
             commands::supported_engines,
             commands::storage_problems,
         ])

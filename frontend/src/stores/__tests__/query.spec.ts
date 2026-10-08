@@ -465,9 +465,42 @@ describe('query store', () => {
     })
     const queries = useQueryStore()
     await queries.execute('t1', 'c1', 'SELECT 1')
-    expect(seen).toEqual([{ rows: 50_000, bytes: 4096 }, null])
+    expect(seen).toEqual([{ rows: 50_000, bytes: 4096, stopping: false }, null])
     // The end of the run clears the progress of a set that never ended.
     expect(queries.stateFor('t1').saving).toBeNull()
+  })
+
+  it('stops saving the rows of a running query once', async () => {
+    const queries = useQueryStore()
+    const ui = useUiStore()
+    const warn = vi.spyOn(ui, 'warn')
+    const steps: unknown[] = []
+    // A tab with no request has nothing to stop.
+    queries.stateFor('t1').saving = { rows: 1, bytes: 1, stopping: false }
+    await queries.stopSaving('t1')
+    expect(apiStub.stopSaving).not.toHaveBeenCalled()
+    apiStub.executeQuery.mockImplementation(async (_request, handlers) => {
+      const state = queries.stateFor('t1')
+      handlers.onBegin?.(new ResultTable([{ name: 'n', typeName: 'int' }]))
+      // Nothing is saving yet, so a stop does nothing.
+      await queries.stopSaving('t1')
+      handlers.onProgress?.({ set: 0, rows: 1, bytes: 2 })
+      await queries.stopSaving('t1')
+      await queries.stopSaving('t1')
+      // A later report keeps the mark of the stop.
+      handlers.onProgress?.({ set: 0, rows: 3, bytes: 4 })
+      steps.push({ ...state.saving })
+      // A stop that fails lets the user try again.
+      apiStub.stopSaving.mockRejectedValueOnce(new Error('gone'))
+      state.saving!.stopping = false
+      await queries.stopSaving('t1')
+      steps.push(state.saving!.stopping)
+      handlers.onEnd({ messages: [], rowsAffected: null, elapsedMs: 1, stats: null })
+    })
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    expect(apiStub.stopSaving).toHaveBeenCalledTimes(2)
+    expect(steps).toEqual([{ rows: 3, bytes: 4, stopping: true }, false])
+    expect(warn).toHaveBeenCalledWith("Couldn't stop saving the rows.", 'gone')
   })
 
   it('passes over rows for a set that it never opened', async () => {

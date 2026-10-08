@@ -36,6 +36,7 @@ pub mod blocking;
 mod paused;
 pub mod run_file;
 pub mod run_messages;
+pub mod saved;
 mod session_report;
 
 use session_report::{session_after_run, RunExit};
@@ -1268,8 +1269,12 @@ pub async fn execute_query<R: Runtime>(
                     max_rows: spill.max_rows,
                     ..options
                 };
+                // The guard keeps the stop flag of the run in the registry
+                // until the read ends.
+                let stop = state.kept.watch_spill(&request_id);
                 let mut sink =
-                    SpillSink::new(grid, options.max_rows, folder, spill.max_bytes, &state.kept);
+                    SpillSink::new(grid, options.max_rows, folder, spill.max_bytes, &state.kept)
+                        .with_stop(stop.flag());
                 let outcome = run_into_sink(
                     &state,
                     &request_id,

@@ -108,11 +108,19 @@ describe('StatusBar', () => {
     state.running = true
     await wrapper.vm.$nextTick()
     expect(wrapper.find('[data-test="status-saving"]').exists()).toBe(false)
-    state.saving = { rows: 1_200_000, bytes: 340 * 1024 ** 2 }
+    state.saving = { rows: 1_200_000, bytes: 340 * 1024 ** 2, stopping: false }
     await wrapper.vm.$nextTick()
     expect(wrapper.find('[data-test="status-saving"]').text()).toBe(
       'Saving all rows: 1.2M rows, 340 MB',
     )
+
+    // The button asks the backend to stop, and waits for its answer.
+    state.requestId = 'r1'
+    state.saving = { rows: 1_200_000, bytes: 340 * 1024 ** 2, stopping: false }
+    await wrapper.vm.$nextTick()
+    await wrapper.find('[data-test="status-stop-saving"]').trigger('click')
+    expect(apiStub.stopSaving).toHaveBeenCalledWith('r1')
+    expect(wrapper.find('[data-test="status-stop-saving"]').attributes('disabled')).toBeDefined()
   })
 
   it('counts the time while the statement runs', async () => {

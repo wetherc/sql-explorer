@@ -135,7 +135,11 @@ Runs take longer with the option on, because the statement keeps running until
 it reaches the end of its result or the export row limit. The tab shows the
 statement as running for that time, and **Stop** works as usual. Once the grid
 has its rows, the status bar shows how much of the result the app has saved so
-far, for example **Saving all rows: 1.2M rows, 340 MB**.
+far, for example **Saving all rows: 1.2M rows, 340 MB**. **Stop saving** beside
+it ends the saving and keeps the run: the app deletes the partial file, the
+read stops at the grid's row limit, and the warning above the grid says **Not
+saved: you stopped saving**. The later results of the same run aren't saved
+either.
 
 The app saves the result of a single statement on any database except Athena.
 A script with more than one statement reads only up to the grid's row limit.

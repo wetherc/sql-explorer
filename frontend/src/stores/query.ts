@@ -157,7 +157,7 @@ export interface QueryState {
   openTransactionOn: string | null
   /** The rows and the bytes that the backend saved so far of a set past the
    *  row limit of the grid, while the run saves its full results. */
-  saving: { rows: number; bytes: number } | null
+  saving: { rows: number; bytes: number; stopping: boolean } | null
 }
 
 /** Builds the state a tab starts with. */
@@ -533,7 +533,7 @@ export const useQueryStore = defineStore('query', () => {
           },
           onMessage: (message) => addMessage(state, message),
           onProgress: ({ rows, bytes }) => {
-            state.saving = { rows, bytes }
+            state.saving = { rows, bytes, stopping: state.saving?.stopping ?? false }
           },
           onEnd: (end) => {
             // The end gives the messages that did not stream before it.
@@ -905,6 +905,25 @@ export const useQueryStore = defineStore('query', () => {
     },
   )
 
+  /**
+   * Stops the saving of all rows of the running query of a tab. The run goes
+   * on and ends at the row limit of the grid.
+   */
+  async function stopSaving(tabId: string): Promise<void> {
+    const state = stateFor(tabId)
+    const saving = state.saving
+    if (!saving || saving.stopping || !state.requestId) {
+      return
+    }
+    saving.stopping = true
+    try {
+      await api.stopSaving(state.requestId)
+    } catch (error) {
+      saving.stopping = false
+      ui.warn("Couldn't stop saving the rows.", toErrorPayload(error).message)
+    }
+  }
+
   /** Removes the error marker of one tab, for example after an edit. */
   function clearErrorLocation(tabId: string): void {
     const state = peekState(tabId)
@@ -978,5 +997,6 @@ export const useQueryStore = defineStore('query', () => {
     stopSavingMessages,
     saveShownMessages,
     forgetKept,
+    stopSaving,
   }
 })

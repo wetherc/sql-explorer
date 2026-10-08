@@ -27,6 +27,15 @@
         Saving all rows: {{ shortCount(state.saving.rows) }} rows,
         {{ shortSize(state.saving.bytes) }}
       </div>
+      <v-btn
+        size="x-small"
+        variant="text"
+        :disabled="state.saving.stopping"
+        data-test="status-stop-saving"
+        @click="queries.stopSaving(tab!.id)"
+      >
+        Stop saving
+      </v-btn>
     </template>
 
     <!-- While the statement runs, the time that has passed stands in the

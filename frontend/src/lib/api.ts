@@ -470,6 +470,13 @@ export const api = {
     return invoke('export_kept', { request })
   },
 
+  /** Stops the saving of all rows of a running query. The run goes on and
+   *  stops at the row limit of the grid. Gives false when the run saves
+   *  nothing now. */
+  stopSaving(requestId: string): Promise<boolean> {
+    return invoke('stop_saving', { requestId })
+  },
+
   /** Lets the backend forget a kept result that left the interface. */
   releaseKept(keptId: string): Promise<void> {
     return invoke('release_kept', { keptId })

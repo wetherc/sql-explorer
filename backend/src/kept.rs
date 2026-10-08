@@ -19,7 +19,8 @@
 //!
 //! The registry also keeps the count of the disk use of the spill files
 //! (see `crate::spill`). A new spill that needs room past the cap releases
-//! the oldest kept spill first.
+//! the oldest kept spill first. It also keeps a stop flag for each run that
+//! spills, so the window can stop the spill and keep the run.
 
 use crate::db::sink::RowSink;
 use crate::db::ExecOptions;
@@ -28,6 +29,7 @@ use crate::spill::{DiskUse, SpillFolder};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -246,6 +248,8 @@ pub enum UnsavedReason {
     Stopped,
     /// The disk refused the file, or no folder for the files was ready.
     DiskFailed,
+    /// The user stopped the spill and kept the rows of the grid.
+    StoppedSaving,
 }
 
 /// A set that the row limit cut and that has no kept result, with the
@@ -284,11 +288,61 @@ pub struct KeptResults {
     /// application sets it after it removes the files of the processes
     /// that ended, and a run writes no spill file before that.
     spill_folder: OnceLock<SpillFolder>,
+    /// The stop flag of each run that spills, by the identifier of the
+    /// request of the run.
+    spill_stops: Mutex<HashMap<String, Arc<AtomicBool>>>,
+}
+
+/// The stop flag of the spill of one run. The drop removes the flag from
+/// the registry, so a stop after the run finds no spill.
+pub struct SpillStop<'k> {
+    kept: &'k KeptResults,
+    request_id: String,
+    flag: Arc<AtomicBool>,
+}
+
+impl SpillStop<'_> {
+    /// The flag that the spill sink of the run reads.
+    pub fn flag(&self) -> Arc<AtomicBool> {
+        self.flag.clone()
+    }
+}
+
+impl Drop for SpillStop<'_> {
+    fn drop(&mut self) {
+        self.kept.stops().remove(&self.request_id);
+    }
 }
 
 impl KeptResults {
     fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<KeptResult>>> {
         self.entries.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn stops(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<AtomicBool>>> {
+        self.spill_stops
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Records a stop flag for the spill of a run, until the guard drops.
+    pub fn watch_spill(&self, request_id: &str) -> SpillStop<'_> {
+        let flag = Arc::new(AtomicBool::new(false));
+        self.stops().insert(request_id.to_string(), flag.clone());
+        SpillStop {
+            kept: self,
+            request_id: request_id.to_string(),
+            flag,
+        }
+    }
+
+    /// Stops the spill of a run, and gives false when the run does not
+    /// spill now.
+    pub fn stop_spill(&self, request_id: &str) -> bool {
+        self.stops().get(request_id).is_some_and(|flag| {
+            flag.store(true, Ordering::Relaxed);
+            true
+        })
     }
 
     /// Adds the sources of the cut sets of one run, and gives the identifier

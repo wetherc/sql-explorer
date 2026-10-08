@@ -180,6 +180,8 @@ describe('api', () => {
     expect(invoke).toHaveBeenCalledWith('export_kept', { request: kept })
     await api.releaseKept('r1:0')
     expect(invoke).toHaveBeenCalledWith('release_kept', { keptId: 'r1:0' })
+    await api.stopSaving('r1')
+    expect(invoke).toHaveBeenCalledWith('stop_saving', { requestId: 'r1' })
 
     await api.saveBinaryFile({
       defaultName: 'a.xlsx',
