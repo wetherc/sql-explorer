@@ -1,6 +1,6 @@
 [package]
 name = "sql-explorer"
-version = "1.3.0"
+version = "1.4.0"
 description = "A cross-platform desktop client for MS SQL Server, AWS Athena, MySQL, PostgreSQL and SQLite"
 authors = ["Christopher Wetherill"]
 license = "MIT"
