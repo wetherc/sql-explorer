@@ -252,10 +252,13 @@ function onContext({ x, y, node }: { x: number; y: number; node: ExplorerNode })
   menu.open = true
 }
 
+/**
+ * Reads every connection again. The reads run side by side, because a
+ * refresh empties each tree first, and a slow server would otherwise keep
+ * the tree of every connection after it empty.
+ */
 async function refreshRoots(): Promise<void> {
-  for (const root of explorer.roots) {
-    await explorer.refresh(root, openKeys.value)
-  }
+  await Promise.all(explorer.roots.map((root) => explorer.refresh(root, openKeys.value)))
 }
 
 /**

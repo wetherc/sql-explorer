@@ -106,6 +106,28 @@ describe('DbExplorer', () => {
     expect(apiStub.listDatabases).toHaveBeenCalled()
   })
 
+  it('reads every root again without a wait for a slow root', async () => {
+    apiStub.getConnections.mockResolvedValue([
+      connectionFixture(),
+      connectionFixture({ id: 'c2', name: 'Other' }),
+    ])
+    apiStub.listActiveConnections.mockResolvedValue([infoFixture('c1'), infoFixture('c2')])
+    const wrapper = await mountExplorer()
+    const explorer = useExplorerStore()
+    explorer.addRoot('c1')
+    const second = explorer.addRoot('c2')
+    await wrapper.vm.$nextTick()
+    // The first server never answers.
+    apiStub.listDatabases.mockImplementation((connectionId: string) =>
+      connectionId === 'c1' ? new Promise(() => {}) : Promise.resolve([{ name: 'Other' }]),
+    )
+
+    await wrapper.find('[data-test="explorer-refresh"]').trigger('click')
+    await settle()
+    expect(second.loaded).toBe(true)
+    expect(second.children?.map((node) => node.label)).toEqual(['Other'])
+  })
+
   it('keeps only the nodes that match the filter', async () => {
     const wrapper = await mountExplorer()
     const explorer = useExplorerStore()
