@@ -27,6 +27,8 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod blocking;
+
 pub struct MysqlDriver {
     conn: Option<Conn>,
     /// The identifier of the session on the server. A second connection
@@ -674,6 +676,10 @@ impl DatabaseDriver for MysqlDriver {
 
     /// The server marks each OK packet with a flag while a transaction is
     /// open, so a statement that does nothing reads the state.
+    async fn blocking_sessions(&mut self) -> Result<crate::db::blocking::BlockingReport> {
+        self.blocking_report().await
+    }
+
     async fn holds_open_transaction(&mut self) -> Result<bool> {
         let conn = self.conn()?;
         conn.query_drop("DO 0").await?;

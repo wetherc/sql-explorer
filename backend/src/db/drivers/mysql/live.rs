@@ -358,3 +358,176 @@ async fn live_mysql_the_end_of_the_pause_releases_the_read() {
 async fn live_mariadb_the_end_of_the_pause_releases_the_read() {
     the_end_of_the_pause_releases_the_read("SQLX_LIVE_MARIADB").await;
 }
+
+const LOCK_PROBE: &str = "CREATE TABLE lock_probe (id int PRIMARY KEY, v int) ENGINE = InnoDB;\n\
+                          INSERT INTO lock_probe VALUES (1, 1);";
+
+/// Makes a lock in the scratch database and gives the report that a third
+/// session read while a second session waited for it.
+async fn locked_report(
+    server: &Server,
+    name: &str,
+    reporter: &mut dyn DatabaseDriver,
+    lock: &str,
+    wait: &str,
+) -> live::LockedReport {
+    let holder = server.open(DbType::Mysql, Some(name)).await;
+    let waiter = server.open(DbType::Mysql, Some(name)).await;
+    let scene = live::LockScene {
+        session_id: "SELECT CONNECTION_ID()",
+        lock,
+        wait,
+        release: "ROLLBACK",
+    };
+    live::report_during_wait(holder, waiter, reporter, &scene).await
+}
+
+/// Finds the wait of the waiting session of a scene, and checks that the
+/// blocking session of the scene causes it.
+fn wait_of(locked: &live::LockedReport) -> &crate::db::blocking::BlockingSession {
+    let report = &locked.report;
+    let wait = report
+        .sessions
+        .iter()
+        .find(|row| row.waiting_session == locked.waiter)
+        .unwrap_or_else(|| panic!("no wait in {report:?}"));
+    assert_eq!(wait.blocking_session, locked.holder, "{report:?}");
+    wait
+}
+
+/// Checks the report of a row lock, and of a metadata lock where the server
+/// records them.
+async fn the_report_names_the_session_that_blocks(variable: &str, tag: &str, metadata: bool) {
+    let Some((scratch, mut driver, server)) = Scratch::open(variable, tag).await else {
+        return;
+    };
+    let name = scratch.name.clone();
+    let body = async move {
+        live::run(driver.as_mut(), LOCK_PROBE).await;
+
+        let locked = locked_report(
+            &server,
+            &name,
+            driver.as_mut(),
+            "START TRANSACTION; UPDATE lock_probe SET v = 2 WHERE id = 1;",
+            "UPDATE lock_probe SET v = 3 WHERE id = 1",
+        )
+        .await;
+        let wait = wait_of(&locked);
+        assert!(
+            wait.object
+                .as_deref()
+                .is_some_and(|object| object.contains("lock_probe")),
+            "{wait:?}"
+        );
+        assert!(wait
+            .lock_mode
+            .as_deref()
+            .is_some_and(|mode| mode.starts_with('X')));
+        assert_eq!(wait.blocking_status.as_deref(), Some("Sleep"));
+        assert_eq!(
+            wait.waiting_statement.as_deref(),
+            Some("UPDATE lock_probe SET v = 3 WHERE id = 1")
+        );
+        assert!(wait.wait_ms.is_some());
+        assert!(locked
+            .report
+            .open_transactions
+            .iter()
+            .any(|row| row.session == locked.holder));
+
+        let locked = locked_report(
+            &server,
+            &name,
+            driver.as_mut(),
+            "START TRANSACTION; SELECT v FROM lock_probe;",
+            "ALTER TABLE lock_probe ADD COLUMN w int",
+        )
+        .await;
+        if metadata {
+            let wait = wait_of(&locked);
+            assert_eq!(wait.object, Some(format!("{name}.lock_probe")));
+            assert!(wait
+                .blocking_statement
+                .as_deref()
+                .is_some_and(|text| text.contains("SELECT v FROM lock_probe")));
+            assert!(locked.report.notes.is_empty(), "{:?}", locked.report);
+        } else {
+            assert!(
+                locked
+                    .report
+                    .notes
+                    .iter()
+                    .any(|note| note.contains("performance_schema")),
+                "{:?}",
+                locked.report
+            );
+        }
+    };
+    live::with_cleanup(body, scratch.remove()).await;
+}
+
+/// Checks that a user without the PROCESS privilege gets notes in place of
+/// an error.
+async fn a_user_without_process_gets_notes(variable: &str, tag: &str) {
+    let Some((scratch, mut driver, server)) = Scratch::open(variable, tag).await else {
+        return;
+    };
+    let name = scratch.name.clone();
+    let user = live::unique_name("noproc");
+    let password = "LiveNoProcess2026";
+    live::run(
+        driver.as_mut(),
+        &format!(
+            "CREATE USER '{user}'@'%' IDENTIFIED BY '{password}';\n\
+             GRANT ALL ON {name}.* TO '{user}'@'%';"
+        ),
+    )
+    .await;
+    let limited = Server {
+        user: user.clone(),
+        password: password.to_string(),
+        ..server.clone()
+    };
+    let body = async move {
+        let mut reporter = limited.open(DbType::Mysql, Some(&name)).await;
+        let report = reporter.blocking_sessions().await.unwrap();
+        assert!(report.sessions.is_empty());
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("aren't shown")),
+            "{report:?}"
+        );
+    };
+    let cleanup = async move {
+        live::run(driver.as_mut(), &format!("DROP USER '{user}'@'%'")).await;
+        scratch.remove().await;
+    };
+    live::with_cleanup(body, cleanup).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a live MySQL server"]
+async fn live_mysql_the_report_names_the_session_that_blocks() {
+    the_report_names_the_session_that_blocks("SQLX_LIVE_MYSQL", "my_block", true).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a live MariaDB server"]
+async fn live_mariadb_the_report_names_the_session_that_blocks() {
+    the_report_names_the_session_that_blocks("SQLX_LIVE_MARIADB", "maria_block", false).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a live MySQL server"]
+async fn live_mysql_a_user_without_process_gets_notes() {
+    a_user_without_process_gets_notes("SQLX_LIVE_MYSQL", "my_noproc").await;
+}
+
+#[tokio::test]
+#[ignore = "needs a live MariaDB server"]
+async fn live_mariadb_a_user_without_process_gets_notes() {
+    a_user_without_process_gets_notes("SQLX_LIVE_MARIADB", "maria_noproc").await;
+}
