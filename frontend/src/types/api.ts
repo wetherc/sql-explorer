@@ -624,6 +624,9 @@ export interface ErrorPayload {
   line?: number | null
   /** The column of the failure, from 1, on that line. */
   column?: number | null
+  /** A marker for an error whose message gives its own advice, such as
+   *  `kerberosUnreachable`. Null when the advice of the category applies. */
+  reason?: string | null
 }
 
 /** Builds the options that a new connection starts with. */

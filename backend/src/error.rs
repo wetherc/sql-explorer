@@ -73,6 +73,10 @@ pub struct ErrorPayload {
     pub line: Option<u32>,
     /// The column of the failure, from 1, on that line.
     pub column: Option<u32>,
+    /// A marker for an error that needs advice other than the advice of
+    /// its category. The window shows the advice of the category when this
+    /// is null.
+    pub reason: Option<&'static str>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -408,6 +412,18 @@ impl Error {
             detail,
             line: None,
             column: None,
+            reason: self.reason(),
+        }
+    }
+
+    /// Gives the marker of an error whose message has its own advice. The
+    /// message of an unreachable Kerberos server names the VPN, and the
+    /// advice of the connection category (host, port and transport) does
+    /// not apply to it.
+    fn reason(&self) -> Option<&'static str> {
+        match self {
+            Error::KerberosUnreachable(_) => Some("kerberosUnreachable"),
+            _ => None,
         }
     }
 }
@@ -780,6 +796,13 @@ mod tests {
             payload.detail.as_deref(),
             Some("The server didn't finish opening the connection within 5 seconds.")
         );
+        assert_eq!(payload.reason, Some("kerberosUnreachable"));
+        let value = serde_json::to_value(&payload).unwrap();
+        assert_eq!(value["reason"], "kerberosUnreachable");
+        assert_eq!(
+            late.at(1, 1).to_payload().reason,
+            Some("kerberosUnreachable")
+        );
 
         let gssapi = Error::KerberosUnreachable(Box::new(Error::Anyhow(
             anyhow::Error::new(std::io::Error::other("Cannot contact any KDC"))
@@ -1047,6 +1070,7 @@ mod tests {
         let value = serde_json::to_value(&payload).unwrap();
         assert_eq!(value["line"], 3);
         assert_eq!(value["column"], 7);
+        assert_eq!(value["reason"], serde_json::Value::Null);
     }
 
     #[test]

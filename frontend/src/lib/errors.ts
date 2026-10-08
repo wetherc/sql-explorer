@@ -81,6 +81,11 @@ export function errorIcon(category: ErrorCategory): string {
  * itself is enough.
  */
 export function errorAdvice(payload: ErrorPayload): string {
+  // The message names the VPN, and the host, port and transport of the
+  // connection are not the cause.
+  if (payload.reason === 'kerberosUnreachable') {
+    return ''
+  }
   switch (payload.category) {
     case ErrorCategory.NotConnected:
       return 'Reconnect from the Connections list.'

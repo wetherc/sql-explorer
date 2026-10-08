@@ -124,6 +124,17 @@ describe('errorAdvice', () => {
     // the connection details are not the cause.
     expect(advise(ErrorCategory.Invalid)).toBe('')
   })
+
+  it('gives no connection advice when the Kerberos server is out of reach', () => {
+    const payload = {
+      category: ErrorCategory.Connection,
+      message: "Couldn't reach the Kerberos server. Check your VPN or network connection.",
+      detail: null,
+      reason: 'kerberosUnreachable',
+    }
+    expect(errorAdvice(payload)).toBe('')
+    expect(errorAdvice({ ...payload, reason: null })).toContain('host')
+  })
 })
 
 describe('the authentication category', () => {
