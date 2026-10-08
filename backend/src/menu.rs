@@ -28,32 +28,39 @@ pub struct MenuCommand {
     pub id: &'static str,
     pub label: &'static str,
     /// The key of the item, in the form that the platform reads. `CmdOrCtrl`
-    /// stands for Command on macOS and for Control elsewhere.
-    pub accelerator: &'static str,
+    /// stands for Command on macOS and for Control elsewhere. An item with
+    /// no key has `None`.
+    pub accelerator: Option<&'static str>,
 }
 
 /// The items of the File menu, in the order a reader expects them: the new
-/// one, the two that open, and the one that writes.
-pub const FILE_COMMANDS: [MenuCommand; 4] = [
+/// one, the two that open, the one that writes the statement, and the one
+/// that writes the rows of a run.
+pub const FILE_COMMANDS: [MenuCommand; 5] = [
     MenuCommand {
         id: "tab.new",
         label: "New Query",
-        accelerator: "CmdOrCtrl+N",
+        accelerator: Some("CmdOrCtrl+N"),
     },
     MenuCommand {
         id: "file.open",
         label: "Open Query…",
-        accelerator: "CmdOrCtrl+O",
+        accelerator: Some("CmdOrCtrl+O"),
     },
     MenuCommand {
         id: "file.openFolder",
         label: "Open Folder…",
-        accelerator: "CmdOrCtrl+Shift+O",
+        accelerator: Some("CmdOrCtrl+Shift+O"),
     },
     MenuCommand {
         id: "query.save",
         label: "Save to File",
-        accelerator: "CmdOrCtrl+S",
+        accelerator: Some("CmdOrCtrl+S"),
+    },
+    MenuCommand {
+        id: "query.runToFile",
+        label: "Run to File…",
+        accelerator: None,
     },
 ];
 
@@ -71,7 +78,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             command.id,
             command.label,
             true,
-            Some(command.accelerator),
+            command.accelerator,
         )?);
     }
     let separator = PredefinedMenuItem::separator(app)?;
@@ -218,20 +225,30 @@ mod tests {
         let ids: Vec<&str> = FILE_COMMANDS.iter().map(|item| item.id).collect();
         assert_eq!(
             ids,
-            vec!["tab.new", "file.open", "file.openFolder", "query.save"]
+            vec![
+                "tab.new",
+                "file.open",
+                "file.openFolder",
+                "query.save",
+                "query.runToFile"
+            ]
         );
         for item in FILE_COMMANDS {
             assert!(!item.label.is_empty());
-            // Every key of the menu holds the modifier of the platform, so
+            // Every key of the menu has the modifier of the platform, so
             // one text serves macOS and the rest.
-            assert!(item.accelerator.starts_with("CmdOrCtrl+"));
+            if let Some(key) = item.accelerator {
+                assert!(key.starts_with("CmdOrCtrl+"));
+            }
         }
+        assert_eq!(FILE_COMMANDS[4].accelerator, None);
     }
 
     #[test]
     fn an_item_of_the_platform_names_no_command() {
         assert!(names_a_command("tab.new"));
         assert!(names_a_command("query.save"));
+        assert!(names_a_command("query.runToFile"));
         // The items that the platform builds carry their own identifiers.
         assert!(!names_a_command("close_window"));
         assert!(!names_a_command(""));

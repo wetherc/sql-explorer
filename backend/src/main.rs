@@ -38,6 +38,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new(secrets::build_store()))
+        .manage(commands::run_file::ChosenFiles::default())
         .setup(|app| {
             spawn_session_reaper(app.handle().clone(), SESSION_REAP_INTERVAL);
 
@@ -62,6 +63,8 @@ fn main() {
             commands::disconnect,
             commands::list_active_connections,
             commands::execute_query,
+            commands::run_file::choose_run_file,
+            commands::run_file::run_to_file,
             commands::explain_query,
             commands::query_parameters,
             commands::cancel_query,

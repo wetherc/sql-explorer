@@ -29,6 +29,8 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Runtime};
 use tokio_util::sync::CancellationToken;
 
+pub mod run_file;
+
 /// Opens the driver that belongs to the engine of the record.
 pub async fn open_driver(connection: &SavedConnection) -> Result<Box<dyn DatabaseDriver>> {
     connection.validate().map_err(Error::Configuration)?;
@@ -4782,7 +4784,7 @@ mod tests {
 
     /// Builds a state with one open SQLite connection, for the tests of the
     /// sessions of the tabs.
-    async fn state_with_sqlite(
+    pub(super) async fn state_with_sqlite(
         descriptor: SavedConnection,
     ) -> (tauri::App<tauri::test::MockRuntime>, AppState) {
         let app = tauri::test::mock_app();
@@ -4795,7 +4797,7 @@ mod tests {
         (app, state)
     }
 
-    fn temp_sqlite() -> (tempfile::TempDir, SavedConnection) {
+    pub(super) fn temp_sqlite() -> (tempfile::TempDir, SavedConnection) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tabs.db");
         (dir, sqlite_connection(path.to_str().unwrap()))
