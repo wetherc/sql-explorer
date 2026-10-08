@@ -197,6 +197,7 @@ describe('AppLayout', () => {
     const actions = {
       runStatement: vi.fn(),
       runAll: vi.fn(),
+      runToFile: vi.fn(),
       cancel: vi.fn(),
       format: vi.fn(),
       save: vi.fn(),
@@ -238,6 +239,7 @@ describe('AppLayout', () => {
       { id: 'file.open', enabled: true },
       { id: 'file.openFolder', enabled: true },
       { id: 'query.save', enabled: false },
+      { id: 'query.runToFile', enabled: false },
     ])
 
     // A tab opens, so the command that writes a file can run, and the
@@ -1033,6 +1035,7 @@ describe('AppLayout keys', () => {
     const actions = {
       runStatement: vi.fn(),
       runAll: vi.fn(),
+      runToFile: vi.fn(),
       cancel: vi.fn(),
       format: vi.fn(),
       save: vi.fn(),
@@ -1052,6 +1055,11 @@ describe('AppLayout keys', () => {
     expect(actions.cancel).toHaveBeenCalled()
     expect(actions.format).toHaveBeenCalled()
     expect(actions.save).toHaveBeenCalled()
+
+    // Run to file has no key, so the menu of the system reaches it.
+    const handler = apiStub.onMenuCommand.mock.calls[0]?.[0] as (id: string) => void
+    handler('query.runToFile')
+    expect(actions.runToFile).toHaveBeenCalled()
     wrapper.unmount()
   })
 

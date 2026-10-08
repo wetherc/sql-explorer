@@ -80,6 +80,16 @@ describe('ResultsGrid', () => {
     expect(wrapper.find('[data-test="grid-truncated"]').text()).toContain('row limit')
   })
 
+  it('names the file in place of the row limit when the rows also went to a file', () => {
+    const wrapper = mountWithPlugins(ResultsGrid, {
+      props: { result: result({ truncated: true }), savedNote: 'All 9 rows were saved to /a.csv.' },
+    })
+    expect(wrapper.find('[data-test="grid-saved-file"]').text()).toBe(
+      'All 9 rows were saved to /a.csv.',
+    )
+    expect(wrapper.find('[data-test="grid-truncated"]').exists()).toBe(false)
+  })
+
   it('takes the mark of the row limit from the pane over the table', async () => {
     const wrapper = mountWithPlugins(ResultsGrid, {
       props: { result: result(), truncated: false },

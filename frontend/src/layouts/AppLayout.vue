@@ -348,6 +348,15 @@ const commands: Command[] = [
     run: () => actionsOfActiveTab()?.runAll(),
   },
   {
+    id: 'query.runToFile',
+    title: 'Run to file…',
+    group: 'Query',
+    key: null,
+    enabled: hasActiveTab,
+    disabledReason: () => NO_TAB_REASON,
+    run: () => actionsOfActiveTab()?.runToFile(),
+  },
+  {
     id: 'query.stop',
     title: 'Stop',
     group: 'Query',
@@ -510,7 +519,13 @@ function runCommandById(id: string): void {
 }
 
 /** The commands that the menu of the operating system draws. */
-const MENU_COMMAND_IDS: string[] = ['tab.new', 'file.open', 'file.openFolder', 'query.save']
+const MENU_COMMAND_IDS: string[] = [
+  'tab.new',
+  'file.open',
+  'file.openFolder',
+  'query.save',
+  'query.runToFile',
+]
 
 /**
  * What the menu of the operating system shows for each command it holds.

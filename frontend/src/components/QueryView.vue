@@ -32,6 +32,20 @@
         </template>
       </v-tooltip>
 
+      <v-tooltip location="bottom" text="Run statement at cursor and save all rows to a file">
+        <template #activator="{ props: tip }">
+          <v-btn
+            v-bind="tip"
+            :disabled="!canRun || state.running"
+            size="small"
+            prepend-icon="mdi-file-download-outline"
+            text="Run to file…"
+            data-test="run-to-file-button"
+            @click="runToFile()"
+          />
+        </template>
+      </v-tooltip>
+
       <!-- Stop stands beside Run, so it carries a weight of its own. It is
            quieter than Run, because Run is the button of the work. -->
       <v-tooltip v-if="state.running" location="bottom" :text="`Stop (${keyLabel('mod+shift+c')})`">
@@ -317,6 +331,9 @@
                 :truncated="pane.truncated"
                 :busy="state.running && pane.pinned"
                 :exporting="exportingAll !== null"
+                :saved-note="
+                  pane.savedFile ? savedFileNote(pane.rows, pane.truncated, pane.savedFile) : null
+                "
                 @export="onExport"
                 @export-all="(format: ExportAllFormat) => onExportAll(pane, format)"
                 @copied="onCopied"
@@ -511,6 +528,7 @@ import { errorAdvice, errorIcon, fullErrorText, isCancellation, toErrorPayload }
 import { exportFileName, toCsv, toInsertStatements, toJson, toMarkdown } from '@/lib/export'
 import { bytesToBase64, toXlsx } from '@/lib/xlsx'
 import { formatClockTime, formatRowCount } from '@/lib/format'
+import { savedFileNote } from '@/lib/runFile'
 import { useConnectionsStore } from '@/stores/connections'
 import { useExplorerStore } from '@/stores/explorer'
 import { baseName, useFilesStore } from '@/stores/files'
@@ -524,6 +542,7 @@ import {
   Dialect,
   ParamType,
   PlanMode,
+  type ChosenRunFile,
   type ErrorPayload,
   type ExportSummary,
   type ParamValue,
@@ -977,6 +996,63 @@ function runAll(): void {
   void run(props.tab.query, { line: 1, column: 1 })
 }
 
+/**
+ * Runs the statement at the cursor and saves every row of its first result
+ * to a file that the user chooses. The statement runs once, and the grid
+ * shows the first rows as in a normal run. The checks come before the save
+ * dialog, so the user doesn't choose a file for a run that can't start.
+ */
+function runToFile(): void {
+  const connectionId = props.tab.connectionId
+  if (!connectionId) {
+    ui.warn('Choose a connection to run this statement.')
+    return
+  }
+  if (state.value.running) {
+    ui.warn('A statement is already running in this tab.')
+    return
+  }
+  const { text, start } = editorRun()
+  if (text.trim() === '') {
+    ui.warn('There is nothing to run.')
+    return
+  }
+  layout.setResultsCollapsed(false)
+  void withParams(text, (values) => {
+    void saveRun(connectionId, text, values, start)
+  })
+}
+
+/** Asks for the file of a run to a file, then runs the statement. */
+async function saveRun(
+  connectionId: string,
+  text: string,
+  values: Record<string, unknown> | undefined,
+  start: TextStart | undefined,
+): Promise<void> {
+  let file: ChosenRunFile | null
+  try {
+    file = await api.chooseRunFile({ defaultName: exportFileName(props.tab.title, 'csv') })
+  } catch (error) {
+    ui.reportError(error)
+    return
+  }
+  if (!file) {
+    return
+  }
+  const summary = await queries.runToFile(
+    props.tab.id,
+    connectionId,
+    text,
+    file.ticket,
+    values,
+    start,
+  )
+  if (summary) {
+    reportExport(summary)
+  }
+}
+
 /** Reads the plan of the statement under the cursor. */
 function readPlan(mode: PlanMode): void {
   const connectionId = props.tab.connectionId
@@ -1233,6 +1309,7 @@ onMounted(() => {
   registerTabActions(props.tab.id, {
     runStatement: () => runStatement(),
     runAll,
+    runToFile,
     cancel,
     format: formatStatement,
     save: () => {
@@ -1245,7 +1322,7 @@ onBeforeUnmount(() => {
   forgetTabActions(props.tab.id)
 })
 
-defineExpose({ runStatement, runAll, formatStatement, readPlan, saveToFile })
+defineExpose({ runStatement, runAll, runToFile, formatStatement, readPlan, saveToFile })
 </script>
 
 <style scoped>

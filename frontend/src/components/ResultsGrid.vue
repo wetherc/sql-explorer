@@ -106,7 +106,12 @@
       </template>
     </PanelHeader>
 
-    <div v-if="truncated" class="px-3 py-1">
+    <div v-if="savedNote" class="px-3 py-1">
+      <v-alert type="info" density="compact" variant="tonal" data-test="grid-saved-file">
+        {{ savedNote }}
+      </v-alert>
+    </div>
+    <div v-else-if="truncated" class="px-3 py-1">
       <v-alert type="warning" density="compact" variant="tonal" data-test="grid-truncated">
         Showing the first {{ rowTotal.toLocaleString() }} rows because of the row limit.
       </v-alert>
@@ -348,8 +353,11 @@ const props = withDefaults(
     busy?: boolean
     /** True while an export of all rows runs, so a second one waits. */
     exporting?: boolean
+    /** The note for a result whose rows also went to a file. It takes the
+     *  place of the row limit warning. */
+    savedNote?: string | null
   }>(),
-  { busy: false, exporting: false, rows: undefined, truncated: undefined },
+  { busy: false, exporting: false, rows: undefined, truncated: undefined, savedNote: null },
 )
 
 /** The note under each command that exports all rows. */

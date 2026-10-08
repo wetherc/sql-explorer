@@ -10,7 +10,8 @@ import { isCancellation, toErrorPayload } from '@/lib/errors'
 import { scanCost } from '@/lib/format'
 import { ResultTable, type ResultStreamHandlers } from '@/lib/results'
 import { PlanMode } from '@/types/api'
-import type { ErrorPayload, ExecOptions, Message, QueryStats } from '@/types/api'
+import type { SavedFile } from '@/lib/runFile'
+import type { ErrorPayload, ExecOptions, ExportSummary, Message, QueryStats } from '@/types/api'
 
 /** One gigabyte, as a storage unit counts it. */
 const BYTES_IN_GIGABYTE = 1024 ** 3
@@ -52,6 +53,8 @@ export interface ResultPane {
    *  text of the editor or the connection that the tab names now, which the
    *  user may have changed since the run. */
   run: PaneRun | null
+  /** The file that a run to a file wrote with the rows of this result. */
+  savedFile?: SavedFile
 }
 
 /** What the export of every row needs to run a statement again. */
@@ -277,7 +280,9 @@ export const useQueryStore = defineStore('query', () => {
    *
    * The identifier of the request lets the user stop the statement while it
    * runs. The caller gives the call that reaches the backend, so that a run
-   * and a plan share the state of the tab.
+   * and a plan share the state of the tab. A run that `savesFirstSet` sends
+   * its first set to a file, so a cut of that set at the row limit gives no
+   * warning.
    */
   async function runRequest(
     tabId: string,
@@ -291,6 +296,7 @@ export const useQueryStore = defineStore('query', () => {
     label?: string,
     queryParams?: Record<string, unknown>,
     origin?: { sent: string; start: EditorPosition },
+    savesFirstSet = false,
   ): Promise<boolean> {
     const trimmed = query.trim()
     if (trimmed === '') {
@@ -400,7 +406,7 @@ export const useQueryStore = defineStore('query', () => {
       )
       recordScan(state.stats)
       succeeded = true
-      if (run.fresh.some((table) => table.truncated)) {
+      if (run.fresh.slice(savesFirstSet ? 1 : 0).some((table) => table.truncated)) {
         ui.warn('Results stopped at the row limit. Raise the limit in Settings to see more rows.')
       }
     } catch (error) {
@@ -481,6 +487,55 @@ export const useQueryStore = defineStore('query', () => {
       queryParams,
       start ? { sent: query, start } : undefined,
     )
+  }
+
+  /**
+   * Runs a statement for one tab and writes the rows of its first result
+   * set to the file of the ticket. The grid shows the first rows, as in a
+   * normal run, and the first result records the file. Gives back what the
+   * file received, or null when the run failed.
+   */
+  async function runToFile(
+    tabId: string,
+    connectionId: string,
+    query: string,
+    ticket: string,
+    queryParams?: Record<string, unknown>,
+    start?: EditorPosition,
+  ): Promise<ExportSummary | null> {
+    const text = query.trim()
+    let summary = null as ExportSummary | null
+    await runRequest(
+      tabId,
+      connectionId,
+      text,
+      async (requestId, options, handlers) => {
+        summary = await api.runToFile(
+          {
+            connectionId,
+            requestId,
+            query: text,
+            ticket,
+            maxRows: settings.settings.exportRowLimit,
+            tabId,
+            queryParams,
+            options,
+          },
+          handlers,
+        )
+      },
+      undefined,
+      queryParams,
+      start ? { sent: query, start } : undefined,
+      true,
+    )
+    // A tab that closed during the run has no state and no result.
+    const state = peekState(tabId)
+    const first = state ? panesOfLastRun(state)[0] : undefined
+    if (summary && first) {
+      first.savedFile = { path: summary.path, rows: summary.rows, truncated: summary.truncated }
+    }
+    return summary
   }
 
   /**
@@ -628,6 +683,7 @@ export const useQueryStore = defineStore('query', () => {
     clear,
     runningOn,
     execute,
+    runToFile,
     explain,
     cancel,
     clearErrorLocation,

@@ -173,6 +173,7 @@ describe('the actions of a tab', () => {
   const actions = {
     runStatement: vi.fn(),
     runAll: vi.fn(),
+    runToFile: vi.fn(),
     cancel: vi.fn(),
     format: vi.fn(),
     save: vi.fn(),

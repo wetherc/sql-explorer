@@ -34,7 +34,8 @@ show.
 | `Ctrl`/`Cmd` + `J`               | Toggle results panel             |
 | `Ctrl`/`Cmd` + `,`               | Open settings                    |
 
-**Rename tab** and **Open guide** have no key. Run them from the palette.
+**Rename tab**, **Run to file…** and **Open guide** have no key. Run them from the
+palette.
 
 ## Object explorer
 

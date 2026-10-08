@@ -2182,3 +2182,134 @@ describe('QueryView edge paths', () => {
     expect(useUiStore().notices.some((notice) => notice.level === 'success')).toBe(false)
   })
 })
+
+describe('QueryView run to file', () => {
+  beforeEach(() => {
+    Object.values(apiStub).forEach((fn) => fn.mockReset())
+    vi.mocked(monaco.editor.create).mockReset()
+    apiStub.getConnections.mockResolvedValue([connectionFixture()])
+    apiStub.listActiveConnections.mockResolvedValue([infoFixture()])
+    apiStub.addHistoryEntry.mockResolvedValue([])
+    apiStub.queryParameters.mockResolvedValue([])
+  })
+
+  const summary = {
+    rows: 40000,
+    truncated: false,
+    path: '/tmp/all.csv',
+    sheetFull: false,
+    cutCells: 0,
+    warning: null,
+  }
+
+  /** A run to a file whose grid gets one row of a set that the limit cut. */
+  function savedRun() {
+    const stream = streamed({
+      ...response,
+      results: [{ columns: [{ name: 'n', typeName: 'int' }], rows: [[1]], truncated: true }],
+    })
+    apiStub.runToFile.mockImplementation(async (request: unknown, handlers: never) => {
+      await stream(request, handlers)
+      return summary
+    })
+  }
+
+  it('runs once to the chosen file and shows the first rows with a note', async () => {
+    apiStub.chooseRunFile.mockResolvedValue({ ticket: 'k1', path: '/tmp/all.csv' })
+    savedRun()
+    const wrapper = await mountView()
+
+    await wrapper.find('[data-test="run-to-file-button"]').trigger('click')
+    await settle()
+
+    expect(apiStub.chooseRunFile).toHaveBeenCalledWith({
+      defaultName: expect.stringMatching(/^Query_1-.*\.csv$/),
+    })
+    expect(apiStub.runToFile).toHaveBeenCalledWith(
+      expect.objectContaining({ connectionId: 'c1', query: 'SELECT 1', ticket: 'k1' }),
+      expect.anything(),
+    )
+    expect(apiStub.executeQuery).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-test="grid-saved-file"]').text()).toBe(
+      'Showing the first 1 row. All 40,000 rows were saved to /tmp/all.csv.',
+    )
+    expect(lastNotice()?.level).toBe('success')
+  })
+
+  it('runs nothing when the user closes the save dialog', async () => {
+    apiStub.chooseRunFile.mockResolvedValue(null)
+    const wrapper = await mountView()
+    await wrapper.find('[data-test="run-to-file-button"]').trigger('click')
+    await settle()
+    expect(apiStub.runToFile).not.toHaveBeenCalled()
+  })
+
+  it('reports a failure to open the save dialog', async () => {
+    apiStub.chooseRunFile.mockRejectedValue({ category: 'internal', message: 'no', detail: null })
+    const wrapper = await mountView()
+    await wrapper.find('[data-test="run-to-file-button"]').trigger('click')
+    await settle()
+    expect(apiStub.runToFile).not.toHaveBeenCalled()
+    expect(lastNotice()?.level).toBe('error')
+  })
+
+  it('reports nothing more for a run that failed', async () => {
+    apiStub.chooseRunFile.mockResolvedValue({ ticket: 'k1', path: '/tmp/all.csv' })
+    apiStub.runToFile.mockRejectedValue({ category: 'query', message: 'bad', detail: null })
+    const wrapper = await mountView()
+    await wrapper.find('[data-test="run-to-file-button"]').trigger('click')
+    await settle()
+    expect(useUiStore().notices.some((notice) => notice.level === 'success')).toBe(false)
+  })
+
+  it('asks for the values of the parameters before the file', async () => {
+    apiStub.queryParameters.mockResolvedValue(['id'])
+    const wrapper = await mountView('SELECT :id')
+    await wrapper.find('[data-test="run-to-file-button"]').trigger('click')
+    await settle()
+    expect(document.querySelector('[data-test="parameters-confirm"]')).not.toBeNull()
+    expect(apiStub.chooseRunFile).not.toHaveBeenCalled()
+  })
+
+  it('opens no dialog for a run that cannot start', async () => {
+    const wrapper = await mountView('   ')
+    const view = wrapper.vm as unknown as { runToFile: () => void }
+    view.runToFile()
+    await settle()
+    expect(lastNotice()?.message).toBe('There is nothing to run.')
+
+    const running = await mountView()
+    useQueryStore().stateFor('t1').running = true
+    ;(running.vm as unknown as { runToFile: () => void }).runToFile()
+    await settle()
+    expect(lastNotice()?.message).toBe('A statement is already running in this tab.')
+    useQueryStore().stateFor('t1').running = false
+
+    const closed = mountWithPlugins(QueryView, {
+      props: {
+        tab: {
+          id: 't2',
+          title: 'Query 2',
+          query: 'SELECT 1',
+          connectionId: null,
+          dirty: false,
+          params: [],
+          filePath: null,
+          encoding: 'utf8',
+        },
+      },
+    })
+    ;(closed.vm as unknown as { runToFile: () => void }).runToFile()
+    await settle()
+    expect(lastNotice()?.message).toBe('Choose a connection to run this statement.')
+    expect(apiStub.chooseRunFile).not.toHaveBeenCalled()
+  })
+
+  it('reaches the run to file through the actions of the tab', async () => {
+    apiStub.chooseRunFile.mockResolvedValue(null)
+    await mountView()
+    tabActions('t1')?.runToFile()
+    await settle()
+    expect(apiStub.chooseRunFile).toHaveBeenCalled()
+  })
+})

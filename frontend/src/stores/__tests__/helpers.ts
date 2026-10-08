@@ -11,6 +11,8 @@ export function makeApiStub() {
     disconnect: vi.fn(),
     listActiveConnections: vi.fn(),
     executeQuery: vi.fn(),
+    chooseRunFile: vi.fn(),
+    runToFile: vi.fn(),
     explainQuery: vi.fn(),
     queryParameters: vi.fn(),
     cancelQuery: vi.fn(),

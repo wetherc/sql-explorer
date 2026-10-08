@@ -248,6 +248,28 @@ export interface ExportRequest {
   queryParams?: Record<string, unknown>
 }
 
+/** The file that the user chose for a run to a file. The run sends the
+ *  ticket, and the backend writes only to the path of a ticket. */
+export interface ChosenRunFile {
+  ticket: string
+  path: string
+}
+
+/** What a run to a file sends. */
+export interface RunToFileRequest {
+  connectionId: string
+  requestId: string
+  query: string
+  /** The ticket that `chooseRunFile` gave. */
+  ticket: string
+  /** The row limit of the file. */
+  maxRows: number
+  tabId?: string
+  queryParams?: Record<string, unknown>
+  /** The limits of the grid. */
+  options?: ExecOptions
+}
+
 /** What one export to a file wrote. */
 export interface ExportSummary {
   rows: number

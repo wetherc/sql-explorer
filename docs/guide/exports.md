@@ -1,6 +1,6 @@
 ---
 title: Exports and row limits
-description: Export rows to CSV, JSON, Markdown, INSERT statements or Excel, or copy them, and set the grid and export row limits.
+description: Export rows to CSV, JSON, Markdown, INSERT statements or Excel, copy them, run a statement straight to a file, and set the grid and export row limits.
 order: 8
 ---
 
@@ -30,6 +30,36 @@ rows…** and has a **Stop** button. The export menu stays disabled until the
 export ends, and a tab runs one such export at a time. The rows go to a
 temporary file beside the one you chose, and the file takes its name only when
 the export finishes, so a stopped or failed export leaves no file behind.
+
+## Run to file
+
+**Run to file…** runs the statement under the cursor once and sends its rows to
+two places at the same time. Every row, up to the export row limit, goes to a
+file, and the grid shows the first rows, up to the grid's row limit, like a
+normal run. You get the preview and the whole file from one execution, so the
+server doesn't do the work twice. The button sits beside **Run all**, and the
+command palette and the **File** menu list it too.
+
+The save dialog opens before the statement runs. The file's extension sets its
+format: `.json` writes JSON, `.xlsx` writes an Excel file, and any other name
+writes CSV. If you close the dialog, nothing runs and the tab keeps its
+results.
+
+A note above the grid says how many rows it shows and where the rest went, for
+example "Showing the first 10,000 rows. All 52,310 rows were saved to
+/Users/me/orders.csv." A notice in the corner reports the file and its row
+count, as **Export all rows** does.
+
+Because the statement runs only once, **Run to file…** accepts any statement,
+including ones that change data, and it runs a whole script when you select
+one. The file gets the first result set. The grid shows every result set of the
+script, each up to the grid's row limit, and **Messages** lists what the server
+sent. A statement that returns no result set writes no file, and the run
+reports an error after the statement has run.
+
+**Stop** and the connection's time limit work as they do for a normal run. The
+rows go to a temporary file beside the one you chose, so a stopped or failed run
+leaves no file behind.
 
 ## Excel files
 
@@ -62,10 +92,10 @@ writes it, so a spreadsheet keeps the value in one cell.
 
 The settings have two separate limits by design:
 
-| Setting          | What it limits                           | Default   |
-| ---------------- | ---------------------------------------- | --------- |
-| Row limit        | The rows that the grid keeps             | 10,000    |
-| Export row limit | The rows that **Export all rows** writes | 1,000,000 |
+| Setting          | What it limits                                               | Default   |
+| ---------------- | ------------------------------------------------------------ | --------- |
+| Row limit        | The rows that the grid keeps                                 | 10,000    |
+| Export row limit | The rows that **Export all rows** and **Run to file…** write | 1,000,000 |
 
 The grid limit keeps the interface fast, because every row in the grid lives in
 the interface's memory. Each connection also has a **Row limit** in its form's

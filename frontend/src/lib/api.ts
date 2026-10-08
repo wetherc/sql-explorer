@@ -10,6 +10,7 @@ import type {
   DatabaseRef,
   EngineInfo,
   EventRef,
+  ChosenRunFile,
   ExecOptions,
   ExportRequest,
   ExportSummary,
@@ -27,6 +28,7 @@ import type {
   PlanMode,
   QueryResponse,
   RoutineRef,
+  RunToFileRequest,
   SavedConnection,
   SchemaRef,
   SchemaSnapshot,
@@ -57,6 +59,44 @@ export const LAST_FRAME_WAIT_MS = 10_000
  */
 function call<T>(command: string, request: Record<string, unknown>): Promise<T> {
   return invoke(command, { request: withNulls(request) })
+}
+
+/**
+ * Calls a command that sends the rows of a run on a channel as binary
+ * chunks, and gives back the answer of the command. The handlers receive
+ * each result set as it ends, and then the numbers of the run.
+ */
+async function streamed<T>(
+  command: string,
+  request: Record<string, unknown>,
+  handlers: ResultStreamHandlers,
+): Promise<T> {
+  const stream = new ResultStream(handlers)
+  const onChunk = new Channel<ArrayBuffer>()
+  onChunk.onmessage = (message) => stream.feed(message)
+  let failed = false
+  let error: unknown = null
+  let answer: T | undefined
+  try {
+    answer = await invoke<T>(command, { request: withNulls(request), onChunk })
+  } catch (caught) {
+    failed = true
+    error = caught
+  }
+  // The backend sends the end frame for a failed run too, with the
+  // messages of the server, so the wait is the same on both paths.
+  await stream.settle(LAST_FRAME_WAIT_MS)
+  stream.close()
+  if (failed) {
+    throw error
+  }
+  // A fault of the frames cannot travel out of the channel, so the reader
+  // keeps it and the run fails here.
+  const failure = stream.failure
+  if (failure) {
+    throw failure
+  }
+  return answer as T
 }
 
 /** Replaces `undefined` with `null` in the fields of a record. */
@@ -96,7 +136,7 @@ export const api = {
    * read runs, so neither side holds the whole answer. The handlers receive
    * each result set as it ends, and then the numbers of the run.
    */
-  async executeQuery(
+  executeQuery(
     request: {
       connectionId: string
       requestId: string
@@ -107,30 +147,23 @@ export const api = {
     },
     handlers: ResultStreamHandlers,
   ): Promise<void> {
-    const stream = new ResultStream(handlers)
-    const onChunk = new Channel<ArrayBuffer>()
-    onChunk.onmessage = (message) => stream.feed(message)
-    let failed = false
-    let error: unknown = null
-    try {
-      await invoke('execute_query', { request: withNulls(request), onChunk })
-    } catch (caught) {
-      failed = true
-      error = caught
-    }
-    // The backend sends the end frame for a failed run too, with the
-    // messages of the server, so the wait is the same on both paths.
-    await stream.settle(LAST_FRAME_WAIT_MS)
-    stream.close()
-    if (failed) {
-      throw error
-    }
-    // A fault of the frames cannot travel out of the channel, so the reader
-    // keeps it and the run fails here.
-    const failure = stream.failure
-    if (failure) {
-      throw failure
-    }
+    return streamed<void>('execute_query', request, handlers)
+  },
+
+  /** Asks the user for the file of a run to a file. The dialog offers CSV,
+   *  JSON and Excel files, and the extension sets the format. Gives back
+   *  null when the user closed the dialog. */
+  chooseRunFile(request: { defaultName: string }): Promise<ChosenRunFile | null> {
+    return call('choose_run_file', request)
+  },
+
+  /**
+   * Runs a script one time. The rows of the first result set go to the
+   * file of the ticket, and the first rows of each set reach the handlers
+   * as in `executeQuery`. Gives back what the file received.
+   */
+  runToFile(request: RunToFileRequest, handlers: ResultStreamHandlers): Promise<ExportSummary> {
+    return streamed<ExportSummary>('run_to_file', { ...request }, handlers)
   },
 
   explainQuery(request: {

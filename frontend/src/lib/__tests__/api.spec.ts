@@ -229,6 +229,28 @@ describe('api', () => {
     expect(handler).toHaveBeenCalledWith('run')
   })
 
+  it('asks for the file of a run and gives back the answer of the run', async () => {
+    await api.chooseRunFile({ defaultName: 'q.csv' })
+    expect(invoke).toHaveBeenCalledWith('choose_run_file', { request: { defaultName: 'q.csv' } })
+
+    const summary = { rows: 2, truncated: false, path: '/a/q.csv' }
+    invoke.mockImplementation((_command: string, args: { onChunk: ChannelStub }) => {
+      args.onChunk.onmessage?.(endFrame())
+      return Promise.resolve(summary)
+    })
+    const run = handlers()
+    const answer = await api.runToFile(
+      { connectionId: 'c1', requestId: 'r1', query: 'SELECT 1', ticket: 'k1', maxRows: 9 },
+      run,
+    )
+    expect(answer).toBe(summary)
+    expect(run.onEnd).toHaveBeenCalledTimes(1)
+    expect(invoke).toHaveBeenLastCalledWith('run_to_file', {
+      request: { connectionId: 'c1', requestId: 'r1', query: 'SELECT 1', ticket: 'k1', maxRows: 9 },
+      onChunk: expect.anything(),
+    })
+  })
+
   it('sends the limits of an execution when they are given', async () => {
     await api.executeQuery(
       {

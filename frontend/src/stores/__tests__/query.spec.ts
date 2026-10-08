@@ -861,3 +861,92 @@ describe('query store counting what runs on a connection', () => {
     expect(queries.runningOn('c1')).toBe(0)
   })
 })
+
+describe('a run to a file', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    Object.values(apiStub).forEach((fn) => fn.mockReset())
+    apiStub.addHistoryEntry.mockResolvedValue([])
+    apiStub.getConnections.mockResolvedValue([connectionFixture()])
+    apiStub.listActiveConnections.mockResolvedValue([])
+  })
+
+  const summary = {
+    rows: 50,
+    truncated: false,
+    path: '/a/out.csv',
+    sheetFull: false,
+    cutCells: 0,
+    warning: null,
+  }
+
+  /** A run whose first set, cut at the grid limit, also went to a file. */
+  function savedRun(results = [{ columns: [], rows: [[1]], truncated: true }]) {
+    const stream = streamed({ ...response(), results })
+    apiStub.runToFile.mockImplementation(async (request: unknown, handlers: never) => {
+      await stream(request, handlers)
+      return summary
+    })
+  }
+
+  it('sends the ticket and the export limit, and records the file on the first result', async () => {
+    savedRun()
+    const queries = useQueryStore()
+    const result = await queries.runToFile(
+      't1',
+      'c1',
+      ' SELECT 1 ',
+      'k1',
+      { a: 1 },
+      {
+        line: 1,
+        column: 1,
+      },
+    )
+    expect(result).toEqual(summary)
+    expect(apiStub.runToFile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connectionId: 'c1',
+        query: 'SELECT 1',
+        ticket: 'k1',
+        maxRows: useSettingsStore().settings.exportRowLimit,
+        tabId: 't1',
+        queryParams: { a: 1 },
+        options: { maxRows: 10000, timeoutSecs: 300 },
+      }),
+      expect.anything(),
+    )
+    const pane = queries.stateFor('t1').panes[0]!
+    expect(pane.savedFile).toEqual({ path: '/a/out.csv', rows: 50, truncated: false })
+    // The cut of the first set is the preview, so no warning comes.
+    expect(useUiStore().notices.some((notice) => notice.level === 'warning')).toBe(false)
+  })
+
+  it('warns when the row limit cut a set after the first', async () => {
+    savedRun([
+      { columns: [], rows: [[1]], truncated: true },
+      { columns: [], rows: [[2]], truncated: true },
+    ])
+    const queries = useQueryStore()
+    await queries.runToFile('t1', 'c1', 'SELECT 1; SELECT 2', 'k1')
+    expect(queries.stateFor('t1').panes[1]!.savedFile).toBeUndefined()
+    expect(useUiStore().notices.some((notice) => notice.level === 'warning')).toBe(true)
+  })
+
+  it('gives null for a run that failed', async () => {
+    apiStub.runToFile.mockRejectedValue({ category: 'query', message: 'bad', detail: null })
+    const queries = useQueryStore()
+    expect(await queries.runToFile('t1', 'c1', 'SELECT 1', 'k1')).toBeNull()
+    expect(queries.stateFor('t1').failed).toBe(true)
+  })
+
+  it('records nothing for a tab that closed during the run', async () => {
+    const queries = useQueryStore()
+    apiStub.runToFile.mockImplementation(async () => {
+      queries.clear('t1')
+      return summary
+    })
+    expect(await queries.runToFile('t1', 'c1', 'SELECT 1', 'k1')).toEqual(summary)
+    expect(queries.peekState('t1')).toBeUndefined()
+  })
+})
