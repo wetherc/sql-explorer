@@ -41,7 +41,7 @@ function stubEditor(value = 'SELECT 1;\nSELECT 2') {
   let contentHandler: Handler = () => {}
   const model = {
     uri: { toString: () => 'model:test' },
-    getValue: () => value,
+    getValue: vi.fn(() => value),
     // The whole range gives the whole text; any other range stands for
     // the selection of the user.
     getValueInRange: vi.fn((range: { whole?: boolean }) => (range.whole ? value : 'SELECTED')),
@@ -219,6 +219,32 @@ describe('SqlEditor', () => {
     stub.actions[RUN_ALL_ACTION]?.()
     expect(wrapper.emitted('run-statement')).toHaveLength(1)
     expect(wrapper.emitted('run-all')).toHaveLength(1)
+  })
+
+  it('reads the model no second time for the text it just sent', async () => {
+    const stub = stubEditor('SELECT 9')
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
+    const wrapper = mount(SqlEditor, { props: { modelValue: '' } })
+    stub.fireContentChange()
+    stub.model.getValue.mockClear()
+    await wrapper.setProps({ modelValue: 'SELECT 9' })
+    expect(stub.model.getValue).not.toHaveBeenCalled()
+    expect(stub.model.pushEditOperations).not.toHaveBeenCalled()
+  })
+
+  it('writes the sent text again after a write from outside', async () => {
+    const stub = stubEditor('typed')
+    vi.mocked(monaco.editor.create).mockReturnValue(asEditor(stub.editor))
+    const wrapper = mount(SqlEditor, { props: { modelValue: '' } })
+    stub.fireContentChange()
+    await wrapper.setProps({ modelValue: 'typed' })
+    await wrapper.setProps({ modelValue: 'from a file' })
+    expect(stub.editor.getValue()).toBe('from a file')
+
+    // The model no longer has the text that the editor sent, so the text
+    // goes in again.
+    await wrapper.setProps({ modelValue: 'typed' })
+    expect(stub.editor.getValue()).toBe('typed')
   })
 
   it('writes a new text into the editor and reports nothing back', async () => {

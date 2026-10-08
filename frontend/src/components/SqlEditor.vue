@@ -69,6 +69,11 @@ let modelUri: string | null = null
 let markerShown = false
 /** True while the editor writes into the model itself. */
 let applyingExternalValue = false
+/**
+ * The text that the editor last sent to the parent, or `null` after a write
+ * from outside. The model has this text until the next change.
+ */
+let emittedValue: string | null = null
 
 /**
  * Returns the text to run: the selection when there is one, and otherwise
@@ -173,6 +178,7 @@ function applyExternalValue(instance: monaco.editor.IStandaloneCodeEditor, value
     return
   }
   applyingExternalValue = true
+  emittedValue = null
   model.pushStackElement()
   model.pushEditOperations(
     instance.getSelections(),
@@ -230,7 +236,8 @@ onMounted(() => {
       setMarker(null)
       emit('marker-cleared')
     }
-    emit('update:modelValue', instance.getValue())
+    emittedValue = instance.getValue()
+    emit('update:modelValue', emittedValue)
   })
 
   // The shell binds the keys of the application on the window. Monaco stops
@@ -270,7 +277,14 @@ onMounted(() => {
   // and Vue stops it at unmount.
   watch(
     () => props.modelValue,
-    (value) => applyExternalValue(instance, value),
+    (value) => {
+      // The text that the editor itself just sent comes back through the
+      // parent. The model already has it, so the text of the model is not
+      // read again and compared.
+      if (value !== emittedValue) {
+        applyExternalValue(instance, value)
+      }
+    },
   )
 
   registerCompletions()
