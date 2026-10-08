@@ -281,6 +281,26 @@ const TOKEN_REUSE_MARGIN: Duration = Duration::from_secs(5 * 60);
 static AZURE_CLI_TOKENS: std::sync::Mutex<Vec<(String, String)>> =
     std::sync::Mutex::new(Vec::new());
 
+/// One lock for each key of [`AZURE_CLI_TOKENS`]. Connections that open at
+/// the same time with no valid token in the cache then wait for one run of the
+/// CLI and share its token. Without the lock, each of them starts its own
+/// `az` process.
+static AZURE_CLI_RUNS: std::sync::Mutex<Vec<(String, Arc<tokio::sync::Mutex<()>>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Gives the lock for the runs of the CLI at `key`.
+fn cli_run_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let mut runs = AZURE_CLI_RUNS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((_, lock)) = runs.iter().find(|(path, _)| path == key) {
+        return lock.clone();
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    runs.push((key.to_string(), lock.clone()));
+    lock
+}
+
 /// Builds the command that runs the Azure CLI at `path`.
 fn azure_cli_command(path: &str) -> tokio::process::Command {
     #[cfg(windows)]
@@ -396,10 +416,17 @@ fn token_has_expired(token: &str, now: SystemTime) -> bool {
 /// The token lives for about one hour. A token that stays valid for more
 /// than [`TOKEN_REUSE_MARGIN`] serves the next connection too, so the CLI
 /// runs about once an hour. A CLI that does not answer within
-/// [`AZURE_CLI_WAIT`] is stopped.
+/// [`AZURE_CLI_WAIT`] is stopped. Only one run for each CLI path is active at
+/// a time. A caller that waits for the run of another caller then takes the
+/// token of that run from the cache.
 async fn azure_cli_token(configured_path: &Option<String>) -> Result<String> {
     let configured = non_empty(configured_path);
     let key = configured.unwrap_or_default().to_string();
+    if let Some(token) = cached_cli_token(&key, SystemTime::now()) {
+        return Ok(token);
+    }
+    let lock = cli_run_lock(&key);
+    let _run = lock.lock().await;
     if let Some(token) = cached_cli_token(&key, SystemTime::now()) {
         return Ok(token);
     }
@@ -573,14 +600,14 @@ pub fn encryption_level(mode: TlsMode) -> EncryptionLevel {
 }
 
 impl MssqlDriver {
-    /// Opens a connection. One time limit covers the socket, the TLS
-    /// handshake, the login, and each redirect and retry of the login.
+    /// Opens a connection. One time limit covers the token of the Azure CLI,
+    /// the socket, the TLS handshake, the login, and each redirect and retry
+    /// of the login.
     ///
     /// The mode `Prefer` asks for full encryption and trusts any
     /// certificate. A server without TLS refuses that request, and the
     /// driver then opens one more connection without encryption.
     pub async fn connect(connection: &SavedConnection) -> Result<Box<dyn DatabaseDriver>> {
-        let config = build_config(connection).await?;
         let limit = connection.options.connect_timeout_secs.max(1);
         let auth = connection.options.mssql_auth;
         let falls_back = connection.options.tls_mode == TlsMode::Prefer
@@ -590,6 +617,7 @@ impl MssqlDriver {
                 .as_deref()
                 .is_none_or(|url| !string_keys(url).iter().any(|key| key == "encrypt"));
         let client = connect_within(limit, async move {
+            let config = build_config(connection).await?;
             match open_client(config.clone()).await {
                 Err(tiberius::error::Error::Tls(text))
                     if falls_back && text == tiberius::error::ENCRYPTION_NOT_SUPPORTED =>
@@ -601,9 +629,9 @@ impl MssqlDriver {
                 }
                 other => other,
             }
+            .map_err(|error| describe_login(error, auth))
         })
-        .await?
-        .map_err(|error| describe_login(error, auth))?;
+        .await??;
         Ok(Box::new(MssqlDriver { client }))
     }
 
@@ -4137,6 +4165,57 @@ mod tests {
         let short = token_with_claims(r#"{"exp":1}"#);
         cache_cli_token("short", &short);
         assert_eq!(cached_cli_token("short", SystemTime::now()), None);
+    }
+
+    /// Writes an executable script named `az` into a new folder for one test.
+    #[cfg(unix)]
+    fn fake_cli(folder: &str, body: &str) -> (std::path::PathBuf, Option<String>) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("{folder}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("az");
+        std::fs::write(&script, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = Some(script.to_string_lossy().into_owned());
+        (dir, path)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connections_that_open_together_share_one_run_of_the_cli() {
+        let token = token_with_claims(r#"{"exp":4000000000}"#);
+        let runs = std::env::temp_dir().join(format!("az-shared-runs-{}", std::process::id()));
+        let (dir, path) = fake_cli(
+            "az-shared",
+            &format!(
+                "echo run >> '{}'\nsleep 0.3\necho '{{\"accessToken\": \"{token}\"}}'\n",
+                runs.display()
+            ),
+        );
+
+        let (first, second) = tokio::join!(azure_cli_token(&path), azure_cli_token(&path));
+        let count = std::fs::read_to_string(&runs).unwrap().lines().count();
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_file(&runs).unwrap();
+        assert_eq!(first.unwrap(), token);
+        assert_eq!(second.unwrap(), token);
+        assert_eq!(count, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_time_limit_of_the_connection_covers_the_azure_cli() {
+        let (dir, path) = fake_cli("az-slow", "sleep 5\n");
+        let mut input = connection();
+        input.options.mssql_auth = MssqlAuth::EntraAzureCli;
+        input.options.azure_cli_path = path;
+        input.options.connect_timeout_secs = 1;
+
+        let started = Instant::now();
+        let error = MssqlDriver::connect(&input).await.err().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert_eq!(error.category(), crate::error::ErrorCategory::Connection);
     }
 
     #[cfg(unix)]

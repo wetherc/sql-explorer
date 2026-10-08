@@ -173,6 +173,12 @@ strip = true
 # server then refuses `CREATE VIEW`, `CREATE TRIGGER`, `CREATE SCHEMA` and the
 # other statements that must start a batch with a syntax error.
 #
+# The copy also runs the Kerberos steps of an Integrated Security login on the
+# blocking pool of tokio. The release calls `Cred::acquire` and `ClientCtx::step`
+# on the async worker thread. The first step gets a service ticket from the
+# KDC, so a slow KDC stops the other tasks of that thread, and the connect time
+# limit cannot stop the wait.
+#
 # `tokio-postgres` 0.7.18 drops the type OID of each column of the row
 # description in the simple protocol, so a driver cannot name the type of a
 # column of a statement without parameters. The copy under `vendor/`

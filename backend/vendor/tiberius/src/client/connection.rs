@@ -41,6 +41,36 @@ use tracing::{event, Level};
 #[cfg(all(windows, feature = "winauth"))]
 use winauth::{windows::NtlmSspiBuilder, NextBytes};
 
+/// Runs a blocking call of the GSSAPI library.
+///
+/// The first `gss_init_sec_context` asks the KDC for a service ticket. That
+/// call makes DNS lookups and network I/O, and a slow KDC keeps it waiting for
+/// the krb5 time limits. Inline on an async worker thread, the call stops all
+/// other tasks of that thread, and a time limit around the connect cannot end
+/// the wait, because the future never yields.
+///
+/// With the `tokio` feature and inside a tokio runtime, the call runs on the
+/// blocking pool of the runtime. When the future is dropped during the wait,
+/// the call continues on that pool until it ends. Without the feature, or
+/// outside a tokio runtime, the call runs inline, because the crate does not
+/// otherwise know which executor drives it.
+#[cfg(all(unix, feature = "integrated-auth-gssapi"))]
+async fn run_gssapi<T, F>(call: F) -> crate::Result<T>
+where
+    F: FnOnce() -> crate::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    #[cfg(feature = "tokio")]
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        return match runtime.spawn_blocking(call).await {
+            Ok(result) => result,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(error) => Err(crate::Error::Gssapi(error.to_string())),
+        };
+    }
+    call()
+}
+
 /// A `Connection` is an abstraction between the [`Client`] and the server. It
 /// can be used as a `Stream` to fetch [`Packet`]s from and to `send` packets
 /// splitting them to the negotiated limit automatically.
@@ -353,21 +383,27 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             }
             #[cfg(all(unix, feature = "integrated-auth-gssapi"))]
             AuthMethod::Integrated => {
-                let mut s = OidSet::new()?;
-                s.add(&GSS_MECH_KRB5)?;
+                let spn = self.context.spn().to_string();
 
-                let client_cred = Cred::acquire(None, None, CredUsage::Initiate, Some(&s))?;
+                let (mut ctx, init_token) = run_gssapi(move || {
+                    let mut s = OidSet::new()?;
+                    s.add(&GSS_MECH_KRB5)?;
 
-                let mut ctx = ClientCtx::new(
-                    Some(client_cred),
-                    Name::new(self.context.spn().as_bytes(), Some(&GSS_NT_KRB5_PRINCIPAL))?,
-                    CtxFlags::GSS_C_MUTUAL_FLAG | CtxFlags::GSS_C_SEQUENCE_FLAG,
-                    None,
-                );
+                    let client_cred = Cred::acquire(None, None, CredUsage::Initiate, Some(&s))?;
 
-                let init_token = ctx.step(None, None)?;
+                    let mut ctx = ClientCtx::new(
+                        Some(client_cred),
+                        Name::new(spn.as_bytes(), Some(&GSS_NT_KRB5_PRINCIPAL))?,
+                        CtxFlags::GSS_C_MUTUAL_FLAG | CtxFlags::GSS_C_SEQUENCE_FLAG,
+                        None,
+                    );
 
-                login_message.integrated_security(Some(Vec::from(init_token.unwrap().deref())));
+                    let init_token = ctx.step(None, None)?.map(|token| Vec::from(token.deref()));
+                    Ok((ctx, init_token))
+                })
+                .await?;
+
+                login_message.integrated_security(Some(init_token.unwrap()));
 
                 let id = self.context.next_packet_id();
                 self.send(PacketHeader::login(id), login_message).await?;
@@ -376,10 +412,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
 
                 let auth_bytes = self.flush_sspi().await?;
 
-                let next_token = match ctx.step(Some(auth_bytes.as_ref()), None)? {
+                let response = run_gssapi(move || {
+                    let response = ctx.step(Some(auth_bytes.as_ref()), None)?;
+                    Ok(response.map(|response| Vec::from(response.deref())))
+                })
+                .await?;
+
+                let next_token = match response {
                     Some(response) => {
                         event!(Level::TRACE, response_len = response.len());
-                        TokenSspi::new(Vec::from(response.deref()))
+                        TokenSspi::new(response)
                     }
                     None => {
                         event!(Level::TRACE, response_len = 0);
@@ -695,5 +737,43 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> SqlReadBytes for Connection<S> {
     /// A mutable reference to the current execution context.
     fn context_mut(&mut self) -> &mut Context {
         &mut self.context
+    }
+}
+
+#[cfg(all(test, unix, feature = "integrated-auth-gssapi"))]
+mod tests {
+    use super::run_gssapi;
+    use futures_util::FutureExt;
+
+    #[test]
+    fn outside_a_runtime_the_call_runs_inline() {
+        let caller = std::thread::current().id();
+        let ran_on = run_gssapi(|| Ok(std::thread::current().id()))
+            .now_or_never()
+            .unwrap()
+            .unwrap();
+        assert_eq!(ran_on, caller);
+    }
+
+    #[cfg(feature = "tokio")]
+    #[tokio::test]
+    async fn inside_a_tokio_runtime_the_call_leaves_the_worker_thread() {
+        let caller = std::thread::current().id();
+        let ran_on = run_gssapi(|| Ok(std::thread::current().id()))
+            .await
+            .unwrap();
+        assert_ne!(ran_on, caller);
+
+        let error = run_gssapi::<(), _>(|| Err(crate::Error::Gssapi("no ticket".into())))
+            .await
+            .unwrap_err();
+        assert_eq!(error, crate::Error::Gssapi("no ticket".into()));
+    }
+
+    #[cfg(feature = "tokio")]
+    #[tokio::test]
+    #[should_panic(expected = "the call panicked")]
+    async fn a_panic_of_the_call_reaches_the_caller() {
+        let _ = run_gssapi::<(), _>(|| panic!("the call panicked")).await;
     }
 }
