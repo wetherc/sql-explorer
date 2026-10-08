@@ -357,12 +357,17 @@ export const useQueryStore = defineStore('query', () => {
               openPane(table)
             }
           },
+          // A message goes on the end of the list in place. A loop of the
+          // server can send tens of thousands of them, and a new copy of the
+          // list for each one costs time in the square of their number.
           onMessage: (message) => {
-            state.messages = [...state.messages, message]
+            state.messages.push(message)
           },
           onEnd: (end) => {
             // The end gives the messages that did not stream before it.
-            state.messages = [...state.messages, ...end.messages]
+            for (const message of end.messages) {
+              state.messages.push(message)
+            }
             state.rowsAffected = end.rowsAffected
             state.elapsedMs = end.elapsedMs
             state.stats = end.stats

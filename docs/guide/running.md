@@ -49,6 +49,9 @@ code, line and procedure. Messages appear while the script runs, so you can
 follow a long script's `PRINT` or `RAISE NOTICE` output without waiting for the
 whole script to finish.
 
+The tab shows the last 500 messages. A line at the top counts the earlier
+messages that it leaves out, so a loop that prints for every row stays quick.
+
 When a statement fails, the results panel switches to **Messages**, where the
 error appears with the server's detail and any advice. The error also appears
 in the corner.

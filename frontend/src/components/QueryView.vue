@@ -359,27 +359,7 @@
                 </div>
               </v-alert>
 
-              <div
-                v-for="(message, index) in state.messages"
-                :key="index"
-                class="message-line"
-                :class="`message-${message.level}`"
-                data-test="query-message"
-              >
-                <v-icon v-if="message.level !== 'info'" size="x-small" class="mr-1">
-                  {{ message.level === 'error' ? 'mdi-alert-circle' : 'mdi-alert' }}
-                </v-icon>
-                {{ message.text }}
-                <span v-if="message.detail" class="message-detail">{{ message.detail }}</span>
-              </div>
-
-              <div
-                v-if="!state.error && state.messages.length === 0"
-                class="text-medium-emphasis"
-                data-test="no-messages"
-              >
-                Messages from the server appear here when you run a statement.
-              </div>
+              <QueryMessages :messages="state.messages" :has-error="state.error !== null" />
             </div>
           </div>
         </div>
@@ -519,6 +499,7 @@ import { Splitpanes, Pane } from 'splitpanes'
 import 'splitpanes/dist/splitpanes.css'
 import SqlEditor from './SqlEditor.vue'
 import ResultsGrid from './ResultsGrid.vue'
+import QueryMessages from './QueryMessages.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import { api } from '@/lib/api'
 import { appleKeyboard, chordLabel, forgetTabActions, registerTabActions } from '@/lib/commands'
@@ -1330,29 +1311,9 @@ defineExpose({ runStatement, runAll, formatStatement, readPlan, saveToFile })
   flex-direction: column;
 }
 
-.message-warning {
-  color: rgb(var(--v-theme-warning));
-}
-
-.message-error {
-  color: rgb(var(--v-theme-error));
-}
-
-/* The detail of one message stays in the colour of its level, so a smaller
-   size is what separates it from the text of the message. */
-.message-detail {
-  margin-left: 0.5rem;
-  font-size: var(--app-text-sm);
-}
-
 .messages {
   overflow: auto;
   font-size: var(--app-text-md);
-}
-
-.message-line {
-  padding: 2px 0;
-  font-family: var(--app-font-mono);
 }
 
 .error-detail {

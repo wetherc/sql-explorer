@@ -452,6 +452,28 @@ describe('query store', () => {
     expect(queries.stateFor('t1').messages.map((m) => m.text)).toEqual(['first', 'last'])
   })
 
+  it('adds each message to the same list, and copies no list', async () => {
+    let list: unknown = null
+    apiStub.executeQuery.mockImplementation(
+      async (_request: unknown, handlers: import('@/lib/results').ResultStreamHandlers) => {
+        list = useQueryStore().stateFor('t1').messages
+        for (let index = 0; index < 3; index += 1) {
+          handlers.onMessage?.({ level: 'info', text: `line ${index}`, detail: null })
+        }
+        handlers.onEnd({
+          messages: [{ level: 'info', text: 'last', detail: null }],
+          rowsAffected: null,
+          elapsedMs: 1,
+          stats: null,
+        })
+      },
+    )
+    const queries = useQueryStore()
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    expect(queries.stateFor('t1').messages).toBe(list)
+    expect(queries.stateFor('t1').messages).toHaveLength(4)
+  })
+
   it('reports a length of time even when the start is no longer known', async () => {
     apiStub.executeQuery.mockImplementation(async () => {
       useQueryStore().stateFor('t1').startedAt = null
