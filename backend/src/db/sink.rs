@@ -75,7 +75,6 @@ pub trait RowSink: Send {
     /// Waits until a paused read can go on, after `row` answered `Pause`.
     /// The answer tells the driver to go on or to stop. The default stops,
     /// because a sink that never pauses has nothing to wait for.
-    #[cfg_attr(not(test), allow(dead_code))]
     async fn resume(&mut self) -> Result<SinkControl> {
         Ok(SinkControl::Stop)
     }
@@ -83,7 +82,6 @@ pub trait RowSink: Send {
 
 /// Gives one row to the sink, and waits for [`RowSink::resume`] when the
 /// sink pauses the read. The answer is `Continue` or `Stop`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub async fn feed(sink: &mut dyn RowSink, row: Vec<JsonValue>) -> Result<SinkControl> {
     match sink.row(row)? {
         SinkControl::Pause => sink.resume().await,

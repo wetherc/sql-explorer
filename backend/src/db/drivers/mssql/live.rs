@@ -7,6 +7,7 @@ use crate::db::{
     ObjectType, RelationType, SchemaSnapshot, Table, Trigger, TriggerEvent, TriggerTiming,
 };
 use crate::storage::DbType;
+use std::time::Duration;
 
 const FIXTURE: &str = include_str!("../../../../live/fixtures/mssql.sql");
 
@@ -414,4 +415,53 @@ async fn live_the_column_types_name_the_digits_of_their_fraction_and_a_short_flo
         );
     };
     live::with_cleanup(body, scratch.remove()).await;
+}
+
+/// A read of 200,000 numbers in order. The rows fill the buffers of the
+/// connection, so the server must wait while the read is paused.
+const NUMBERS: &str = "SELECT TOP (200000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n \
+     FROM sys.all_objects a CROSS JOIN sys.all_objects b ORDER BY n";
+
+#[tokio::test]
+#[ignore = "needs a live MS SQL Server"]
+async fn live_a_paused_read_exports_every_row_once() {
+    let Some(server) = live::server("SQLX_LIVE_MSSQL") else {
+        return;
+    };
+    let driver = server.open(DbType::Mssql, Some("master")).await;
+    let paused = live::pause_read(driver, NUMBERS, 100, Duration::from_secs(60)).await;
+    assert_eq!(live::numbers(&paused.grid), (1..=100).collect::<Vec<_>>());
+    // The server waits while the read is paused.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let rows = live::export_paused(&paused.read, usize::MAX).await.unwrap();
+    assert_eq!(live::numbers(&rows), (1..=200_000).collect::<Vec<_>>());
+    let response = live::run_after(&paused.session, "SELECT 1 AS one").await;
+    assert_eq!(live::cell(&response, 0, 0).as_deref(), Some("1"));
+}
+
+#[tokio::test]
+#[ignore = "needs a live MS SQL Server"]
+async fn live_a_released_read_frees_its_session() {
+    let Some(server) = live::server("SQLX_LIVE_MSSQL") else {
+        return;
+    };
+    let driver = server.open(DbType::Mssql, Some("master")).await;
+    let paused = live::pause_read(driver, NUMBERS, 100, Duration::from_secs(60)).await;
+    let session = paused.session.clone();
+    drop(paused);
+    let response = live::run_after(&session, "SELECT 2 AS two").await;
+    assert_eq!(live::cell(&response, 0, 0).as_deref(), Some("2"));
+}
+
+#[tokio::test]
+#[ignore = "needs a live MS SQL Server"]
+async fn live_the_end_of_the_pause_releases_the_read() {
+    let Some(server) = live::server("SQLX_LIVE_MSSQL") else {
+        return;
+    };
+    let driver = server.open(DbType::Mssql, Some("master")).await;
+    let paused = live::pause_read(driver, NUMBERS, 100, Duration::from_secs(1)).await;
+    let response = live::run_after(&paused.session, "SELECT 3 AS three").await;
+    assert_eq!(live::cell(&response, 0, 0).as_deref(), Some("3"));
+    assert!(live::export_paused(&paused.read, usize::MAX).await.is_err());
 }

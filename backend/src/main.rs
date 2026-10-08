@@ -11,7 +11,6 @@ mod history;
 mod jsonfile;
 mod kept;
 mod menu;
-#[cfg_attr(not(test), allow(dead_code))]
 mod pause;
 mod script;
 mod secrets;

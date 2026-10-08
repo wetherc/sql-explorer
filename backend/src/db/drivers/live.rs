@@ -14,12 +14,16 @@
 
 use crate::commands::{create_text_of, open_driver};
 use crate::db::drivers::DatabaseDriver;
+use crate::db::sink::{BufferSink, PausePoint, RunSummary};
 use crate::db::{CreateQuery, ExecOptions, QueryResponse};
+use crate::pause::{spawn_read, PausedRead, PausingSink, SessionSlot, SharedSink};
+use crate::session::{Session, SessionPool};
 use crate::storage::{ConnectionOptions, DbType, SavedConnection, TlsMode};
 use futures_util::FutureExt;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
-use std::sync::Once;
+use std::sync::{Arc, Once};
+use std::time::Duration;
 
 /// The address and the login of one test server.
 #[derive(Debug, Clone)]
@@ -191,6 +195,85 @@ pub async fn create_text(driver: &mut dyn DatabaseDriver, query: Option<CreateQu
     let response = run(driver, &query.sql).await;
     create_text_of(&response, &query)
         .unwrap_or_else(|| panic!("the statement gave no CREATE text: {}", query.sql))
+}
+
+/// A read of a live server that paused at the row limit, with the rows of
+/// its grid and its session.
+pub struct Paused {
+    pub read: PausedRead<BufferSink>,
+    pub grid: Vec<Vec<serde_json::Value>>,
+    pub session: Arc<Session>,
+}
+
+/// Runs the query in a task that pauses its read after `rows` rows, as a run
+/// of a tab does, and waits for the pause.
+pub async fn pause_read(
+    driver: Box<dyn DatabaseDriver>,
+    query: &str,
+    rows: usize,
+    limit: Duration,
+) -> Paused {
+    let sessions = Arc::new(SessionPool::new(4));
+    let session = sessions.insert("tab", Session::new(driver)).await;
+    let slot = SessionSlot {
+        sessions,
+        key: "tab".to_string(),
+        session: session.clone(),
+    };
+    let guard = session.driver.clone().lock_owned().await;
+    let point = PausePoint { rows, limit };
+    let (sink, control) = PausingSink::new(BufferSink::new(rows), point);
+    let options = ExecOptions {
+        max_rows: usize::MAX,
+        ..ExecOptions::default()
+    };
+    let task = spawn_read(guard, query.to_string(), None, options, sink, slot.clone());
+    let Ok(handoff) = control.handoff.await else {
+        let (result, _) = task.await.expect("the read ends");
+        panic!("the read ended without a pause: {:?}", result.err());
+    };
+    let mut response = handoff.grid.into_response(RunSummary::default());
+    Paused {
+        read: PausedRead::new(control.commands, task, slot, limit),
+        grid: response.results.remove(0).rows,
+        session,
+    }
+}
+
+/// Continues a paused read into a buffer, and gives the rows of the first
+/// set of the export.
+pub async fn export_paused(
+    read: &PausedRead<BufferSink>,
+    max_rows: usize,
+) -> crate::error::Result<Vec<Vec<serde_json::Value>>> {
+    let shared = Arc::new(std::sync::Mutex::new(BufferSink::new(usize::MAX)));
+    read.continue_into(Box::new(SharedSink(shared.clone())), max_rows)
+        .await?;
+    let buffer = Arc::into_inner(shared)
+        .expect("the read dropped the sink")
+        .into_inner()
+        .unwrap();
+    let mut response = buffer.into_response(RunSummary::default());
+    Ok(response.results.remove(0).rows)
+}
+
+/// The first column of each row as a number.
+pub fn numbers(rows: &[Vec<serde_json::Value>]) -> Vec<i64> {
+    rows.iter()
+        .map(|row| match &row[0] {
+            serde_json::Value::Number(number) => number.as_i64().unwrap(),
+            serde_json::Value::String(text) => text.parse().unwrap(),
+            other => panic!("not a number: {other}"),
+        })
+        .collect()
+}
+
+/// Waits for the driver of the session, and runs a query on it. A session
+/// that a paused read used must be fit for the next run.
+pub async fn run_after(session: &Session, sql: &str) -> QueryResponse {
+    let mut driver = session.driver.lock().await;
+    assert!(!session.is_broken(), "the session closed");
+    run(driver.as_mut(), sql).await
 }
 
 #[cfg(test)]

@@ -13,7 +13,7 @@ use crate::db::drivers::{
     size_text, trigger_event, CancelHandle, DatabaseDriver, NumberValue, KEEPALIVE_IDLE,
     KEEPALIVE_INTERVAL,
 };
-use crate::db::sink::{BufferSink, RowSink, RunSummary, SinkControl};
+use crate::db::sink::{feed, BufferSink, RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
     IndexInfo, Message, MessageLevel, ObjectType, PlanMode, QueryParams, QueryResponse,
@@ -756,7 +756,7 @@ impl MssqlDriver {
                         }
                         continue;
                     }
-                    if sink.row(row_to_json(&row))? == SinkControl::Stop {
+                    if feed(sink, row_to_json(&row)).await? == SinkControl::Stop {
                         truncated = true;
                         stopped = true;
                         if may_end_early && !asked_to_end {
@@ -1032,6 +1032,12 @@ impl DatabaseDriver for MssqlDriver {
 
     fn dialect(&self) -> Dialect {
         Dialect::MsSql
+    }
+
+    /// The server waits with no time limit while the client does not read
+    /// the rows, so a read can pause.
+    fn pauses_reads(&self) -> bool {
+        true
     }
 
     fn create_query(
