@@ -146,6 +146,77 @@ async fn live_a_read_past_the_row_limit_stops_the_server_and_the_next_statement_
 
 #[tokio::test]
 #[ignore = "needs a live PostgreSQL server"]
+async fn live_a_read_inside_a_block_stops_at_the_row_limit_and_keeps_the_block() {
+    let Some((scratch, mut driver, _)) = Scratch::open("pg_block").await else {
+        return;
+    };
+    let body = async move {
+        let driver = driver.as_mut();
+        let options = ExecOptions {
+            max_rows: 100,
+            ..ExecOptions::default()
+        };
+        live::run(driver, "CREATE TABLE app.kept (n int)").await;
+        live::run(driver, "BEGIN; INSERT INTO app.kept VALUES (1)").await;
+
+        // The cursor stops the read at the limit, so a set of two hundred
+        // million rows ends at once.
+        let started = Instant::now();
+        let read = live::run_with(
+            driver,
+            "SELECT g FROM generate_series(1, 200000000) AS g",
+            &options,
+        )
+        .await;
+        assert_eq!(read.results[0].rows.len(), 100);
+        assert!(read.results[0].truncated);
+        assert!(started.elapsed() < Duration::from_secs(20));
+
+        // The path with parameters reads through a portal in the block.
+        let params = vec![crate::db::QueryParam {
+            value: serde_json::json!(1),
+        }];
+        let started = Instant::now();
+        let read = driver
+            .execute_query(
+                "SELECT g FROM generate_series(1, 200000000) AS g WHERE $1::int = 1",
+                Some(&params),
+                &options,
+            )
+            .await
+            .unwrap();
+        assert_eq!(read.results[0].rows.len(), 100);
+        assert!(read.results[0].truncated);
+        assert!(started.elapsed() < Duration::from_secs(20));
+
+        // A read with a row lock runs whole and gives the same rows.
+        let read = live::run_with(driver, "SELECT n FROM app.kept FOR UPDATE", &options).await;
+        assert_eq!(live::cell(&read, 0, 0).as_deref(), Some("1"));
+
+        // The block stays open, and its work stays until the user ends it.
+        assert!(driver.holds_open_transaction().await.unwrap());
+        live::run(driver, "COMMIT").await;
+        let count = live::run(driver, "SELECT count(*) FROM app.kept").await;
+        assert_eq!(live::cell(&count, 0, 0).as_deref(), Some("1"));
+
+        // An error of a read inside a block aborts the block, as the
+        // statement alone would, and the user ends it.
+        live::run(driver, "BEGIN").await;
+        let error = driver
+            .execute_query("SELECT 1,\n  nope FROM app.kept", None, &options)
+            .await
+            .unwrap_err();
+        let payload = error.to_payload();
+        assert_eq!((payload.line, payload.column), (Some(2), Some(3)));
+        assert!(driver.holds_open_transaction().await.unwrap());
+        live::run(driver, "ROLLBACK").await;
+        assert!(!driver.holds_open_transaction().await.unwrap());
+    };
+    live::with_cleanup(body, scratch.remove()).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL server"]
 async fn live_the_cancel_handle_stops_a_statement_that_runs() {
     let Some((scratch, mut driver, _)) = Scratch::open("pg_cancel").await else {
         return;

@@ -189,6 +189,12 @@ strip = true
 # it closes its own side, so the next statement of the driver can start
 # before the signal and receive it. The cancel of the copy waits until the
 # server closes the socket, as libpq does.
+#
+# The release binds a portal only through a `Transaction`, which sends its
+# own `BEGIN` and `COMMIT`. Inside a transaction block of the user, a `COMMIT`
+# of the driver would end that block. The copy adds `Client::bind_raw` and
+# `Client::query_portal_raw`, which bind and execute a portal in the block
+# that is open.
 [patch.crates-io]
 tiberius = { path = "vendor/tiberius" }
 tokio-postgres = { path = "vendor/tokio-postgres" }

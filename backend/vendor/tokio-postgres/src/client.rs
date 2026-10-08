@@ -13,8 +13,9 @@ use crate::tls::MakeTlsConnect;
 use crate::tls::TlsConnect;
 use crate::types::{Oid, ToSql, Type};
 use crate::{
-    CancelToken, CopyInSink, Error, Row, SimpleQueryMessage, Statement, ToStatement, Transaction,
-    TransactionBuilder, copy_in, copy_out, prepare, query, simple_query, slice_iter,
+    CancelToken, CopyInSink, Error, Portal, Row, SimpleQueryMessage, Statement, ToStatement,
+    Transaction, TransactionBuilder, bind, copy_in, copy_out, prepare, query, simple_query,
+    slice_iter,
 };
 use bytes::{Buf, BytesMut};
 use fallible_iterator::FallibleIterator;
@@ -699,6 +700,31 @@ impl Client {
     pub async fn check_connection(&self) -> Result<(), Error> {
         // sync is a very quick message to test the connection health.
         query::sync(self.inner()).await
+    }
+
+    /// Like `Transaction::bind_raw`, for a session that is inside a transaction block that the
+    /// caller opened with its own SQL, such as a `BEGIN` of the user.
+    ///
+    /// A portal lasts until the end of its transaction. Outside a transaction block each
+    /// exchange is a transaction of its own, so the portal is gone before the first execute.
+    pub async fn bind_raw<P, T, I>(&self, statement: &T, params: I) -> Result<Portal, Error>
+    where
+        T: ?Sized + ToStatement,
+        P: BorrowToSql,
+        I: IntoIterator<Item = P>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let statement = statement.__convert().into_statement(&self.inner).await?;
+        bind::bind(&self.inner, statement, params).await
+    }
+
+    /// Like `Transaction::query_portal_raw`, for a portal of [`Client::bind_raw`].
+    pub async fn query_portal_raw(
+        &self,
+        portal: &Portal,
+        max_rows: i32,
+    ) -> Result<RowStream, Error> {
+        query::query_portal(&self.inner, portal, max_rows).await
     }
 
     /// Begins a new database transaction.

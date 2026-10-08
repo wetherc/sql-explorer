@@ -297,6 +297,22 @@ fn holds_a_write_word(statement: &str, dialect: Dialect) -> bool {
     found
 }
 
+/// True when a statement has a clause that locks the rows it reads:
+/// `FOR UPDATE`, `FOR NO KEY UPDATE`, `FOR SHARE` or `FOR KEY SHARE`. The
+/// check reads the words outside quoted regions and comments, so a lock in a
+/// subquery also counts.
+pub fn locks_rows(statement: &str, dialect: Dialect) -> bool {
+    let mut found = false;
+    let mut previous = String::new();
+    scan_words(statement, dialect, |word| {
+        if previous == "for" && matches!(word, "update" | "share" | "no" | "key") {
+            found = true;
+        }
+        previous = word.to_string();
+    });
+    found
+}
+
 /// Walks a statement and gives each bare word to `visit`, in small letters.
 /// A word inside a quoted region or a comment is text and is not given.
 fn scan_words(sql: &str, dialect: Dialect, visit: impl FnMut(&str)) {
@@ -2185,6 +2201,28 @@ mod tests {
             "WITH d AS (UPDATE t SET a = 1 RETURNING *) SELECT * FROM d FOR UPDATE",
             Dialect::Postgres
         ));
+    }
+
+    #[test]
+    fn each_row_lock_clause_is_found() {
+        for statement in [
+            "SELECT * FROM t FOR UPDATE",
+            "SELECT * FROM t for no key update of t",
+            "SELECT * FROM t FOR SHARE SKIP LOCKED",
+            "SELECT * FROM t FOR KEY SHARE",
+            "SELECT * FROM (SELECT * FROM t FOR UPDATE) AS s",
+        ] {
+            assert!(locks_rows(statement, Dialect::Postgres), "{statement}");
+        }
+        for statement in [
+            "SELECT * FROM t",
+            "SELECT 'for update' FROM t",
+            "SELECT \"for\", \"update\" FROM t",
+            "SELECT 1 -- for update\n",
+            "SELECT substring(a FOR 2) FROM t",
+        ] {
+            assert!(!locks_rows(statement, Dialect::Postgres), "{statement}");
+        }
     }
 
     #[test]

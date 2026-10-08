@@ -20,7 +20,7 @@ use crate::db::{
     Trigger, TriggerEvent, TriggerTiming,
 };
 use crate::error::{offset_place, place_of_byte_offset, place_of_char_position, Error, Result};
-use crate::sql::{leading_keyword, only_reads, split_statements, Dialect};
+use crate::sql::{leading_keyword, locks_rows, only_reads, split_statements, Dialect};
 use crate::storage::{SavedConnection, TlsMode};
 use async_trait::async_trait;
 use bytes::BytesMut;
@@ -1022,23 +1022,26 @@ fn oid_type_name(oid: u32) -> String {
 }
 
 impl PostgresDriver {
-    /// True when a cancel at the row limit loses no work. The statement must
-    /// only read, and the session must be outside a transaction block.
+    /// Runs the probe [`OUTSIDE_A_BLOCK`] for a statement that only reads.
+    /// Gives `Some(true)` outside a transaction block and `Some(false)`
+    /// inside a block. A statement that writes gives `None` and sends no
+    /// probe. A probe that fails, for example in a block that is already
+    /// aborted, also gives `None`.
     ///
-    /// A cancel rolls back the statement it ends, so a cancelled
+    /// A cancel at the row limit loses no work only for a read outside a
+    /// block. A cancel rolls back the statement it ends, so a cancelled
     /// `INSERT ... RETURNING` writes no row. Inside a block the cancel also
     /// aborts the block, and the `COMMIT` that follows then rolls back every
-    /// change of the block. A probe that fails, for example in a block that
-    /// is already aborted, gives false.
-    async fn may_cancel(&self, statement: &str) -> bool {
+    /// change of the block.
+    async fn probe_read(&self, statement: &str) -> Option<bool> {
         if !reads_rows(statement) {
-            return false;
+            return None;
         }
-        self.outside_a_block().await.unwrap_or(false)
+        self.outside_a_block().await.ok()
     }
 
     /// Prepares a statement that only reads, and gives the type names of
-    /// its columns together with the answer of [`Self::may_cancel`]. The
+    /// its columns together with the answer of [`Self::probe_read`]. The
     /// prepare and the probe [`OUTSIDE_A_BLOCK`] go to the server in one
     /// round trip. The prepare also finds the names of types that a user
     /// or an extension defines. A statement that writes is not prepared
@@ -1048,20 +1051,20 @@ impl PostgresDriver {
     /// simple query then reports the error. Inside a block the failed
     /// prepare aborts the block, and the simple query would only report
     /// the aborted block. The error of the prepare then ends the run.
-    async fn describe_read(&self, statement: &str) -> Result<(Option<Vec<String>>, bool)> {
+    async fn describe_read(&self, statement: &str) -> Result<(Option<Vec<String>>, Option<bool>)> {
         if !reads_rows(statement) {
-            return Ok((None, false));
+            return Ok((None, None));
         }
         let (prepared, outside) =
             futures_util::future::join(self.client.prepare(statement), self.outside_a_block())
                 .await;
-        let alone = outside.unwrap_or(false);
+        let outside = outside.ok();
         match prepared {
-            Ok(prepared) => Ok((Some(type_names(&prepared)), alone)),
-            Err(error) if !alone => Err(error.into()),
+            Ok(prepared) => Ok((Some(type_names(&prepared)), outside)),
+            Err(error) if outside != Some(true) => Err(error.into()),
             Err(error) => {
                 log::debug!("The statement could not be prepared: {error}");
-                Ok((None, alone))
+                Ok((None, outside))
             }
         }
     }
@@ -1202,12 +1205,11 @@ impl PostgresDriver {
     /// message at a time. Gives the count of the changed rows, and true when
     /// the sink took no more rows.
     ///
-    /// A statement that [`reads_through_a_cursor`] accepts goes through
-    /// [`Self::stream_cursor`] when the session is outside a transaction
-    /// block.
+    /// A statement goes through [`Self::stream_cursor`] when [`read_path`]
+    /// gives a path other than the walk.
     ///
-    /// Any other statement that [`Self::may_cancel`] accepts, such as `SHOW`,
-    /// ends at the row limit:
+    /// Any other read outside a transaction block, such as `SHOW`, ends at
+    /// the row limit:
     /// the driver sends a cancel request on a second socket, and the server
     /// stops the statement instead of sending the rest of the result. The
     /// server answers the cancel with the error 57014, which the walk reads
@@ -1233,15 +1235,18 @@ impl PostgresDriver {
         sink: &mut dyn RowSink,
     ) -> std::result::Result<(Option<u64>, bool), Failure> {
         refuse_client_copy(statement)?;
-        let (prepared, alone) = match prepared {
-            Some(names) => (Some(names), self.may_cancel(statement).await),
+        let (prepared, outside) = match prepared {
+            Some(names) => (Some(names), self.probe_read(statement).await),
             None => self.describe_read(statement).await?,
         };
-        if alone && reads_through_a_cursor(statement) {
+        let path = read_path(statement, outside);
+        if path != ReadPath::Walk {
+            let in_block = path == ReadPath::UserBlock;
             return self
-                .stream_cursor(statement, prepared.as_deref(), options, sink)
+                .stream_cursor(statement, prepared.as_deref(), in_block, options, sink)
                 .await;
         }
+        let alone = outside == Some(true);
         let stop = self.stop.clone();
         let messages = self.client.simple_query_raw(statement).await?;
         pin_mut!(messages);
@@ -1351,10 +1356,19 @@ impl PostgresDriver {
     /// and a stop of the user, rolls the transaction back. A read that ends
     /// before the end of its transaction, for example on a time limit, rolls
     /// it back through [`OpenBlock`].
+    ///
+    /// With `in_block`, the session is inside a transaction block of the
+    /// user, and the cursor lives in that block. The first text then has no
+    /// `BEGIN`, and a `CLOSE` of the cursor ends the read in place of the
+    /// `COMMIT`. An error aborts the block of the user, as the statement
+    /// alone would abort it, and the driver sends no `ROLLBACK`. The user
+    /// ends the block. A read that ends before the `CLOSE`, for example on a
+    /// time limit, leaves the cursor open until the block ends.
     async fn stream_cursor(
         &self,
         statement: &str,
         prepared: Option<&[String]>,
+        in_block: bool,
         options: &ExecOptions,
         sink: &mut dyn RowSink,
     ) -> std::result::Result<(Option<u64>, bool), Failure> {
@@ -1362,11 +1376,12 @@ impl PostgresDriver {
             "sql_explorer_read_{}",
             NEXT_CURSOR.fetch_add(1, Ordering::Relaxed)
         );
-        let prefix = format!("BEGIN; DECLARE {name} NO SCROLL CURSOR FOR ");
+        let begin = if in_block { "" } else { "BEGIN; " };
+        let prefix = format!("{begin}DECLARE {name} NO SCROLL CURSOR FOR ");
         let need = options.max_rows.saturating_add(1);
         let mut block = OpenBlock {
             client: &self.client,
-            done: false,
+            done: in_block,
         };
         let mut read = CursorRead::default();
         let mut asked = need.min(FETCH_BATCH);
@@ -1380,7 +1395,9 @@ impl PostgresDriver {
             {
                 Ok(fetched) => fetched,
                 Err(error) => {
-                    block.roll_back().await;
+                    if !in_block {
+                        block.roll_back().await;
+                    }
                     return Err(Failure { error, shift });
                 }
             };
@@ -1393,7 +1410,12 @@ impl PostgresDriver {
             shift = 0;
         }
         block.done = true;
-        if let Err(error) = self.client.simple_query("COMMIT").await {
+        let end = if in_block {
+            format!("CLOSE {name}")
+        } else {
+            "COMMIT".to_string()
+        };
+        if let Err(error) = self.client.simple_query(&end).await {
             return Err(error.into());
         }
         if read.open {
@@ -1405,10 +1427,9 @@ impl PostgresDriver {
 
     /// Runs one statement with bound parameters through the extended
     /// protocol and streams the rows into the sink one at a time. A
-    /// statement that [`reads_through_a_cursor`] accepts goes through
-    /// [`Self::stream_portal`] when the session is outside a transaction
-    /// block. When [`Self::may_cancel`] accepts any other statement, a stop
-    /// cancels it on the
+    /// statement goes through [`Self::stream_portal`] when [`read_path`]
+    /// gives a path other than the walk. For any other read outside a
+    /// transaction block, a stop cancels the statement on the
     /// server and drops the stream, so the rows past the stop do not cross
     /// the wire. Any other statement runs to its end, and the walk drops the
     /// rows past the stop. A fault that the server reports after those rows
@@ -1431,7 +1452,8 @@ impl PostgresDriver {
     ) -> Result<Option<u64>> {
         refuse_client_copy(query)?;
         let bound = bind_params(params)?;
-        let may_cancel = self.may_cancel(query).await;
+        let outside = self.probe_read(query).await;
+        let may_cancel = outside == Some(true);
 
         let statement = self
             .client
@@ -1458,9 +1480,13 @@ impl PostgresDriver {
             settings.money_digits = self.money_digits().await;
         }
 
-        if may_cancel && reads_through_a_cursor(query) {
+        let path = read_path(query, outside);
+        if path != ReadPath::Walk {
+            let in_block = path == ReadPath::UserBlock;
             return self
-                .stream_portal(&statement, &bound, columns, &settings, options, sink)
+                .stream_portal(
+                    &statement, &bound, columns, &settings, in_block, options, sink,
+                )
                 .await;
         }
 
@@ -1514,55 +1540,136 @@ impl PostgresDriver {
     /// statement, where a cancel would roll it back. An error, and a read
     /// that ends early, drop the transaction, and the drop sends a
     /// `ROLLBACK`.
+    ///
+    /// With `in_block`, the session is inside a transaction block of the
+    /// user, and the portal lives in that block. The driver then sends no
+    /// `BEGIN` and no `COMMIT`. An error aborts the block of the user, as the
+    /// statement alone would abort it, and the user ends the block.
+    #[allow(clippy::too_many_arguments)]
     async fn stream_portal(
         &mut self,
         statement: &tokio_postgres::Statement,
         bound: &[TextParam],
         columns: Vec<ColumnInfo>,
         settings: &Settings,
+        in_block: bool,
         options: &ExecOptions,
         sink: &mut dyn RowSink,
     ) -> Result<Option<u64>> {
         let returns_rows = !columns.is_empty();
-        let need = options.max_rows.saturating_add(1);
-        let transaction = self.client.transaction().await?;
-        let portal = transaction.bind_raw(statement, bound).await?;
-        if returns_rows {
-            sink.begin_set(columns)?;
-        }
-        let mut fetched = 0usize;
-        let mut count = 0usize;
-        let mut truncated = false;
-        loop {
-            let asked = (need - fetched).min(FETCH_BATCH);
-            let rows = transaction.query_portal_raw(&portal, asked as i32).await?;
-            pin_mut!(rows);
-            while let Some(row) = rows.try_next().await? {
-                fetched += 1;
-                if truncated {
-                    continue;
-                }
-                if count >= options.max_rows
-                    || sink.row(row_to_json(&row, settings))? == SinkControl::Stop
-                {
-                    truncated = true;
-                    continue;
-                }
-                count += 1;
-            }
-            // A portal that gave all its rows ends with its tag. A portal
-            // that stops at the count of the execute gives no tag.
-            if rows.rows_affected().is_some() || fetched >= need || truncated {
-                break;
-            }
-        }
-        drop(portal);
-        transaction.commit().await?;
+        let (count, truncated) = if in_block {
+            read_portal(
+                &self.client,
+                statement,
+                bound,
+                columns,
+                settings,
+                options,
+                sink,
+            )
+            .await?
+        } else {
+            let transaction = self.client.transaction().await?;
+            let read = read_portal(
+                transaction.client(),
+                statement,
+                bound,
+                columns,
+                settings,
+                options,
+                sink,
+            )
+            .await?;
+            transaction.commit().await?;
+            read
+        };
         if returns_rows {
             sink.message(rows_returned_message(count, truncated));
             sink.end_set(truncated)?;
         }
         Ok(None)
+    }
+}
+
+/// Binds a portal on the client and feeds its rows to the sink, for
+/// [`PostgresDriver::stream_portal`]. Each execute of the portal asks for a
+/// count of rows, and the reads stop one row past the row limit. The caller
+/// opens the transaction of the portal. Gives the count of the rows that the
+/// sink took, and true when the set has more rows than the sink took.
+async fn read_portal(
+    client: &Client,
+    statement: &tokio_postgres::Statement,
+    bound: &[TextParam],
+    columns: Vec<ColumnInfo>,
+    settings: &Settings,
+    options: &ExecOptions,
+    sink: &mut dyn RowSink,
+) -> Result<(usize, bool)> {
+    let need = options.max_rows.saturating_add(1);
+    let portal = client.bind_raw(statement, bound).await?;
+    if !columns.is_empty() {
+        sink.begin_set(columns)?;
+    }
+    let mut fetched = 0usize;
+    let mut count = 0usize;
+    let mut truncated = false;
+    loop {
+        let asked = (need - fetched).min(FETCH_BATCH);
+        let rows = client.query_portal_raw(&portal, asked as i32).await?;
+        pin_mut!(rows);
+        while let Some(row) = rows.try_next().await? {
+            fetched += 1;
+            if truncated {
+                continue;
+            }
+            if count >= options.max_rows
+                || sink.row(row_to_json(&row, settings))? == SinkControl::Stop
+            {
+                truncated = true;
+                continue;
+            }
+            count += 1;
+        }
+        // A portal that gave all its rows ends with its tag. A portal
+        // that stops at the count of the execute gives no tag.
+        if rows.rows_affected().is_some() || fetched >= need || truncated {
+            break;
+        }
+    }
+    drop(portal);
+    Ok((count, truncated))
+}
+
+/// The way that [`PostgresDriver::stream_statement`] and
+/// [`PostgresDriver::stream_with_params`] read the rows of a statement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadPath {
+    /// The statement runs to its end, and the walk drops the rows past the
+    /// row limit. A read outside a transaction block can still end at the
+    /// limit through a cancel.
+    Walk,
+    /// A cursor or a portal reads the rows in a transaction of the driver.
+    OwnTransaction,
+    /// A cursor or a portal reads the rows in the open transaction block of
+    /// the user.
+    UserBlock,
+}
+
+/// Picks the read path of a statement from the answer of
+/// [`PostgresDriver::probe_read`].
+///
+/// Inside a block of the user, a cursor locks only the rows that its fetches
+/// read, and the block keeps its locks until it ends. A statement with
+/// `FOR UPDATE` or a similar clause would then lock fewer rows than the user
+/// asked for, so it keeps the walk. A probe that failed also keeps the walk.
+fn read_path(statement: &str, outside: Option<bool>) -> ReadPath {
+    if !reads_through_a_cursor(statement) {
+        return ReadPath::Walk;
+    }
+    match outside {
+        Some(true) => ReadPath::OwnTransaction,
+        Some(false) if !locks_rows(statement, Dialect::Postgres) => ReadPath::UserBlock,
+        _ => ReadPath::Walk,
     }
 }
 
@@ -3633,7 +3740,25 @@ mod tests {
     /// the cursor back.
     async fn read_cursor_open(server: &mut DuplexStream, statement: &str, asked: usize) -> String {
         let text = read_query(server).await;
-        let rest = text.strip_prefix("BEGIN; DECLARE ").unwrap();
+        let rest = text.strip_prefix("BEGIN; ").unwrap();
+        cursor_name(rest, statement, asked)
+    }
+
+    /// Reads the text that opens a read through a cursor inside a block of
+    /// the user, which has no `BEGIN`, and gives the name of the cursor.
+    async fn read_block_cursor_open(
+        server: &mut DuplexStream,
+        statement: &str,
+        asked: usize,
+    ) -> String {
+        let text = read_query(server).await;
+        cursor_name(&text, statement, asked)
+    }
+
+    /// Checks a text that declares a cursor and fetches from it, and gives
+    /// the name of the cursor.
+    fn cursor_name(text: &str, statement: &str, asked: usize) -> String {
+        let rest = text.strip_prefix("DECLARE ").unwrap();
         let (name, rest) = rest.split_once(" NO SCROLL CURSOR FOR ").unwrap();
         assert_eq!(rest, format!("{statement}\n; FETCH {asked} FROM {name}"));
         name.to_string()
@@ -4013,14 +4138,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_set_that_passes_the_row_limit_inside_a_block_is_cut_and_the_walk_goes_on() {
+    async fn a_locking_read_inside_a_block_keeps_the_walk_past_the_row_limit() {
         let (client_end, mut server) = tokio::io::duplex(64 * 1024);
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
             answer_described(&mut server, &[("id", 23)], false).await;
+            // A cursor would lock only the rows it fetches, so the statement
+            // runs whole and locks every row.
             answer_query(
                 &mut server,
-                "SELECT id FROM t",
+                "SELECT id FROM t FOR UPDATE",
                 &[
                     row_description(&["id"]),
                     data_row(&[Some("1")]),
@@ -4046,7 +4173,11 @@ mod tests {
         };
         let mut sink = BufferSink::new(options.max_rows);
         let rows_affected = driver
-            .stream_simple("SELECT id FROM t; DELETE FROM t", &options, &mut sink)
+            .stream_simple(
+                "SELECT id FROM t FOR UPDATE; DELETE FROM t",
+                &options,
+                &mut sink,
+            )
             .await
             .unwrap();
         let response = sink.into_response(RunSummary::default());
@@ -4114,16 +4245,20 @@ mod tests {
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
             answer_described(&mut server, &[("id", 23)], false).await;
+            let name = read_block_cursor_open(&mut server, "SELECT id FROM t", 101).await;
+            let mut answer = command_complete("DECLARE CURSOR");
+            answer.extend_from_slice(&fetched(
+                &["id"],
+                &[&[Some("1")], &[Some("2")], &[Some("3")]],
+            ));
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
+            // The stop of the sink ends the read inside the block of the
+            // user, so the cursor closes and no COMMIT follows.
             answer_query(
                 &mut server,
-                "SELECT id FROM t",
-                &[
-                    row_description(&["id"]),
-                    data_row(&[Some("1")]),
-                    data_row(&[Some("2")]),
-                    data_row(&[Some("3")]),
-                    command_complete("SELECT 3"),
-                ],
+                &format!("CLOSE {name}"),
+                &[command_complete("CLOSE CURSOR")],
             )
             .await;
             let mut rest = Vec::new();
@@ -4451,6 +4586,75 @@ mod tests {
         // A column without a value shows as NULL.
         assert_eq!(response.results[0].rows[1][0], JsonValue::Null);
 
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_parameterised_read_inside_a_block_stops_its_portal_past_the_row_limit() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            answer_probe(&mut server, false).await;
+            read_until_sync(&mut server).await;
+            server
+                .write_all(&prepared(Some(&[("id", 23)])))
+                .await
+                .unwrap();
+            // The portal binds in the block of the user, with no BEGIN.
+            read_until_sync(&mut server).await;
+            let mut bound = message(b'2', &[]);
+            bound.extend_from_slice(&ready_for_query());
+            server.write_all(&bound).await.unwrap();
+            // The execute asks for one row past the limit and ends at that
+            // count, so the portal gives no tag.
+            read_until_sync(&mut server).await;
+            let mut answer = Vec::new();
+            for value in [1i32, 2] {
+                answer.extend_from_slice(&binary_data_row(&[Some(&value.to_be_bytes())]));
+            }
+            answer.extend_from_slice(&message(b's', &[]));
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
+            read_until_sync(&mut server).await;
+            let mut closed = message(b'3', &[]);
+            closed.extend_from_slice(&ready_for_query());
+            server.write_all(&closed).await.unwrap();
+            // No COMMIT follows. The next message closes the prepared
+            // statement.
+            let mut message_type = [0u8; 1];
+            server.read_exact(&mut message_type).await.unwrap();
+            assert_eq!(message_type[0], b'C');
+            let mut length = [0u8; 4];
+            server.read_exact(&mut length).await.unwrap();
+            let mut body = vec![0u8; i32::from_be_bytes(length) as usize - 4];
+            server.read_exact(&mut body).await.unwrap();
+            assert_eq!(body[0], b'S');
+            read_until_sync(&mut server).await;
+            let mut closed = message(b'3', &[]);
+            closed.extend_from_slice(&ready_for_query());
+            server.write_all(&closed).await.unwrap();
+        });
+
+        let mut driver = driver_on(client_end).await;
+        let options = ExecOptions {
+            max_rows: 1,
+            ..no_limit()
+        };
+        let mut sink = BufferSink::new(options.max_rows);
+        driver
+            .stream_with_params(
+                "SELECT id FROM t WHERE $1 = 1",
+                &one_param(),
+                &options,
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        let response = sink.into_response(RunSummary::default());
+
+        assert_eq!(response.results[0].rows.len(), 1);
+        assert!(response.results[0].truncated);
+        drop(driver);
         task.await.unwrap();
     }
 
@@ -4905,21 +5109,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_script_of_one_statement_inside_a_block_walks_past_the_row_limit() {
+    async fn a_read_inside_a_block_fetches_through_a_cursor_in_that_block() {
         let (client_end, mut server) = tokio::io::duplex(64 * 1024);
         let (stop, calls, _signal) = test_stop(true);
         let task = tokio::spawn(async move {
             accept_startup(&mut server).await;
             answer_described(&mut server, &[("id", 23)], false).await;
-            read_query(&mut server).await;
-
-            let mut answer = row_description(&["id"]);
-            for value in ["1", "2", "3"] {
-                answer.extend_from_slice(&data_row(&[Some(value)]));
-            }
-            answer.extend_from_slice(&command_complete("SELECT 3"));
+            // The fetch asks for one row past the limit, and the server
+            // computes no other row.
+            let name = read_block_cursor_open(&mut server, "SELECT id FROM t", 2).await;
+            let mut answer = command_complete("DECLARE CURSOR");
+            answer.extend_from_slice(&fetched(&["id"], &[&[Some("1")], &[Some("2")]]));
             answer.extend_from_slice(&ready_for_query());
             server.write_all(&answer).await.unwrap();
+            answer_query(
+                &mut server,
+                &format!("CLOSE {name}"),
+                &[command_complete("CLOSE CURSOR")],
+            )
+            .await;
+            answer_query(
+                &mut server,
+                "DELETE FROM t",
+                &[command_complete("DELETE 5")],
+            )
+            .await;
         });
 
         let mut driver = driver_with_stop(client_end, stop).await;
@@ -4929,8 +5143,8 @@ mod tests {
             one_statement: false,
         };
         let mut sink = BufferSink::new(options.max_rows);
-        driver
-            .stream_simple("SELECT id FROM t", &options, &mut sink)
+        let rows_affected = driver
+            .stream_simple("SELECT id FROM t; DELETE FROM t", &options, &mut sink)
             .await
             .unwrap();
         let response = sink.into_response(RunSummary::default());
@@ -4939,8 +5153,62 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(response.results[0].rows.len(), 1);
         assert!(response.results[0].truncated);
+        assert_eq!(rows_affected, Some(5));
 
         task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_error_of_a_read_inside_a_block_leaves_the_block_to_the_user() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            answer_described(&mut server, &[("id", 23)], false).await;
+            read_block_cursor_open(&mut server, "SELECT 1 / 0", 101).await;
+            let mut answer = error_response("22012", "division by zero");
+            answer.extend_from_slice(&ready_for_query());
+            server.write_all(&answer).await.unwrap();
+            // The driver sends no ROLLBACK and no later statement.
+            let mut rest = Vec::new();
+            server.read_to_end(&mut rest).await.unwrap();
+            assert!(!rest.contains(&b'Q'));
+        });
+
+        let mut driver = driver_on(client_end).await;
+        let mut sink = BufferSink::new(100);
+        let error = driver
+            .stream_simple("SELECT 1 / 0; SELECT 2", &no_limit(), &mut sink)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::Located { ref inner, .. }
+                if matches!(**inner, Error::Postgres(ref error)
+                    if error.code() == Some(&SqlState::DIVISION_BY_ZERO))
+        ));
+        drop(driver);
+        task.await.unwrap();
+    }
+
+    #[test]
+    fn the_read_path_follows_the_statement_and_the_probe() {
+        let read = "SELECT * FROM t";
+        assert_eq!(read_path(read, Some(true)), ReadPath::OwnTransaction);
+        assert_eq!(read_path(read, Some(false)), ReadPath::UserBlock);
+        assert_eq!(read_path(read, None), ReadPath::Walk);
+
+        // A lock in a block of the user keeps the walk. Outside a block the
+        // driver's own COMMIT ends every lock at once.
+        let locks = "SELECT * FROM t FOR SHARE";
+        assert_eq!(read_path(locks, Some(false)), ReadPath::Walk);
+        assert_eq!(read_path(locks, Some(true)), ReadPath::OwnTransaction);
+
+        for statement in ["SHOW ALL", "DELETE FROM t RETURNING *"] {
+            for outside in [Some(true), Some(false), None] {
+                assert_eq!(read_path(statement, outside), ReadPath::Walk);
+            }
+        }
     }
 
     #[tokio::test]
