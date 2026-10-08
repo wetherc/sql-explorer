@@ -5,8 +5,8 @@
 //! The metadata comes from the data catalog through the same service.
 
 use crate::db::drivers::{
-    add_snapshot_column, connect_within, f64_to_json, finish_set, prefixed_plan, relation_type,
-    rows_affected_message, CancelHandle, DatabaseDriver,
+    add_snapshot_column, add_snapshot_relation, connect_within, f64_to_json, finish_set,
+    prefixed_plan, relation_type, rows_affected_message, CancelHandle, DatabaseDriver,
 };
 use crate::db::sink::{BufferSink, RowSink, RunSummary, SinkControl};
 use crate::db::{
@@ -25,7 +25,7 @@ use aws_sdk_athena::operation::get_query_results::GetQueryResultsOutput;
 use aws_sdk_athena::operation::start_query_execution::builders::StartQueryExecutionFluentBuilder;
 use aws_sdk_athena::types::{
     QueryExecutionContext, QueryExecutionState, QueryExecutionStatistics, ResultConfiguration,
-    ResultReuseByAgeConfiguration, ResultReuseConfiguration, Row as AthenaRow,
+    ResultReuseByAgeConfiguration, ResultReuseConfiguration, Row as AthenaRow, TableMetadata,
 };
 use aws_sdk_athena::Client;
 use serde_json::Value as JsonValue;
@@ -465,6 +465,55 @@ fn snapshot_of(database: &str, set: Option<ResultSet>, max_columns: usize) -> Sc
     snapshot
 }
 
+/// The type of a relation from the table type of the metadata API. Glue
+/// names a view `VIRTUAL_VIEW`, and every other value is a table.
+fn metadata_relation_type(table_type: Option<&str>) -> RelationType {
+    match table_type {
+        Some(table_type) if table_type.eq_ignore_ascii_case("VIRTUAL_VIEW") => RelationType::View,
+        _ => RelationType::Table,
+    }
+}
+
+/// The name and the type of one column of the metadata API. The type is
+/// `unknown` when the catalog gives none.
+fn metadata_column(column: &aws_sdk_athena::types::Column) -> SnapshotColumn {
+    SnapshotColumn {
+        name: column.name().to_string(),
+        data_type: column.r#type().unwrap_or("unknown").to_string(),
+    }
+}
+
+/// Adds one relation of the metadata API to a snapshot, with its columns and
+/// then its partition keys. A relation without a column still goes in, so
+/// that the editor offers its name. Gives false when the bound on the
+/// columns stopped the read, as [`add_snapshot_column`] does.
+fn add_metadata_relation(
+    snapshot: &mut SchemaSnapshot,
+    max_columns: usize,
+    table: &TableMetadata,
+) -> bool {
+    let name = table.name().to_string();
+    let relation_type = metadata_relation_type(table.table_type());
+    let mut columns = table
+        .columns()
+        .iter()
+        .chain(table.partition_keys())
+        .peekable();
+    if columns.peek().is_none() {
+        return add_snapshot_relation(snapshot, max_columns, None, name, relation_type);
+    }
+    columns.all(|column| {
+        add_snapshot_column(
+            snapshot,
+            max_columns,
+            None,
+            name.clone(),
+            relation_type,
+            metadata_column(column),
+        )
+    })
+}
+
 /// Builds the statement that reads the CREATE text of one object. Athena
 /// answers `SHOW CREATE` with one line of the text in each row of the first
 /// column.
@@ -587,6 +636,13 @@ fn read_statistics(statistics: Option<&QueryExecutionStatistics>) -> QueryStats 
 
 /// The name Athena gives to the catalog that AWS Glue provides.
 pub const DEFAULT_CATALOG: &str = "AwsDataCatalog";
+
+/// The time limit in seconds of one read of the catalog.
+const CATALOG_TIMEOUT_SECS: u64 = 60;
+
+/// The number of relations on one page of `ListTableMetadata`. The service
+/// accepts no more than 50.
+const METADATA_PAGE_SIZE: i32 = 50;
 
 /// The words that name a pair of keys with a part missing.
 const INCOMPLETE_KEYS_MESSAGE: &str =
@@ -927,7 +983,7 @@ impl AthenaDriver {
         // so it costs nothing and needs no row limit of its own.
         let options = ExecOptions {
             max_rows: 100_000,
-            timeout_secs: 60,
+            timeout_secs: CATALOG_TIMEOUT_SECS,
             one_statement: false,
         };
         let (set, _) = self.run_statement(statement, &options).await?;
@@ -1011,6 +1067,66 @@ impl AthenaDriver {
                 })
             })
             .collect())
+    }
+
+    /// Reads the snapshot of one database page by page from
+    /// `ListTableMetadata`. Each page gives the columns, the partition keys
+    /// and the table type of its relations. The read stops at the bound on
+    /// the columns, and the pages after it are not requested.
+    async fn snapshot_from_metadata(
+        &self,
+        database: &str,
+        max_columns: usize,
+    ) -> Result<SchemaSnapshot> {
+        let mut snapshot = SchemaSnapshot {
+            database: database.to_string(),
+            complete: true,
+            ..SchemaSnapshot::default()
+        };
+        let mut token: Option<String> = None;
+        loop {
+            let page = self
+                .client
+                .list_table_metadata()
+                .catalog_name(&self.catalog)
+                .database_name(database)
+                .max_results(METADATA_PAGE_SIZE)
+                .set_next_token(token)
+                .send()
+                .await
+                .map_err(|error| describe(error, "Couldn't read the schema"))?;
+            for table in page.table_metadata_list() {
+                if !add_metadata_relation(&mut snapshot, max_columns, table) {
+                    return Ok(snapshot);
+                }
+            }
+            token = page.next_token().map(str::to_string);
+            if token.is_none() {
+                return Ok(snapshot);
+            }
+        }
+    }
+
+    /// Reads every relation and every column of one database with one
+    /// statement against `information_schema`. Such a statement scans no data
+    /// in storage, so the snapshot costs nothing.
+    async fn snapshot_from_statement(
+        &self,
+        database: &str,
+        max_columns: usize,
+    ) -> Result<SchemaSnapshot> {
+        let set = self
+            .catalog_set(&format!(
+                "SELECT c.table_name, t.table_type, c.column_name, c.data_type \
+                 FROM information_schema.columns AS c \
+                 JOIN information_schema.tables AS t \
+                   ON t.table_schema = c.table_schema AND t.table_name = c.table_name \
+                 WHERE c.table_schema = {} \
+                 ORDER BY c.table_name, c.ordinal_position",
+                quote_literal(database)
+            ))
+            .await?;
+        Ok(snapshot_of(database, set, max_columns))
     }
 
     async fn list_databases_inner(&self) -> Result<Vec<Database>> {
@@ -1196,10 +1312,8 @@ impl DatabaseDriver for AthenaDriver {
             };
             for table in page.table_metadata_list() {
                 let name = table.name().to_string();
-                tables.push(match table.table_type() {
-                    Some(table_type) if table_type.eq_ignore_ascii_case("VIRTUAL_VIEW") => {
-                        Table::view(name)
-                    }
+                tables.push(match metadata_relation_type(table.table_type()) {
+                    RelationType::View => Table::view(name),
                     _ => Table::table(name),
                 });
             }
@@ -1269,26 +1383,32 @@ impl DatabaseDriver for AthenaDriver {
         Ok(columns)
     }
 
-    /// Reads every relation and every column of one database with one
-    /// statement against `information_schema`. Such a statement scans no data
-    /// in storage, so the snapshot costs nothing.
+    /// Reads every relation and every column of one database from the
+    /// metadata API, which the tree also uses. A statement against
+    /// `information_schema` needs the right to start a query and a location
+    /// for the output, and the whole statement fails when one relation has
+    /// metadata that Athena cannot read. The statement is the fallback for a
+    /// catalog whose metadata API gave an answer that could not be read.
     async fn schema_snapshot(
         &mut self,
         database: &str,
         max_columns: usize,
     ) -> Result<SchemaSnapshot> {
-        let set = self
-            .catalog_set(&format!(
-                "SELECT c.table_name, t.table_type, c.column_name, c.data_type \
-                 FROM information_schema.columns AS c \
-                 JOIN information_schema.tables AS t \
-                   ON t.table_schema = c.table_schema AND t.table_name = c.table_name \
-                 WHERE c.table_schema = {} \
-                 ORDER BY c.table_name, c.ordinal_position",
-                quote_literal(database)
-            ))
+        if self.metadata_api_usable() {
+            let read = before_deadline(
+                deadline_of(CATALOG_TIMEOUT_SECS),
+                CATALOG_TIMEOUT_SECS,
+                self.snapshot_from_metadata(database, max_columns),
+            )
             .await?;
-        Ok(snapshot_of(database, set, max_columns))
+            match read {
+                Err(error) if answer_is_unreadable(&error) => {
+                    self.note_unreadable_metadata(&error);
+                }
+                other => return other,
+            }
+        }
+        self.snapshot_from_statement(database, max_columns).await
     }
 
     /// Reads the partitions from the `$partitions` relation of the table. A
@@ -2871,6 +2991,199 @@ mod tests {
         connection.options.aws_access_key_id = Some("AKIAEXAMPLE".into());
         connection.aws_secret_access_key = Some("secret".into());
         assert!(config_loader(&connection).is_ok());
+    }
+
+    /// One relation of `ListTableMetadata` as JSON.
+    fn metadata_table(name: &str, table_type: &str, columns: &str, keys: &str) -> String {
+        format!(
+            r#"{{"Name":"{name}","TableType":"{table_type}","Columns":[{columns}],"PartitionKeys":[{keys}]}}"#
+        )
+    }
+
+    /// One page of `ListTableMetadata` as JSON.
+    fn metadata_page(tables: &[String], next_token: Option<&str>) -> String {
+        let token = next_token
+            .map(|token| format!(r#","NextToken":"{token}""#))
+            .unwrap_or_default();
+        format!(r#"{{"TableMetadataList":[{}]{token}}}"#, tables.join(","))
+    }
+
+    /// A service whose first page of metadata has a partitioned table and
+    /// names a next page, and whose second page has a view and a table
+    /// without columns.
+    fn two_metadata_pages() -> Answer {
+        Arc::new(|_, body: String| {
+            Box::pin(async move {
+                let reply = if body.contains("NextToken") {
+                    metadata_page(
+                        &[
+                            metadata_table(
+                                "recent",
+                                "VIRTUAL_VIEW",
+                                r#"{"Name":"id","Type":"int"}"#,
+                                "",
+                            ),
+                            metadata_table("empty", "EXTERNAL_TABLE", "", ""),
+                        ],
+                        None,
+                    )
+                } else {
+                    metadata_page(
+                        &[metadata_table(
+                            "events",
+                            "EXTERNAL_TABLE",
+                            r#"{"Name":"id","Type":"int"},{"Name":"body"}"#,
+                            r#"{"Name":"day","Type":"string"}"#,
+                        )],
+                        Some("t2"),
+                    )
+                };
+                (200, reply)
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn the_snapshot_reads_every_page_of_the_metadata_api() {
+        let fake = FakeAthena::start(two_metadata_pages()).await;
+        let mut driver = fake.driver();
+        let snapshot = driver.schema_snapshot("db", 100).await.unwrap();
+        assert_eq!(
+            fake.operations(),
+            vec!["ListTableMetadata", "ListTableMetadata"]
+        );
+        let request = fake.body_of("ListTableMetadata");
+        assert!(request.contains(r#""CatalogName":"AwsDataCatalog""#));
+        assert!(request.contains(r#""DatabaseName":"db""#));
+        assert!(request.contains(r#""MaxResults":50"#));
+
+        assert_eq!(snapshot.database, "db");
+        assert!(snapshot.complete);
+        assert_eq!(snapshot.column_count, 4);
+        let names: Vec<&str> = snapshot.relations.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["events", "recent", "empty"]);
+
+        // The partition key follows the columns of the table.
+        let events = &snapshot.relations[0];
+        assert_eq!(events.relation_type, RelationType::Table);
+        let columns: Vec<(&str, &str)> = events
+            .columns
+            .iter()
+            .map(|c| (c.name.as_str(), c.data_type.as_str()))
+            .collect();
+        assert_eq!(
+            columns,
+            vec![("id", "int"), ("body", "unknown"), ("day", "string")]
+        );
+        assert_eq!(snapshot.relations[1].relation_type, RelationType::View);
+        assert!(snapshot.relations[2].columns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_snapshot_stops_at_the_bound_on_the_columns() {
+        let fake = FakeAthena::start(two_metadata_pages()).await;
+        let mut driver = fake.driver();
+        let snapshot = driver.schema_snapshot("db", 2).await.unwrap();
+        // The bound stops the read inside the first page, so the second page
+        // is not requested.
+        assert_eq!(fake.operations(), vec!["ListTableMetadata"]);
+        assert!(!snapshot.complete);
+        assert_eq!(snapshot.column_count, 2);
+        assert_eq!(snapshot.relations[0].columns.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_relation_without_columns_past_the_bound_makes_the_snapshot_incomplete() {
+        let fake = FakeAthena::start(two_metadata_pages()).await;
+        let mut driver = fake.driver();
+        let snapshot = driver.schema_snapshot("db", 4).await.unwrap();
+        assert!(!snapshot.complete);
+        assert_eq!(snapshot.relations.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_refused_read_of_the_metadata_gives_the_error() {
+        let fake = FakeAthena::start(at_once(|_| {
+            (
+                400,
+                r#"{"__type":"AccessDeniedException","Message":"no access to db"}"#.to_string(),
+            )
+        }))
+        .await;
+        let mut driver = fake.driver();
+        let Err(Error::Athena(text)) = driver.schema_snapshot("db", 100).await else {
+            panic!("the read did not fail with an error of the service");
+        };
+        assert!(text.starts_with("Couldn't read the schema"));
+        assert!(text.contains("no access to db"));
+        // No statement runs in place of the metadata API.
+        assert_eq!(fake.operations(), vec!["ListTableMetadata"]);
+        assert!(driver.metadata_api_usable());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_read_of_the_metadata_obeys_the_time_limit_of_the_catalog() {
+        let fake = FakeAthena::start(Arc::new(|_, _| Box::pin(std::future::pending()))).await;
+        let mut driver = fake.driver();
+        let outcome = driver.schema_snapshot("db", 100).await;
+        assert!(matches!(outcome, Err(Error::Timeout(CATALOG_TIMEOUT_SECS))));
+    }
+
+    /// A service whose metadata API gives a map with an absent value, which
+    /// the parser of the SDK refuses, and which answers the statement of the
+    /// catalog with one column of one table.
+    fn unreadable_metadata() -> Answer {
+        at_once(|operation| {
+            match operation {
+            "ListTableMetadata" => (
+                200,
+                r#"{"TableMetadataList":[{"Name":"t","Parameters":{"k":null}}]}"#.to_string(),
+            ),
+            "StartQueryExecution" => (200, STARTED.to_string()),
+            "GetQueryExecution" => (200, SUCCEEDED.to_string()),
+            _ => (
+                200,
+                r#"{"ResultSet":{"ResultSetMetadata":{"ColumnInfo":[{"Name":"table_name","Type":"varchar"},{"Name":"table_type","Type":"varchar"},{"Name":"column_name","Type":"varchar"},{"Name":"data_type","Type":"varchar"}]},"Rows":[{"Data":[{"VarCharValue":"table_name"},{"VarCharValue":"table_type"},{"VarCharValue":"column_name"},{"VarCharValue":"data_type"}]},{"Data":[{"VarCharValue":"t"},{"VarCharValue":"BASE TABLE"},{"VarCharValue":"id"},{"VarCharValue":"integer"}]}]}}"#
+                    .to_string(),
+            ),
+        }
+        })
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_answer_of_the_metadata_api_reads_the_snapshot_with_a_statement() {
+        let fake = FakeAthena::start(unreadable_metadata()).await;
+        let mut driver = fake.driver();
+        let snapshot = driver.schema_snapshot("db", 100).await.unwrap();
+        assert!(!driver.metadata_api_usable());
+        assert_eq!(fake.operations()[0], "ListTableMetadata");
+        assert!(fake
+            .body_of("StartQueryExecution")
+            .contains("information_schema.columns"));
+        assert_eq!(snapshot.relations.len(), 1);
+        assert_eq!(snapshot.relations[0].columns[0].name, "id");
+
+        // The next read goes to the statement at once.
+        driver.schema_snapshot("db", 100).await.unwrap();
+        let reads = fake
+            .operations()
+            .iter()
+            .filter(|name| *name == "ListTableMetadata")
+            .count();
+        assert_eq!(reads, 1);
+    }
+
+    #[test]
+    fn a_view_of_the_metadata_api_is_a_view() {
+        assert_eq!(
+            metadata_relation_type(Some("virtual_view")),
+            RelationType::View
+        );
+        assert_eq!(
+            metadata_relation_type(Some("EXTERNAL_TABLE")),
+            RelationType::Table
+        );
+        assert_eq!(metadata_relation_type(None), RelationType::Table);
     }
 
     #[test]
