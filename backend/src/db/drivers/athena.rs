@@ -5,7 +5,7 @@
 //! The metadata comes from the data catalog through the same service.
 
 use crate::db::drivers::{
-    add_snapshot_column, f64_to_json, finish_set, prefixed_plan, relation_type,
+    add_snapshot_column, connect_within, f64_to_json, finish_set, prefixed_plan, relation_type,
     rows_affected_message, CancelHandle, DatabaseDriver,
 };
 use crate::db::sink::{BufferSink, RowSink, RunSummary, SinkControl};
@@ -20,6 +20,7 @@ use crate::storage::{AwsCredentialSource, SavedConnection};
 use async_trait::async_trait;
 use aws_config::timeout::TimeoutConfig;
 use aws_credential_types::Credentials;
+use aws_sdk_athena::operation::get_query_results::GetQueryResultsOutput;
 use aws_sdk_athena::operation::start_query_execution::builders::StartQueryExecutionFluentBuilder;
 use aws_sdk_athena::types::{
     QueryExecutionContext, QueryExecutionState, QueryExecutionStatistics, ResultConfiguration,
@@ -173,8 +174,53 @@ async fn start_statement(
         }
         Err(Error::Cancelled)
     });
-    task.await
-        .unwrap_or_else(|error| Err(Error::Athena(error.to_string())))
+    joined(task.await)
+}
+
+/// The number of rows that one request for a page of the result asks for.
+/// It is the largest number that the service accepts.
+const PAGE_ROWS: i32 = 1000;
+
+/// A request for one page of the result. It runs in a task of its own, so it
+/// goes on while the caller gives the rows of the page before it to the sink.
+/// A drop of the request ends the task.
+struct PageRequest(tokio::task::JoinHandle<Result<GetQueryResultsOutput>>);
+
+impl PageRequest {
+    fn send(client: &Client, execution_id: &str, token: Option<&str>) -> Self {
+        let request = client
+            .get_query_results()
+            .query_execution_id(execution_id)
+            .set_next_token(token.map(str::to_string))
+            .max_results(PAGE_ROWS);
+        PageRequest(tokio::spawn(async move {
+            request
+                .send()
+                .await
+                .map_err(|error| describe(error, "Couldn't read the results"))
+        }))
+    }
+
+    /// Waits for the page until the deadline.
+    async fn page(
+        mut self,
+        deadline: Option<Instant>,
+        timeout_secs: u64,
+    ) -> Result<GetQueryResultsOutput> {
+        joined(before_deadline(deadline, timeout_secs, &mut self.0).await?)
+    }
+}
+
+impl Drop for PageRequest {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Gives the outcome of a task. A task that panicked or was ended gives an
+/// error of the service.
+fn joined<T>(outcome: std::result::Result<Result<T>, tokio::task::JoinError>) -> Result<T> {
+    outcome.unwrap_or_else(|error| Err(Error::Athena(error.to_string())))
 }
 
 /// Waits for the work until the deadline. Without a deadline the work has
@@ -416,32 +462,64 @@ fn deadline_of(timeout_secs: u64) -> Option<Instant> {
     (timeout_secs > 0).then(|| Instant::now() + Duration::from_secs(timeout_secs))
 }
 
-impl AthenaDriver {
-    pub async fn connect(connection: &SavedConnection) -> Result<Box<dyn DatabaseDriver>> {
-        let region = connection
-            .options
-            .aws_region
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                Error::Configuration("An Athena connection needs an AWS region.".to_string())
-            })?
-            .to_string();
+/// Prepares the load of the SDK configuration for the region and the
+/// credentials of the connection. A missing region or an incomplete pair of
+/// keys is refused here, before a request opens.
+fn config_loader(connection: &SavedConnection) -> Result<aws_config::ConfigLoader> {
+    let region = connection
+        .options
+        .aws_region
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            Error::Configuration("An Athena connection needs an AWS region.".to_string())
+        })?
+        .to_string();
 
-        let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .region(aws_config::Region::new(region))
-            .timeout_config(timeouts(connection));
-        // The keys of the user take the place of the whole chain. The
-        // profile belongs to the chain, so the two never stand together.
-        match typed_credentials(connection)? {
-            Some(credentials) => loader = loader.credentials_provider(credentials),
-            None => {
-                if let Some(profile) = trimmed(connection.options.aws_profile.as_deref()) {
-                    loader = loader.profile_name(profile);
-                }
+    let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .region(aws_config::Region::new(region))
+        .timeout_config(timeouts(connection));
+    // The keys of the user take the place of the whole chain. The
+    // profile belongs to the chain, so the two never stand together.
+    match typed_credentials(connection)? {
+        Some(credentials) => loader = loader.credentials_provider(credentials),
+        None => {
+            if let Some(profile) = trimmed(connection.options.aws_profile.as_deref()) {
+                loader = loader.profile_name(profile);
             }
         }
+    }
+    Ok(loader)
+}
+
+impl AthenaDriver {
+    pub async fn connect(connection: &SavedConnection) -> Result<Box<dyn DatabaseDriver>> {
+        let loader = config_loader(connection)?;
+        // The future of the SDK is deep. On the heap, it stays out of the
+        // type of the callers, whose layout the compiler otherwise cannot
+        // compute within its depth limit.
+        let driver = Box::pin(Self::connect_with(loader, connection)).await?;
+        Ok(Box::new(driver))
+    }
+
+    /// Opens the connection under the time limit of the connection. The load
+    /// of the credentials can refresh an SSO token, run a credential process
+    /// or ask the instance metadata service, and the check of the
+    /// credentials is a request with retries, so each step can wait for a
+    /// long time.
+    async fn connect_with(
+        loader: aws_config::ConfigLoader,
+        connection: &SavedConnection,
+    ) -> Result<AthenaDriver> {
+        let limit = connection.options.connect_timeout_secs.max(1);
+        connect_within(limit, Self::open(loader, connection)).await?
+    }
+
+    async fn open(
+        loader: aws_config::ConfigLoader,
+        connection: &SavedConnection,
+    ) -> Result<AthenaDriver> {
         let config = loader.load().await;
 
         let driver = AthenaDriver {
@@ -462,7 +540,7 @@ impl AthenaDriver {
         // The credentials and the permissions are checked once, so that a
         // wrong profile is reported at the moment the user connects.
         driver.list_databases_inner().await?;
-        Ok(Box::new(driver))
+        Ok(driver)
     }
 
     /// Runs one statement and buffers its rows, for a caller that reads the
@@ -555,12 +633,18 @@ impl AthenaDriver {
         let mut wait = Duration::from_millis(200);
 
         loop {
-            let execution = self
+            let request = self
                 .client
                 .get_query_execution()
                 .query_execution_id(execution_id)
-                .send()
-                .await
+                .send();
+            // A check of the status that has no answer at the deadline ends
+            // the wait in the same way as a statement that runs too long.
+            let Ok(execution) = before_deadline(deadline, options.timeout_secs, request).await
+            else {
+                return Err(self.stop_at_deadline(execution_id, options).await);
+            };
+            let execution = execution
                 .map_err(|error| describe(error, "Couldn't get the statement's status"))?;
 
             let execution = execution.query_execution().ok_or_else(|| {
@@ -587,18 +671,24 @@ impl AthenaDriver {
             }
 
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                if let Err(error) = self.stop(execution_id).await {
-                    // A statement that Athena did not stop goes on to scan
-                    // data, so the user needs its execution ID to stop it.
-                    return Err(Error::Athena(format!(
-                        "The statement didn't finish within {} seconds, and Athena didn't stop it. It may still be running. Its execution ID is {execution_id}. {error}",
-                        options.timeout_secs
-                    )));
-                }
-                return Err(Error::Timeout(options.timeout_secs));
+                return Err(self.stop_at_deadline(execution_id, options).await);
             }
             tokio::time::sleep(pause_before_check(wait, deadline, Instant::now())).await;
             wait = next_wait(wait);
+        }
+    }
+
+    /// Asks the service to stop a statement that did not finish before the
+    /// deadline, and gives the error of the run.
+    async fn stop_at_deadline(&self, execution_id: &str, options: &ExecOptions) -> Error {
+        match self.stop(execution_id).await {
+            Ok(()) => Error::Timeout(options.timeout_secs),
+            // A statement that Athena did not stop goes on to scan data, so
+            // the user needs its execution ID to stop it.
+            Err(error) => Error::Athena(format!(
+                "The statement didn't finish within {} seconds, and Athena didn't stop it. It may still be running. Its execution ID is {execution_id}. {error}",
+                options.timeout_secs
+            )),
         }
     }
 
@@ -608,6 +698,12 @@ impl AthenaDriver {
     /// read without a fetch of the pages that remain. A stop of the user ends
     /// the read before the next page. The read of each page obeys the time
     /// that remains of the limit of the statement.
+    ///
+    /// The request for the next page starts when a page arrives, so the
+    /// service prepares that page while the rows of the current page go to
+    /// the sink. One request at most is open, so the rows of two pages at
+    /// most are in memory. A page that the row limit makes unnecessary is
+    /// not requested.
     ///
     /// Returns true when the sink stopped the run.
     ///
@@ -623,25 +719,21 @@ impl AthenaDriver {
         sink: &mut dyn RowSink,
         rows_affected: &mut Option<u64>,
     ) -> Result<bool> {
-        let mut token: Option<String> = None;
+        let mut next: Option<PageRequest> = None;
         let mut columns: Option<Vec<ColumnInfo>> = None;
         let mut first_page = true;
         let mut count = 0usize;
 
         loop {
+            // A request for the next page that is open at a stop is dropped,
+            // and the drop ends it.
             if self.stop_requested() {
                 return Err(Error::Cancelled);
             }
-            let request = self
-                .client
-                .get_query_results()
-                .query_execution_id(execution_id)
-                .set_next_token(token.clone())
-                .max_results(1000)
-                .send();
-            let page = before_deadline(deadline, options.timeout_secs, request)
-                .await?
-                .map_err(|error| describe(error, "Couldn't read the results"))?;
+            let request = next
+                .take()
+                .unwrap_or_else(|| PageRequest::send(&self.client, execution_id, None));
+            let page = request.page(deadline, options.timeout_secs).await?;
 
             let has_columns = page
                 .result_set()
@@ -687,6 +779,15 @@ impl AthenaDriver {
                 };
             first_page = false;
 
+            // The row limit ends the read in this page when the page has more
+            // rows than the limit leaves, and a stop of the user ends the read
+            // before the next page. The next page is then not requested. A
+            // page that fills the limit exactly still leads to the next page,
+            // which tells if more rows exist.
+            let token = page.next_token();
+            if token.is_some() && count + rows.len() <= options.max_rows && !self.stop_requested() {
+                next = Some(PageRequest::send(&self.client, execution_id, token));
+            }
             for row in rows {
                 if count >= options.max_rows {
                     finish_set(sink, count, true)?;
@@ -699,7 +800,6 @@ impl AthenaDriver {
                 count += 1;
             }
 
-            token = page.next_token().map(str::to_string);
             if token.is_none() {
                 break;
             }
@@ -1912,19 +2012,25 @@ mod tests {
     const SUCCEEDED: &str =
         r#"{"QueryExecution":{"QueryExecutionId":"q1","Status":{"State":"SUCCEEDED"}}}"#;
 
-    /// One page of a result with the column `a`. The first page repeats the
-    /// name of the column, as the service does for a `SELECT`.
+    /// One page of a result with the column `a` and one row. The first page
+    /// repeats the name of the column, as the service does for a `SELECT`.
     fn page(first: bool, next_token: Option<&str>) -> String {
+        page_of(first, 1, next_token)
+    }
+
+    /// One page of a result with the column `a` and `rows` rows.
+    fn page_of(first: bool, rows: usize, next_token: Option<&str>) -> String {
         let header = if first {
             r#"{"Data":[{"VarCharValue":"a"}]},"#
         } else {
             ""
         };
+        let rows = vec![r#"{"Data":[{"VarCharValue":"1"}]}"#; rows].join(",");
         let token = next_token
             .map(|token| format!(r#","NextToken":"{token}""#))
             .unwrap_or_default();
         format!(
-            r#"{{"ResultSet":{{"ResultSetMetadata":{{"ColumnInfo":[{{"Name":"a","Type":"integer"}}]}},"Rows":[{header}{{"Data":[{{"VarCharValue":"1"}}]}}]}}{token}}}"#
+            r#"{{"ResultSet":{{"ResultSetMetadata":{{"ColumnInfo":[{{"Name":"a","Type":"integer"}}]}},"Rows":[{header}{rows}]}}{token}}}"#
         )
     }
 
@@ -2249,6 +2355,262 @@ mod tests {
             )
             .await;
         assert!(matches!(outcome, Err(Error::Timeout(1))));
+    }
+
+    /// A service whose first page has `rows` rows and names a next page,
+    /// and whose second page has one row and is the last.
+    async fn fake_with_two_pages(rows: usize) -> FakeAthena {
+        FakeAthena::start(Arc::new(move |operation, body: String| {
+            Box::pin(async move {
+                match operation.as_str() {
+                    "StartQueryExecution" => (200, STARTED.to_string()),
+                    "GetQueryExecution" => (200, SUCCEEDED.to_string()),
+                    _ if body.contains("NextToken") => (200, page(false, None)),
+                    _ => (200, page_of(true, rows, Some("t2"))),
+                }
+            })
+        }))
+        .await
+    }
+
+    /// A sink that, at the first row, waits until the service has received a
+    /// request for a second page or the wait ends. A sink runs on the thread
+    /// of the driver, so the wait shows if the request for the next page goes
+    /// on while the rows go to the sink.
+    struct WaitingSink {
+        calls: Arc<Mutex<Vec<(String, String)>>>,
+        wait: Duration,
+        rows: usize,
+        saw_next_page: bool,
+    }
+
+    impl WaitingSink {
+        fn new(fake: &FakeAthena, wait: Duration) -> Self {
+            WaitingSink {
+                calls: fake.calls.clone(),
+                wait,
+                rows: 0,
+                saw_next_page: false,
+            }
+        }
+
+        fn page_requests(&self) -> usize {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(operation, _)| operation == "GetQueryResults")
+                .count()
+        }
+    }
+
+    impl RowSink for WaitingSink {
+        fn begin_set(&mut self, _columns: Vec<ColumnInfo>) -> Result<()> {
+            Ok(())
+        }
+
+        fn row(&mut self, _row: Vec<JsonValue>) -> Result<SinkControl> {
+            if self.rows == 0 {
+                let end = Instant::now() + self.wait;
+                while self.page_requests() < 2 && Instant::now() < end {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                self.saw_next_page = self.page_requests() >= 2;
+            }
+            self.rows += 1;
+            Ok(SinkControl::Continue)
+        }
+
+        fn end_set(&mut self, _truncated: bool) -> Result<()> {
+            Ok(())
+        }
+
+        fn message(&mut self, _message: crate::db::Message) {}
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_next_page_is_requested_while_the_rows_go_to_the_sink() {
+        let fake = fake_with_two_pages(1).await;
+        let mut driver = fake.driver();
+        let mut sink = WaitingSink::new(&fake, Duration::from_secs(5));
+        driver
+            .execute_stream("SELECT 1", None, &LIMITS, &mut sink)
+            .await
+            .unwrap();
+        assert!(sink.saw_next_page);
+        assert_eq!(sink.rows, 2);
+        assert!(fake.body_of("GetQueryResults").contains("1000"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_page_past_the_row_limit_is_not_requested() {
+        let fake = fake_with_two_pages(2).await;
+        let mut driver = fake.driver();
+        let mut sink = WaitingSink::new(&fake, Duration::from_millis(300));
+        driver
+            .execute_stream(
+                "SELECT 1",
+                None,
+                &ExecOptions {
+                    max_rows: 1,
+                    ..LIMITS
+                },
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        assert!(!sink.saw_next_page);
+        assert_eq!(sink.rows, 1);
+        assert_eq!(sink.page_requests(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_page_that_fills_the_row_limit_still_learns_if_more_rows_exist() {
+        let fake = fake_with_two_pages(1).await;
+        let mut driver = fake.driver();
+        let mut sink = BufferSink::new(100);
+        driver
+            .execute_stream(
+                "SELECT 1",
+                None,
+                &ExecOptions {
+                    max_rows: 1,
+                    ..LIMITS
+                },
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        let set = sink
+            .into_response(RunSummary::default())
+            .results
+            .pop()
+            .unwrap();
+        assert_eq!(set.rows.len(), 1);
+        assert!(set.truncated);
+        assert_eq!(
+            fake.operations()
+                .iter()
+                .filter(|name| *name == "GetQueryResults")
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn the_read_of_a_requested_next_page_obeys_the_time_limit() {
+        let fake = FakeAthena::start(Arc::new(|operation, body: String| {
+            Box::pin(async move {
+                match operation.as_str() {
+                    "StartQueryExecution" => (200, STARTED.to_string()),
+                    "GetQueryExecution" => (200, SUCCEEDED.to_string()),
+                    _ if body.contains("NextToken") => std::future::pending().await,
+                    _ => (200, page(true, Some("t2"))),
+                }
+            })
+        }))
+        .await;
+        let mut driver = fake.driver();
+        let mut sink = BufferSink::new(100);
+        let outcome = driver
+            .execute_stream(
+                "SELECT 1",
+                None,
+                &ExecOptions {
+                    timeout_secs: 1,
+                    ..LIMITS
+                },
+                &mut sink,
+            )
+            .await;
+        assert!(matches!(outcome, Err(Error::Timeout(1))));
+    }
+
+    #[tokio::test]
+    async fn a_check_of_the_status_without_an_answer_obeys_the_time_limit() {
+        let fake = FakeAthena::start(Arc::new(|operation, _| {
+            Box::pin(async move {
+                match operation.as_str() {
+                    "StartQueryExecution" => (200, STARTED.to_string()),
+                    "GetQueryExecution" => std::future::pending().await,
+                    _ => (200, "{}".to_string()),
+                }
+            })
+        }))
+        .await;
+        let mut driver = fake.driver();
+        let mut sink = BufferSink::new(100);
+        let outcome = driver
+            .execute_stream(
+                "SELECT 1",
+                None,
+                &ExecOptions {
+                    timeout_secs: 1,
+                    ..LIMITS
+                },
+                &mut sink,
+            )
+            .await;
+        assert!(matches!(outcome, Err(Error::Timeout(1))));
+        // The statement goes on in the service, so the driver stops it.
+        assert!(fake.body_of("StopQueryExecution").contains("q1"));
+    }
+
+    #[tokio::test]
+    async fn a_task_that_was_ended_gives_an_error_of_the_service() {
+        let task = tokio::spawn(std::future::pending::<Result<()>>());
+        task.abort();
+        let outcome = joined(task.await);
+        assert!(matches!(outcome, Err(Error::Athena(_))));
+        assert_eq!(joined(Ok(Ok(7))).unwrap(), 7);
+    }
+
+    /// The load of the configuration for a fake service, with fixed keys.
+    fn fake_loader(fake: &FakeAthena) -> aws_config::ConfigLoader {
+        aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_config::Region::new("us-east-1"))
+            .credentials_provider(Credentials::new("AKID", "secret", None, None, "test"))
+            .endpoint_url(format!("http://127.0.0.1:{}", fake.port))
+            .retry_config(aws_sdk_athena::config::retry::RetryConfig::disabled())
+    }
+
+    #[tokio::test]
+    async fn a_connection_opens_when_the_service_lists_the_databases() {
+        let fake = FakeAthena::start(at_once(|_| {
+            (200, r#"{"DatabaseList":[{"Name":"db"}]}"#.to_string())
+        }))
+        .await;
+        let mut connection = athena_connection();
+        connection.database = Some("db".into());
+        let driver = AthenaDriver::connect_with(fake_loader(&fake), &connection)
+            .await
+            .unwrap();
+        assert_eq!(driver.database.as_deref(), Some("db"));
+        assert_eq!(fake.operations(), vec!["ListDatabases"]);
+    }
+
+    #[tokio::test]
+    async fn the_opening_of_a_connection_obeys_the_connect_time_limit() {
+        let fake = FakeAthena::start(Arc::new(|_, _| Box::pin(std::future::pending()))).await;
+        let mut connection = athena_connection();
+        connection.options.connect_timeout_secs = 1;
+        let outcome = AthenaDriver::connect_with(fake_loader(&fake), &connection).await;
+        let Err(Error::Connection(text)) = outcome else {
+            panic!("the opening did not stop at the time limit");
+        };
+        assert!(text.contains("within 1 seconds"));
+    }
+
+    #[test]
+    fn the_configuration_takes_the_keys_or_the_profile() {
+        let mut connection = athena_connection();
+        connection.options.aws_region = Some("us-east-1".into());
+        connection.options.aws_profile = Some("work".into());
+        assert!(config_loader(&connection).is_ok());
+        connection.options.aws_credential_source = AwsCredentialSource::Keys;
+        connection.options.aws_access_key_id = Some("AKIAEXAMPLE".into());
+        connection.aws_secret_access_key = Some("secret".into());
+        assert!(config_loader(&connection).is_ok());
     }
 
     #[test]
