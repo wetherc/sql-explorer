@@ -165,6 +165,7 @@ export function filterCommands(commands: Command[], text: string): Command[] {
 export interface TabActions {
   runStatement: () => void
   runAll: () => void
+  runKeepingRows: () => void
   runToFile: () => void
   cancel: () => void
   format: () => void

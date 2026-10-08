@@ -1,22 +1,49 @@
 <template>
   <div class="query-view">
     <div class="toolbar d-flex align-center ga-2 px-2 py-1">
-      <v-tooltip location="bottom" :text="`Run statement at cursor (${keyLabel('mod+enter')})`">
-        <template #activator="{ props: tip }">
-          <v-btn
-            v-bind="tip"
-            :disabled="!canRun || state.running"
-            :loading="state.running"
-            color="primary"
-            variant="flat"
-            size="small"
-            prepend-icon="mdi-play"
-            text="Run"
-            data-test="run-button"
-            @click="runStatement()"
-          />
-        </template>
-      </v-tooltip>
+      <v-btn-group density="compact" divided class="run-group">
+        <v-tooltip location="bottom" :text="`Run statement at cursor (${keyLabel('mod+enter')})`">
+          <template #activator="{ props: tip }">
+            <v-btn
+              v-bind="tip"
+              :disabled="!canRun || state.running"
+              :loading="state.running"
+              color="primary"
+              variant="flat"
+              size="small"
+              prepend-icon="mdi-play"
+              text="Run"
+              data-test="run-button"
+              @click="runStatement()"
+            />
+          </template>
+        </v-tooltip>
+        <v-menu location="bottom end">
+          <template #activator="{ props: menu }">
+            <v-btn
+              v-bind="menu"
+              :disabled="!canRun || state.running"
+              color="primary"
+              variant="flat"
+              size="small"
+              icon="mdi-chevron-down"
+              aria-label="More ways to run"
+              data-test="run-menu-button"
+            />
+          </template>
+          <v-list density="compact">
+            <v-list-item data-test="run-menu-run" @click="runStatement()">
+              <v-list-item-title>Run</v-list-item-title>
+            </v-list-item>
+            <v-list-item data-test="run-menu-keep-rows" @click="runKeepingRows()">
+              <v-list-item-title>Run and keep all rows</v-list-item-title>
+              <v-list-item-subtitle>
+                Saves every row on this computer, so Export all rows doesn't run it again
+              </v-list-item-subtitle>
+            </v-list-item>
+          </v-list>
+        </v-menu>
+      </v-btn-group>
 
       <v-tooltip location="bottom" :text="`Run script (${keyLabel('mod+shift+enter')})`">
         <template #activator="{ props: tip }">
@@ -337,7 +364,7 @@
                 "
                 :kept="pane.kept"
                 :unsaved="pane.unsaved ?? null"
-                :run-ms="pane.elapsedMs ?? null"
+                :run-ms="pane.elapsedMs"
                 :paused-until="pane.pausedUntil"
                 @export="onExport"
                 @export-all="(format: ExportAllFormat) => onExportAll(pane, format)"
@@ -991,7 +1018,7 @@ function onCopyFailed(reason: string): void {
 /** The place in the editor where a sent text begins, counted from 1. */
 type TextStart = { line: number; column: number }
 
-async function run(statement: string, start?: TextStart): Promise<void> {
+async function run(statement: string, start?: TextStart, keepAllRows = false): Promise<void> {
   const connectionId = props.tab.connectionId
   if (!connectionId) {
     ui.warn('Choose a connection to run this statement.')
@@ -1000,7 +1027,7 @@ async function run(statement: string, start?: TextStart): Promise<void> {
   // The rows of a run are what the user asked for, so the panel comes back.
   layout.setResultsCollapsed(false)
   await withParams(statement, (values) => {
-    void queries.execute(props.tab.id, connectionId, statement, values, start)
+    void queries.execute(props.tab.id, connectionId, statement, values, start, keepAllRows)
   })
 }
 
@@ -1016,6 +1043,15 @@ function runStatement(): void {
 
 function runAll(): void {
   void run(props.tab.query, { line: 1, column: 1 })
+}
+
+/**
+ * Runs the statement at the cursor and saves every row of a result past the
+ * row limit on this computer, as the option in Settings does for each run.
+ */
+function runKeepingRows(): void {
+  const { text, start } = editorRun()
+  void run(text, start, true)
 }
 
 /**
@@ -1490,6 +1526,7 @@ onMounted(() => {
   registerTabActions(props.tab.id, {
     runStatement: () => runStatement(),
     runAll,
+    runKeepingRows,
     runToFile,
     cancel,
     format: formatStatement,
@@ -1503,7 +1540,15 @@ onBeforeUnmount(() => {
   forgetTabActions(props.tab.id)
 })
 
-defineExpose({ runStatement, runAll, runToFile, formatStatement, readPlan, saveToFile })
+defineExpose({
+  runStatement,
+  runAll,
+  runKeepingRows,
+  runToFile,
+  formatStatement,
+  readPlan,
+  saveToFile,
+})
 </script>
 
 <style scoped>
@@ -1518,6 +1563,12 @@ defineExpose({ runStatement, runAll, runToFile, formatStatement, readPlan, saveT
   flex: 0 0 auto;
   border-bottom: var(--app-divider);
   background: rgb(var(--v-theme-surface));
+}
+
+/* The group gives its buttons its own height, so it takes the height of the
+   small buttons beside it. */
+.run-group {
+  height: 28px;
 }
 
 .param-help {

@@ -639,9 +639,10 @@ export const useQueryStore = defineStore('query', () => {
     query: string,
     queryParams?: Record<string, unknown>,
     start?: EditorPosition,
+    keepAllRows = false,
   ): Promise<boolean> {
     const text = query.trim()
-    const spill = spillRequest(settings.settings)
+    const spill = spillRequest(settings.settings, keepAllRows || settings.settings.keepFullResults)
     const pauseSecs = pauseSeconds(settings.settings)
     return runRequest(
       tabId,

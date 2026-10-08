@@ -617,6 +617,29 @@ describe('QueryView', () => {
     )
   })
 
+  it('runs the statement from the menu of the Run button, with or without all rows', async () => {
+    apiStub.executeQuery.mockImplementation(streamed(response))
+    const wrapper = await mountView()
+
+    await wrapper.find('[data-test="run-menu-button"]').trigger('click')
+    await wrapper.vm.$nextTick()
+    ;(document.querySelector('[data-test="run-menu-run"]') as HTMLElement).click()
+    await settle()
+    expect(apiStub.executeQuery.mock.calls[0]![0]).toMatchObject({
+      query: 'SELECT 1',
+      spill: undefined,
+    })
+
+    await wrapper.find('[data-test="run-menu-button"]').trigger('click')
+    await wrapper.vm.$nextTick()
+    ;(document.querySelector('[data-test="run-menu-keep-rows"]') as HTMLElement).click()
+    await settle()
+    expect(apiStub.executeQuery.mock.calls[1]![0]).toMatchObject({
+      query: 'SELECT 1',
+      spill: { maxRows: expect.any(Number), maxBytes: expect.any(Number) },
+    })
+  })
+
   it('reads the estimated plan from the menu', async () => {
     apiStub.explainQuery.mockResolvedValue(response)
     const wrapper = await mountView()

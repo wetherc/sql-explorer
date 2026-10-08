@@ -348,6 +348,15 @@ const commands: Command[] = [
     run: () => actionsOfActiveTab()?.runAll(),
   },
   {
+    id: 'query.runKeepingRows',
+    title: 'Run and keep all rows',
+    group: 'Query',
+    key: null,
+    enabled: hasActiveTab,
+    disabledReason: () => NO_TAB_REASON,
+    run: () => actionsOfActiveTab()?.runKeepingRows(),
+  },
+  {
     id: 'query.runToFile',
     title: 'Run to file…',
     group: 'Query',

@@ -7,13 +7,15 @@ import type { KeptInfo, SpillRequest, UnsavedReason } from '@/types/api'
 export const GIGABYTE = 1024 ** 3
 
 /**
- * What a normal run asks for when the user turned on saved full results, or
- * nothing when the option is off.
+ * What a normal run asks for when it saves its full results, or nothing when
+ * it doesn't. A run saves them when the user turned on the option in
+ * Settings, or when `keep` asks for it.
  */
 export function spillRequest(
   settings: Pick<Settings, 'keepFullResults' | 'exportRowLimit' | 'fullResultsDiskGb'>,
+  keep = settings.keepFullResults,
 ): SpillRequest | undefined {
-  return settings.keepFullResults
+  return keep
     ? { maxRows: settings.exportRowLimit, maxBytes: settings.fullResultsDiskGb * GIGABYTE }
     : undefined
 }

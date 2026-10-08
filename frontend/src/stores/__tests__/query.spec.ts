@@ -1399,6 +1399,20 @@ describe('kept results', () => {
     })
   })
 
+  it('asks the backend to save full results for a run that keeps all rows', async () => {
+    const queries = useQueryStore()
+    useSettingsStore().update({
+      keepFullResults: false,
+      exportRowLimit: 5000,
+      fullResultsDiskGb: 3,
+    })
+    apiStub.executeQuery.mockImplementation(streamed({ results: [{ rows: [[1]] }] }))
+    await queries.execute('t1', 'c1', 'SELECT 1', undefined, undefined, true)
+    expect(apiStub.executeQuery.mock.calls[0]![0]).toMatchObject({
+      spill: { maxRows: 5000, maxBytes: 3 * 1024 ** 3 },
+    })
+  })
+
   it('asks the backend to pause a read only when Settings turns it on and nothing is saved', async () => {
     const queries = useQueryStore()
     const settings = useSettingsStore()

@@ -197,6 +197,7 @@ describe('AppLayout', () => {
     const actions = {
       runStatement: vi.fn(),
       runAll: vi.fn(),
+      runKeepingRows: vi.fn(),
       runToFile: vi.fn(),
       cancel: vi.fn(),
       format: vi.fn(),
@@ -1061,6 +1062,7 @@ describe('AppLayout keys', () => {
     const actions = {
       runStatement: vi.fn(),
       runAll: vi.fn(),
+      runKeepingRows: vi.fn(),
       runToFile: vi.fn(),
       cancel: vi.fn(),
       format: vi.fn(),
@@ -1086,6 +1088,12 @@ describe('AppLayout keys', () => {
     const handler = apiStub.onMenuCommand.mock.calls[0]?.[0] as (id: string) => void
     handler('query.runToFile')
     expect(actions.runToFile).toHaveBeenCalled()
+
+    // Run and keep all rows has no key either, so the palette reaches it.
+    type Cmd = import('@/lib/commands').Command
+    const commands = wrapper.findComponent({ name: 'CommandPalette' }).props('commands') as Cmd[]
+    commands.find((command) => command.id === 'query.runKeepingRows')!.run()
+    expect(actions.runKeepingRows).toHaveBeenCalled()
     wrapper.unmount()
   })
 
@@ -1332,7 +1340,14 @@ describe('AppLayout and the host window', () => {
 
     vi.spyOn(useQueryStore(), 'peekState').mockReturnValue({ running: true } as never)
     expect(stop.enabled!()).toBe(true)
-    for (const id of ['query.runAll', 'query.save', 'editor.format', 'tab.rename', 'tab.close']) {
+    for (const id of [
+      'query.runAll',
+      'query.runKeepingRows',
+      'query.save',
+      'editor.format',
+      'tab.rename',
+      'tab.close',
+    ]) {
       expect(byId(id).disabledReason!()).toBe('Open a query tab first.')
     }
     wrapper.unmount()
