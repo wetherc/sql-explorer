@@ -85,6 +85,10 @@ rustls-native-certs = "0.8"
 
 rusqlite = { version = "0.40", features = ["bundled", "chrono", "column_decltype"] }
 
+# Sets TCP keepalive on the socket of MS SQL Server, which `tokio` cannot
+# set. The AWS SDK already builds this version.
+socket2 = "0.6"
+
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-athena = "1"
 aws-credential-types = "1"

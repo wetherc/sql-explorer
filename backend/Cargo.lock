@@ -5064,6 +5064,7 @@ dependencies = [
  "rustls-pki-types",
  "serde",
  "serde_json",
+ "socket2 0.6.5",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

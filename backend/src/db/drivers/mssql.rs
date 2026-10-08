@@ -505,6 +505,30 @@ async fn auth_method(connection: &SavedConnection) -> Result<AuthMethod> {
     }
 }
 
+/// The idle time of a socket after which the operating system sends the
+/// first keepalive probe, and the time between two probes. A firewall or a
+/// NAT gateway can drop an idle connection without a word to either side. A
+/// statement that waits for its answer on such a connection then waits until
+/// its own limit. The probes keep the entry of the firewall open, and they
+/// close the socket when the far side stops answering them. The operating
+/// system sets the count of probes, which is 8 to 10.
+const KEEPALIVE_IDLE: Duration = Duration::from_secs(60);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Turns on TCP keepalive for the socket of one connection. A socket where
+/// the option cannot be set still works, so the failure is a warning and
+/// gives false.
+fn keep_alive(socket: socket2::SockRef<'_>) -> bool {
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(KEEPALIVE_IDLE)
+        .with_interval(KEEPALIVE_INTERVAL);
+    let outcome = socket.set_tcp_keepalive(&keepalive);
+    if let Err(error) = &outcome {
+        log::warn!("Could not turn on TCP keepalive: {error}");
+    }
+    outcome.is_ok()
+}
+
 /// The count of redirects that one login follows. An availability group
 /// listener or an Azure gateway sends one redirect.
 const MAX_REDIRECTS: usize = 3;
@@ -529,6 +553,7 @@ async fn open_client(
         if let Err(error) = tcp.set_nodelay(true) {
             log::warn!("Could not disable the Nagle algorithm: {error}");
         }
+        keep_alive(socket2::SockRef::from(&tcp));
         match Client::connect(config.clone(), tcp.compat_write()).await {
             Err(tiberius::error::Error::Routing { host, port }) => {
                 log::info!("The server sent the login to {host}:{port}.");
@@ -1922,6 +1947,20 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn the_socket_of_a_connection_sends_keepalive_probes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tcp = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        assert!(keep_alive(socket2::SockRef::from(&tcp)));
+        assert!(socket2::SockRef::from(&tcp).keepalive().unwrap());
+
+        // A socket without TCP refuses the option, and the open goes on.
+        let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        assert!(!keep_alive(socket2::SockRef::from(&udp)));
+    }
 
     /// The types of packet that the test reads from the client.
     const PACKET_SQL_BATCH: u8 = 1;
