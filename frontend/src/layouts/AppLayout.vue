@@ -690,6 +690,13 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 
+/* The buttons at the end of the bar keep a gap from the edge of the window
+   and from each other, as the buttons of the panel headers do. */
+.v-app-bar :deep(.v-toolbar__content) {
+  gap: 4px;
+  padding-inline-end: 10px;
+}
+
 /* A row of the rail has an icon and no text. The library keeps a gap of 32
    pixels after the icon for the text that would follow it, and the icon with
    that gap is wider than the row, so the icon would sit against the edge of
@@ -699,6 +706,12 @@ onBeforeUnmount(() => {
   --v-list-prepend-gap: 0px;
 
   justify-content: center;
+}
+
+/* The icons of the rail are one step larger than the icons of a toolbar,
+   because they are the only mark on each row. */
+.rail :deep(.v-list-item .v-icon) {
+  font-size: 20px;
 }
 
 /* The strip sits over the right edge of the panel. It reaches past the edge on

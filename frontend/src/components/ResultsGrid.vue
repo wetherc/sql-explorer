@@ -12,7 +12,7 @@
       <template #actions>
         <span
           v-if="filterProgress !== null"
-          class="text-caption text-medium-emphasis mr-2"
+          class="app-text-sm text-medium-emphasis mr-2"
           role="status"
           data-test="grid-filtering"
         >
@@ -20,13 +20,13 @@
         </span>
         <span
           v-if="sortProgress !== null"
-          class="text-caption text-medium-emphasis mr-2"
+          class="app-text-sm text-medium-emphasis mr-2"
           role="status"
           data-test="grid-sorting"
         >
           Sorting… {{ Math.round(sortProgress * 100) }}%
         </span>
-        <span class="text-caption text-medium-emphasis mr-2" data-test="grid-count">
+        <span class="app-text-sm text-medium-emphasis mr-2" data-test="grid-count">
           {{ countLabel }}
         </span>
         <v-menu>
@@ -118,7 +118,7 @@
     <div class="grid-body">
       <div v-if="busy" class="grid-busy" data-test="grid-busy">
         <v-progress-circular indeterminate size="20" width="2" />
-        <span class="text-caption">Running…</span>
+        <span class="app-text-sm">Running…</span>
       </div>
       <div ref="scrollArea" :key="resultGeneration" class="grid-scroll" @scroll="onScroll">
         <!-- The grid draws only the rows around the visible part, so it reports

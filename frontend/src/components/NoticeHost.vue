@@ -8,7 +8,7 @@
       class="notice notice-bar bg-surface-light"
       data-test="notice-clear-all"
     >
-      <span class="text-caption notice-text">{{ ui.notices.length }} notices</span>
+      <span class="app-text-sm notice-text">{{ ui.notices.length }} notices</span>
       <v-btn
         size="small"
         variant="text"

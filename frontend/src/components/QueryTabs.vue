@@ -416,8 +416,9 @@ defineExpose({ renameActiveTab, closeActiveTab })
 /* The mark grows a background under the pointer, so the area it answers is
    plain to see before the click. */
 .close-mark {
-  border-radius: 50%;
-  padding: 2px;
+  border-radius: 4px;
+  padding: 3px;
+  font-size: 14px;
 }
 
 .close-mark:hover {

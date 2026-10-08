@@ -22,7 +22,7 @@
         </v-list>
 
         <div ref="topicBody" class="topic-body" data-test="guide-content">
-          <h2 class="text-subtitle-1 mb-2">{{ activeTopic.title }}</h2>
+          <h2 class="topic-title mb-2">{{ activeTopic.title }}</h2>
           <!-- The text comes from a file of the build and holds no text of
                the user, so it needs no cleaning step. -->
           <!-- eslint-disable-next-line vue/no-v-html -->
@@ -99,6 +99,12 @@ function close(open: boolean): void {
   flex: 1 1 auto;
   min-width: 0;
   overflow: auto;
+}
+
+/* The name of the topic is one step larger than the headings inside it. */
+.topic-title {
+  font-size: 1.0625rem;
+  font-weight: 600;
 }
 
 /* The rules below reach the HTML that the renderer made, which carries no

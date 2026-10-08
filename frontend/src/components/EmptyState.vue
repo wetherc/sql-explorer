@@ -1,8 +1,8 @@
 <template>
   <div class="empty-state" :class="`empty-state--${size}`">
     <v-icon :size="iconSize" class="empty-state-icon mb-3">{{ icon }}</v-icon>
-    <div class="empty-state-title mb-1" :class="titleClass">{{ title }}</div>
-    <p v-if="hint" class="empty-state-hint text-medium-emphasis mb-4" :class="hintClass">
+    <div class="empty-state-title mb-1">{{ title }}</div>
+    <p v-if="hint" class="empty-state-hint text-medium-emphasis mb-4">
       {{ hint }}
     </p>
     <!-- The action of the state, when one exists. A state without an action
@@ -33,8 +33,6 @@ const props = withDefaults(
 )
 
 const iconSize = computed(() => (props.size === 'page' ? 56 : 40))
-const titleClass = computed(() => (props.size === 'page' ? 'text-h6' : 'text-body-2'))
-const hintClass = computed(() => (props.size === 'page' ? 'text-body-2' : 'text-caption'))
 </script>
 
 <style scoped>
@@ -64,8 +62,24 @@ const hintClass = computed(() => (props.size === 'page' ? 'text-body-2' : 'text-
   padding: 24px 16px;
 }
 
+.empty-state--panel .empty-state-title {
+  font-size: var(--app-text-md);
+}
+
+.empty-state--panel .empty-state-hint {
+  font-size: var(--app-text-sm);
+}
+
 .empty-state--page {
   height: 100%;
   padding: 24px;
+}
+
+.empty-state--page .empty-state-title {
+  font-size: var(--app-text-lg);
+}
+
+.empty-state--page .empty-state-hint {
+  font-size: var(--app-text-md);
 }
 </style>

@@ -407,7 +407,7 @@
       class="results-bar d-flex align-center px-2"
       data-test="results-bar"
     >
-      <span class="text-caption text-medium-emphasis">{{ collapsedLabel }}</span>
+      <span class="app-text-sm text-medium-emphasis">{{ collapsedLabel }}</span>
       <v-spacer />
       <v-btn
         icon="mdi-chevron-up"

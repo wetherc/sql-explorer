@@ -97,6 +97,17 @@ body.app-resizing .v-main {
   border: 0;
 }
 
+/* Text sizes for elements that are not controls, such as a count beside a
+   toolbar or the name of a group of fields. */
+.app-text-sm {
+  font-size: var(--app-text-sm);
+}
+
+.app-heading {
+  font-size: var(--app-text-md);
+  font-weight: 600;
+}
+
 /* The scroll bars follow the theme, so they do not stand out on a dark
    surface. */
 * {
@@ -120,7 +131,7 @@ body.app-resizing .v-main {
 
 /* The menus of the application follow the text of the application. The
    component library builds a menu for a finger on a touch screen, which gives
-   rows of 40 pixels and text of 16, beside body text of 13 everywhere else. */
+   rows of 40 pixels, beside rows of 24 in the tree. */
 .v-menu > .v-overlay__content .v-list {
   padding: 4px;
 }
@@ -130,20 +141,130 @@ body.app-resizing .v-main {
   padding-inline: 10px;
 }
 
-.v-menu > .v-overlay__content .v-list-item__prepend {
+.v-menu > .v-overlay__content .v-icon {
+  font-size: 18px;
+}
+
+/* The rows of a list use the text sizes of the application. The library
+   gives the title of a row text of 16 and its subtitle text of 14, with wide
+   letter spacing, beside body text of 13 everywhere else. The library also
+   puts a gap of 32 pixels between the icon of a row and its text. */
+.v-list-item {
   --v-list-prepend-gap: 10px;
 }
 
-.v-menu > .v-overlay__content .v-list-item-title {
+.v-list-item-title {
   font-size: var(--app-text-md);
+  letter-spacing: normal;
 }
 
-.v-menu > .v-overlay__content .v-list-item-subtitle {
+.v-list-item-subtitle {
   font-size: var(--app-text-sm);
+  letter-spacing: normal;
 }
 
-.v-menu > .v-overlay__content .v-icon {
+/* The buttons of the application use the text of the application. The
+   library sizes a button for a touch screen: a small button has text of 12,
+   which is smaller than the body text, and a default button stands 36 pixels
+   high. A text button of each size here has text of 13 and an icon of 16. */
+.v-btn {
+  letter-spacing: normal;
+}
+
+.v-btn--size-default:not(.v-btn--icon) {
+  --v-btn-height: 30px;
+  font-size: var(--app-text-md);
+  padding-inline: 14px;
+}
+
+.v-btn--size-small:not(.v-btn--icon) {
+  --v-btn-height: 28px;
+  font-size: var(--app-text-md);
+  min-width: 0;
+  padding-inline: 10px;
+}
+
+.v-btn--size-x-small:not(.v-btn--icon) {
+  --v-btn-height: 22px;
+  font-size: var(--app-text-sm);
+  min-width: 0;
+  padding-inline: 6px;
+}
+
+.v-btn:not(.v-btn--icon) .v-btn__prepend {
+  margin-inline: -2px 6px;
+}
+
+.v-btn:not(.v-btn--icon) .v-btn__append {
+  margin-inline: 6px -2px;
+}
+
+.v-btn:not(.v-btn--icon) .v-btn__prepend .v-icon,
+.v-btn:not(.v-btn--icon) .v-btn__append .v-icon {
+  font-size: 16px;
+}
+
+/* A button with only an icon. The library adds 12 pixels to the height of
+   each size, so a small icon button is a circle of 40 pixels around an icon
+   of 18, which is wider than a row of the tree or a tab. The buttons here are
+   squares with round corners, which line up with the rows and the tabs. */
+.v-btn--icon {
+  border-radius: 6px;
+}
+
+.v-btn--icon.v-btn--size-default {
+  width: 32px;
+  height: 32px;
+}
+
+.v-btn--icon.v-btn--size-default .v-icon {
+  font-size: 20px;
+}
+
+.v-btn--icon.v-btn--size-small {
+  width: 28px;
+  height: 28px;
+}
+
+.v-btn--icon.v-btn--size-small .v-icon {
   font-size: 18px;
+}
+
+.v-btn--icon.v-btn--size-x-small {
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+}
+
+.v-btn--icon.v-btn--size-x-small .v-icon {
+  font-size: 16px;
+}
+
+/* A tooltip names a button in a few words. The library gives it text of 14
+   inside a box with 16 pixels of padding at each side. */
+.v-tooltip > .v-overlay__content {
+  font-size: var(--app-text-sm);
+  padding: 4px 8px;
+}
+
+/* A group of buttons that switch one value, such as the two lists of the
+   history panel, stands at the height of a small button. */
+.v-btn-group.v-btn-toggle {
+  height: 28px;
+  border-radius: 6px;
+}
+
+/* The tabs of the editor and of the results. The library gives a tab a row of
+   48 pixels with text of 14. */
+.v-tabs {
+  --v-tabs-height: 34px;
+}
+
+.v-tab.v-btn {
+  font-size: var(--app-text-md);
+  letter-spacing: normal;
+  min-width: 0;
+  padding-inline: 12px;
 }
 
 /* The controls of the application stand one step below the compact density
@@ -214,8 +335,7 @@ body.app-resizing .v-main {
 }
 
 /* A dialog follows the text of the application. The library gives the title
-   of a card text of 22 and its buttons text of 16 at a height of 36, beside
-   fields with text of 13. */
+   of a card text of 22, beside fields with text of 13. */
 .v-dialog .v-card-title {
   font-size: var(--app-text-lg);
   font-weight: 600;
@@ -232,13 +352,6 @@ body.app-resizing .v-main {
   min-height: 0;
   padding: 8px 14px 14px;
   gap: 6px;
-}
-
-.v-dialog .v-card-actions .v-btn {
-  --v-btn-height: 28px;
-  font-size: var(--app-text-md);
-  letter-spacing: normal;
-  padding-inline: 12px;
 }
 
 /* A compact notice inside a form follows the text of the fields around it. */

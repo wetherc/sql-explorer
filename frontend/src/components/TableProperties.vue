@@ -22,7 +22,7 @@
         </v-alert>
 
         <template v-else-if="details">
-          <div class="text-subtitle-2 mb-1">General</div>
+          <div class="app-heading mb-1">General</div>
           <v-table density="compact" class="mb-4">
             <tbody>
               <tr v-for="fact of details.facts" :key="fact.name" data-test="property-fact">
@@ -37,7 +37,7 @@
             </tbody>
           </v-table>
 
-          <div class="text-subtitle-2 mb-1">Columns</div>
+          <div class="app-heading mb-1">Columns</div>
           <v-table density="compact" class="mb-4">
             <thead>
               <tr>
@@ -60,7 +60,7 @@
             </tbody>
           </v-table>
 
-          <div class="text-subtitle-2 mb-1">Indexes</div>
+          <div class="app-heading mb-1">Indexes</div>
           <v-table density="compact" class="mb-4">
             <thead v-if="details.indexes.length > 0">
               <tr>
@@ -81,7 +81,7 @@
             </tbody>
           </v-table>
 
-          <div class="text-subtitle-2 mb-1">Constraints</div>
+          <div class="app-heading mb-1">Constraints</div>
           <v-table density="compact">
             <tbody>
               <tr

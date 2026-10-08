@@ -12,7 +12,7 @@ describe('EmptyState', () => {
     expect(wrapper.text()).toContain('No open connection')
     expect(wrapper.find('.mdi-database-off-outline').exists()).toBe(true)
     expect(wrapper.find('.empty-state--panel').exists()).toBe(true)
-    expect(wrapper.find('.text-body-2.empty-state-title').exists()).toBe(true)
+    expect(wrapper.find('.empty-state-icon').attributes('style')).toContain('40px')
   })
 
   it('leaves the hint out when none is given', () => {
@@ -37,7 +37,7 @@ describe('EmptyState', () => {
     })
 
     expect(wrapper.find('.empty-state--page').exists()).toBe(true)
-    expect(wrapper.find('.text-h6.empty-state-title').exists()).toBe(true)
+    expect(wrapper.find('.empty-state-icon').attributes('style')).toContain('56px')
   })
 
   it('draws the action it is given', () => {
