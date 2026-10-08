@@ -340,7 +340,7 @@ impl PostgresDriver {
     /// Takes the notices that arrived since the last run.
     fn take_notices(&self) -> Vec<Message> {
         match self.notices.lock() {
-            Ok(mut buffer) => std::mem::take(&mut *buffer),
+            Ok(mut buffer) => buffer.take(),
             // The lock breaks only when a holder panicked, and a lost notice
             // must not stop the run itself.
             Err(_) => Vec::new(),
@@ -354,13 +354,14 @@ impl PostgresDriver {
 /// The notices of the server arrive on the connection object and not with
 /// the result of a statement, so the task that drives the socket is a stream
 /// of messages and not a future. Each notice goes into a buffer that the
-/// driver drains into the sink after each statement.
+/// driver drains into the sink after each statement. See [`Notices`] for the
+/// bound of the buffer.
 fn drive_connection<S, T>(mut io: tokio_postgres::Connection<S, T>) -> NoticeBuffer
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let notices: NoticeBuffer = Arc::new(Mutex::new(Vec::new()));
+    let notices: NoticeBuffer = Arc::new(Mutex::new(Notices::default()));
     let held = notices.clone();
     let mut stream = stream::poll_fn(move |context| io.poll_message(context));
     tokio::spawn(async move {
@@ -385,7 +386,54 @@ where
 }
 
 /// The notices that wait for the next answer.
-type NoticeBuffer = Arc<Mutex<Vec<Message>>>;
+type NoticeBuffer = Arc<Mutex<Notices>>;
+
+/// The most notices that the buffer keeps between two drains. A statement
+/// that raises a notice in a loop of millions of rounds would otherwise fill
+/// the memory of the application.
+const NOTICE_LIMIT: usize = 1000;
+
+/// The notices that arrived since the last drain, up to [`NOTICE_LIMIT`],
+/// and the count of the notices past that limit.
+#[derive(Debug, Default)]
+struct Notices {
+    kept: Vec<Message>,
+    dropped: u64,
+}
+
+impl Notices {
+    /// Keeps a notice, or only counts it when the buffer is full.
+    fn push(&mut self, notice: Message) {
+        if self.kept.len() < NOTICE_LIMIT {
+            self.kept.push(notice);
+        } else {
+            self.dropped += 1;
+        }
+    }
+
+    /// Gives the kept notices and empties the buffer. When the buffer
+    /// dropped notices, a warning with their count follows the kept ones.
+    fn take(&mut self) -> Vec<Message> {
+        let mut notices = std::mem::take(&mut self.kept);
+        let dropped = std::mem::take(&mut self.dropped);
+        if dropped > 0 {
+            notices.push(dropped_notices_message(dropped));
+        }
+        notices
+    }
+}
+
+/// The warning that counts the notices past [`NOTICE_LIMIT`].
+fn dropped_notices_message(dropped: u64) -> Message {
+    let counted = if dropped == 1 {
+        "1 more notice was".to_string()
+    } else {
+        format!("{dropped} more notices were")
+    };
+    Message::warning(format!(
+        "{counted} dropped. Only the first {NOTICE_LIMIT} notices of a statement are shown."
+    ))
+}
 
 /// Reads the fields of a notice of the server and builds one message. The
 /// severity decides the level, and the fields beside the text become the
@@ -6812,6 +6860,35 @@ mod tests {
     fn the_plan_keyword_names_the_form_of_the_answer() {
         assert_eq!(plan_prefix(PlanMode::Estimated), "EXPLAIN (FORMAT TEXT)");
         assert_eq!(plan_prefix(PlanMode::Actual), "EXPLAIN (ANALYZE, BUFFERS)");
+    }
+
+    #[test]
+    fn the_notice_buffer_keeps_the_first_notices_and_counts_the_rest() {
+        let mut notices = Notices::default();
+        for index in 0..NOTICE_LIMIT + 2 {
+            notices.push(Message::info(format!("n{index}")));
+        }
+        let taken = notices.take();
+        assert_eq!(taken.len(), NOTICE_LIMIT + 1);
+        assert_eq!(taken[0].text, "n0");
+        assert_eq!(
+            taken[NOTICE_LIMIT - 1].text,
+            format!("n{}", NOTICE_LIMIT - 1)
+        );
+        let last = &taken[NOTICE_LIMIT];
+        assert_eq!(last.level, MessageLevel::Warning);
+        assert!(last.text.starts_with("2 more notices were dropped."));
+
+        // The take empties the buffer and its count.
+        notices.push(Message::info("next"));
+        let taken = notices.take();
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].text, "next");
+        assert!(notices.take().is_empty());
+
+        assert!(dropped_notices_message(1)
+            .text
+            .starts_with("1 more notice was dropped."));
     }
 
     #[test]
