@@ -323,3 +323,14 @@ async fn a_tee_without_a_log_only_passes_the_calls_on() {
     assert_eq!(tee.resume().await.unwrap(), SinkControl::Continue);
     assert_eq!(tee.into_inner().messages, [info("plain")]);
 }
+
+#[test]
+fn a_tee_gives_the_reason_of_an_unsaved_set_to_the_inner_sink() {
+    let mut tee = MessageTee::new(crate::db::sink::testing::ReasonSink::default(), None);
+    tee.not_kept(UnsavedReason::DiskLimit);
+    tee.inner_mut().not_kept(UnsavedReason::Script);
+    assert_eq!(
+        tee.into_inner().reasons,
+        [UnsavedReason::DiskLimit, UnsavedReason::Script]
+    );
+}

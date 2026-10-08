@@ -15,7 +15,7 @@
 use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{ColumnInfo, Message, QueryStats};
 use crate::error::{Error, Result};
-use crate::kept::{KeptSet, KeptSource};
+use crate::kept::{KeptSet, KeptSource, UnsavedReason, UnsavedSet};
 use crate::session::SessionReport;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -415,6 +415,9 @@ struct RunEnd<'a> {
     /// The field is missing when the state is not known.
     #[serde(skip_serializing_if = "Option::is_none")]
     open_transaction: Option<bool>,
+    /// The sets that the row limit cut and that have no kept result, with
+    /// the reason, for a run that asked to save its full results.
+    unsaved: &'a [UnsavedSet],
 }
 
 /// A sink that sends the rows to the user interface as binary chunks. It
@@ -445,6 +448,13 @@ pub struct ChunkSink {
     kept: Vec<KeptSet>,
     /// What the run tells the tab about its session.
     session: SessionReport,
+    /// The reason why the open set keeps no source, when a sink before
+    /// this one gave one.
+    reason: Option<UnsavedReason>,
+    /// The reason for each cut set that gives no reason of its own.
+    default_reason: Option<UnsavedReason>,
+    /// The cut sets without a kept result, with their reasons.
+    unsaved: Vec<UnsavedSet>,
 }
 
 impl ChunkSink {
@@ -464,6 +474,9 @@ impl ChunkSink {
             kept_sources: Vec::new(),
             kept: Vec::new(),
             session: SessionReport::default(),
+            reason: None,
+            default_reason: None,
+            unsaved: Vec::new(),
         }
     }
 
@@ -471,6 +484,18 @@ impl ChunkSink {
     /// session.
     pub fn report_session(&mut self, session: SessionReport) {
         self.session = session;
+    }
+
+    /// Gives the reason for each cut set of the run that keeps no source
+    /// and gets no reason of its own, such as a script that cannot spill.
+    pub fn set_unsaved_reason(&mut self, reason: UnsavedReason) {
+        self.default_reason = Some(reason);
+    }
+
+    /// Records that a cut set lost its kept source after it ended, for
+    /// example because the run then failed.
+    pub fn mark_unsaved(&mut self, set: u32, reason: UnsavedReason) {
+        self.unsaved.push(UnsavedSet { set, reason });
     }
 
     /// Takes the sources of the sets that ended cut, so the command of the
@@ -533,6 +558,7 @@ impl ChunkSink {
             kept: &self.kept,
             session_reset: self.session.reset,
             open_transaction: self.session.open_transaction,
+            unsaved: &self.unsaved,
         };
         let json = serde_json::to_string(&end)?;
         let mut buffer = Vec::new();
@@ -551,6 +577,7 @@ impl RowSink for ChunkSink {
         self.rows_in_set = 0;
         self.truncated = false;
         self.offered = None;
+        self.reason = None;
         let mut buffer = Vec::new();
         write_begin_set(&mut buffer, self.set, &columns);
         self.send(buffer)
@@ -575,8 +602,10 @@ impl RowSink for ChunkSink {
         let cut = self.truncated || truncated;
         // A source matters only for a set that the limit cut, because the
         // grid shows every row of a set that ended whole.
-        if let Some(source) = self.offered.take().filter(|_| cut) {
-            self.kept_sources.push((self.set, source));
+        match (self.offered.take(), self.reason.or(self.default_reason)) {
+            (Some(source), _) if cut => self.kept_sources.push((self.set, source)),
+            (None, Some(reason)) if cut => self.mark_unsaved(self.set, reason),
+            _ => {}
         }
         let mut buffer = Vec::new();
         write_end_set(&mut buffer, self.set, cut);
@@ -602,6 +631,10 @@ impl RowSink for ChunkSink {
 
     fn keep_source(&mut self, source: KeptSource) {
         self.offered = Some(source);
+    }
+
+    fn not_kept(&mut self, reason: UnsavedReason) {
+        self.reason = Some(reason);
     }
 }
 
@@ -1294,6 +1327,45 @@ mod tests {
         assert_eq!(
             value["kept"],
             json!([{ "set": 1, "id": "r1:1", "origin": "athena", "keptAt": 7 }])
+        );
+    }
+
+    #[test]
+    fn the_sink_names_the_reason_of_each_cut_set_without_a_source() {
+        use crate::kept::tests::fixed;
+        let (channel, messages) = collecting_channel();
+        let mut sink = ChunkSink::new(channel, 1);
+        sink.set_unsaved_reason(UnsavedReason::Script);
+        // A cut set with a reason of its own.
+        sink.begin_set(columns()).unwrap();
+        sink.not_kept(UnsavedReason::DiskLimit);
+        sink.end_set(true).unwrap();
+        // A cut set that takes the reason of the run.
+        sink.begin_set(columns()).unwrap();
+        sink.end_set(true).unwrap();
+        // A whole set needs no reason, and a cut set with a source is kept.
+        sink.begin_set(columns()).unwrap();
+        sink.not_kept(UnsavedReason::ExportLimit);
+        sink.end_set(false).unwrap();
+        sink.begin_set(columns()).unwrap();
+        sink.keep_source(fixed(1));
+        sink.end_set(true).unwrap();
+        assert_eq!(sink.take_kept().len(), 1);
+        sink.mark_unsaved(3, UnsavedReason::Stopped);
+        sink.finish(RunSummary::default()).unwrap();
+
+        let frames = frames_of(&messages.lock().unwrap());
+        let Some(Frame::End { summary }) = frames.last() else {
+            panic!("the last frame does not end the run");
+        };
+        let value: JsonValue = serde_json::from_str(summary).unwrap();
+        assert_eq!(
+            value["unsaved"],
+            json!([
+                { "set": 0, "reason": "diskLimit" },
+                { "set": 1, "reason": "script" },
+                { "set": 3, "reason": "stopped" },
+            ])
         );
     }
 

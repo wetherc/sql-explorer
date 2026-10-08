@@ -231,6 +231,33 @@ pub struct KeptSet {
     pub paused_secs: Option<u64>,
 }
 
+/// Why a run that asked to save its full results kept no file for a set
+/// that the row limit of the grid cut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UnsavedReason {
+    /// The run had more than one statement, so it saved nothing.
+    Script,
+    /// The spill files reached the cap of their disk use.
+    DiskLimit,
+    /// The set had more rows than the export row limit.
+    ExportLimit,
+    /// The run stopped or failed before its end, so the file can miss rows.
+    Stopped,
+    /// The disk refused the file, or no folder for the files was ready.
+    DiskFailed,
+}
+
+/// A set that the row limit cut and that has no kept result, with the
+/// reason, as the frame at the end of the run gives it to the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnsavedSet {
+    /// The number of the set in the run, from zero.
+    pub set: u32,
+    pub reason: UnsavedReason,
+}
+
 /// The time of the system clock in milliseconds since the Unix epoch. A
 /// clock before the epoch gives zero.
 pub fn unix_millis() -> u64 {

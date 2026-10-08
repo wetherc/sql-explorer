@@ -18,7 +18,7 @@ use crate::db::columnar::ChunkSink;
 use crate::db::sink::{PausePoint, RowSink, SinkControl};
 use crate::db::{ColumnInfo, Message, MessageLevel};
 use crate::error::{Error, Result};
-use crate::kept::KeptSource;
+use crate::kept::{KeptSource, UnsavedReason};
 use serde_json::Value as JsonValue;
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
@@ -376,6 +376,12 @@ impl<S> MessageTee<S> {
     pub fn into_inner(self) -> S {
         self.inner
     }
+
+    /// Lends the inner sink, for a call that the trait of a sink does not
+    /// give.
+    pub fn inner_mut(&mut self) -> &mut S {
+        &mut self.inner
+    }
 }
 
 #[async_trait::async_trait]
@@ -401,6 +407,10 @@ impl<S: RowSink> RowSink for MessageTee<S> {
 
     fn keep_source(&mut self, source: KeptSource) {
         self.inner.keep_source(source);
+    }
+
+    fn not_kept(&mut self, reason: UnsavedReason) {
+        self.inner.not_kept(reason);
     }
 
     fn pause_point(&self) -> Option<PausePoint> {

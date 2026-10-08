@@ -1450,53 +1450,28 @@ describe('kept results', () => {
     })
   })
 
-  it('points at Messages when a cut result was not saved and a warning came', async () => {
-    const queries = useQueryStore()
-    const ui = useUiStore()
-    const warn = vi.spyOn(ui, 'warn')
-    const notice = "A result wasn't saved on this computer. Messages has the reason."
-    const warning = { level: 'warning' as const, text: 'Not saved.', detail: null }
-    const run = async (fixture: Parameters<typeof streamed>[0]) => {
-      warn.mockClear()
-      apiStub.executeQuery.mockImplementationOnce(streamed(fixture))
-      await queries.execute('t1', 'c1', 'SELECT 1')
-      return warn.mock.calls.map((call) => call[0])
-    }
-    const cut = [{ rows: [[1]], truncated: true }]
-
-    // The option is off, so nothing was meant to be saved.
-    expect(await run({ results: cut, messages: [warning] })).not.toContain(notice)
-
-    useSettingsStore().update({ keepFullResults: true })
-    expect(await run({ results: cut, messages: [warning] })).toContain(notice)
-    // No warning came, or the set was saved, or no set was cut.
-    expect(await run({ results: cut })).not.toContain(notice)
-    expect(
-      await run({
-        results: cut,
-        messages: [warning],
-        kept: [{ set: 0, id: 'r2:0', origin: 'spill', keptAt: 5, savedRows: 9, savedBytes: 9 }],
-      }),
-    ).not.toContain(notice)
-    expect(await run({ results: [{ rows: [[1]] }], messages: [warning] })).not.toContain(notice)
-
-    // A failed run says so on its own.
-    warn.mockClear()
-    apiStub.executeQuery.mockRejectedValueOnce(new Error('broken'))
-    await queries.execute('t1', 'c1', 'SELECT 1')
-    expect(warn.mock.calls.map((call) => call[0])).not.toContain(notice)
-
-    // A tab that closed during the run has nothing to point at.
-    warn.mockClear()
+  it('gives each cut set that the run did not save its reason', async () => {
     apiStub.executeQuery.mockImplementationOnce(
       async (_request: unknown, handlers: import('@/lib/results').ResultStreamHandlers) => {
         handlers.onSet(ResultTable.fromRows([], [[1]], true))
-        queries.clear('t1')
-        handlers.onEnd({ messages: [warning], rowsAffected: null, elapsedMs: 1, stats: null })
+        handlers.onSet(ResultTable.fromRows([], [[2]], true))
+        handlers.onEnd({
+          messages: [],
+          rowsAffected: null,
+          elapsedMs: 1,
+          stats: null,
+          // The third set never opened a pane.
+          unsaved: [
+            { set: 1, reason: 'diskLimit' },
+            { set: 2, reason: 'stopped' },
+          ],
+        })
       },
     )
+    const queries = useQueryStore()
     await queries.execute('t1', 'c1', 'SELECT 1')
-    expect(warn.mock.calls.map((call) => call[0])).not.toContain(notice)
+    const panes = queries.stateFor('t1').panes
+    expect(panes.map((pane) => pane.unsaved)).toEqual([undefined, 'diskLimit'])
   })
 
   it('needs no answer from a release', async () => {

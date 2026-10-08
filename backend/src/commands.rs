@@ -14,6 +14,7 @@ use crate::db::{
 use crate::error::{Error, Result};
 use crate::files;
 use crate::history::HistoryEntry;
+use crate::kept::UnsavedReason;
 use crate::message_log::{MessageLogs, MessageTee};
 use crate::script::{self, ScriptStatement};
 use crate::secrets::{self, SecretStore};
@@ -1062,7 +1063,7 @@ pub struct ExecuteRequest {
 }
 
 /// What a run that keeps its full result sets on the local disk asks for.
-#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpillRequest {
     /// The row limit of the read, which is the export row limit.
@@ -1071,8 +1072,18 @@ pub struct SpillRequest {
     pub max_bytes: u64,
 }
 
-/// The spill of one run and the folder of its files, when the run can
-/// spill.
+/// What a run does with its full result sets.
+#[derive(Debug, PartialEq)]
+enum SpillPlan {
+    /// The run spills with the request, into the folder.
+    Spill(SpillRequest, std::path::PathBuf),
+    /// The run does not spill. The reason goes to each cut set, when the
+    /// user asked for a spill that the run cannot do.
+    Skip(Option<UnsavedReason>),
+}
+
+/// The spill of one run and the folder of its files, or the reason that
+/// the run cannot spill.
 ///
 /// Athena keeps its full result in S3, so a run there gets its kept result
 /// without a spill. A read limit at or below the grid limit leaves nothing
@@ -1085,25 +1096,54 @@ fn spill_plan(
     dialect: crate::sql::Dialect,
     query: &str,
     grid: &ExecOptions,
-) -> Option<(SpillRequest, std::path::PathBuf)> {
-    let request = request.filter(|request| {
-        dialect != crate::sql::Dialect::Athena
-            && request.max_rows > grid.max_rows
-            && crate::sql::split_statements(query, dialect).len() == 1
-    })?;
-    Some((request, state.kept.spill_folder()?))
+) -> SpillPlan {
+    let request = match request {
+        Some(request) if dialect != crate::sql::Dialect::Athena => request,
+        _ => return SpillPlan::Skip(None),
+    };
+    if request.max_rows <= grid.max_rows {
+        return SpillPlan::Skip(Some(UnsavedReason::ExportLimit));
+    }
+    if crate::sql::split_statements(query, dialect).len() != 1 {
+        return SpillPlan::Skip(Some(UnsavedReason::Script));
+    }
+    match state.kept.spill_folder() {
+        Some(folder) => SpillPlan::Spill(request, folder),
+        None => SpillPlan::Skip(Some(UnsavedReason::DiskFailed)),
+    }
 }
 
-/// The kept sources of a run that go to the registry. A spill file stays
-/// only after a run that ended well.
+/// The kept sources of a run that go to the registry, and the numbers of
+/// the sets whose spill file goes. A spill file stays only after a run that
+/// ended well.
 fn sources_to_keep(
-    mut sources: Vec<(u32, crate::kept::KeptSource)>,
+    sources: Vec<(u32, crate::kept::KeptSource)>,
     ended_well: bool,
-) -> Vec<(u32, crate::kept::KeptSource)> {
-    if !ended_well {
-        sources.retain(|(_, source)| !source.is_spill());
+) -> (Vec<(u32, crate::kept::KeptSource)>, Vec<u32>) {
+    let (kept, dropped): (Vec<_>, Vec<_>) = sources
+        .into_iter()
+        .partition(|(_, source)| ended_well || !source.is_spill());
+    (kept, dropped.into_iter().map(|(set, _)| set).collect())
+}
+
+/// Puts the kept sources of a run and its paused read in the registry and
+/// gives their identifiers to the sink. A set whose spill file goes, because
+/// the run did not end well, gets the reason for the window.
+fn keep_run_sources(
+    state: &AppState,
+    sink: &mut ChunkSink,
+    request_id: &str,
+    connection_id: &str,
+    ended_well: bool,
+    paused: Option<(u32, crate::kept::KeptSource)>,
+) {
+    let (mut sources, dropped) = sources_to_keep(sink.take_kept(), ended_well);
+    for set in dropped {
+        sink.mark_unsaved(set, UnsavedReason::Stopped);
     }
-    sources
+    sources.extend(paused);
+    let kept = state.kept.keep(request_id, connection_id, sources);
+    sink.announce_kept(kept);
 }
 
 /// Takes the driver of the session and runs the statement into the sink,
@@ -1221,7 +1261,7 @@ pub async fn execute_query<R: Runtime>(
             (run.outcome, run.grid, run.paused)
         }
         None => match spill_plan(&state, spill, open.dialect, &ran, &options) {
-            Some((spill, folder)) => {
+            SpillPlan::Spill(spill, folder) => {
                 // The driver reads up to the export row limit, and the grid
                 // gets the rows up to its own limit.
                 let read = ExecOptions {
@@ -1243,8 +1283,11 @@ pub async fn execute_query<R: Runtime>(
                 .await;
                 (outcome, Some(sink.into_grid()), None)
             }
-            None => {
+            SpillPlan::Skip(reason) => {
                 let mut sink = grid;
+                if let Some(reason) = reason {
+                    sink.inner_mut().set_unsaved_reason(reason);
+                }
                 let outcome = run_into_sink(
                     &state,
                     &request_id,
@@ -1273,14 +1316,17 @@ pub async fn execute_query<R: Runtime>(
     // A stop, a time limit or an error can end a set early, so a spill file
     // stays only after a run that ended well, because its file can miss
     // rows.
-    let mut sources = sources_to_keep(
-        sink.take_kept(),
-        matches!(outcome, Bounded::Answered(Ok(_))),
-    );
+    let ended_well = matches!(outcome, Bounded::Answered(Ok(_)));
     let read_paused = paused.is_some();
-    sources.extend(paused.map(|(set, read)| (set, crate::kept::KeptSource::PausedRead(read))));
-    let kept = state.kept.keep(&request_id, &connection_id, sources);
-    sink.announce_kept(kept);
+    let paused = paused.map(|(set, read)| (set, crate::kept::KeptSource::PausedRead(read)));
+    keep_run_sources(
+        &state,
+        &mut sink,
+        &request_id,
+        &connection_id,
+        ended_well,
+        paused,
+    );
     let finished = finish_run(&state, &connection_id, &open, &key, &session, outcome).await;
     sink.report_session(
         session_after_run(
@@ -5648,10 +5694,9 @@ mod tests {
         .await
         .unwrap_err();
         assert!(error.to_string().contains("overflow"));
-        assert_eq!(
-            end_frame(&messages.lock().unwrap())["kept"],
-            serde_json::json!([])
-        );
+        let end = end_frame(&messages.lock().unwrap());
+        assert_eq!(end["kept"], serde_json::json!([]));
+        assert_eq!(end["unsaved"], serde_json::json!([]));
         assert_eq!(app.state::<AppState>().kept.len(), 0);
         assert!(crate::spill::tests::wait_for_empty(folder.path()));
     }
@@ -5673,11 +5718,64 @@ mod tests {
                 ),
             ]
         };
-        assert_eq!(sources_to_keep(sources(), true).len(), 2);
-        let kept = sources_to_keep(sources(), false);
+        let (kept, dropped) = sources_to_keep(sources(), true);
+        assert_eq!((kept.len(), dropped), (2, vec![]));
+        drop(kept);
+        let (kept, dropped) = sources_to_keep(sources(), false);
         assert_eq!(kept.len(), 1);
         assert!(!kept[0].1.is_spill());
+        assert_eq!(dropped, vec![1]);
         assert_eq!(disk.bytes(), 0);
+    }
+
+    #[test]
+    fn a_spill_file_of_a_run_that_failed_names_the_stop() {
+        use crate::db::sink::RowSink;
+        let folder = tempfile::tempdir().unwrap();
+        let state = AppState::new(Arc::new(MemoryStore::default()));
+        let (channel, messages) = message_channel();
+        let mut sink = ChunkSink::new(channel, 1);
+        sink.begin_set(vec![crate::db::ColumnInfo::new("n", "int")])
+            .unwrap();
+        sink.keep_source(crate::kept::KeptSource::SpillFile(
+            crate::spill::tests::spill(folder.path(), &state.kept.disk_use(), 2),
+        ));
+        sink.end_set(true).unwrap();
+        keep_run_sources(&state, &mut sink, "r1", "c1", false, None);
+        sink.finish(crate::db::sink::RunSummary::default()).unwrap();
+        let end = end_frame(&messages.lock().unwrap());
+        assert_eq!(end["kept"], serde_json::json!([]));
+        assert_eq!(
+            end["unsaved"],
+            serde_json::json!([{ "set": 0, "reason": "stopped" }])
+        );
+        assert_eq!(state.kept.disk_use().bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_script_that_asks_for_a_spill_says_why_it_saved_nothing() {
+        use tauri::Manager;
+        let (_dir, descriptor) = temp_sqlite();
+        let (app, state) = state_with_sqlite(descriptor).await;
+        let folder = tempfile::tempdir().unwrap();
+        state.kept.set_spill_folder(folder.path().to_path_buf());
+        app.manage(state);
+        let (channel, messages) = message_channel();
+        let script = format!("{}; SELECT 2", numbers(50, "x"));
+        execute_query(
+            app.handle().clone(),
+            spill_request(&script, 10),
+            app.state::<AppState>(),
+            channel,
+        )
+        .await
+        .unwrap();
+        let end = end_frame(&messages.lock().unwrap());
+        assert_eq!(
+            end["unsaved"],
+            serde_json::json!([{ "set": 0, "reason": "script" }])
+        );
+        assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 0);
     }
 
     #[tokio::test]
@@ -5712,30 +5810,46 @@ mod tests {
             max_rows: 10,
             ..ExecOptions::default()
         };
-        let request = Some(SpillRequest {
+        let spill = SpillRequest {
             max_rows: 100,
             max_bytes: 1,
-        });
-        let plan = |request, dialect, query: &str| {
-            spill_plan(&state, request, dialect, query, &grid).map(|(_, folder)| folder)
         };
+        let request = Some(spill);
+        let plan =
+            |request, dialect, query: &str| spill_plan(&state, request, dialect, query, &grid);
+        let skip = |reason| SpillPlan::Skip(Some(reason));
         // No folder before the start prepares it.
-        assert_eq!(plan(request, Dialect::Sqlite, "SELECT 1"), None);
+        assert_eq!(
+            plan(request, Dialect::Sqlite, "SELECT 1"),
+            skip(UnsavedReason::DiskFailed)
+        );
         state
             .kept
             .set_spill_folder(std::path::PathBuf::from("/spill"));
         assert_eq!(
             plan(request, Dialect::Sqlite, "SELECT 1"),
-            Some("/spill".into())
+            SpillPlan::Spill(spill, "/spill".into())
         );
-        assert_eq!(plan(None, Dialect::Sqlite, "SELECT 1"), None);
-        assert_eq!(plan(request, Dialect::Athena, "SELECT 1"), None);
-        assert_eq!(plan(request, Dialect::Sqlite, "SELECT 1; SELECT 2"), None);
+        assert_eq!(
+            plan(None, Dialect::Sqlite, "SELECT 1"),
+            SpillPlan::Skip(None)
+        );
+        assert_eq!(
+            plan(request, Dialect::Athena, "SELECT 1"),
+            SpillPlan::Skip(None)
+        );
+        assert_eq!(
+            plan(request, Dialect::Sqlite, "SELECT 1; SELECT 2"),
+            skip(UnsavedReason::Script)
+        );
         let low = Some(SpillRequest {
             max_rows: 10,
             max_bytes: 1,
         });
-        assert_eq!(plan(low, Dialect::Sqlite, "SELECT 1"), None);
+        assert_eq!(
+            plan(low, Dialect::Sqlite, "SELECT 1"),
+            skip(UnsavedReason::ExportLimit)
+        );
     }
 
     #[tokio::test]

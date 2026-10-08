@@ -25,6 +25,7 @@ use crate::db::columnar::ChunkSink;
 use crate::db::sink::{RowSink, SinkControl};
 use crate::db::{ColumnInfo, ExecOptions, Message};
 use crate::error::{Error, Result};
+use crate::kept::UnsavedReason;
 use crate::message_log::{MessageLogs, MessageTee};
 use crate::sql::ParamValues;
 use crate::state::AppState;
@@ -668,6 +669,10 @@ impl<F: RowSink, G: RowSink> RowSink for TeeSink<F, G> {
     fn message(&mut self, message: Message) {
         self.grid.message(message);
     }
+
+    fn not_kept(&mut self, reason: UnsavedReason) {
+        self.grid.not_kept(reason);
+    }
 }
 
 #[cfg(test)]
@@ -692,6 +697,15 @@ mod tests {
 
     fn response(sink: BufferSink) -> QueryResponse {
         sink.into_response(RunSummary::default())
+    }
+
+    #[test]
+    fn the_reason_of_an_unsaved_set_goes_to_the_grid() {
+        use crate::db::sink::testing::ReasonSink;
+        let mut tee = TeeSink::new(ReasonSink::default(), ReasonSink::default(), 2);
+        tee.not_kept(UnsavedReason::DiskFailed);
+        assert!(tee.file.reasons.is_empty());
+        assert_eq!(tee.grid.reasons, vec![UnsavedReason::DiskFailed]);
     }
 
     #[test]

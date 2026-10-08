@@ -25,7 +25,7 @@ use crate::db::drivers::DatabaseDriver;
 use crate::db::sink::{PausePoint, RowSink, RunSummary, SinkControl};
 use crate::db::{ColumnInfo, ExecOptions, Message, QueryParams};
 use crate::error::{Error, Result};
-use crate::kept::KeptSource;
+use crate::kept::{KeptSource, UnsavedReason};
 use crate::session::{Session, SessionPool};
 use serde_json::Value as JsonValue;
 use std::future::Future;
@@ -306,6 +306,12 @@ impl<G: RowSink + 'static> RowSink for PausingSink<G> {
         }
     }
 
+    fn not_kept(&mut self, reason: UnsavedReason) {
+        if let Phase::Visible(grid) = &mut self.phase {
+            grid.not_kept(reason);
+        }
+    }
+
     fn pause_point(&self) -> Option<PausePoint> {
         Some(self.point)
     }
@@ -371,6 +377,10 @@ impl<S: RowSink> RowSink for SharedSink<S> {
 
     fn message(&mut self, message: Message) {
         self.sink().message(message);
+    }
+
+    fn not_kept(&mut self, reason: UnsavedReason) {
+        self.sink().not_kept(reason);
     }
 }
 

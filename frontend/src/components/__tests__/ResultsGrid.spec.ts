@@ -731,7 +731,9 @@ describe('ResultsGrid', () => {
         kept: { origin: 'spill', keptAt: 0, savedRows: 52310, savedBytes: 412 * 1024 ** 2 },
       })
       expect(note()).toBe('Saved on this computer, 52,310 rows, 412 MB')
-      await grid.setProps({ kept: null })
+      await grid.setProps({ kept: null, unsaved: 'diskLimit' })
+      expect(note()).toBe('Not saved: the disk limit was reached')
+      await grid.setProps({ unsaved: null })
       expect(grid.find('[data-test="grid-full-result"]').exists()).toBe(false)
       grid.unmount()
     } finally {

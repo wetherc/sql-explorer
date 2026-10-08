@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { exportAllNote, keptNote, shortCount, shortSize, timeAgo } from '@/lib/kept'
+import { exportAllNote, keptNote, shortCount, shortSize, timeAgo, unsavedNote } from '@/lib/kept'
 
 describe('kept result notes', () => {
   it('writes a size with few digits', () => {
@@ -36,5 +36,20 @@ describe('kept result notes', () => {
     expect(exportAllNote({ origin: 'paused', keptAt: 0 }, 5)).toBe('Continues the paused read')
     expect(exportAllNote(null, null)).toBe('Runs the query again')
     expect(exportAllNote(null, 1500)).toBe('Runs the query again (last run took 1.50 s)')
+  })
+
+  it('says why the full rows were not saved', () => {
+    expect(
+      (
+        ['script', 'diskLimit', 'exportLimit', 'stopped', 'diskFailed', 'stoppedSaving'] as const
+      ).map(unsavedNote),
+    ).toEqual([
+      "Not saved: scripts with more than one statement can't be saved",
+      'Not saved: the disk limit was reached',
+      'Not saved: the export row limit was reached',
+      'Not saved: the read stopped',
+      "Not saved: the file couldn't be written on this computer",
+      'Not saved: you stopped saving',
+    ])
   })
 })

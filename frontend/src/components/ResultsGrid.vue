@@ -372,8 +372,8 @@ import type { SortKey } from '@/lib/format'
 import { toTabSeparated } from '@/lib/export'
 import type { ResultTable } from '@/lib/results'
 import { FALLBACK_CHAR_WIDTH } from '@/lib/textWidth'
-import { exportAllNote, keptNote } from '@/lib/kept'
-import type { CellValue, KeptInfo, ResultSet } from '@/types/api'
+import { exportAllNote, keptNote, unsavedNote } from '@/lib/kept'
+import type { CellValue, KeptInfo, ResultSet, UnsavedReason } from '@/types/api'
 
 /** The forms an export can take. */
 export type ExportFormat = 'csv' | 'json' | 'markdown' | 'insert' | 'xlsx'
@@ -405,6 +405,9 @@ const props = withDefaults(
      *  them. The export of all rows then reads them and does not run the
      *  query again. */
     kept?: KeptInfo | null
+    /** Why the run saved no file for this cut result, when it asked to save
+     *  its full results. */
+    unsaved?: UnsavedReason | null
     /** The time the run of the result took, for the note of an export that
      *  runs the query again. */
     runMs?: number | null
@@ -417,6 +420,7 @@ const props = withDefaults(
     busy: false,
     exporting: false,
     kept: null,
+    unsaved: null,
     runMs: null,
     rows: undefined,
     truncated: undefined,
@@ -454,8 +458,17 @@ watch(
   { immediate: true },
 )
 
-/** Where the full rows of a cut result are, when the backend kept them. */
-const fullResultNote = computed(() => (props.kept ? keptNote(props.kept, keptNow.value) : ''))
+/**
+ * Where the full rows of a cut result are, or why the run saved no file for
+ * them.
+ */
+const fullResultNote = computed(() =>
+  props.kept
+    ? keptNote(props.kept, keptNow.value)
+    : props.unsaved
+      ? unsavedNote(props.unsaved)
+      : '',
+)
 
 /** The number of rows of the result, which grows while the set streams. */
 const rowTotal = computed(() => props.rows ?? props.result.rowCount)

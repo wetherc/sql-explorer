@@ -1,7 +1,7 @@
 import { api } from './api'
 import { formatDuration, formatRowCount } from './format'
 import type { Settings } from '@/stores/settings'
-import type { KeptInfo, SpillRequest } from '@/types/api'
+import type { KeptInfo, SpillRequest, UnsavedReason } from '@/types/api'
 
 /** The bytes of one gigabyte of the disk limit in Settings. */
 export const GIGABYTE = 1024 ** 3
@@ -83,6 +83,24 @@ export function keptNote(kept: KeptInfo, now: number): string {
       return `Saved on this computer, ${formatRowCount(kept.savedRows ?? 0)}, ${shortSize(kept.savedBytes ?? 0)}`
     case 'paused':
       return `Paused on the server, ${timeAgo(kept.keptAt, now)}`
+  }
+}
+
+/** Says why the full rows of a cut result were not saved, for the grid. */
+export function unsavedNote(reason: UnsavedReason): string {
+  switch (reason) {
+    case 'script':
+      return "Not saved: scripts with more than one statement can't be saved"
+    case 'diskLimit':
+      return 'Not saved: the disk limit was reached'
+    case 'exportLimit':
+      return 'Not saved: the export row limit was reached'
+    case 'stopped':
+      return 'Not saved: the read stopped'
+    case 'diskFailed':
+      return "Not saved: the file couldn't be written on this computer"
+    case 'stoppedSaving':
+      return 'Not saved: you stopped saving'
   }
 }
 

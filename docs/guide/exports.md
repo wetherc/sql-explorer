@@ -147,8 +147,12 @@ not saved in these cases, and **Export all rows** runs the query again for it:
 - You stop the run, the run reaches the connection's time limit, or a statement
   fails.
 
-When the export row limit, the disk space or the disk keeps a result from being
-saved, **Messages** says why, and a notice in the corner points you there.
+When a result isn't saved, the warning above the grid gives the reason, for
+example **Not saved: the export row limit was reached** or **Not saved: the disk
+limit was reached**. A script with more than one statement shows **Not saved:
+scripts with more than one statement can't be saved**. A run that you stop or
+that fails shows **Not saved: the read stopped**. When the export row limit,
+the disk space or the disk stops a save, **Messages** also gives the details.
 
 The app deletes a saved file when you run the tab again (unless you pinned the
 result), close the result or the tab, or disconnect. It also deletes a file

@@ -4,7 +4,7 @@
 
 use crate::db::{ColumnInfo, Message, QueryResponse, QueryStats, ResultSet};
 use crate::error::{Error, Result};
-use crate::kept::KeptSource;
+use crate::kept::{KeptSource, UnsavedReason};
 use serde_json::Value as JsonValue;
 
 /// The answer a sink gives for one row. `Stop` tells the driver to end the
@@ -62,6 +62,11 @@ pub trait RowSink: Send {
     /// source, because a sink that writes a file or a buffer has no later
     /// use for it.
     fn keep_source(&mut self, _source: KeptSource) {}
+
+    /// Receives the reason why the open set keeps no source of its full
+    /// rows. The sink that spills a run calls this, so the window can tell
+    /// the user why a cut set was not saved. The default drops the reason.
+    fn not_kept(&mut self, _reason: UnsavedReason) {}
 
     /// The place where this sink can pause the read, or `None` for a sink
     /// that never pauses. A driver uses it to stop between two exchanges
@@ -155,6 +160,49 @@ impl RowSink for BufferSink {
 
     fn message(&mut self, message: Message) {
         self.messages.push(message);
+    }
+}
+
+/// Sinks for the tests of the sinks that wrap another sink.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+
+    /// A sink that records the reasons of `not_kept` and drops all else.
+    #[derive(Default)]
+    pub(crate) struct ReasonSink {
+        pub reasons: Vec<UnsavedReason>,
+    }
+
+    impl RowSink for ReasonSink {
+        fn begin_set(&mut self, _columns: Vec<ColumnInfo>) -> Result<()> {
+            Ok(())
+        }
+
+        fn row(&mut self, _row: Vec<JsonValue>) -> Result<SinkControl> {
+            Ok(SinkControl::Continue)
+        }
+
+        fn end_set(&mut self, _truncated: bool) -> Result<()> {
+            Ok(())
+        }
+
+        fn message(&mut self, _message: Message) {}
+
+        fn not_kept(&mut self, reason: UnsavedReason) {
+            self.reasons.push(reason);
+        }
+    }
+
+    #[test]
+    fn the_reason_sink_records_reasons_and_drops_the_rest() {
+        let mut sink = ReasonSink::default();
+        sink.begin_set(Vec::new()).unwrap();
+        assert_eq!(sink.row(Vec::new()).unwrap(), SinkControl::Continue);
+        sink.end_set(false).unwrap();
+        sink.message(Message::info("note"));
+        sink.not_kept(UnsavedReason::DiskLimit);
+        assert_eq!(sink.reasons, vec![UnsavedReason::DiskLimit]);
     }
 }
 
@@ -299,6 +347,7 @@ mod tests {
         let mut sink = BufferSink::new(1);
         sink.begin_set(columns()).unwrap();
         sink.keep_source(crate::kept::tests::fixed(2));
+        sink.not_kept(UnsavedReason::DiskLimit);
         sink.end_set(true).unwrap();
         let response = sink.into_response(RunSummary::default());
         assert!(response.results[0].truncated);

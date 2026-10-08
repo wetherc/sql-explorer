@@ -9,7 +9,7 @@
  * The form of the bytes stands in `backend/src/db/columnar.rs`.
  */
 
-import type { CellValue, ColumnInfo, KeptSet, Message, QueryStats } from '@/types/api'
+import type { CellValue, ColumnInfo, KeptSet, Message, QueryStats, UnsavedSet } from '@/types/api'
 import { exactAsNumber } from './format'
 
 const FRAME_BEGIN_SET = 1
@@ -360,6 +360,9 @@ export interface RunEnd {
   /** True when the tab's session is inside an open transaction after the
    *  run. Missing when the backend doesn't know. */
   openTransaction?: boolean
+  /** The cut sets of a run that asked to save its full results and saved
+   *  no file for them, with the reason. */
+  unsaved?: UnsavedSet[]
 }
 
 /** What the reader of a run tells its caller. */

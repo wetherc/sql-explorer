@@ -315,6 +315,20 @@ export interface KeptSet extends KeptInfo {
  */
 export type KeptOrigin = 'athena' | 'spill' | 'paused'
 
+/**
+ * Why a run that asked to save its full results saved no file for a set that
+ * the row limit cut.
+ */
+export type UnsavedReason =
+  'script' | 'diskLimit' | 'exportLimit' | 'stopped' | 'diskFailed' | 'stoppedSaving'
+
+/** A cut set of a run that saved no file for it, with the reason. */
+export interface UnsavedSet {
+  /** The number of the set in its run, from zero. */
+  set: number
+  reason: UnsavedReason
+}
+
 /** What the interface shows about the full rows of one kept set. */
 export interface KeptInfo {
   origin: KeptOrigin

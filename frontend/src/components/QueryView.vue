@@ -336,6 +336,7 @@
                   pane.savedFile ? savedFileNote(pane.rows, pane.truncated, pane.savedFile) : null
                 "
                 :kept="pane.kept"
+                :unsaved="pane.unsaved ?? null"
                 :run-ms="pane.elapsedMs ?? null"
                 :paused-until="pane.pausedUntil"
                 @export="onExport"

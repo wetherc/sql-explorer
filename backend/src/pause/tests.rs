@@ -696,3 +696,17 @@ async fn a_release_that_passes_its_limit_closes_the_session() {
     assert!(session.is_broken());
     assert!(sessions.get("t1").await.is_none());
 }
+
+#[test]
+fn the_reason_of_an_unsaved_set_reaches_the_grid_and_a_shared_sink() {
+    use crate::db::sink::testing::ReasonSink;
+    use crate::kept::UnsavedReason;
+    let (mut sink, _control) = PausingSink::new(ReasonSink::default(), point(1));
+    sink.not_kept(UnsavedReason::ExportLimit);
+    let grid = sink.into_grid().expect("the read never paused");
+    assert_eq!(grid.reasons, vec![UnsavedReason::ExportLimit]);
+
+    let shared = Arc::new(Mutex::new(ReasonSink::default()));
+    SharedSink(shared.clone()).not_kept(UnsavedReason::Stopped);
+    assert_eq!(shared.lock().unwrap().reasons, vec![UnsavedReason::Stopped]);
+}

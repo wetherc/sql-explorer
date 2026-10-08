@@ -21,6 +21,8 @@ import type {
   Message,
   QueryStats,
   RunFileSummary,
+  UnsavedReason,
+  UnsavedSet,
 } from '@/types/api'
 
 /** The file of a run to a file, and where its result sets go. */
@@ -75,6 +77,9 @@ export interface ResultPane {
   keptId?: string
   /** Where the kept rows of the set are, for the grid and the export menu. */
   kept?: KeptInfo
+  /** Why the run saved no file for this cut set, when it asked to save its
+   *  full results. */
+  unsaved?: UnsavedReason
   /** The time the run of the set took, once the run has ended. An export of
    *  all rows that runs the query again takes about as long. */
   elapsedMs?: number
@@ -366,6 +371,18 @@ export const useQueryStore = defineStore('query', () => {
     pane.pausedUntil = undefined
   }
 
+  /** Gives the reason of each cut set that the run saved no file for to
+   *  the pane of its table. */
+  function attachUnsaved(state: QueryState, run: Run, unsaved: UnsavedSet[]): void {
+    for (const entry of unsaved) {
+      const table = run.fresh[entry.set]
+      const pane = state.panes.find((pane) => table !== undefined && pane.result === table)
+      if (pane) {
+        pane.unsaved = entry.reason
+      }
+    }
+  }
+
   function paneOf(state: QueryState, paneId: string): ResultPane | undefined {
     return state.panes.find((pane) => pane.id === paneId)
   }
@@ -517,6 +534,7 @@ export const useQueryStore = defineStore('query', () => {
               }
             }
             attachKept(state, run, end.kept ?? [])
+            attachUnsaved(state, run, end.unsaved ?? [])
           },
         },
       )
@@ -605,7 +623,7 @@ export const useQueryStore = defineStore('query', () => {
     const text = query.trim()
     const spill = spillRequest(settings.settings)
     const pauseSecs = pauseSeconds(settings.settings)
-    const succeeded = await runRequest(
+    return runRequest(
       tabId,
       connectionId,
       text,
@@ -628,30 +646,6 @@ export const useQueryStore = defineStore('query', () => {
       queryParams,
       start ? { sent: query, start } : undefined,
     )
-    if (spill && succeeded) {
-      warnUnsaved(tabId)
-    }
-    return succeeded
-  }
-
-  /**
-   * Points the user at the Messages tab when a run that asked to save its
-   * full results left a cut result unsaved and a warning arrived, such as
-   * the warning for a result that needs more disk space than Settings
-   * allows.
-   */
-  function warnUnsaved(tabId: string): void {
-    // A tab that closed during the run has no state.
-    const state = peekState(tabId)
-    if (!state) {
-      return
-    }
-    const unsaved = panesOfLastRun(state).some(
-      (pane) => pane.truncated && pane.kept?.origin !== 'spill',
-    )
-    if (unsaved && state.messages.some((message) => message.level === MessageLevel.Warning)) {
-      ui.warn("A result wasn't saved on this computer. Messages has the reason.")
-    }
   }
 
   /**

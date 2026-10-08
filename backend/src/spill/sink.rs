@@ -4,7 +4,7 @@ use super::{SpillEnd, SpillWriter};
 use crate::db::sink::{RowSink, SinkControl};
 use crate::db::{ColumnInfo, Message};
 use crate::error::Result;
-use crate::kept::{KeptResults, KeptSource};
+use crate::kept::{KeptResults, KeptSource, UnsavedReason};
 use std::path::PathBuf;
 
 /// The message for a result set whose spill passed the cap of the disk use.
@@ -39,7 +39,8 @@ fn failed_message(error: &crate::error::Error) -> String {
 /// their disk use, or when the disk refuses a write. After the cap stops one
 /// spill, the later sets of the run do not spill. A set that the export row
 /// limit cut keeps no file, because its file misses rows. A message of each
-/// such case goes to the grid.
+/// such case goes to the grid, and the grid also gets the reason as a value
+/// for the frame at the end of the run.
 pub struct SpillSink<'k, G: RowSink> {
     grid: G,
     grid_rows: usize,
@@ -49,8 +50,9 @@ pub struct SpillSink<'k, G: RowSink> {
     kept: &'k KeptResults,
     /// The spill of the open set, while it goes on.
     writer: Option<SpillWriter>,
-    /// True once the cap stopped a spill.
-    full: bool,
+    /// The reason that stopped every spill of the run, once the cap
+    /// stopped one. The later sets of the run do not spill.
+    halted: Option<UnsavedReason>,
     /// The rows of the open set that went to the grid.
     shown: usize,
     /// True when the open set had more rows than the grid takes.
@@ -72,7 +74,7 @@ impl<'k, G: RowSink> SpillSink<'k, G> {
             cap,
             kept,
             writer: None,
-            full: false,
+            halted: None,
             shown: 0,
             cut: false,
         }
@@ -87,17 +89,18 @@ impl<'k, G: RowSink> SpillSink<'k, G> {
     /// Stops the spill of the open set, and tells the user why.
     fn give_up(&mut self, end: SpillEnd) {
         self.writer = None;
-        let text = match end {
+        let (text, reason) = match end {
             SpillEnd::Full => {
-                self.full = true;
-                FULL_MESSAGE.to_string()
+                self.halted = Some(UnsavedReason::DiskLimit);
+                (FULL_MESSAGE.to_string(), UnsavedReason::DiskLimit)
             }
             SpillEnd::Failed(error) => {
                 log::warn!("A spill file failed: {error}");
-                failed_message(&error)
+                (failed_message(&error), UnsavedReason::DiskFailed)
             }
         };
         self.grid.message(Message::warning(text));
+        self.grid.not_kept(reason);
     }
 }
 
@@ -105,7 +108,7 @@ impl<G: RowSink> RowSink for SpillSink<'_, G> {
     fn begin_set(&mut self, columns: Vec<ColumnInfo>) -> Result<()> {
         self.shown = 0;
         self.cut = false;
-        self.writer = (!self.full).then(|| {
+        self.writer = self.halted.is_none().then(|| {
             SpillWriter::new(
                 self.folder.clone(),
                 columns.clone(),
@@ -113,7 +116,11 @@ impl<G: RowSink> RowSink for SpillSink<'_, G> {
                 self.cap,
             )
         });
-        self.grid.begin_set(columns)
+        self.grid.begin_set(columns)?;
+        if let Some(reason) = self.halted {
+            self.grid.not_kept(reason);
+        }
+        Ok(())
     }
 
     fn row(&mut self, row: Vec<serde_json::Value>) -> Result<SinkControl> {
@@ -139,6 +146,7 @@ impl<G: RowSink> RowSink for SpillSink<'_, G> {
             if truncated {
                 self.grid
                     .message(Message::warning(EXPORT_LIMIT_MESSAGE.to_string()));
+                self.grid.not_kept(UnsavedReason::ExportLimit);
             } else {
                 let kept = self.kept;
                 match writer.finish(&mut || kept.release_oldest_spill()) {
@@ -180,6 +188,7 @@ mod tests {
     struct Grid {
         rows: BufferSink,
         sources: Vec<KeptSource>,
+        reasons: Vec<UnsavedReason>,
     }
 
     impl Grid {
@@ -187,6 +196,7 @@ mod tests {
             Self {
                 rows: BufferSink::new(max_rows),
                 sources: Vec::new(),
+                reasons: Vec::new(),
             }
         }
 
@@ -210,6 +220,9 @@ mod tests {
         }
         fn keep_source(&mut self, source: KeptSource) {
             self.sources.push(source);
+        }
+        fn not_kept(&mut self, reason: UnsavedReason) {
+            self.reasons.push(reason);
         }
     }
 
@@ -277,7 +290,9 @@ mod tests {
         let kept = KeptResults::default();
         let mut sink = SpillSink::new(Grid::new(2), 2, folder.path().into(), u64::MAX, &kept);
         send_set(&mut sink, 4, true);
-        let (response, sources) = sink.into_grid().response();
+        let grid = sink.into_grid();
+        assert_eq!(grid.reasons, vec![UnsavedReason::ExportLimit]);
+        let (response, sources) = grid.response();
         assert!(sources.is_empty());
         assert!(response.results[0].truncated);
         assert_eq!(texts(&response), vec![EXPORT_LIMIT_MESSAGE]);
@@ -308,7 +323,12 @@ mod tests {
         sink.end_set(true).unwrap();
         // A later set of the run does not spill.
         assert_eq!(send_set(&mut sink, 11, false), SinkControl::Stop);
-        let (response, sources) = sink.into_grid().response();
+        let grid = sink.into_grid();
+        assert_eq!(
+            grid.reasons,
+            vec![UnsavedReason::DiskLimit, UnsavedReason::DiskLimit]
+        );
+        let (response, sources) = grid.response();
         assert!(sources.is_empty());
         assert_eq!(answers.last(), Some(&SinkControl::Stop));
         assert!(answers.len() > 10);
@@ -328,7 +348,9 @@ mod tests {
         // The cut of the set finds no folder for the file.
         let mut sink = SpillSink::new(Grid::new(2), 2, gone.clone(), u64::MAX, &kept);
         send_set(&mut sink, 3, false);
-        let (response, sources) = sink.into_grid().response();
+        let grid = sink.into_grid();
+        assert_eq!(grid.reasons, vec![UnsavedReason::DiskFailed]);
+        let (response, sources) = grid.response();
         assert!(sources.is_empty());
         assert_eq!(response.results[0].rows.len(), 2);
         assert!(texts(&response)[0].starts_with("Couldn't save this result"));
