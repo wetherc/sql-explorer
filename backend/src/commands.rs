@@ -568,6 +568,35 @@ async fn before_deadline<T>(
 /// that connection waits behind it.
 pub const CATALOG_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// The longest time that one statement of a background driver waits for a
+/// lock of the server. The server then ends the statement with an error.
+///
+/// A read of the catalog on a server that is not busy ends in much less than
+/// one second. A lock that stays for 5 seconds is almost always a transaction
+/// that another session did not end, and that lock can stay for hours. A
+/// read that waits for it would keep the driver for the full
+/// [`CATALOG_LIMIT`], and every other read of the tree on that connection
+/// would wait behind it. With this limit, the read of the locked object fails
+/// and the other reads continue. A short change of a table, such as an
+/// `ALTER TABLE` that ends in less than 5 seconds, does not stop a read.
+///
+/// The limit applies to each wait for a lock, so a read that waits for some
+/// locks can take longer in total. [`CATALOG_LIMIT`] still stops it.
+pub const LOCK_WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Sets [`LOCK_WAIT_LIMIT`] on a new background driver. The sessions of the
+/// tabs never get it, so a statement of the user waits for a lock as the
+/// server decides. A server that refuses the setting does not stop the read,
+/// because the read then waits for locks up to [`CATALOG_LIMIT`].
+async fn limit_lock_waits(driver: &mut dyn DatabaseDriver, connection_id: &str) {
+    if let Err(error) = driver.limit_lock_waits(LOCK_WAIT_LIMIT).await {
+        log::warn!(
+            "The lock wait limit of the catalog reads of '{connection_id}' could not be set, \
+             so a read can wait for a lock until the end of its time limit: {error}"
+        );
+    }
+}
+
 /// One read of the catalog on one session, under the limit of its time.
 struct CatalogRead<'a> {
     state: &'a AppState,
@@ -632,7 +661,7 @@ impl<'a> CatalogRead<'a> {
     /// session.
     async fn run<T>(&self, read: impl std::future::Future<Output = Result<T>>) -> Result<T> {
         match tokio::time::timeout_at(self.deadline, read).await {
-            Ok(result) => result,
+            Ok(result) => result.map_err(Error::name_lock_wait),
             Err(_) => {
                 self.discard().await;
                 Err(self.timeout())
@@ -1499,7 +1528,8 @@ async fn background_answers(
 /// one when the connection has none or when the one it has stopped
 /// answering. A driver that cannot open gives the default session, because a
 /// snapshot that waits is better than no completions. The read of the
-/// password and the open of a new driver end at the deadline.
+/// password and the open of a new driver end at the deadline. A new driver
+/// gets [`LOCK_WAIT_LIMIT`] before its first read.
 ///
 /// A connection with one session alone gives its default session and opens
 /// no second connection. A second connection to a SQLite database in memory
@@ -1539,24 +1569,32 @@ async fn background_session(
     // The box stops the nesting of the future type here. Without it, the
     // layout of `metadata_read` passes the query depth limit of the compiler
     // in the build that measures coverage.
-    match before_deadline(deadline, Box::pin(open_driver(&full))).await? {
-        // A disconnect or a new connect during the open replaced the
-        // connection. The driver then serves this read alone and closes,
-        // so the slot never keeps a driver of a closed connection.
-        Ok(driver) if !still_open(state, connection_id, open).await => {
-            Ok(Arc::new(Session::new(driver)))
-        }
-        Ok(driver) => Ok(state
-            .set_background_driver(connection_id, role, driver)
-            .await),
+    let mut driver = match before_deadline(deadline, Box::pin(open_driver(&full))).await? {
+        Ok(driver) => driver,
         Err(error) => {
             log::warn!(
                 "A second connection for '{connection_id}' could not open, so the schema is \
                  read on the session of the user: {error}"
             );
-            open.default_session().await
+            return open.default_session().await;
         }
+    };
+    // The limit goes on the driver before any read uses it. A deadline that
+    // cuts the exchange drops the driver, which is not yet in its slot.
+    before_deadline(
+        deadline,
+        Box::pin(limit_lock_waits(driver.as_mut(), connection_id)),
+    )
+    .await?;
+    // A disconnect or a new connect during the open replaced the connection.
+    // The driver then serves this read alone and closes, so the slot never
+    // keeps a driver of a closed connection.
+    if !still_open(state, connection_id, open).await {
+        return Ok(Arc::new(Session::new(driver)));
     }
+    Ok(state
+        .set_background_driver(connection_id, role, driver)
+        .await)
 }
 
 /// Builds one statement for an object of the tree: the CREATE text, or a
@@ -5550,6 +5588,98 @@ mod tests {
         ) -> Result<Vec<AppColumn>> {
             Ok(Vec::new())
         }
+    }
+
+    /// A driver that keeps the lock limit it was given, and refuses the
+    /// limit when it is told to.
+    struct LockLimitDriver {
+        asked: Arc<std::sync::Mutex<Option<std::time::Duration>>>,
+        refuses: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl DatabaseDriver for LockLimitDriver {
+        fn capabilities(&self) -> crate::db::DriverCapabilities {
+            crate::db::DriverCapabilities::default()
+        }
+        fn dialect(&self) -> Dialect {
+            Dialect::MsSql
+        }
+        async fn ping(&mut self) -> Result<()> {
+            Ok(())
+        }
+        async fn limit_lock_waits(&mut self, limit: std::time::Duration) -> Result<()> {
+            *self.asked.lock().unwrap() = Some(limit);
+            match self.refuses {
+                true => Err(Error::Unsupported("no lock limit".into())),
+                false => Ok(()),
+            }
+        }
+        async fn list_databases(&mut self) -> Result<Vec<Database>> {
+            Ok(Vec::new())
+        }
+        async fn list_schemas(&mut self, _database: &str) -> Result<Vec<Schema>> {
+            Ok(Vec::new())
+        }
+        async fn list_tables(
+            &mut self,
+            _database: &str,
+            _schema: Option<&str>,
+        ) -> Result<Vec<Table>> {
+            Ok(Vec::new())
+        }
+        async fn list_columns(
+            &mut self,
+            _database: &str,
+            _schema: Option<&str>,
+            _table: &str,
+        ) -> Result<Vec<AppColumn>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_new_background_driver_gets_the_lock_limit_and_a_refusal_is_no_failure() {
+        for refuses in [false, true] {
+            let asked = Arc::new(std::sync::Mutex::new(None));
+            let mut driver = LockLimitDriver {
+                asked: asked.clone(),
+                refuses,
+            };
+            limit_lock_waits(&mut driver, "s1").await;
+            assert_eq!(*asked.lock().unwrap(), Some(LOCK_WAIT_LIMIT));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_driver_without_locks_of_a_session_accepts_the_lock_limit() {
+        let (mut driver, _calls) = catalog_driver(None);
+        assert!(driver.limit_lock_waits(LOCK_WAIT_LIMIT).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_lock_wait_in_a_catalog_read_names_the_lock() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (_app, state) = state_with_sqlite(descriptor).await;
+        let (driver, _calls) = catalog_driver(None);
+        let read = CatalogRead::new(&state, "s1", Arc::new(Session::new(driver)), CATALOG_LIMIT);
+
+        let outcome: Result<()> = read
+            .run(async {
+                Err(Error::MySql(mysql_async::Error::Server(
+                    mysql_async::ServerError {
+                        code: 1205,
+                        state: "HY000".to_string(),
+                        message: "Lock wait timeout exceeded".to_string(),
+                    },
+                )))
+            })
+            .await;
+        assert!(matches!(outcome, Err(Error::LockWait(_))));
+
+        // Another error of the read stays as it is.
+        let outcome: Result<()> = read.run(async { Err(Error::Cancelled) }).await;
+        assert!(matches!(outcome, Err(Error::Cancelled)));
     }
 
     fn catalog_driver(

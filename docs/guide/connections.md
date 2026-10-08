@@ -134,3 +134,10 @@ A read for the explorer tree, the Properties dialog or completion ends with a
 timeout error after 60 seconds. The time counts from the click, so it includes
 the check and the opening of a new connection. On Athena, each request to AWS
 also gives up after 30 seconds and is retried.
+
+On MS SQL Server, PostgreSQL and MySQL, these reads also stop waiting for a
+lock after 5 seconds. If another session has an uncommitted change to a table,
+such as an `ALTER TABLE` in an open transaction, the read of that table fails
+with a message about the lock, and the rest of the tree keeps loading. The
+limit applies only to the explorer's own connection. Statements in your tabs
+wait for locks as the server's settings decide.

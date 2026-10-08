@@ -479,6 +479,13 @@ impl DatabaseDriver for PostgresDriver {
         Ok(())
     }
 
+    async fn limit_lock_waits(&mut self, limit: Duration) -> Result<()> {
+        self.client
+            .simple_query(&lock_timeout_statement(limit))
+            .await?;
+        Ok(())
+    }
+
     /// A block that an error aborted still waits for a `ROLLBACK`, so the
     /// error 25P02 of the probe counts as an open block.
     async fn holds_open_transaction(&mut self) -> Result<bool> {
@@ -893,6 +900,14 @@ impl CancelHandle for PostgresCancel {
     async fn cancel(&self) -> Result<()> {
         wait_for_cancel(self.token.cancel_query(self.tls.clone()), CANCEL_WAIT).await
     }
+}
+
+/// The statement that ends each later statement of the session that waits
+/// for a lock longer than `limit`. The server then sends the error 55P03. The
+/// text names the unit, so the value does not depend on the default unit of
+/// the setting.
+fn lock_timeout_statement(limit: Duration) -> String {
+    format!("SET lock_timeout = '{}ms'", limit.as_millis())
 }
 
 /// The longest time that the driver waits for the server to close the socket
@@ -3685,6 +3700,39 @@ mod tests {
         assert_eq!(response.results[1].rows.len(), 1);
         assert!(!response.results[0].truncated);
 
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_lock_limit_ends_a_later_wait_for_a_lock_with_a_lock_error() {
+        let (client_end, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            accept_startup(&mut server).await;
+            answer_query(
+                &mut server,
+                "SET lock_timeout = '5000ms'",
+                &[command_complete("SET")],
+            )
+            .await;
+            answer_query(
+                &mut server,
+                "SELECT 1",
+                &[error_response(
+                    "55P03",
+                    "canceling statement due to lock timeout",
+                )],
+            )
+            .await;
+        });
+
+        let mut driver = driver_on(client_end).await;
+        driver
+            .limit_lock_waits(Duration::from_secs(5))
+            .await
+            .unwrap();
+        let error = driver.ping().await.unwrap_err();
+
+        assert!(error.is_lock_wait());
         task.await.unwrap();
     }
 

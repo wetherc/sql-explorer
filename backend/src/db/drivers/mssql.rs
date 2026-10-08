@@ -932,6 +932,14 @@ fn locate_error(error: Error, query: &str, start: Option<usize>) -> Error {
     }
 }
 
+/// The statement that ends each later statement of the session that waits
+/// for a lock longer than `limit`. The server takes whole milliseconds, and
+/// error 1222 ends such a statement. The statement goes as a batch of its
+/// own, because a `SET` inside `sp_executesql` ends with that call.
+fn lock_timeout_statement(limit: Duration) -> String {
+    format!("SET LOCK_TIMEOUT {}", limit.as_millis())
+}
+
 /// The message for an error that the server sent after the first error of a
 /// batch, with the number, the severity, the state and the line that SQL
 /// Server Management Studio shows.
@@ -1014,6 +1022,13 @@ impl DatabaseDriver for MssqlDriver {
 
     async fn ping(&mut self) -> Result<()> {
         let mut stream = self.client.simple_query("SELECT 1").await?;
+        while stream.try_next().await?.is_some() {}
+        Ok(())
+    }
+
+    async fn limit_lock_waits(&mut self, limit: Duration) -> Result<()> {
+        let statement = lock_timeout_statement(limit);
+        let mut stream = self.client.simple_query(statement).await?;
         while stream.try_next().await?.is_some() {}
         Ok(())
     }
@@ -1938,6 +1953,14 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn the_lock_limit_goes_to_the_server_in_milliseconds() {
+        assert_eq!(
+            lock_timeout_statement(Duration::from_millis(5_500)),
+            "SET LOCK_TIMEOUT 5500"
+        );
+    }
 
     #[tokio::test]
     async fn the_socket_of_a_connection_sends_keepalive_probes() {

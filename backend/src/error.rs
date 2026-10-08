@@ -111,6 +111,15 @@ pub enum Error {
         column: u32,
     },
 
+    /// A read that waited for a lock of another session longer than the
+    /// lock limit of its own session. The inner error is the one that the
+    /// server sent.
+    #[error(
+        "Another session has locked this object, so the read stopped waiting. Commit or roll \
+         back that session's transaction, then try again."
+    )]
+    LockWait(Box<Error>),
+
     #[error(transparent)]
     Tiberius(#[from] tiberius::error::Error),
 
@@ -159,6 +168,14 @@ const MYSQL_LOGIN_REFUSED: [u16; 3] = [1045, 1044, 1698];
 
 /// The number MS SQL Server sends when it refuses a login.
 const MSSQL_LOGIN_FAILED: u32 = 18456;
+
+/// The number MS SQL Server sends when a statement waited for a lock longer
+/// than the `LOCK_TIMEOUT` of the session.
+const MSSQL_LOCK_TIMEOUT: u32 = 1222;
+
+/// The number MySQL and MariaDB send when a statement waited for a lock
+/// longer than `lock_wait_timeout` or `innodb_lock_wait_timeout`.
+const MYSQL_LOCK_WAIT_TIMEOUT: u16 = 1205;
 
 /// True when the failure is the one MySQL sends after a stop. The MySQL
 /// driver uses it to know that a stop ended the statement.
@@ -249,6 +266,9 @@ impl Error {
             Error::Unsupported(_) => ErrorCategory::Unsupported,
             Error::Invalid(_) => ErrorCategory::Invalid,
             Error::Located { inner, .. } => inner.category(),
+            // The advice for a timeout names the timeout of the connection,
+            // which does not change the lock limit.
+            Error::LockWait(_) => ErrorCategory::Database,
             Error::Tiberius(error) => mssql_category(error),
             Error::MySql(error) => mysql_category(error),
             Error::Postgres(error) => postgres_category(error),
@@ -283,6 +303,33 @@ impl Error {
                 self.category(),
                 ErrorCategory::Cancelled | ErrorCategory::Connection | ErrorCategory::Io
             ),
+        }
+    }
+
+    /// True when the server ended the statement because it waited for a lock
+    /// longer than the lock limit of the session.
+    pub fn is_lock_wait(&self) -> bool {
+        match self {
+            Error::Tiberius(tiberius::error::Error::Server(token)) => {
+                token.code() == MSSQL_LOCK_TIMEOUT
+            }
+            Error::Postgres(error) => {
+                error.code() == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE)
+            }
+            Error::MySql(mysql_async::Error::Server(server)) => {
+                server.code == MYSQL_LOCK_WAIT_TIMEOUT
+            }
+            _ => false,
+        }
+    }
+
+    /// Gives an error of a lock wait as [`Error::LockWait`], so the user
+    /// reads the cause in plain words. Every other error stays as it is.
+    pub fn name_lock_wait(self) -> Error {
+        if self.is_lock_wait() {
+            Error::LockWait(Box::new(self))
+        } else {
+            self
         }
     }
 
@@ -322,6 +369,24 @@ impl Error {
             ),
             Error::Tiberius(tiberius::error::Error::Server(token)) => {
                 (self.to_string(), Some(mssql_error_detail(token)))
+            }
+            // The detail gives the text of the server, so the user can look
+            // the error up.
+            Error::LockWait(inner) => {
+                let (text, detail) = match inner.as_ref() {
+                    Error::Tiberius(tiberius::error::Error::Server(token)) => {
+                        (token.message().to_string(), Some(mssql_error_detail(token)))
+                    }
+                    other => {
+                        let payload = other.to_payload();
+                        (payload.message, payload.detail)
+                    }
+                };
+                let detail = match detail {
+                    Some(detail) => format!("{text}\n{detail}"),
+                    None => text,
+                };
+                (self.to_string(), Some(detail))
             }
             _ => (self.to_string(), source_chain(self)),
         };
@@ -618,6 +683,71 @@ mod tests {
 
         let secret: Error = keyring::Error::NoEntry.into();
         assert_eq!(secret.category(), ErrorCategory::Secret);
+    }
+
+    #[test]
+    fn a_lock_wait_of_the_server_gets_a_plain_message() {
+        let mssql = Error::Tiberius(tiberius::error::Error::Server(
+            tiberius::error::TokenError::new(
+                1222,
+                56,
+                16,
+                "Lock request time out period exceeded.",
+                "",
+                1,
+            ),
+        ));
+        assert!(mssql.is_lock_wait());
+
+        let named = mssql.name_lock_wait();
+        assert!(matches!(named, Error::LockWait(_)));
+        assert_eq!(named.category(), ErrorCategory::Database);
+        assert!(!named.is_stop_reply());
+        let payload = named.to_payload();
+        assert!(payload
+            .message
+            .starts_with("Another session has locked this object"));
+        assert_eq!(
+            payload.detail.as_deref(),
+            Some("Lock request time out period exceeded.\nMsg 1222, Level 16, State 56, Line 1")
+        );
+
+        let mysql = Error::MySql(mysql_async::Error::Server(mysql_async::ServerError {
+            code: 1205,
+            state: "HY000".to_string(),
+            message: "Lock wait timeout exceeded; try restarting transaction".to_string(),
+        }));
+        assert!(mysql.is_lock_wait());
+        assert_eq!(
+            mysql.name_lock_wait().to_payload().detail.as_deref(),
+            Some("Lock wait timeout exceeded; try restarting transaction\nError 1205, SQLSTATE HY000")
+        );
+    }
+
+    #[test]
+    fn other_errors_are_not_lock_waits() {
+        let missing = Error::Tiberius(tiberius::error::Error::Server(
+            tiberius::error::TokenError::new(208, 1, 16, "Invalid object name 't'.", "", 1),
+        ));
+        assert!(!missing.is_lock_wait());
+        assert!(matches!(missing.name_lock_wait(), Error::Tiberius(_)));
+
+        let refused = Error::MySql(mysql_async::Error::Server(mysql_async::ServerError {
+            code: 1045,
+            state: "28000".to_string(),
+            message: "Access denied".to_string(),
+        }));
+        assert!(!refused.is_lock_wait());
+
+        let postgres = "port=nope".parse::<tokio_postgres::Config>().unwrap_err();
+        assert!(!Error::Postgres(postgres).is_lock_wait());
+        assert!(!Error::Cancelled.is_lock_wait());
+    }
+
+    #[test]
+    fn a_lock_wait_without_a_server_detail_gives_the_server_text_alone() {
+        let payload = Error::LockWait(Box::new(Error::Connection("gone".into()))).to_payload();
+        assert_eq!(payload.detail.as_deref(), Some("gone"));
     }
 
     #[test]

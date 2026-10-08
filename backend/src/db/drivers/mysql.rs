@@ -115,6 +115,19 @@ fn read_only_setup(builder: OptsBuilder, connection: &SavedConnection) -> OptsBu
     builder.setup(setup)
 }
 
+/// The statements that end each later statement of the session that waits
+/// for a lock longer than `limit`, with the error 1205. The first limits the
+/// wait for a lock on the definition of a table, such as the lock of an
+/// `ALTER TABLE`. The second limits the wait for a lock on rows of InnoDB.
+/// Both variables take whole seconds, from 1.
+fn lock_wait_statements(limit: Duration) -> [String; 2] {
+    let seconds = limit.as_secs().max(1);
+    [
+        format!("SET SESSION lock_wait_timeout = {seconds}"),
+        format!("SET SESSION innodb_lock_wait_timeout = {seconds}"),
+    ]
+}
+
 /// Selects the transport settings. A preference asks for TLS and accepts
 /// any certificate, as a demand without verification does. `mysql_async`
 /// has no setting that tries TLS and then continues without it, so
@@ -556,6 +569,16 @@ impl DatabaseDriver for MysqlDriver {
 
     async fn ping(&mut self) -> Result<()> {
         self.conn()?.ping().await?;
+        Ok(())
+    }
+
+    /// A server without InnoDB refuses the second statement. The first
+    /// statement then stays in effect.
+    async fn limit_lock_waits(&mut self, limit: Duration) -> Result<()> {
+        let conn = self.conn()?;
+        for statement in lock_wait_statements(limit) {
+            conn.query_drop(statement).await?;
+        }
         Ok(())
     }
 
@@ -1349,6 +1372,36 @@ mod live;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_lock_limits_go_to_the_server_in_whole_seconds() {
+        assert_eq!(
+            lock_wait_statements(Duration::from_secs(5)),
+            [
+                "SET SESSION lock_wait_timeout = 5",
+                "SET SESSION innodb_lock_wait_timeout = 5",
+            ]
+        );
+        // The smallest value of both variables is 1 second.
+        assert_eq!(
+            lock_wait_statements(Duration::from_millis(300))[0],
+            "SET SESSION lock_wait_timeout = 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_closed_driver_sets_no_lock_limit() {
+        let mut driver = MysqlDriver {
+            conn: None,
+            connection_id: 0,
+            opts: Opts::default(),
+            connect_limit: Duration::from_secs(1),
+        };
+        assert!(driver
+            .limit_lock_waits(Duration::from_secs(5))
+            .await
+            .is_err());
+    }
 
     #[test]
     fn a_syntax_error_names_its_line_in_the_whole_text() {

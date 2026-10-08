@@ -64,6 +64,19 @@ pub trait DatabaseDriver: Send + Sync {
         false
     }
 
+    /// Tells the server to end each later statement of this session that
+    /// waits for a lock longer than `limit`, with an error. The command layer
+    /// calls this on the drivers of the catalog reads alone, so a lock of
+    /// another session stops one read of the tree in place of the reads that
+    /// wait behind it. The sessions of the tabs keep the setting of the
+    /// server.
+    ///
+    /// The default does nothing. SQLite waits for its file lock through its
+    /// own busy limit, and Athena has no locks of a session.
+    async fn limit_lock_waits(&mut self, _limit: std::time::Duration) -> Result<()> {
+        Ok(())
+    }
+
     /// Runs a script and sends each row to the sink as the read produces it.
     /// A driver that streams holds one row at a time, and the sink decides
     /// what the rows become.
