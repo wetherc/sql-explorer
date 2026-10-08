@@ -6,11 +6,17 @@ plugins:
   - jekyll-seo-tag
   - jekyll-sitemap
 author: Christopher Wetherill
+logo: /assets/icon.png
 defaults:
   - scope:
       path: ""
     values:
       layout: default
+      image:
+        path: /assets/social-card.png
+        width: 1280
+        height: 640
+        alt: SQL Explorer, an open source SQL client for macOS, Windows and Linux
   - scope:
       path: "guide"
     values:
