@@ -34,6 +34,14 @@
       <v-icon size="small" aria-hidden="true">{{ notice.icon }}</v-icon>
       <span class="notice-text" :title="notice.message">{{ notice.message }}</span>
       <v-btn
+        v-if="notice.action"
+        size="small"
+        variant="text"
+        :text="notice.action.label"
+        data-test="notice-action"
+        @click="runAction(notice)"
+      />
+      <v-btn
         v-if="notice.detail || notice.level === 'error'"
         size="small"
         variant="text"
@@ -89,6 +97,12 @@ import { useUiStore, type Notice } from '@/stores/ui'
 const ui = useUiStore()
 
 const newestFirst = computed(() => [...ui.notices].reverse())
+
+/** Takes the notice away and runs the action of its button. */
+function runAction(notice: Notice): void {
+  ui.dismiss(notice.id)
+  notice.action?.run()
+}
 
 /** The timers of the notices that leave on their own, by notice id. */
 const timers = new Map<number, ReturnType<typeof setTimeout>>()

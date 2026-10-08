@@ -555,7 +555,7 @@ import { MIN_EDITOR_SIZE, useLayoutStore } from '@/stores/layout'
 import { newQueryState, useQueryStore } from '@/stores/query'
 import { useSettingsStore } from '@/stores/settings'
 import { useTabsStore } from '@/stores/tabs'
-import { useUiStore } from '@/stores/ui'
+import { useUiStore, type Notice } from '@/stores/ui'
 import { alignParams, needsAValue, paramChipLabel, paramProblem, paramsForRun } from '@/lib/params'
 import {
   Dialect,
@@ -570,7 +570,7 @@ import {
 } from '@/types/api'
 import type { ErrorMarker } from './SqlEditor.vue'
 import type { ExportAllFormat, ExportFormat } from './ResultsGrid.vue'
-import type { ResultPane, RunningExport } from '@/stores/query'
+import type { ResultPane, RunFileTarget, RunningExport } from '@/stores/query'
 import type { QueryTab } from '@/stores/tabs'
 
 /** The value that stands for the Messages tab. */
@@ -1023,13 +1023,8 @@ function runAll(): void {
  * dialog, so the user doesn't choose a file for a run that can't start.
  */
 function runToFile(): void {
-  const connectionId = props.tab.connectionId
+  const connectionId = runFileConnection()
   if (!connectionId) {
-    ui.warn('Choose a connection to run this statement.')
-    return
-  }
-  if (state.value.running) {
-    ui.warn('A statement is already running in this tab.')
     return
   }
   const { text, start } = editorRun()
@@ -1041,6 +1036,21 @@ function runToFile(): void {
   void withParams(text, (values) => {
     void saveRun(connectionId, text, values, start)
   })
+}
+
+/** The connection of a run to a file, or null with a warning when the tab
+ *  can't start one. */
+function runFileConnection(): string | null {
+  const connectionId = props.tab.connectionId
+  if (!connectionId) {
+    ui.warn('Choose a connection to run this statement.')
+    return null
+  }
+  if (state.value.running) {
+    ui.warn('A statement is already running in this tab.')
+    return null
+  }
+  return connectionId
 }
 
 /**
@@ -1116,17 +1126,73 @@ async function saveRun(
   if (eachSet === null) {
     return
   }
-  const summary = await queries.runToFile(
-    props.tab.id,
-    connectionId,
-    text,
-    { ticket: file.ticket, eachSet },
-    values,
-    start,
-  )
+  await startRunToFile(connectionId, text, values, start, { ticket: file.ticket, eachSet })
+}
+
+/** The notice that offers to try a run to a file again, while it shows. */
+let retryNotice: Notice | null = null
+
+function dismissRetry(): void {
+  if (retryNotice) {
+    ui.dismiss(retryNotice.id)
+    retryNotice = null
+  }
+}
+
+onBeforeUnmount(dismissRetry)
+
+/**
+ * Runs the statement to the file of the ticket. When the run fails before the
+ * statement starts, the backend keeps the ticket, and a notice offers to try
+ * again with the same file.
+ */
+async function startRunToFile(
+  connectionId: string,
+  text: string,
+  values: Record<string, unknown> | undefined,
+  start: TextStart | undefined,
+  target: RunFileTarget,
+): Promise<void> {
+  dismissRetry()
+  const summary = await queries.runToFile(props.tab.id, connectionId, text, target, values, start)
   if (summary) {
     reportRunFile(summary)
+    return
   }
+  const error = state.value.error
+  if (error && isCancellation(error)) {
+    return
+  }
+  if (!(await runFileReady(target.ticket))) {
+    return
+  }
+  retryNotice = ui.warn("Run to file didn't start, so nothing was saved.", null, {
+    kept: true,
+    action: { label: 'Try again', run: () => retryRunToFile(text, start, target) },
+  })
+}
+
+/** True when the file of the ticket can still take a run. A failed check
+ *  counts as false, so the notice offers nothing that can't work. */
+async function runFileReady(ticket: string): Promise<boolean> {
+  try {
+    return await api.runFileReady(ticket)
+  } catch {
+    return false
+  }
+}
+
+/** Runs a run to a file again with the file that the user chose before. */
+function retryRunToFile(text: string, start: TextStart | undefined, target: RunFileTarget): void {
+  dismissRetry()
+  const connectionId = runFileConnection()
+  if (!connectionId) {
+    return
+  }
+  layout.setResultsCollapsed(false)
+  void withParams(text, (values) => {
+    void startRunToFile(connectionId, text, values, start, target)
+  })
 }
 
 /** Tells the user what a run to a file saved. */

@@ -101,6 +101,13 @@ runs.
 rows go to a temporary file beside the one you chose, so a stopped or failed run
 leaves no file behind.
 
+If the run fails before the statement starts, for example because the server
+can't be reached, a notice says "Run to file didn't start, so nothing was
+saved." Its **Try again** button runs the statement again with the file you
+already chose, so the save dialog doesn't open a second time. The app keeps
+your choice of file for an hour. After that, or once a run has started, run to
+file again to choose the file.
+
 ## Saved full results
 
 Turn on **Save full results on this computer** in the **Results** group of

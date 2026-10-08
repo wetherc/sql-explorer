@@ -29,36 +29,56 @@ use crate::message_log::{MessageLogs, MessageTee};
 use crate::sql::ParamValues;
 use crate::state::AppState;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Runtime};
 
 /// The number of chosen files that the backend keeps. A choice that the
-/// interface never uses stays in the list until newer choices push it out.
+/// interface never uses stays in the list until newer choices push it out,
+/// or until it is older than [`MAX_CHOSEN_AGE`].
 const MAX_CHOSEN_FILES: usize = 16;
+
+/// The time a chosen file stays valid. A run that did not start keeps its
+/// ticket, so the user can try again with the same file. After this time,
+/// the user must choose the file again.
+const MAX_CHOSEN_AGE: Duration = Duration::from_secs(60 * 60);
 
 /// One file that the user chose for a run, with the format of the file.
 struct ChosenFile {
     ticket: String,
     path: PathBuf,
     format: ExportFormat,
+    /// The time of the choice.
+    chosen_at: Instant,
 }
 
 /// The files that the user chose in the save dialog and that no run used
-/// yet. Each ticket works one time.
+/// yet. Each ticket works for one run that starts.
 #[derive(Default)]
 pub struct ChosenFiles {
     files: std::sync::Mutex<Vec<ChosenFile>>,
 }
 
 impl ChosenFiles {
-    /// Records one file and gives back its ticket. The oldest choice goes
-    /// when the list is full.
-    fn remember(&self, path: PathBuf, format: ExportFormat) -> String {
-        let ticket = uuid::Uuid::new_v4().to_string();
+    /// Locks the list and removes the choices that are too old at `now`.
+    fn current(&self, now: Instant) -> std::sync::MutexGuard<'_, Vec<ChosenFile>> {
         let mut files = self
             .files
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        files.retain(|file| now.saturating_duration_since(file.chosen_at) < MAX_CHOSEN_AGE);
+        files
+    }
+
+    /// Records one file and gives back its ticket. The oldest choice goes
+    /// when the list is full.
+    fn remember(&self, path: PathBuf, format: ExportFormat) -> String {
+        self.remember_at(path, format, Instant::now())
+    }
+
+    fn remember_at(&self, path: PathBuf, format: ExportFormat, now: Instant) -> String {
+        let ticket = uuid::Uuid::new_v4().to_string();
+        let mut files = self.current(now);
         if files.len() >= MAX_CHOSEN_FILES {
             files.remove(0);
         }
@@ -66,18 +86,34 @@ impl ChosenFiles {
             ticket: ticket.clone(),
             path,
             format,
+            chosen_at: now,
         });
         ticket
     }
 
-    /// Removes the file of one ticket from the list and gives it back.
-    fn take(&self, ticket: &str) -> Option<ChosenFile> {
-        let mut files = self
-            .files
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let position = files.iter().position(|file| file.ticket == ticket)?;
-        Some(files.remove(position))
+    /// Gives the path and the format of one ticket, and keeps the ticket.
+    fn peek(&self, ticket: &str) -> Option<(PathBuf, ExportFormat)> {
+        self.peek_at(ticket, Instant::now())
+    }
+
+    fn peek_at(&self, ticket: &str, now: Instant) -> Option<(PathBuf, ExportFormat)> {
+        self.current(now)
+            .iter()
+            .find(|file| file.ticket == ticket)
+            .map(|file| (file.path.clone(), file.format))
+    }
+
+    /// Removes one ticket from the list. Gives false when the list does not
+    /// have the ticket.
+    fn take(&self, ticket: &str) -> bool {
+        self.take_at(ticket, Instant::now())
+    }
+
+    fn take_at(&self, ticket: &str, now: Instant) -> bool {
+        let mut files = self.current(now);
+        let before = files.len();
+        files.retain(|file| file.ticket != ticket);
+        files.len() < before
     }
 }
 
@@ -160,6 +196,14 @@ pub async fn several_result_sets(query: String, dialect: crate::sql::Dialect) ->
     off_thread(move || Ok(crate::sql::may_give_several_sets(&query, dialect))).await
 }
 
+/// Tells the interface whether the file of a ticket can still take a run.
+/// A run that did not start keeps its ticket, so the interface can offer to
+/// try again with the same file.
+#[tauri::command]
+pub fn run_file_ready(ticket: String, chosen: tauri::State<'_, ChosenFiles>) -> bool {
+    chosen.peek(&ticket).is_some()
+}
+
 /// What one run to a file sends.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -234,7 +278,9 @@ pub async fn run_to_file<R: Runtime>(
         .as_ref()
         .map(|logs| logs.start(&request_id, messages_file.as_deref()));
     let prepared = async {
-        let file = chosen.take(&ticket).ok_or_else(unknown_ticket)?;
+        // The ticket stays valid until the statement starts, so a run that
+        // fails before then can try again with the same file.
+        let (path, format) = chosen.peek(&ticket).ok_or_else(unknown_ticket)?;
         let (open, session, key) =
             session_for(&app, &state, &connection_id, tab_id.as_deref(), &token).await?;
         let grid = options.unwrap_or_else(|| open.descriptor.exec_options());
@@ -248,14 +294,14 @@ pub async fn run_to_file<R: Runtime>(
         let (query, bound) = prepare_parameters(&query, open.dialect, query_params.as_ref())?;
         // The drop of the sink before `finish` removes the part of the file
         // that was written.
-        let layout = SetLayout::new(each_set, file.format);
-        let first = FileSink::create(&file.path, file.format).await?;
+        let layout = SetLayout::new(each_set, format);
+        let first = FileSink::create(&path, format).await?;
         let first = if layout == SetLayout::Sheets {
             first.sheet_per_set()
         } else {
             first
         };
-        let sink = SetFiles::new(first, file.format, layout);
+        let sink = SetFiles::new(first, format, layout);
         Ok::<_, Error>((
             open,
             session,
@@ -284,6 +330,9 @@ pub async fn run_to_file<R: Runtime>(
     let may_stop = !each_set && crate::sql::one_read(&ran, open.dialect);
     let mut sink = TeeSink::new(file, grid, grid_rows).stopping_when_full(may_stop);
     let outcome = match driver_for_request(&state, &request_id, &session, &token).await {
+        // A second run with the same ticket can take it first. That run
+        // then owns the file, and this run stops before its statement.
+        Ok(_) if !chosen.take(&ticket) => Bounded::Answered(Err(unknown_ticket())),
         Ok(mut guard) => {
             run_bounded(
                 guard.execute_stream(&ran, bound.as_ref(), &options, &mut sink),
@@ -900,14 +949,17 @@ mod tests {
     }
 
     #[test]
-    fn a_ticket_works_one_time() {
+    fn a_ticket_works_until_a_run_takes_it() {
         let chosen = ChosenFiles::default();
         let file = remember_choice(&chosen, PathBuf::from("/a/out.xlsx"));
         assert_eq!(file.path, "/a/out.xlsx");
-        let taken = chosen.take(&file.ticket).unwrap();
-        assert_eq!(taken.path, PathBuf::from("/a/out.xlsx"));
-        assert!(matches!(taken.format, ExportFormat::Xlsx));
-        assert!(chosen.take(&file.ticket).is_none());
+        let (path, format) = chosen.peek(&file.ticket).unwrap();
+        assert_eq!(path, PathBuf::from("/a/out.xlsx"));
+        assert!(matches!(format, ExportFormat::Xlsx));
+        // A look keeps the ticket, and a take removes it.
+        assert!(chosen.take(&file.ticket));
+        assert!(chosen.peek(&file.ticket).is_none());
+        assert!(!chosen.take(&file.ticket));
     }
 
     #[test]
@@ -918,8 +970,23 @@ mod tests {
         for number in 1..=MAX_CHOSEN_FILES {
             last = chosen.remember(PathBuf::from(format!("/a/{number}.csv")), ExportFormat::Csv);
         }
-        assert!(chosen.take(&first).is_none());
-        assert!(chosen.take(&last).is_some());
+        assert!(!chosen.take(&first));
+        assert!(chosen.take(&last));
+    }
+
+    #[test]
+    fn a_choice_expires_after_its_age_limit() {
+        let chosen = ChosenFiles::default();
+        let start = Instant::now();
+        let old = chosen.remember_at(PathBuf::from("/a/old.csv"), ExportFormat::Csv, start);
+        let later = start + MAX_CHOSEN_AGE - Duration::from_secs(1);
+        let young = chosen.remember_at(PathBuf::from("/a/new.csv"), ExportFormat::Csv, later);
+        assert!(chosen.peek_at(&old, later).is_some());
+
+        let expired = start + MAX_CHOSEN_AGE;
+        assert!(chosen.peek_at(&old, expired).is_none());
+        assert!(chosen.take_at(&young, expired));
+        assert!(!chosen.take_at(&old, expired));
     }
 
     /// The messages that a test channel received.
@@ -1201,6 +1268,53 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("expired"));
         assert_eq!(frame_types(&frames), vec![FRAME_END]);
+    }
+
+    #[tokio::test]
+    async fn a_run_that_fails_before_its_statement_keeps_the_ticket() {
+        let (dir, app) = app().await;
+        let path = dir.path().join("out.csv");
+        let ticket = choose(&app, &path);
+        let (channel, _) = frame_channel();
+        let mut missing = request(&ticket, "SELECT 1", 100);
+        missing.connection_id = "missing".to_string();
+
+        assert!(run(&app, missing, channel).await.is_err());
+        assert!(run_file_ready(ticket.clone(), app.state::<ChosenFiles>()));
+        assert!(!path.exists());
+
+        // The same ticket then runs, and the run uses it up.
+        let (channel, _) = frame_channel();
+        run(&app, request(&ticket, "SELECT 1", 100), channel)
+            .await
+            .unwrap();
+        assert!(path.exists());
+        assert!(!run_file_ready(ticket, app.state::<ChosenFiles>()));
+    }
+
+    #[tokio::test]
+    async fn two_runs_with_one_ticket_write_the_file_once() {
+        let (dir, app) = app().await;
+        let path = dir.path().join("out.csv");
+        let ticket = choose(&app, &path);
+        let (first, _) = frame_channel();
+        let (second, _) = frame_channel();
+        let mut other = request(&ticket, &numbers(3), 100);
+        other.request_id = "r2".to_string();
+
+        let (one, two) = tokio::join!(
+            run(&app, request(&ticket, &numbers(3), 100), first),
+            run(&app, other, second)
+        );
+        let errors: Vec<String> = [one, two]
+            .into_iter()
+            .filter_map(|outcome| outcome.err().map(|error| error.to_string()))
+            .collect();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("expired"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 4);
+        // The run that lost removed its part of a file.
+        assert!(!has_part_file(dir.path()));
     }
 
     #[tokio::test]

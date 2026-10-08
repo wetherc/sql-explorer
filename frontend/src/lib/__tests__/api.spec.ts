@@ -434,6 +434,9 @@ describe('api', () => {
       query: 'SELECT 1; SELECT 2',
       dialect: Dialect.MsSql,
     })
+
+    await api.runFileReady('k1')
+    expect(invoke).toHaveBeenCalledWith('run_file_ready', { ticket: 'k1' })
   })
 
   it('sends the preview request with and without a limit', async () => {

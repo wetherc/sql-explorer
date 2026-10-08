@@ -2449,6 +2449,76 @@ describe('QueryView run to file', () => {
     expect(useUiStore().notices.some((notice) => notice.level === 'success')).toBe(false)
   })
 
+  /** The notice that offers to try the run to a file again. */
+  function retryNotice() {
+    return useUiStore().notices.find((notice) => notice.action?.label === 'Try again')
+  }
+
+  it('offers to try again with the same file when the run did not start', async () => {
+    apiStub.chooseRunFile.mockResolvedValue({ ticket: 'k1', path: '/tmp/all.csv' })
+    apiStub.runToFile.mockRejectedValueOnce({
+      category: 'connection',
+      message: 'refused',
+      detail: null,
+    })
+    apiStub.runFileReady.mockResolvedValue(true)
+    const wrapper = await mountView()
+    await wrapper.find('[data-test="run-to-file-button"]').trigger('click')
+    await settle()
+    expect(apiStub.runFileReady).toHaveBeenCalledWith('k1')
+    const notice = retryNotice()
+    expect(notice?.message).toBe("Run to file didn't start, so nothing was saved.")
+    expect(notice?.timeout).toBe(-1)
+
+    savedRun()
+    notice?.action?.run()
+    await settle()
+    expect(apiStub.chooseRunFile).toHaveBeenCalledOnce()
+    expect(apiStub.runToFile).toHaveBeenLastCalledWith(
+      expect.objectContaining({ ticket: 'k1', eachSet: false }),
+      expect.anything(),
+    )
+    expect(lastNotice()?.level).toBe('success')
+  })
+
+  it('offers no second try for a stopped run or a used ticket', async () => {
+    apiStub.chooseRunFile.mockResolvedValue({ ticket: 'k1', path: '/tmp/all.csv' })
+    apiStub.runToFile.mockRejectedValue({ category: 'cancelled', message: 'stop', detail: null })
+    const wrapper = await mountView()
+    await wrapper.find('[data-test="run-to-file-button"]').trigger('click')
+    await settle()
+    expect(apiStub.runFileReady).not.toHaveBeenCalled()
+
+    apiStub.runToFile.mockRejectedValue({ category: 'query', message: 'bad', detail: null })
+    apiStub.runFileReady.mockRejectedValue(new Error('gone'))
+    await wrapper.find('[data-test="run-to-file-button"]').trigger('click')
+    await settle()
+    expect(apiStub.runFileReady).toHaveBeenCalled()
+    expect(retryNotice()).toBeUndefined()
+  })
+
+  it('checks the tab again before a second try and clears the offer on close', async () => {
+    apiStub.chooseRunFile.mockResolvedValue({ ticket: 'k1', path: '/tmp/all.csv' })
+    apiStub.runToFile.mockRejectedValue({ category: 'connection', message: 'no', detail: null })
+    apiStub.runFileReady.mockResolvedValue(true)
+    const wrapper = await mountView()
+    await wrapper.find('[data-test="run-to-file-button"]').trigger('click')
+    await settle()
+    useQueryStore().stateFor('t1').running = true
+    retryNotice()?.action?.run()
+    await settle()
+    expect(apiStub.runToFile).toHaveBeenCalledOnce()
+    expect(lastNotice()?.message).toBe('A statement is already running in this tab.')
+
+    useQueryStore().stateFor('t1').running = false
+    await settle()
+    await wrapper.find('[data-test="run-to-file-button"]').trigger('click')
+    await settle()
+    expect(retryNotice()).toBeDefined()
+    wrapper.unmount()
+    expect(retryNotice()).toBeUndefined()
+  })
+
   it('asks for the values of the parameters before the file', async () => {
     apiStub.queryParameters.mockResolvedValue(['id'])
     const wrapper = await mountView('SELECT :id')

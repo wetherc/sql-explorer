@@ -13,6 +13,14 @@ export interface Notice {
   icon: string
   /** The number of milliseconds the notice stays on screen. */
   timeout: number
+  /** A button on the notice. A click takes the notice away and runs it. */
+  action?: NoticeAction
+}
+
+/** A button on a notice, such as "Try again". */
+export interface NoticeAction {
+  label: string
+  run: () => void
 }
 
 let nextNoticeId = 0
@@ -104,20 +112,24 @@ export const useUiStore = defineStore('ui', () => {
   /**
    * Shows a warning. With `kept: true` the warning stays until the user takes
    * it away, and the limit of the list counts it as a notice that stays from
-   * the moment it arrives.
+   * the moment it arrives. An `action` puts a button on the warning.
    */
   function warn(
     message: string,
     detail: string | null = null,
-    options: { kept?: boolean } = {},
+    options: { kept?: boolean; action?: NoticeAction } = {},
   ): Notice {
-    return push({
+    const notice: Omit<Notice, 'id'> = {
       level: 'warning',
       message,
       detail,
       icon: 'mdi-alert-outline',
       timeout: options.kept ? -1 : 6000,
-    })
+    }
+    if (options.action) {
+      notice.action = options.action
+    }
+    return push(notice)
   }
 
   /**

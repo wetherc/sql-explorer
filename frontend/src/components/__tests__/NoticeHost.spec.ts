@@ -46,6 +46,24 @@ describe('NoticeHost', () => {
     wrapper.unmount()
   })
 
+  it('takes the notice away and runs its action on a click of its button', async () => {
+    const wrapper = mountWithPlugins(NoticeHost)
+    const ui = useUiStore()
+    const run = vi.fn()
+    ui.warn('Nothing was saved.', null, { kept: true, action: { label: 'Try again', run } })
+    ui.info('a note')
+    await settle()
+    const buttons = document.querySelectorAll('[data-test="notice-action"]')
+    expect(buttons).toHaveLength(1)
+    expect(buttons[0]?.textContent).toContain('Try again')
+
+    ;(buttons[0] as HTMLElement).click()
+    await settle()
+    expect(run).toHaveBeenCalledOnce()
+    expect(ui.notices.map((notice) => notice.message)).toEqual(['a note'])
+    wrapper.unmount()
+  })
+
   it('offers no details for a notice that carries none', async () => {
     const wrapper = mountWithPlugins(NoticeHost)
     useUiStore().info('a note')

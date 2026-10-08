@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { ERROR_TIMEOUT_MS, MAX_NOTICES, useUiStore } from '@/stores/ui'
 import { ErrorCategory } from '@/types/api'
@@ -35,6 +35,15 @@ describe('ui store', () => {
       ui.success(`Notice ${index}`)
     }
     expect(ui.notices[0]?.id).toBe(kept.id)
+  })
+
+  it('puts a button on a warning only when the caller gives one', () => {
+    const ui = useUiStore()
+    const run = vi.fn()
+    expect(ui.warn('failed', null, { action: { label: 'Try again', run } }).action?.label).toBe(
+      'Try again',
+    )
+    expect('action' in ui.warn('plain')).toBe(false)
   })
 
   it('gives every notice its own identifier', () => {

@@ -85,6 +85,7 @@ fn main() {
             commands::run_messages::save_run_messages,
             commands::run_messages::save_shown_messages,
             commands::run_file::several_result_sets,
+            commands::run_file::run_file_ready,
             commands::explain_query,
             commands::query_parameters,
             commands::cancel_query,

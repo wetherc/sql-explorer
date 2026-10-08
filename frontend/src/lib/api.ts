@@ -173,6 +173,12 @@ export const api = {
     return invoke('several_result_sets', { query, dialect })
   },
 
+  /** True when the file of a ticket can still take a run. A run that didn't
+   *  start keeps its ticket, so the user can try again with the same file. */
+  runFileReady(ticket: string): Promise<boolean> {
+    return invoke('run_file_ready', { ticket })
+  },
+
   /**
    * Runs a script one time. The rows of the first result set, or of each
    * set, go to the file of the ticket, and the first rows of each set reach
