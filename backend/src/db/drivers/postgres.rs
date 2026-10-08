@@ -10,6 +10,7 @@ use crate::db::drivers::{
     bytes_to_json, connect_within, constraint_type, f32_to_json, f64_to_json, hex_text,
     number_out_of_range, number_value, prefixed_plan, routine_type, rows_affected_message,
     rows_returned_message, size_text, system_roots, CancelHandle, DatabaseDriver, NumberValue,
+    KEEPALIVE_IDLE, KEEPALIVE_INTERVAL,
 };
 use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{
@@ -83,8 +84,18 @@ pub fn build_config(connection: &SavedConnection) -> Result<PgConfig> {
     config.connect_timeout(Duration::from_secs(
         connection.options.connect_timeout_secs.max(1),
     ));
+    keep_alive(&mut config);
     add_read_only_option(&mut config, connection);
     Ok(config)
+}
+
+/// Sets the TCP keepalive times of the application. The default of the
+/// driver sends the first probe after two hours, and a firewall can drop an
+/// idle connection long before that.
+fn keep_alive(config: &mut PgConfig) {
+    config.keepalives(true);
+    config.keepalives_idle(KEEPALIVE_IDLE);
+    config.keepalives_interval(KEEPALIVE_INTERVAL);
 }
 
 /// Reads a connection string, in the URL form or in the key and value form.
@@ -125,6 +136,11 @@ fn add_fields_of_record(config: &mut PgConfig, url: &str, connection: &SavedConn
     // text of the string decides.
     if !url.contains("sslmode") {
         config.ssl_mode(ssl_mode(connection.options.tls_mode));
+    }
+    // The parser gives the default keepalive values also when the string
+    // names none, so the text of the string decides here too.
+    if !url.contains("keepalives") {
+        keep_alive(config);
     }
 }
 
@@ -6919,6 +6935,29 @@ mod tests {
         let config = build_config(&input).unwrap();
         assert_eq!(config.get_user(), None);
         assert_eq!(config.get_password(), None);
+    }
+
+    #[test]
+    fn a_connection_probes_its_socket_after_a_minute_of_silence() {
+        let mut input = connection();
+        let config = build_config(&input).unwrap();
+        assert!(config.get_keepalives());
+        assert_eq!(config.get_keepalives_idle(), KEEPALIVE_IDLE);
+        assert_eq!(config.get_keepalives_interval(), Some(KEEPALIVE_INTERVAL));
+
+        // A connection string with no keepalive values takes those of the
+        // application.
+        input.options.connection_url = Some("postgresql://h/d".into());
+        let config = build_config(&input).unwrap();
+        assert_eq!(config.get_keepalives_idle(), KEEPALIVE_IDLE);
+        assert_eq!(config.get_keepalives_interval(), Some(KEEPALIVE_INTERVAL));
+
+        // The values of the string win.
+        input.options.connection_url =
+            Some("postgresql://h/d?keepalives=1&keepalives_idle=300".into());
+        let config = build_config(&input).unwrap();
+        assert_eq!(config.get_keepalives_idle(), Duration::from_secs(300));
+        assert_eq!(config.get_keepalives_interval(), None);
     }
 
     #[test]

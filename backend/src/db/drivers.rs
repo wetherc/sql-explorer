@@ -399,6 +399,16 @@ pub fn finish_set(sink: &mut dyn RowSink, count: usize, truncated: bool) -> Resu
     sink.end_set(truncated)
 }
 
+/// The idle time of a socket after which the operating system sends the
+/// first TCP keepalive probe, and the time between two probes. A firewall or
+/// a NAT gateway can drop an idle connection without a word to either side.
+/// A statement that waits for its answer on such a connection then waits
+/// until its own limit. The probes keep the entry of the firewall open, and
+/// they close the socket when the far side stops answering them. The
+/// operating system sets the count of probes, which is 8 to 10.
+pub const KEEPALIVE_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
+pub const KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Runs a step of the opening of a connection under the time limit. A step
 /// that does not finish reports the connection and not the statement, because
 /// the advice for a slow statement does not fit a server that never answered.

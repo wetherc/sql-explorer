@@ -5,7 +5,7 @@ use crate::db::drivers::{
     constraint_type, f32_to_json, f64_to_json, finish_set, next_values, non_empty,
     number_out_of_range, number_value, parameter_type_refused, prefixed_plan, relation_type,
     routine_type, rows_affected_message, size_text, system_roots, trigger_event, trigger_timing,
-    CancelHandle, DatabaseDriver, NumberValue,
+    CancelHandle, DatabaseDriver, NumberValue, KEEPALIVE_IDLE,
 };
 use crate::db::sink::{RowSink, RunSummary, SinkControl};
 use crate::db::{
@@ -60,7 +60,9 @@ pub fn build_opts(connection: &SavedConnection) -> Result<Opts> {
     if let Some(database) = non_empty(&connection.database) {
         builder = builder.db_name(Some(database.to_string()));
     }
-    builder = builder.ssl_opts(ssl_opts(connection));
+    builder = builder
+        .ssl_opts(ssl_opts(connection))
+        .tcp_keepalive(Some(KEEPALIVE_IDLE));
 
     Ok(Opts::from(read_only_setup(builder, connection)))
 }
@@ -89,6 +91,11 @@ fn add_fields_of_record(opts: Opts, connection: &SavedConnection) -> OptsBuilder
     }
     if opts.ssl_opts().is_none() {
         builder = builder.ssl_opts(ssl_opts(connection));
+    }
+    // The driver can set the idle time alone, so the operating system
+    // decides the time between two probes.
+    if opts.tcp_keepalive().is_none() {
+        builder = builder.tcp_keepalive(Some(KEEPALIVE_IDLE));
     }
     builder
 }
@@ -1776,6 +1783,30 @@ mod tests {
         assert!(!string_has_password("mysql://u@h/d").unwrap());
         assert!(!string_has_password("mysql://u:@h/d").unwrap());
         assert!(string_has_password("not-a-url").is_err());
+    }
+
+    #[test]
+    fn a_connection_probes_its_socket_after_a_minute_of_silence() {
+        let mut input = connection();
+        assert_eq!(
+            build_opts(&input).unwrap().tcp_keepalive(),
+            Some(KEEPALIVE_IDLE)
+        );
+
+        // A connection string with no keepalive value takes the one of the
+        // application.
+        input.options.connection_url = Some("mysql://u@h/d".into());
+        assert_eq!(
+            build_opts(&input).unwrap().tcp_keepalive(),
+            Some(KEEPALIVE_IDLE)
+        );
+
+        // The value of the string wins.
+        input.options.connection_url = Some("mysql://u@h/d?tcp_keepalive=300000".into());
+        assert_eq!(
+            build_opts(&input).unwrap().tcp_keepalive(),
+            Some(Duration::from_secs(300))
+        );
     }
 
     #[test]

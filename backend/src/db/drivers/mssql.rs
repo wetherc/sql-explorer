@@ -10,7 +10,8 @@ use crate::db::drivers::{
     add_snapshot_relation, add_trigger_event, connect_within, constraint_type, f32_to_json,
     f64_to_json, finish_set, hex_text, non_empty, number_out_of_range, number_value,
     parameter_type_refused, relation_type, routine_type, rows_affected_message, single_statement,
-    size_text, trigger_event, CancelHandle, DatabaseDriver, NumberValue,
+    size_text, trigger_event, CancelHandle, DatabaseDriver, NumberValue, KEEPALIVE_IDLE,
+    KEEPALIVE_INTERVAL,
 };
 use crate::db::sink::{BufferSink, RowSink, RunSummary, SinkControl};
 use crate::db::{
@@ -504,16 +505,6 @@ async fn auth_method(connection: &SavedConnection) -> Result<AuthMethod> {
         )),
     }
 }
-
-/// The idle time of a socket after which the operating system sends the
-/// first keepalive probe, and the time between two probes. A firewall or a
-/// NAT gateway can drop an idle connection without a word to either side. A
-/// statement that waits for its answer on such a connection then waits until
-/// its own limit. The probes keep the entry of the firewall open, and they
-/// close the socket when the far side stops answering them. The operating
-/// system sets the count of probes, which is 8 to 10.
-const KEEPALIVE_IDLE: Duration = Duration::from_secs(60);
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Turns on TCP keepalive for the socket of one connection. A socket where
 /// the option cannot be set still works, so the failure is a warning and
