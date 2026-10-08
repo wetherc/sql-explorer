@@ -10,6 +10,7 @@ import type {
   DatabaseRef,
   EngineInfo,
   EventRef,
+  ChosenMessagesFile,
   ChosenRunFile,
   ExecOptions,
   ExportRequest,
@@ -21,6 +22,7 @@ import type {
   OpenedFile,
   TextFile,
   SaveFileRequest,
+  SaveShownMessagesRequest,
   SaveStatementRequest,
   SavedStatement,
   HistoryEntry,
@@ -149,6 +151,8 @@ export const api = {
       spill?: SpillRequest
       /** The seconds the read may pause at the row limit, or 0. */
       pauseSecs?: number
+      /** The identifier of the file that gets every message of the run. */
+      messagesFile?: string
     },
     handlers: ResultStreamHandlers,
   ): Promise<void> {
@@ -169,6 +173,29 @@ export const api = {
    */
   runToFile(request: RunToFileRequest, handlers: ResultStreamHandlers): Promise<ExportSummary> {
     return streamed<ExportSummary>('run_to_file', { ...request }, handlers)
+  },
+
+  /** Asks the user for a text file that gets every message of the runs of
+   *  a tab. Gives back null when the user closed the dialog. */
+  chooseMessagesFile(defaultName: string): Promise<ChosenMessagesFile | null> {
+    return invoke('choose_messages_file', { defaultName })
+  },
+
+  /** Stops the writes to a file of messages. */
+  forgetMessagesFile(id: string): Promise<void> {
+    return invoke('forget_messages_file', { id })
+  },
+
+  /** Sends the messages of a run that goes on to a chosen file. Gives back
+   *  false when the run already ended. */
+  saveRunMessages(requestId: string, fileId: string): Promise<boolean> {
+    return invoke('save_run_messages', { requestId, fileId })
+  },
+
+  /** Asks the user for a path and writes the messages that a tab shows.
+   *  Gives back the path, or null when the user closed the dialog. */
+  saveShownMessages(request: SaveShownMessagesRequest): Promise<string | null> {
+    return call('save_shown_messages', { ...request })
   },
 
   explainQuery(request: {

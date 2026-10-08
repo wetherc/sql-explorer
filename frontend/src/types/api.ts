@@ -268,6 +268,23 @@ export interface RunToFileRequest {
   queryParams?: Record<string, unknown>
   /** The limits of the grid. */
   options?: ExecOptions
+  /** The identifier of the file that gets every message of the run. */
+  messagesFile?: string
+}
+
+/** The file that the user chose for the messages of a tab. A run sends the
+ *  identifier, and the backend writes only to the path of an identifier. */
+export interface ChosenMessagesFile {
+  id: string
+  path: string
+}
+
+/** What the window sends to save the messages that a tab shows. */
+export interface SaveShownMessagesRequest {
+  defaultName: string
+  messages: Message[]
+  /** The count of the first messages of the run that the tab dropped. */
+  dropped: number
 }
 
 /**

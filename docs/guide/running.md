@@ -52,6 +52,23 @@ whole script to finish.
 The tab shows the last 500 messages. A line at the top counts the earlier
 messages that it leaves out, so a loop that prints for every row stays quick.
 
+To keep messages, use the save button above the list:
+
+- **Save shown messages** writes the messages the tab has in memory to a text
+  file. A tab keeps between 2,000 and 4,000 of a run's latest messages, so a
+  long run's file starts with a line that counts the messages it doesn't have.
+- **Save all messages to file** sends every message of the tab's runs to a
+  text file that you choose. Each run adds a line with its start time and then
+  its messages, and a run that fails adds its error at the end. The tab keeps
+  using the file until you choose **Stop saving messages** or close the tab.
+
+Choose the file before you run the script if you need every message. If you
+choose it while a statement runs, the file starts with up to 4,000 of that
+run's latest messages, and a line counts the earlier ones that are missing.
+The application writes to the file while the run goes on, so you can read it
+in another program. If a write fails, for example because the disk is full,
+the run's messages end with a warning that names the file.
+
 When a statement fails, the results panel switches to **Messages**, where the
 error appears with the server's detail and any advice. The error also appears
 in the corner.

@@ -382,6 +382,7 @@
               </v-alert>
 
               <QueryMessages
+                :tab-id="tab.id"
                 :messages="state.messages"
                 :dropped="state.droppedMessages"
                 :has-error="state.error !== null"

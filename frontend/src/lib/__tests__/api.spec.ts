@@ -241,6 +241,25 @@ describe('api', () => {
     expect(handler).toHaveBeenCalledWith('run')
   })
 
+  it('chooses, attaches and forgets the file of the messages of a tab', async () => {
+    await api.chooseMessagesFile('messages.txt')
+    expect(invoke).toHaveBeenLastCalledWith('choose_messages_file', {
+      defaultName: 'messages.txt',
+    })
+    await api.saveRunMessages('r1', 'f1')
+    expect(invoke).toHaveBeenLastCalledWith('save_run_messages', {
+      requestId: 'r1',
+      fileId: 'f1',
+    })
+    await api.forgetMessagesFile('f1')
+    expect(invoke).toHaveBeenLastCalledWith('forget_messages_file', { id: 'f1' })
+    const messages = [{ level: 'info' as const, text: 'a', detail: null }]
+    await api.saveShownMessages({ defaultName: 'm.txt', messages, dropped: 2 })
+    expect(invoke).toHaveBeenLastCalledWith('save_shown_messages', {
+      request: { defaultName: 'm.txt', messages, dropped: 2 },
+    })
+  })
+
   it('asks for the file of a run and gives back the answer of the run', async () => {
     await api.chooseRunFile({ defaultName: 'q.csv' })
     expect(invoke).toHaveBeenCalledWith('choose_run_file', { request: { defaultName: 'q.csv' } })

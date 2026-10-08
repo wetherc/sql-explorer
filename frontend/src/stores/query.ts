@@ -13,6 +13,7 @@ import { ResultTable, type ResultStreamHandlers } from '@/lib/results'
 import { MessageLevel, PlanMode } from '@/types/api'
 import type { SavedFile } from '@/lib/runFile'
 import type {
+  ChosenMessagesFile,
   ErrorPayload,
   ExecOptions,
   ExportSummary,
@@ -31,6 +32,9 @@ const BYTES_IN_GIGABYTE = 1024 ** 3
  * to twice this length, so it keeps at most twice this count.
  */
 export const KEPT_MESSAGES = 2000
+
+/** The file name that the save dialog suggests for messages. */
+export const MESSAGES_FILE_NAME = 'messages.txt'
 
 /**
  * One result set that the interface shows. The record carries an identifier
@@ -129,6 +133,9 @@ export interface QueryState {
   /** The export of all rows that is running. The store keeps it, so a view
    *  that mounts again sees it and can't start a second export. */
   exporting: RunningExport | null
+  /** The text file that gets every message of each run of the tab, until
+   *  the user stops it or closes the tab. */
+  messagesFile: ChosenMessagesFile | null
 }
 
 /** Builds the state a tab starts with. */
@@ -151,6 +158,7 @@ export function newQueryState(): QueryState {
     lastRunAt: null,
     stats: null,
     exporting: null,
+    messagesFile: null,
   }
 }
 
@@ -268,6 +276,10 @@ export const useQueryStore = defineStore('query', () => {
    */
   function clear(tabId: string): void {
     releaseKept(states[tabId]?.panes ?? [])
+    const messagesFile = states[tabId]?.messagesFile
+    if (messagesFile) {
+      void forgetMessagesFile(messagesFile.id)
+    }
     const run = runs.get(tabId)
     if (run) {
       run.abandoned = true
@@ -561,7 +573,17 @@ export const useQueryStore = defineStore('query', () => {
       text,
       (requestId, options, handlers) =>
         api.executeQuery(
-          { connectionId, requestId, query: text, tabId, queryParams, options, spill, pauseSecs },
+          {
+            connectionId,
+            requestId,
+            query: text,
+            tabId,
+            queryParams,
+            options,
+            spill,
+            pauseSecs,
+            messagesFile: messagesFileId(tabId),
+          },
           handlers,
         ),
       undefined,
@@ -625,6 +647,7 @@ export const useQueryStore = defineStore('query', () => {
             tabId,
             queryParams,
             options,
+            messagesFile: messagesFileId(tabId),
           },
           handlers,
         )
@@ -728,6 +751,78 @@ export const useQueryStore = defineStore('query', () => {
     }
   }
 
+  /** The identifier of the file of messages of a tab, when it has one. */
+  function messagesFileId(tabId: string): string | undefined {
+    return peekState(tabId)?.messagesFile?.id
+  }
+
+  /** Stops the writes to a file of messages. A failure goes to the log of
+   *  the backend, and the tab no longer names the file. */
+  async function forgetMessagesFile(id: string): Promise<void> {
+    try {
+      await api.forgetMessagesFile(id)
+    } catch {
+      // The backend writes the failure to its log.
+    }
+  }
+
+  /**
+   * Asks the user for a text file that gets every message of each run of
+   * the tab. A run that goes on sends its last kept messages to the file
+   * at once, then each new message. The file that the tab used before
+   * gets no more messages.
+   */
+  async function saveAllMessages(tabId: string): Promise<void> {
+    try {
+      const chosen = await api.chooseMessagesFile(MESSAGES_FILE_NAME)
+      if (!chosen) {
+        return
+      }
+      const state = peekState(tabId)
+      // The tab closed while the dialog was open.
+      if (!state) {
+        void forgetMessagesFile(chosen.id)
+        return
+      }
+      const previous = state.messagesFile
+      state.messagesFile = chosen
+      if (state.running && state.requestId) {
+        await api.saveRunMessages(state.requestId, chosen.id)
+      }
+      if (previous) {
+        void forgetMessagesFile(previous.id)
+      }
+    } catch (error) {
+      ui.reportError(error)
+    }
+  }
+
+  /** Stops the writes of the messages of a tab to its file. */
+  function stopSavingMessages(tabId: string): void {
+    const state = peekState(tabId)
+    if (state?.messagesFile) {
+      void forgetMessagesFile(state.messagesFile.id)
+      state.messagesFile = null
+    }
+  }
+
+  /** Asks the user for a path and writes the messages that the tab shows. */
+  async function saveShownMessages(tabId: string): Promise<void> {
+    const state = stateFor(tabId)
+    try {
+      const path = await api.saveShownMessages({
+        defaultName: MESSAGES_FILE_NAME,
+        messages: toRaw(state.messages),
+        dropped: state.droppedMessages,
+      })
+      if (path) {
+        ui.success(`Messages saved to ${path}.`)
+      }
+    } catch (error) {
+      ui.reportError(error)
+    }
+  }
+
   /** Removes the error marker of one tab, for example after an edit. */
   function clearErrorLocation(tabId: string): void {
     const state = peekState(tabId)
@@ -796,5 +891,8 @@ export const useQueryStore = defineStore('query', () => {
     togglePin,
     closePane,
     endPause,
+    saveAllMessages,
+    stopSavingMessages,
+    saveShownMessages,
   }
 })

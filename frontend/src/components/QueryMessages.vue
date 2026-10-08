@@ -1,4 +1,48 @@
 <template>
+  <div class="messages-bar d-flex align-center ga-2 mb-1">
+    <span
+      v-if="savingTo"
+      class="app-text-sm text-medium-emphasis text-truncate"
+      :title="savingTo"
+      data-test="messages-saving"
+    >
+      Saving all messages to {{ savingTo }}
+    </span>
+    <v-spacer />
+    <v-menu>
+      <template #activator="{ props: menu }">
+        <v-btn
+          v-bind="menu"
+          icon="mdi-content-save-outline"
+          size="small"
+          variant="text"
+          aria-label="Save messages"
+          data-test="messages-save"
+        />
+      </template>
+      <v-list density="compact">
+        <v-list-item
+          title="Save shown messages…"
+          :disabled="messages.length === 0"
+          data-test="messages-save-shown"
+          @click="queries.saveShownMessages(tabId)"
+        />
+        <v-list-item
+          :title="savingTo ? 'Save all messages to another file…' : 'Save all messages to file…'"
+          subtitle="Includes messages that aren't shown"
+          data-test="messages-save-all"
+          @click="queries.saveAllMessages(tabId)"
+        />
+        <v-list-item
+          v-if="savingTo"
+          title="Stop saving messages"
+          data-test="messages-stop"
+          @click="queries.stopSavingMessages(tabId)"
+        />
+      </v-list>
+    </v-menu>
+  </div>
+
   <div v-if="hiddenCount > 0" class="text-medium-emphasis mb-1" data-test="messages-hidden">
     {{ hiddenText }}
   </div>
@@ -42,14 +86,20 @@
  * away the first one, and the lines between them stay. When the store drops
  * messages, the dropped count rises by the length that the list loses, so
  * the key of each line stays the same.
+ *
+ * The menu above the list saves the shown messages to a file, or sends
+ * every message of each run of the tab to a file that the user chooses.
  */
 import { computed, toRaw } from 'vue'
+import { useQueryStore } from '@/stores/query'
 import type { Message } from '@/types/api'
 
 /** The most messages the list draws. */
 const MAX_SHOWN_MESSAGES = 500
 
 const props = defineProps<{
+  /** The tab whose messages the list shows. */
+  tabId: string
   /** The last messages of the run, as the store keeps them. */
   messages: Message[]
   /** The count of the first messages of the run that the store dropped. */
@@ -57,6 +107,11 @@ const props = defineProps<{
   /** True when the tab shows a failure, which takes the place of the empty note. */
   hasError: boolean
 }>()
+
+const queries = useQueryStore()
+
+/** The path of the file that gets every message of the tab, if any. */
+const savingTo = computed(() => queries.peekState(props.tabId)?.messagesFile?.path ?? null)
 
 const hiddenCount = computed(
   () => props.dropped + Math.max(0, props.messages.length - MAX_SHOWN_MESSAGES),

@@ -59,6 +59,7 @@ describe('newQueryState', () => {
       lastRunAt: null,
       stats: null,
       exporting: null,
+      messagesFile: null,
     })
   })
 })
@@ -949,6 +950,131 @@ describe('a run to a file', () => {
     })
     expect(await queries.runToFile('t1', 'c1', 'SELECT 1', 'k1')).toEqual(summary)
     expect(queries.peekState('t1')).toBeUndefined()
+  })
+})
+
+describe('the file of the messages of a tab', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    Object.values(apiStub).forEach((fn) => fn.mockReset())
+    apiStub.addHistoryEntry.mockResolvedValue([])
+    apiStub.getConnections.mockResolvedValue([connectionFixture()])
+    apiStub.listActiveConnections.mockResolvedValue([])
+    apiStub.forgetMessagesFile.mockResolvedValue(undefined)
+    apiStub.saveRunMessages.mockResolvedValue(true)
+  })
+
+  const first = { id: 'f1', path: '/logs/first.txt' }
+  const second = { id: 'f2', path: '/logs/second.txt' }
+
+  it('arms a file that each later run of the tab names', async () => {
+    const queries = useQueryStore()
+    queries.stateFor('t1')
+    apiStub.chooseMessagesFile.mockResolvedValue(first)
+    await queries.saveAllMessages('t1')
+    expect(apiStub.chooseMessagesFile).toHaveBeenCalledWith('messages.txt')
+    expect(queries.stateFor('t1').messagesFile).toEqual(first)
+    expect(apiStub.saveRunMessages).not.toHaveBeenCalled()
+
+    apiStub.executeQuery.mockImplementation(streamed(response()))
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    expect(apiStub.executeQuery).toHaveBeenCalledWith(
+      expect.objectContaining({ messagesFile: 'f1' }),
+      expect.anything(),
+    )
+    apiStub.runToFile.mockResolvedValue(null)
+    await queries.runToFile('t1', 'c1', 'SELECT 1', 'k1')
+    expect(apiStub.runToFile).toHaveBeenCalledWith(
+      expect.objectContaining({ messagesFile: 'f1' }),
+      expect.anything(),
+    )
+    // The file stays armed after the runs.
+    expect(queries.stateFor('t1').messagesFile).toEqual(first)
+  })
+
+  it('sends a running run to the new file and forgets the old file', async () => {
+    const queries = useQueryStore()
+    const state = queries.stateFor('t1')
+    state.messagesFile = first
+    state.running = true
+    state.requestId = 'r9'
+    apiStub.chooseMessagesFile.mockResolvedValue(second)
+    await queries.saveAllMessages('t1')
+    expect(apiStub.saveRunMessages).toHaveBeenCalledWith('r9', 'f2')
+    expect(apiStub.forgetMessagesFile).toHaveBeenCalledWith('f1')
+    expect(state.messagesFile).toEqual(second)
+  })
+
+  it('does nothing when the user closes the dialog', async () => {
+    const queries = useQueryStore()
+    queries.stateFor('t1')
+    apiStub.chooseMessagesFile.mockResolvedValue(null)
+    await queries.saveAllMessages('t1')
+    expect(queries.stateFor('t1').messagesFile).toBeNull()
+  })
+
+  it('forgets a file that the user chose after the tab closed', async () => {
+    const queries = useQueryStore()
+    apiStub.chooseMessagesFile.mockResolvedValue(first)
+    await queries.saveAllMessages('closed')
+    expect(apiStub.forgetMessagesFile).toHaveBeenCalledWith('f1')
+    expect(queries.peekState('closed')).toBeUndefined()
+  })
+
+  it('reports a failure of the choice', async () => {
+    const queries = useQueryStore()
+    apiStub.chooseMessagesFile.mockRejectedValue({
+      category: 'io',
+      message: "Couldn't create /x.txt",
+      detail: null,
+    })
+    await queries.saveAllMessages('t1')
+    expect(useUiStore().notices.some((notice) => notice.message.includes('/x.txt'))).toBe(true)
+  })
+
+  it('stops the writes when the user asks and when the tab closes', async () => {
+    const queries = useQueryStore()
+    queries.stateFor('t1').messagesFile = first
+    queries.stopSavingMessages('t1')
+    expect(apiStub.forgetMessagesFile).toHaveBeenCalledWith('f1')
+    expect(queries.stateFor('t1').messagesFile).toBeNull()
+    // A tab without a file has nothing to stop.
+    queries.stopSavingMessages('t1')
+    queries.stopSavingMessages('none')
+    expect(apiStub.forgetMessagesFile).toHaveBeenCalledTimes(1)
+
+    // A failure of the backend leaves the tab without the file.
+    apiStub.forgetMessagesFile.mockRejectedValue(new Error('gone'))
+    queries.stateFor('t1').messagesFile = second
+    queries.clear('t1')
+    await Promise.resolve()
+    expect(apiStub.forgetMessagesFile).toHaveBeenLastCalledWith('f2')
+    expect(queries.peekState('t1')).toBeUndefined()
+  })
+
+  it('saves the messages that the tab shows', async () => {
+    const queries = useQueryStore()
+    const state = queries.stateFor('t1')
+    state.messages = [{ level: 'info', text: 'a', detail: null }]
+    state.droppedMessages = 4
+    apiStub.saveShownMessages.mockResolvedValue('/logs/shown.txt')
+    await queries.saveShownMessages('t1')
+    expect(apiStub.saveShownMessages).toHaveBeenCalledWith({
+      defaultName: 'messages.txt',
+      messages: [{ level: 'info', text: 'a', detail: null }],
+      dropped: 4,
+    })
+    const ui = useUiStore()
+    expect(ui.notices.some((notice) => notice.message.includes('/logs/shown.txt'))).toBe(true)
+
+    // A closed dialog gives no notice, and a failure gives an error.
+    const count = ui.notices.length
+    apiStub.saveShownMessages.mockResolvedValue(null)
+    await queries.saveShownMessages('t1')
+    expect(ui.notices.length).toBe(count)
+    apiStub.saveShownMessages.mockRejectedValue(new Error('disk full'))
+    await queries.saveShownMessages('t1')
+    expect(ui.notices.some((notice) => notice.message.includes('disk full'))).toBe(true)
   })
 })
 
