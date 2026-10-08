@@ -1,6 +1,6 @@
 ---
 title: Exports and row limits
-description: Export rows to CSV, JSON, Markdown, INSERT statements or Excel, copy them, run a statement straight to a file, save full results on this computer, and set the grid and export row limits.
+description: Export rows to CSV, JSON, Markdown, INSERT statements or Excel, copy them, run a statement straight to a file, save full results on this computer, pause a query at the row limit, and set the grid and export row limits.
 order: 8
 ---
 
@@ -116,6 +116,56 @@ results. The files live in a folder under the app's cache folder. If the app
 quits or crashes, it deletes the files that are left over the next time it
 starts. Each running copy of the app has a folder of its own, so a second copy
 never deletes the files of the first.
+
+## Paused queries
+
+Turn on **Pause queries at the row limit** in the **Results** group of Settings,
+and a query that reaches the grid's row limit pauses there instead of ending.
+The grid shows the first rows, and the statement stays open on the server. When
+you choose **Export all rows**, the export continues the same read into the
+file, so the statement doesn't run a second time and the server doesn't repeat
+its work. The option is off by default.
+
+A bar above a paused result says how long the pause has left and has two
+buttons. **Export all rows** writes every row to a CSV, JSON or Excel file:
+first the rows that the grid shows, then the rest of the read. **Release** ends
+the statement and frees the tab. An export takes the paused read once, so after
+the export, or after an export that fails, the result is no longer paused and
+a second export runs the query again.
+
+A paused query costs the server something for as long as it waits:
+
+- The statement stays open, with its connection and the memory that it uses on
+  the server.
+- The server can keep locks on the rows that the statement read, so another
+  session that wants to change those rows can wait for them.
+- On PostgreSQL, the read waits inside a transaction. A server with
+  `idle_in_transaction_session_timeout` set below the pause limit ends the
+  session, and the export then fails with a message that says so.
+- On MySQL and MariaDB, the app raises `net_write_timeout` for the session while
+  the statement runs, so the server doesn't close the connection while nothing
+  reads from it, and sets the old value again afterwards.
+
+**Pause time limit** sets how long a query can stay paused, from 1 to 60
+minutes. The default is 10 minutes. When the time runs out, the app releases
+the query on its own. The app also releases a paused query when you run the tab
+again (also when you pinned the result), close the tab, or disconnect.
+
+While its query is paused, the tab can't run anything else on its session. A
+new run, a query plan, or **Run to file…** in that tab releases the paused
+query first. Other tabs aren't affected, because each tab has a session of its
+own.
+
+Only some queries pause. The text must be a single statement that only reads,
+it must run in a tab, and the database must be PostgreSQL, MySQL, MariaDB or
+SQL Server. A script, a statement that changes data, and a run on SQLite or
+Athena end at the row limit as before. While the paused query waits, the app
+keeps a copy of the grid's rows for the export. A result whose first rows need
+more than 128 MB for that copy ends at the row limit instead, and **Messages**
+says why.
+
+**Save full results on this computer** already gives the export every row, so a
+run doesn't pause while that option is on.
 
 ## Excel files
 
