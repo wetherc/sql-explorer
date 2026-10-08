@@ -39,6 +39,9 @@ pub enum BackgroundRole {
     Snapshot,
 }
 
+/// The identifier of a connection and one role of its background drivers.
+type BackgroundKey = (String, BackgroundRole);
+
 /// What the user interface learns about one connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -159,6 +162,11 @@ pub struct AppState {
     /// The record of each one keeps the moment of its last answer, so that
     /// a read can confirm a driver that stood idle.
     pub background: Mutex<HashMap<(String, BackgroundRole), Arc<Session>>>,
+    /// One lock for each role of each connection, kept while a background
+    /// driver opens. Five reads of the tree that start together on a
+    /// connection without a background driver then open one second
+    /// connection, not five.
+    background_opening: std::sync::Mutex<HashMap<BackgroundKey, Arc<Mutex<()>>>>,
     /// One record for each statement that runs, keyed by the identifier the
     /// user interface gave it.
     pub running: Mutex<HashMap<String, RunningRequest>>,
@@ -189,6 +197,7 @@ impl AppState {
         Self {
             connections: Mutex::new(HashMap::new()),
             background: Mutex::new(HashMap::new()),
+            background_opening: std::sync::Mutex::new(HashMap::new()),
             running: Mutex::new(HashMap::new()),
             secrets,
             file_roots: Mutex::new(Vec::new()),
@@ -313,6 +322,22 @@ impl AppState {
             .await
             .get(&(connection_id.to_string(), role))
             .cloned()
+    }
+
+    /// The lock that a read keeps while it opens the background driver of
+    /// one role of a connection. The map has at most one entry for each role
+    /// of each saved connection, so it stays small.
+    pub fn background_open_lock(
+        &self,
+        connection_id: &str,
+        role: BackgroundRole,
+    ) -> Arc<Mutex<()>> {
+        self.background_opening
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry((connection_id.to_string(), role))
+            .or_default()
+            .clone()
     }
 
     /// Keeps a background driver for one role of a connection and returns
@@ -860,6 +885,14 @@ mod tests {
             .set_background_driver("c1", BackgroundRole::Snapshot, Box::new(StubDriver))
             .await;
         assert!(!Arc::ptr_eq(&catalog, &snapshot));
+        assert!(Arc::ptr_eq(
+            &state.background_open_lock("c1", BackgroundRole::Catalog),
+            &state.background_open_lock("c1", BackgroundRole::Catalog)
+        ));
+        assert!(!Arc::ptr_eq(
+            &state.background_open_lock("c1", BackgroundRole::Catalog),
+            &state.background_open_lock("c1", BackgroundRole::Snapshot)
+        ));
 
         // A drop names the session, so the driver of the other role stays.
         assert!(state.drop_background("c1", &snapshot).await);

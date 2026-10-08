@@ -6,9 +6,10 @@ use crate::db::drivers::{
     postgres::PostgresDriver, sqlite::SqliteDriver,
 };
 use crate::db::{
-    self, drivers::DatabaseDriver, AppColumn, Constraint, CreateQuery, Database, ExecOptions,
-    IndexInfo, ObjectType, PartitionList, PlanMode, QueryParams, QueryResponse, RelationType,
-    Routine, ScheduledEvent, Schema, SchemaSnapshot, Table, TableDetails, Trigger,
+    self, drivers::CancelHandle, drivers::DatabaseDriver, AppColumn, Constraint, CreateQuery,
+    Database, ExecOptions, IndexInfo, ObjectType, PartitionList, PlanMode, QueryParams,
+    QueryResponse, RelationType, Routine, ScheduledEvent, Schema, SchemaSnapshot, Table,
+    TableDetails, Trigger,
 };
 use crate::error::{Error, Result};
 use crate::files;
@@ -54,16 +55,6 @@ fn announce<R: Runtime>(
     };
     if let Err(error) = app.emit(CONNECTION_STATUS_EVENT, event) {
         log::warn!("The connection state could not be sent: {error}");
-    }
-}
-
-/// The text of an error for a change of the state of a connection: the
-/// message, and the detail of the server on a line of its own.
-fn announcement_text(error: &Error) -> String {
-    let payload = error.to_payload();
-    match payload.detail {
-        Some(detail) if !detail.is_empty() => format!("{}\n{detail}", payload.message),
-        _ => payload.message,
     }
 }
 
@@ -384,27 +375,27 @@ async fn session_for<R: Runtime>(
         return Ok((open, session, key));
     }
 
-    // One session opens at a time, so the count against the cap stays exact
-    // and two requests of one tab open one session, not two.
+    // Two requests of one tab open one session. The open of another tab
+    // does not wait here, because the ticket locks one key alone.
     let pool = open.sessions.clone();
-    let _opening = unless_stopped(async { Ok(pool.begin_open().await) }, token).await?;
+    let mut ticket = unless_stopped(async { Ok(pool.begin_open(&key).await) }, token).await?;
     if let Some(session) = pool.get(&key).await {
         session.touch().await;
         return Ok((open, session, key));
     }
-    if key != DEFAULT_SESSION && pool.at_cap().await {
+    if !ticket.reserve().await {
         pool.evict_least_recent().await;
-    }
-    if key != DEFAULT_SESSION && pool.at_cap().await {
-        return Err(Error::Invalid(format!(
-            "This connection is already using {} sessions. Close a tab or raise Max sessions \
-             in the connection settings.",
-            pool.cap()
-        )));
+        if !ticket.reserve().await {
+            return Err(Error::Invalid(format!(
+                "This connection is already using {} sessions. Close a tab or raise Max \
+                 sessions in the connection settings.",
+                pool.cap()
+            )));
+        }
     }
 
     let driver = open_until_stopped(state, &open, token).await?;
-    let session = pool.insert(&key, Session::new(driver)).await;
+    let session = ticket.insert(Session::new(driver)).await;
     Ok((open, session, key))
 }
 
@@ -622,9 +613,17 @@ impl<'a> CatalogRead<'a> {
     /// driver until the deadline, the read fails and the session stays,
     /// because that exchange has a limit of its own.
     async fn lock(&self) -> Result<tokio::sync::MutexGuard<'_, Box<dyn DatabaseDriver>>> {
-        tokio::time::timeout_at(self.deadline, self.session.driver.lock())
+        let guard = tokio::time::timeout_at(self.deadline, self.session.driver.lock())
             .await
-            .map_err(|_| self.timeout())
+            .map_err(|_| self.timeout())?;
+        if self.session.is_broken() {
+            return Err(Error::Connection(
+                "A read before this one passed its time limit and closed the connection. Try \
+                 again."
+                    .to_string(),
+            ));
+        }
+        Ok(guard)
     }
 
     /// Runs the read until the deadline. A read that passes the deadline is
@@ -665,6 +664,7 @@ impl<'a> CatalogRead<'a> {
             "A read of the catalog of '{}' passed its limit, so its session closes.",
             self.connection_id
         );
+        self.session.mark_broken();
         // The background driver of the other role stays, because its reads
         // do not use this session.
         if self
@@ -771,6 +771,13 @@ async fn driver_for_request<'s>(
     {
         return Err(Error::Cancelled);
     }
+    if session.is_broken() {
+        return Err(Error::Connection(
+            "The session closed after a stop while this statement waited for it. Run the \
+             statement again."
+                .to_string(),
+        ));
+    }
     Ok(guard)
 }
 
@@ -785,19 +792,41 @@ async fn driver_for_request<'s>(
 /// `grace` is the time the Stop button gives the driver to report the failure
 /// that the server sends it. It is zero for a connection that has no way to
 /// ask the server to stop, because no such failure is coming.
+///
+/// At the time limit, `cancel` asks the server to stop the statement, and the
+/// work stays in use for `grace` more. An MS SQL driver sends its stop only
+/// while a task reads the answer, so a drop at once would leave the
+/// statement running on the server after the socket closes. A statement
+/// that ends inside the grace gives the timeout error as an answer, and the
+/// connection stays open.
 pub async fn run_bounded<T, F>(
     work: F,
     token: &CancellationToken,
     timeout_secs: u64,
     grace: std::time::Duration,
+    cancel: Option<Arc<dyn CancelHandle>>,
 ) -> Bounded<T>
 where
     F: std::future::Future<Output = Result<T>>,
 {
+    tokio::pin!(work);
+    let limit = tokio::select! {
+        result = &mut work => return Bounded::Answered(stopped_answer(result, token)),
+        () = stopped_by_the_user(token, grace) => return Bounded::Stopped(Error::Cancelled),
+        () = until_the_limit(timeout_secs) => Error::Timeout(timeout_secs),
+    };
+    let Some(handle) = cancel.filter(|_| !grace.is_zero()) else {
+        return Bounded::Stopped(limit);
+    };
+    if let Err(error) = handle.cancel().await {
+        log::warn!("The server did not stop the statement at its time limit: {error}");
+    }
     tokio::select! {
-        result = work => Bounded::Answered(stopped_answer(result, token)),
-        () = stopped_by_the_user(token, grace) => Bounded::Stopped(Error::Cancelled),
-        () = until_the_limit(timeout_secs) => Bounded::Stopped(Error::Timeout(timeout_secs)),
+        result = &mut work => Bounded::Answered(match result {
+            Err(error) if error.is_stop_reply() => Err(limit),
+            other => other,
+        }),
+        () = tokio::time::sleep(grace) => Bounded::Stopped(limit),
     }
 }
 
@@ -823,16 +852,6 @@ fn stopped_answer<T>(result: Result<T>, token: &CancellationToken) -> Result<T> 
             Err(Error::Cancelled)
         }
         other => other,
-    }
-}
-
-/// Reports what the interface shows when a limit ended an exchange.
-fn limit_reason(error: &Error) -> String {
-    match error {
-        Error::Timeout(seconds) => format!(
-            "The statement ran longer than {seconds} seconds, so the connection was closed."
-        ),
-        _ => "The statement was stopped, so the connection was closed.".to_string(),
     }
 }
 
@@ -993,6 +1012,7 @@ pub async fn execute_query<R: Runtime>(
                 &token,
                 options.timeout_secs,
                 stop_grace(&session),
+                session.cancel_handle.clone(),
             )
             .await
         }
@@ -1001,7 +1021,7 @@ pub async fn execute_query<R: Runtime>(
     let outcome = in_sent_text(outcome, &query, &ran);
 
     state.end_request(&request_id).await;
-    match finish_run(&app, &state, &connection_id, &open, &key, &session, outcome).await {
+    match finish_run(&state, &connection_id, &open, &key, &session, outcome).await {
         Ok(summary) => sink.finish(summary),
         Err(error) => {
             // The messages that the server sent before the failure still
@@ -1073,6 +1093,7 @@ pub async fn explain_query<R: Runtime>(
                 &token,
                 options.timeout_secs,
                 stop_grace(&session),
+                session.cancel_handle.clone(),
             )
             .await
         }
@@ -1081,14 +1102,13 @@ pub async fn explain_query<R: Runtime>(
     let outcome = in_sent_text(outcome, &query, &ran);
 
     state.end_request(&request_id).await;
-    finish_run(&app, &state, &connection_id, &open, &key, &session, outcome).await
+    finish_run(&state, &connection_id, &open, &key, &session, outcome).await
 }
 
 /// Closes the accounts of one exchange. A limit that ended the exchange asks
 /// the server to stop the statement, and the session then goes unless the
 /// driver reports that it stays fit for use.
-async fn finish_run<R: Runtime, T>(
-    app: &AppHandle<R>,
+async fn finish_run<T>(
     state: &AppState,
     connection_id: &str,
     open: &OpenConnection,
@@ -1103,28 +1123,37 @@ async fn finish_run<R: Runtime, T>(
         }
         Bounded::Answered(Err(error)) => Err(error),
         Bounded::Stopped(error) => {
-            // The wait ended, but the server may still run the statement.
-            // The handle asks the server to stop it. A second request for a
-            // statement that already stopped does no harm.
-            if let Some(handle) = session.cancel_handle.clone() {
-                if let Err(stop_error) = handle.cancel().await {
-                    log::warn!("The server did not stop the statement: {stop_error}");
-                }
-            }
+            // The server was already asked to stop the statement: by the
+            // Stop button through the record of the request, or by
+            // `run_bounded` at the time limit.
             if session.keeps_connection_after_stop {
                 return Err(error);
             }
             // The exchange was dropped in the middle of a message, so nothing
-            // can be sent on this session again. A new one goes in its place
-            // at once, so the user is not left with a tab that cannot run
-            // anything. The other sessions of the connection stay as they
-            // are, because the server itself is healthy.
+            // can be sent on this session again. The session leaves its slot,
+            // and the next request of the tab opens a new one. The command
+            // returns at once and does not wait for that open, which can take
+            // the full connect time of a server that does not answer. The
+            // other sessions of the connection stay as they are.
+            session.mark_broken();
             if still_in_use(state, connection_id, open, session_key, session).await {
-                reopen_after_stop(app, state, connection_id, open, session_key, &error).await;
+                open.sessions.release(session_key).await;
+                log::info!(
+                    "A session of '{connection_id}' closed after a stop. The next request opens \
+                     a new one."
+                );
             }
             Err(error)
         }
     }
+}
+
+/// True when the connection is still open with the same pool of sessions.
+async fn still_open(state: &AppState, connection_id: &str, open: &OpenConnection) -> bool {
+    state
+        .connection(connection_id)
+        .await
+        .is_ok_and(|current| Arc::ptr_eq(&current.sessions, &open.sessions))
 }
 
 /// True when the connection is still open and the tab still holds the
@@ -1137,58 +1166,12 @@ async fn still_in_use(
     session_key: &str,
     session: &Arc<Session>,
 ) -> bool {
-    let Ok(current) = state.connection(connection_id).await else {
-        return false;
-    };
-    if !Arc::ptr_eq(&current.sessions, &open.sessions) {
+    if !still_open(state, connection_id, open).await {
         return false;
     }
     match open.sessions.get(session_key).await {
         Some(held) => Arc::ptr_eq(&held, session),
         None => false,
-    }
-}
-
-/// Puts a new session in the place of one that a limit left unusable.
-///
-/// The session is a new one. Whatever the old session held, such as a
-/// temporary table, an open transaction or a `SET` of its own, is gone with
-/// it. The alternative is a tab that can run nothing until the user opens the
-/// connection by hand.
-async fn reopen_after_stop<R: Runtime>(
-    app: &AppHandle<R>,
-    state: &AppState,
-    connection_id: &str,
-    open: &OpenConnection,
-    session_key: &str,
-    error: &Error,
-) {
-    announce(app, connection_id, ConnectionHealth::Reconnecting, None);
-
-    let opened = match with_secrets(state, open.descriptor.clone()).await {
-        Ok(full) => open_driver(&full).await,
-        Err(secret_error) => {
-            log::warn!("The password of '{connection_id}' could not be read: {secret_error}");
-            Err(secret_error)
-        }
-    };
-
-    match opened {
-        Ok(driver) => {
-            open.sessions
-                .insert(session_key, Session::new(driver))
-                .await;
-            announce(app, connection_id, ConnectionHealth::Connected, None);
-            log::info!("A session of '{connection_id}' was opened again after a stop.");
-        }
-        Err(open_error) => {
-            let reason = format!(
-                "{}\n{}",
-                limit_reason(error),
-                announcement_text(&open_error)
-            );
-            reopen_failed(app, state, connection_id, open, session_key, Some(reason)).await;
-        }
     }
 }
 
@@ -1200,16 +1183,26 @@ async fn reopen_after_stop<R: Runtime>(
 /// need it.
 /// Asks the server to stop each statement, and stops waiting for it.
 async fn stop_requests(requests: Vec<crate::state::RunningRequest>) {
-    for request in requests {
+    // The stops go out at the same time, and each one waits for its server
+    // for STOP_GRACE at most. A stop of PostgreSQL or MySQL opens a new
+    // connection, so on a server that does not answer, eight stops one after
+    // the other would keep a disconnect waiting for eight connect times.
+    futures_util::future::join_all(requests.into_iter().map(|request| async move {
         // The handle does not need the lock of the driver, so it works
         // while the statement runs.
         if let Some(handle) = request.cancel_handle {
-            if let Err(error) = handle.cancel().await {
-                log::warn!("The server did not stop the statement: {error}");
+            match tokio::time::timeout(STOP_GRACE, handle.cancel()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => log::warn!("The server did not stop the statement: {error}"),
+                Err(_) => log::warn!(
+                    "The server did not answer the stop within {} seconds.",
+                    STOP_GRACE.as_secs()
+                ),
             }
         }
         request.token.cancel();
-    }
+    }))
+    .await;
 }
 
 #[tauri::command]
@@ -1528,6 +1521,13 @@ async fn background_session(
         log::warn!("The {role:?} driver of '{connection_id}' stopped answering. Opening it again.");
         state.drop_background(connection_id, &session).await;
     }
+    // One read opens the driver, and the reads that start at the same time
+    // wait for it and then take it.
+    let opening = state.background_open_lock(connection_id, role);
+    let _opening = before_deadline(deadline, opening.lock()).await?;
+    if let Some(session) = state.background_session(connection_id, role).await {
+        return Ok(session);
+    }
     let full = match before_deadline(deadline, with_secrets(state, open.descriptor.clone())).await?
     {
         Ok(full) => full,
@@ -1540,6 +1540,12 @@ async fn background_session(
     // layout of `metadata_read` passes the query depth limit of the compiler
     // in the build that measures coverage.
     match before_deadline(deadline, Box::pin(open_driver(&full))).await? {
+        // A disconnect or a new connect during the open replaced the
+        // connection. The driver then serves this read alone and closes,
+        // so the slot never keeps a driver of a closed connection.
+        Ok(driver) if !still_open(state, connection_id, open).await => {
+            Ok(Arc::new(Session::new(driver)))
+        }
         Ok(driver) => Ok(state
             .set_background_driver(connection_id, role, driver)
             .await),
@@ -2607,6 +2613,7 @@ pub async fn export_query<R: Runtime>(
                 &token,
                 options.timeout_secs,
                 stop_grace(&session),
+                session.cancel_handle.clone(),
             )
             .await
         }
@@ -2614,7 +2621,7 @@ pub async fn export_query<R: Runtime>(
     };
     let outcome = in_sent_text(outcome, &query, &ran);
     state.end_request(&request_id).await;
-    finish_run(&app, &state, &connection_id, &open, &key, &session, outcome).await?;
+    finish_run(&state, &connection_id, &open, &key, &session, outcome).await?;
 
     if !sink.saw_set {
         return Err(Error::Unsupported(
@@ -3160,12 +3167,18 @@ mod tests {
     #[tokio::test]
     async fn a_bounded_run_gives_the_answer_of_the_work() {
         let token = CancellationToken::new();
-        let outcome = run_bounded(async { Ok(7_u8) }, &token, 30, STOP_GRACE).await;
+        let outcome = run_bounded(async { Ok(7_u8) }, &token, 30, STOP_GRACE, None).await;
         assert!(matches!(outcome, Bounded::Answered(Ok(7))));
 
         // An error of the driver is an answer, so the connection stays open.
-        let failed: Bounded<u8> =
-            run_bounded(async { Err(Error::Cancelled) }, &token, 30, STOP_GRACE).await;
+        let failed: Bounded<u8> = run_bounded(
+            async { Err(Error::Cancelled) },
+            &token,
+            30,
+            STOP_GRACE,
+            None,
+        )
+        .await;
         assert!(matches!(failed, Bounded::Answered(Err(Error::Cancelled))));
     }
 
@@ -3186,6 +3199,7 @@ mod tests {
             &token,
             30,
             STOP_GRACE,
+            None,
         )
         .await;
 
@@ -3203,15 +3217,16 @@ mod tests {
         };
         let token = CancellationToken::new();
         let failed: Bounded<u8> =
-            run_bounded(async { Err(interrupted()) }, &token, 30, STOP_GRACE).await;
+            run_bounded(async { Err(interrupted()) }, &token, 30, STOP_GRACE, None).await;
         // Without a stop the error of the server stays as it is.
         assert!(matches!(failed, Bounded::Answered(Err(Error::MySql(_)))));
 
         token.cancel();
         let stopped: Bounded<u8> =
-            run_bounded(async { Err(interrupted()) }, &token, 30, STOP_GRACE).await;
+            run_bounded(async { Err(interrupted()) }, &token, 30, STOP_GRACE, None).await;
         assert!(matches!(stopped, Bounded::Answered(Err(Error::Cancelled))));
-        let answered: Bounded<u8> = run_bounded(async { Ok(1) }, &token, 30, STOP_GRACE).await;
+        let answered: Bounded<u8> =
+            run_bounded(async { Ok(1) }, &token, 30, STOP_GRACE, None).await;
         assert!(matches!(answered, Bounded::Answered(Ok(1))));
     }
 
@@ -3232,6 +3247,7 @@ mod tests {
             &token,
             30,
             STOP_GRACE,
+            None,
         )
         .await;
         assert!(matches!(deadlock, Bounded::Answered(Err(Error::MySql(_)))));
@@ -3240,6 +3256,7 @@ mod tests {
             &token,
             30,
             STOP_GRACE,
+            None,
         )
         .await;
         assert!(matches!(syntax, Bounded::Answered(Err(Error::Athena(_)))));
@@ -3250,7 +3267,8 @@ mod tests {
         tokio::time::pause();
         let token = CancellationToken::new();
         token.cancel();
-        let outcome: Bounded<u8> = run_bounded(std::future::pending(), &token, 0, STOP_GRACE).await;
+        let outcome: Bounded<u8> =
+            run_bounded(std::future::pending(), &token, 0, STOP_GRACE, None).await;
         assert!(matches!(outcome, Bounded::Stopped(Error::Cancelled)));
     }
 
@@ -3263,6 +3281,7 @@ mod tests {
             &token,
             30,
             std::time::Duration::ZERO,
+            None,
         )
         .await;
         assert!(matches!(outcome, Bounded::Stopped(Error::Cancelled)));
@@ -3272,8 +3291,84 @@ mod tests {
     async fn a_bounded_run_stops_at_the_time_limit() {
         tokio::time::pause();
         let token = CancellationToken::new();
-        let outcome: Bounded<u8> = run_bounded(std::future::pending(), &token, 5, STOP_GRACE).await;
+        let outcome: Bounded<u8> =
+            run_bounded(std::future::pending(), &token, 5, STOP_GRACE, None).await;
         assert!(matches!(outcome, Bounded::Stopped(Error::Timeout(5))));
+    }
+
+    /// A handle that counts its calls, for the tests of the time limit.
+    fn counting_cancel(
+        fails: bool,
+    ) -> (Arc<dyn CancelHandle>, Arc<std::sync::atomic::AtomicUsize>) {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handle = Arc::new(CountingCancel {
+            calls: calls.clone(),
+            fails,
+        });
+        (handle, calls)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_time_limit_asks_the_server_to_stop_and_reads_its_reply() {
+        let token = CancellationToken::new();
+        let (handle, calls) = counting_cancel(false);
+        // The driver reads the reply of the server to the stop.
+        let outcome: Bounded<u8> = run_bounded(
+            async {
+                tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+                Err(Error::Cancelled)
+            },
+            &token,
+            5,
+            STOP_GRACE,
+            Some(handle),
+        )
+        .await;
+        assert!(matches!(outcome, Bounded::Answered(Err(Error::Timeout(5)))));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // A statement that ends in the grace gives its own answer.
+        let (handle, _) = counting_cancel(true);
+        let outcome: Bounded<u8> = run_bounded(
+            async {
+                tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+                Ok(3)
+            },
+            &token,
+            5,
+            STOP_GRACE,
+            Some(handle),
+        )
+        .await;
+        assert!(matches!(outcome, Bounded::Answered(Ok(3))));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_time_limit_drops_a_driver_that_says_nothing_after_the_stop() {
+        let token = CancellationToken::new();
+        let (handle, calls) = counting_cancel(false);
+        let outcome: Bounded<u8> = run_bounded(
+            std::future::pending(),
+            &token,
+            5,
+            STOP_GRACE,
+            Some(handle.clone()),
+        )
+        .await;
+        assert!(matches!(outcome, Bounded::Stopped(Error::Timeout(5))));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // A connection with no grace does not wait.
+        let outcome: Bounded<u8> = run_bounded(
+            std::future::pending(),
+            &token,
+            5,
+            std::time::Duration::ZERO,
+            Some(handle),
+        )
+        .await;
+        assert!(matches!(outcome, Bounded::Stopped(Error::Timeout(5))));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -3283,12 +3378,6 @@ mod tests {
         tokio::time::advance(std::time::Duration::from_secs(60 * 60)).await;
         assert!(!waiting.is_finished());
         waiting.abort();
-    }
-
-    #[test]
-    fn a_limit_that_ended_a_run_names_the_limit() {
-        assert!(limit_reason(&Error::Timeout(90)).contains("longer than 90 seconds"));
-        assert!(limit_reason(&Error::Cancelled).contains("stopped"));
     }
 
     fn response_with(rows: Vec<Vec<serde_json::Value>>) -> QueryResponse {
@@ -4552,7 +4641,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stop_replaces_only_the_session_that_ran_the_statement() {
+    async fn a_stop_closes_only_the_session_that_ran_the_statement() {
         struct FrailDriver;
 
         #[async_trait::async_trait]
@@ -4602,13 +4691,24 @@ mod tests {
         let default_before = open.default_session().await.unwrap();
 
         let outcome: Bounded<()> = Bounded::Stopped(Error::Cancelled);
-        let result = finish_run(app.handle(), &state, "s1", &open, "t1", &frail, outcome).await;
+        let result = finish_run(&state, "s1", &open, "t1", &frail, outcome).await;
         assert!(result.is_err());
 
-        // The slot of the tab holds a new session, and the default session
-        // stays as it was.
-        let replaced = open.sessions.get("t1").await.unwrap();
-        assert!(!Arc::ptr_eq(&frail, &replaced));
+        // The session leaves the slot of the tab at once, and the default
+        // session stays as it was. The next request of the tab opens a new
+        // session.
+        assert!(frail.is_broken());
+        assert!(open.sessions.get("t1").await.is_none());
+        let (_, reopened, _) = session_for(
+            app.handle(),
+            &state,
+            "s1",
+            Some("t1"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(!Arc::ptr_eq(&frail, &reopened));
         let default_after = open.default_session().await.unwrap();
         assert!(Arc::ptr_eq(&default_before, &default_after));
     }
@@ -5168,18 +5268,6 @@ mod tests {
         assert!(stale.sessions.get(DEFAULT_SESSION).await.is_some());
     }
 
-    #[test]
-    fn an_announcement_gives_the_message_and_the_detail() {
-        assert_eq!(
-            announcement_text(&Error::Connection("refused".into())),
-            "refused"
-        );
-        let error = Error::Anyhow(anyhow::anyhow!("no route").context("refused"));
-        let text = announcement_text(&error);
-        assert!(text.starts_with("refused\n"), "{text}");
-        assert!(text.contains("no route"), "{text}");
-    }
-
     /// A driver for the tests of the background connection. It counts the
     /// pings it answered and fails every ping when it is told to.
     struct PingDriver {
@@ -5397,7 +5485,7 @@ mod tests {
 
         // SQLite aborts a statement cleanly, so the session stays.
         let outcome: Bounded<()> = Bounded::Stopped(Error::Cancelled);
-        let result = finish_run(app.handle(), &state, "s1", &open, &key, &session, outcome).await;
+        let result = finish_run(&state, "s1", &open, &key, &session, outcome).await;
         assert!(result.is_err());
         let kept = open.sessions.get("t1").await.unwrap();
         assert!(Arc::ptr_eq(&session, &kept));
@@ -5539,14 +5627,14 @@ mod tests {
     #[tokio::test]
     async fn a_stop_opens_no_session_for_a_tab_that_closed() {
         let (_dir, descriptor) = temp_sqlite();
-        let (app, state) = state_with_sqlite(descriptor).await;
+        let (_app, state) = state_with_sqlite(descriptor).await;
         let open = state.connection("s1").await.unwrap();
         let (driver, _calls) = catalog_driver(None);
         let session = open.sessions.insert("t1", Session::new(driver)).await;
         open.sessions.release("t1").await;
 
         let outcome: Bounded<()> = Bounded::Stopped(Error::Cancelled);
-        let result = finish_run(app.handle(), &state, "s1", &open, "t1", &session, outcome).await;
+        let result = finish_run(&state, "s1", &open, "t1", &session, outcome).await;
 
         assert!(result.is_err());
         assert!(open.sessions.get("t1").await.is_none());
@@ -5555,14 +5643,14 @@ mod tests {
     #[tokio::test]
     async fn a_stop_opens_no_session_for_a_connection_that_closed() {
         let (_dir, descriptor) = temp_sqlite();
-        let (app, state) = state_with_sqlite(descriptor).await;
+        let (_app, state) = state_with_sqlite(descriptor).await;
         let open = state.connection("s1").await.unwrap();
         let (driver, _calls) = catalog_driver(None);
         let session = open.sessions.insert("t1", Session::new(driver)).await;
         state.remove("s1").await;
 
         let outcome: Bounded<()> = Bounded::Stopped(Error::Cancelled);
-        let result = finish_run(app.handle(), &state, "s1", &open, "t1", &session, outcome).await;
+        let result = finish_run(&state, "s1", &open, "t1", &session, outcome).await;
 
         assert!(result.is_err());
         assert!(state.connection("s1").await.is_err());
@@ -5573,7 +5661,7 @@ mod tests {
     #[tokio::test]
     async fn a_stop_opens_no_session_in_a_connection_that_opened_again() {
         let (_dir, descriptor) = temp_sqlite();
-        let (app, state) = state_with_sqlite(descriptor.clone()).await;
+        let (_app, state) = state_with_sqlite(descriptor.clone()).await;
         let open = state.connection("s1").await.unwrap();
         let (driver, _calls) = catalog_driver(None);
         let session = open.sessions.insert("t1", Session::new(driver)).await;
@@ -5583,11 +5671,101 @@ mod tests {
             .await;
 
         let outcome: Bounded<()> = Bounded::Stopped(Error::Cancelled);
-        let result = finish_run(app.handle(), &state, "s1", &open, "t1", &session, outcome).await;
+        let result = finish_run(&state, "s1", &open, "t1", &session, outcome).await;
 
         assert!(result.is_err());
         let current = state.connection("s1").await.unwrap();
         assert!(current.sessions.get("t1").await.is_none());
+    }
+
+    /// A handle whose stop never ends, as on a server that does not answer.
+    struct SilentCancel;
+
+    #[async_trait::async_trait]
+    impl crate::db::drivers::CancelHandle for SilentCancel {
+        async fn cancel(&self) -> Result<()> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_stops_of_a_connection_run_together_under_one_limit() {
+        let state = state();
+        let mut tokens = Vec::new();
+        for id in ["r1", "r2", "r3"] {
+            tokens.push(state.start_request(id, "c1").await);
+            state.arm_request(id, Some(Arc::new(SilentCancel))).await;
+        }
+
+        let started = tokio::time::Instant::now();
+        stop_requests(state.take_requests_of("c1").await).await;
+
+        assert_eq!(started.elapsed(), STOP_GRACE);
+        assert!(tokens.iter().all(CancellationToken::is_cancelled));
+    }
+
+    #[tokio::test]
+    async fn a_request_does_not_send_on_a_session_that_a_stop_closed() {
+        let state = state();
+        let (driver, _calls) = catalog_driver(None);
+        let session = Session::new(driver);
+        session.mark_broken();
+        let token = state.start_request("r1", "s1").await;
+        let outcome = driver_for_request(&state, "r1", &session, &token).await;
+        assert!(matches!(outcome, Err(Error::Connection(_))));
+    }
+
+    #[tokio::test]
+    async fn a_catalog_read_does_not_send_on_a_session_that_a_limit_closed() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (_app, state) = state_with_sqlite(descriptor).await;
+        let (driver, _calls) = catalog_driver(None);
+        let session = Arc::new(Session::new(driver));
+        session.mark_broken();
+        let read = CatalogRead::new(&state, "s1", session, SHORT);
+        assert!(matches!(read.lock().await, Err(Error::Connection(_))));
+    }
+
+    #[tokio::test]
+    async fn reads_that_start_together_open_one_background_driver() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (_app, state) = state_with_sqlite(descriptor).await;
+        let open = state.connection("s1").await.unwrap();
+
+        // The first read keeps the lock of the open, as during a slow
+        // connect, so the second read waits for it.
+        let opening = state.background_open_lock("s1", BackgroundRole::Catalog);
+        let held = opening.lock().await;
+        let waiting = background_session(&state, "s1", &open, BackgroundRole::Catalog, later());
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut waiting)
+                .await
+                .is_err()
+        );
+        let (first, _) = background_stub(&state, true).await;
+        drop(held);
+
+        let second = waiting.await.unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[tokio::test]
+    async fn a_background_driver_of_a_closed_connection_stays_out_of_the_slot() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (_app, state) = state_with_sqlite(descriptor).await;
+        let open = state.connection("s1").await.unwrap();
+        state.remove("s1").await;
+
+        let session = background_session(&state, "s1", &open, BackgroundRole::Catalog, later())
+            .await
+            .unwrap();
+
+        session.driver.lock().await.ping().await.unwrap();
+        assert!(state
+            .background_session("s1", BackgroundRole::Catalog)
+            .await
+            .is_none());
     }
 
     #[tokio::test]

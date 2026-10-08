@@ -8,9 +8,10 @@
 use crate::db::drivers::{CancelHandle, DatabaseDriver};
 use crate::state::HEALTH_CHECK_AFTER;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
 /// The key of the session that a request without a tab uses. The name starts
 /// with a sign that no tab identifier carries, so no tab can take this slot.
@@ -51,6 +52,10 @@ pub struct Session {
     last_used: Mutex<Instant>,
     /// One check at a time for each session.
     pub health: Mutex<()>,
+    /// True when a limit dropped an exchange of the session in the middle of
+    /// a message. A request that waited for the driver at that moment must
+    /// not send on it, because it would read the rest of the old answer.
+    broken: AtomicBool,
 }
 
 impl Session {
@@ -66,7 +71,18 @@ impl Session {
             last_ok: Mutex::new(Instant::now()),
             last_used: Mutex::new(Instant::now()),
             health: Mutex::new(()),
+            broken: AtomicBool::new(false),
         }
+    }
+
+    /// Records that nothing can be sent on the session again.
+    pub fn mark_broken(&self) {
+        self.broken.store(true, Ordering::SeqCst);
+    }
+
+    /// True when a limit dropped an exchange of the session.
+    pub fn is_broken(&self) -> bool {
+        self.broken.load(Ordering::SeqCst)
     }
 
     /// Records that the session answered.
@@ -122,19 +138,114 @@ impl Session {
 /// The sessions of one connection, keyed by the tab that holds each one.
 pub struct SessionPool {
     sessions: Mutex<HashMap<String, Arc<Session>>>,
-    /// One new session opens at a time, so the count against the cap stays
-    /// exact and two requests for one new tab open one session, not two.
-    open_lock: Mutex<()>,
+    /// The opens of new sessions that run now. The map is never locked
+    /// across an await.
+    opening: std::sync::Mutex<Opening>,
     cap: usize,
+}
+
+/// The opens of new sessions that run now.
+#[derive(Default)]
+struct Opening {
+    /// One lock for each key whose session opens, so two requests of one
+    /// tab open one session and not two. A tab does not wait for the open
+    /// of another tab, which can take the full connect time of the server.
+    locks: HashMap<String, Arc<Mutex<()>>>,
+    /// The tab sessions that opens have taken a place for but not yet put
+    /// into the pool. They count against the cap.
+    reserved: usize,
+}
+
+/// The right of one request to open the session of one key.
+///
+/// The ticket keeps the lock of the key until it drops. A place that
+/// [`OpenTicket::reserve`] took goes back when the ticket drops without an
+/// insert, for example when the open fails or the user presses Stop.
+pub struct OpenTicket<'a> {
+    pool: &'a SessionPool,
+    key: String,
+    lock: Arc<Mutex<()>>,
+    guard: Option<OwnedMutexGuard<()>>,
+    reserved: bool,
+}
+
+impl OpenTicket<'_> {
+    /// Takes a place for the new session under the cap. Returns false when
+    /// the tab sessions and the opens that run now fill the cap. The default
+    /// session does not count against the cap, so its ticket always gets a
+    /// place.
+    pub async fn reserve(&mut self) -> bool {
+        if self.reserved || self.key == DEFAULT_SESSION {
+            return true;
+        }
+        let sessions = self.pool.sessions.lock().await;
+        let tabs = tab_keys(&sessions).count();
+        let mut opening = self.pool.opening();
+        if tabs + opening.reserved >= self.pool.cap {
+            return false;
+        }
+        opening.reserved += 1;
+        self.reserved = true;
+        true
+    }
+
+    /// Puts the new session into the pool, gives back the place that the
+    /// ticket took, and returns the session. The two steps are one step for
+    /// [`OpenTicket::reserve`], so the session never counts twice.
+    pub async fn insert(mut self, session: Session) -> Arc<Session> {
+        let held = Arc::new(session);
+        let mut sessions = self.pool.sessions.lock().await;
+        sessions.insert(self.key.clone(), held.clone());
+        self.unreserve();
+        held
+    }
+
+    fn unreserve(&mut self) {
+        if std::mem::take(&mut self.reserved) {
+            self.pool.opening().reserved -= 1;
+        }
+    }
+}
+
+impl Drop for OpenTicket<'_> {
+    fn drop(&mut self) {
+        self.unreserve();
+        drop(self.guard.take());
+        // The map, this ticket, and each request that waits keep one
+        // reference to the lock. When no request waits, the entry goes.
+        let mut opening = self.pool.opening();
+        let unused = Arc::strong_count(&self.lock) <= 2;
+        if unused
+            && opening
+                .locks
+                .get(&self.key)
+                .is_some_and(|lock| Arc::ptr_eq(lock, &self.lock))
+        {
+            opening.locks.remove(&self.key);
+        }
+    }
+}
+
+/// The keys of the tab sessions, without the default session.
+fn tab_keys(sessions: &HashMap<String, Arc<Session>>) -> impl Iterator<Item = &String> {
+    sessions.keys().filter(|key| *key != DEFAULT_SESSION)
 }
 
 impl SessionPool {
     pub fn new(cap: usize) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
-            open_lock: Mutex::new(()),
+            opening: std::sync::Mutex::new(Opening::default()),
             cap,
         }
+    }
+
+    /// The record of the opens. No code panics while it keeps this lock, so
+    /// the record of a poisoned lock is still valid.
+    fn opening(&self) -> std::sync::MutexGuard<'_, Opening> {
+        self.opening
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Builds a pool that already holds one session. The connect command
@@ -153,11 +264,26 @@ impl SessionPool {
         self.cap
     }
 
-    /// Takes the lock that serialises the opening of new sessions. The
-    /// caller holds the guard from the count against the cap until the
-    /// insert of the new session.
-    pub async fn begin_open(&self) -> MutexGuard<'_, ()> {
-        self.open_lock.lock().await
+    /// Waits until no other request opens the session of the key, and
+    /// returns the ticket for the open. Requests for other keys do not wait.
+    /// The caller looks for the session again after the wait, because the
+    /// request before it can have opened it.
+    pub async fn begin_open(&self, key: &str) -> OpenTicket<'_> {
+        let lock = {
+            let mut opening = self.opening();
+            // A wait that a Stop dropped leaves an entry that no request
+            // uses.
+            opening.locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+            opening.locks.entry(key.to_string()).or_default().clone()
+        };
+        let guard = lock.clone().lock_owned().await;
+        OpenTicket {
+            pool: self,
+            key: key.to_string(),
+            lock,
+            guard: Some(guard),
+            reserved: false,
+        }
     }
 
     /// Returns the session of one key, when the pool holds one.
@@ -185,18 +311,9 @@ impl SessionPool {
 
     /// The number of sessions that tabs hold. The default session does not
     /// count against the cap.
+    #[cfg(test)]
     pub async fn tab_count(&self) -> usize {
-        self.sessions
-            .lock()
-            .await
-            .keys()
-            .filter(|key| *key != DEFAULT_SESSION)
-            .count()
-    }
-
-    /// True when the tab sessions have reached the cap.
-    pub async fn at_cap(&self) -> bool {
-        self.tab_count().await >= self.cap
+        tab_keys(&*self.sessions.lock().await).count()
     }
 
     /// True when the pool holds no session at all.
@@ -298,7 +415,6 @@ mod tests {
     use crate::error::Result;
     use crate::sql::Dialect;
     use async_trait::async_trait;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::Notify;
 
     /// A handle that records that it was asked to stop a statement.
@@ -427,6 +543,9 @@ mod tests {
         assert!(session.keeps_connection_after_stop);
 
         let plain = Session::new(Box::new(StubDriver::plain()));
+        assert!(!plain.is_broken());
+        plain.mark_broken();
+        assert!(plain.is_broken());
         assert!(plain.cancel_handle.is_none());
         assert!(plain.needs_ping);
         assert!(!plain.keeps_connection_after_stop);
@@ -498,16 +617,40 @@ mod tests {
         pool.insert(DEFAULT_SESSION, Session::new(Box::new(StubDriver::plain())))
             .await;
         assert_eq!(pool.tab_count().await, 0);
-        assert!(!pool.at_cap().await);
-
         pool.insert("t1", Session::new(Box::new(StubDriver::plain())))
             .await;
-        assert!(!pool.at_cap().await);
+        assert!(pool.begin_open("t2").await.reserve().await);
         pool.insert("t2", Session::new(Box::new(StubDriver::plain())))
             .await;
         assert_eq!(pool.tab_count().await, 2);
-        assert!(pool.at_cap().await);
+        assert!(!pool.begin_open("t3").await.reserve().await);
+        assert!(pool.begin_open(DEFAULT_SESSION).await.reserve().await);
         assert_eq!(pool.cap(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_open_that_runs_counts_against_the_cap() {
+        let pool = pool();
+        let mut first = pool.begin_open("t1").await;
+        let mut second = pool.begin_open("t2").await;
+        assert!(first.reserve().await);
+        // A second reserve of one ticket takes no second place.
+        assert!(first.reserve().await);
+        assert!(second.reserve().await);
+        let mut third = pool.begin_open("t3").await;
+        assert!(!third.reserve().await);
+
+        // The insert moves the place of the ticket into the pool, so the
+        // count stays the same.
+        first
+            .insert(Session::new(Box::new(StubDriver::plain())))
+            .await;
+        assert!(!third.reserve().await);
+
+        // A ticket that drops without an insert gives its place back.
+        drop(second);
+        assert!(third.reserve().await);
+        assert_eq!(pool.tab_count().await, 1);
     }
 
     #[tokio::test]
@@ -705,17 +848,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_session_opens_at_a_time() {
+    async fn one_open_at_a_time_runs_for_each_key() {
         let pool = Arc::new(pool());
-        let guard = pool.begin_open().await;
-        let waiting = tokio::time::timeout(Duration::from_millis(20), pool.begin_open()).await;
+        let ticket = pool.begin_open("t1").await;
+        let waiting = tokio::time::timeout(Duration::from_millis(20), pool.begin_open("t1")).await;
         assert!(waiting.is_err());
-        drop(guard);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), pool.begin_open())
-                .await
-                .is_ok()
-        );
+
+        // The open of another tab does not wait for the first one.
+        let other = tokio::time::timeout(Duration::from_millis(20), pool.begin_open("t2")).await;
+        assert!(other.is_ok());
+        drop(other);
+
+        let queued = tokio::spawn({
+            let pool = pool.clone();
+            async move {
+                pool.begin_open("t1").await;
+            }
+        });
+        tokio::task::yield_now().await;
+        drop(ticket);
+        queued.await.unwrap();
+        assert!(pool.opening().locks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_wait_that_a_stop_dropped_leaves_no_lock() {
+        let pool = pool();
+        let ticket = pool.begin_open("t1").await;
+        let dropped = tokio::time::timeout(Duration::from_millis(5), pool.begin_open("t1")).await;
+        assert!(dropped.is_err());
+        drop(ticket);
+        assert!(pool.opening().locks.is_empty());
+
+        // A ticket whose entry a later open replaced leaves the new entry.
+        let mut stale = pool.begin_open("t2").await;
+        let replaced = Arc::new(Mutex::new(()));
+        pool.opening().locks.insert("t2".into(), replaced.clone());
+        stale.lock = Arc::new(Mutex::new(()));
+        drop(stale);
+        assert!(Arc::ptr_eq(&pool.opening().locks["t2"], &replaced));
+
+        // The next open takes away the entry that no request uses.
+        drop(replaced);
+        drop(pool.begin_open("t3").await);
+        assert!(pool.opening().locks.is_empty());
     }
 
     #[tokio::test]
