@@ -37,11 +37,11 @@
   <rect x="101.5" y="101.5" width="821" height="821" rx="183.5" fill="none" stroke="#fff" stroke-opacity="0.08" stroke-width="3"/>
 
   <g transform="translate(-18 -18)">
-    <!-- Database cylinder of three segments. -->
+    <!-- Database of three stacked discs with a gap between each disc. -->
     <g mask="url(#lens-gap)">
-      <path d="M232 296 V676 A200 64 0 0 0 632 676 V296 Z" fill="url(#side)"/>
-      <path d="M232 423 A200 64 0 0 0 632 423 M232 550 A200 64 0 0 0 632 550"
-            fill="none" stroke="#1b2a40" stroke-width="16"/>
+      <path d="M232 296 V417 A200 64 0 0 0 632 417 V296 Z" fill="url(#side)"/>
+      <path d="M232 435 A200 64 0 0 0 632 435 V549 A200 64 0 0 1 232 549 Z" fill="url(#side)"/>
+      <path d="M232 567 A200 64 0 0 0 632 567 V676 A200 64 0 0 1 232 676 Z" fill="url(#side)"/>
       <ellipse cx="432" cy="296" rx="200" ry="64" fill="url(#top)"/>
     </g>
 
