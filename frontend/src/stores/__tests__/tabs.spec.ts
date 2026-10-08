@@ -8,6 +8,7 @@ vi.mock('@/lib/api', () => ({ api: apiStub, CONNECTION_STATUS_EVENT: 'connection
 const { parseWorkspace, useTabsStore } = await import('@/stores/tabs')
 const { useConnectionsStore } = await import('@/stores/connections')
 const { useUiStore } = await import('@/stores/ui')
+const { useQueryStore } = await import('@/stores/query')
 
 describe('parseWorkspace', () => {
   it('gives an empty workspace for a record it cannot read', () => {
@@ -474,8 +475,10 @@ describe('tabs store', () => {
     const opened = tabs.add({ query: 'SELECT 9' })
     const file = tabs.add({ query: 'SELECT 8', title: 'b.sql', filePath: '/data/b.sql' })
     expect(opened.title).toBe('Query 1')
-    // A write during the read would replace the tabs of the last session.
-    await tabs.persist()
+    // A write during the read would replace the tabs of the last session,
+    // so it waits for the read.
+    const early = tabs.persist()
+    await Promise.resolve()
     expect(apiStub.saveWorkspace).not.toHaveBeenCalled()
 
     answer({
@@ -497,8 +500,159 @@ describe('tabs store', () => {
     expect(apiStub.readTextFile).toHaveBeenCalledTimes(1)
     expect(apiStub.readTextFile).toHaveBeenCalledWith('/data/a.sql')
 
-    await tabs.persist()
+    // The write that waited writes the merged tabs.
+    await early
     expect(apiStub.saveWorkspace).toHaveBeenCalledTimes(1)
+    const written = apiStub.saveWorkspace.mock.calls[0]![0] as { tabs: { id: string }[] }
+    expect(written.tabs.map((tab) => tab.id)).toEqual(['a', 'b', opened.id, file.id])
+    await tabs.persist()
+    expect(apiStub.saveWorkspace).toHaveBeenCalledTimes(2)
+  })
+
+  /** Starts a restore whose read of the workspace file waits for the test. */
+  function pendingRestore(): {
+    restoring: Promise<void>
+    answer: (value: unknown) => void
+  } {
+    let answer: (value: unknown) => void = () => {}
+    apiStub.getWorkspace.mockReturnValue(
+      new Promise((resolve) => {
+        answer = resolve
+      }),
+    )
+    return { restoring: useTabsStore().restore(), answer }
+  }
+
+  it('makes one tab of a file that a restored tab and an opened tab both have', async () => {
+    apiStub.readTextFile.mockResolvedValue({ contents: 'SELECT 1', encoding: 'utf8' })
+    apiStub.saveWorkspace.mockResolvedValue(undefined)
+    useConnectionsStore().selectedId = 'c-new'
+    const tabs = useTabsStore()
+    const { restoring, answer } = pendingRestore()
+    const opened = tabs.add({ query: 'SELECT 1', title: 'a.sql', filePath: '/data/a.sql' })
+    answer({
+      tabs: [
+        { id: 'b', query: 'SELECT 2', title: 'Query 1' },
+        {
+          id: 'a',
+          query: 'SELECT 1 -- unsaved',
+          title: 'Orders',
+          filePath: '/data/a.sql',
+          dirty: true,
+          connectionId: 'c-old',
+          params: [{ name: 'id', valueType: 'number', text: '7' }],
+        },
+      ],
+      activeTabId: 'a',
+    })
+    await restoring
+
+    // The opened tab takes the place of the restored one, with the unsaved
+    // text, the title, the parameters and the connection of the last session.
+    expect(tabs.tabs.map((tab) => tab.id)).toEqual(['b', opened.id])
+    expect(opened.query).toBe('SELECT 1 -- unsaved')
+    expect(opened.dirty).toBe(true)
+    expect(opened.title).toBe('Orders')
+    expect(opened.connectionId).toBe('c-old')
+    expect(opened.params).toEqual([{ name: 'id', valueType: 'number', text: '7' }])
+    expect(tabs.activeTabId).toBe(opened.id)
+    // The text on the disk decides the mark, as for any restored tab.
+    expect(apiStub.readTextFile).toHaveBeenCalledWith('/data/a.sql')
+    tabs.setQuery(opened.id, 'SELECT 1')
+    expect(opened.dirty).toBe(false)
+  })
+
+  it('keeps the edits of a tab that opened during the read', async () => {
+    apiStub.readTextFile.mockResolvedValue({ contents: 'SELECT 1', encoding: 'utf8' })
+    const tabs = useTabsStore()
+    const { restoring, answer } = pendingRestore()
+    const opened = tabs.add({ query: 'SELECT 1', title: 'a.sql', filePath: '/data/a.sql' })
+    tabs.setQuery(opened.id, 'SELECT 1 -- edit')
+    answer({
+      tabs: [{ id: 'a', query: 'SELECT 1', title: 'Orders', filePath: '/data/a.sql' }],
+      activeTabId: 'a',
+    })
+    await restoring
+
+    expect(tabs.tabs.map((tab) => tab.id)).toEqual([opened.id])
+    expect(opened.query).toBe('SELECT 1 -- edit')
+    expect(opened.title).toBe('a.sql')
+    expect(opened.dirty).toBe(true)
+  })
+
+  it('keeps both tabs of a file when each has edits', async () => {
+    apiStub.readTextFile.mockResolvedValue({ contents: 'SELECT 1', encoding: 'utf8' })
+    const tabs = useTabsStore()
+    const { restoring, answer } = pendingRestore()
+    const opened = tabs.add({ query: 'SELECT 1', title: 'a.sql', filePath: '/data/a.sql' })
+    tabs.setQuery(opened.id, 'SELECT 1 -- new edit')
+    answer({
+      tabs: [{ id: 'a', query: 'SELECT 1 -- old edit', filePath: '/data/a.sql', dirty: true }],
+      activeTabId: 'a',
+    })
+    await restoring
+
+    expect(tabs.tabs.map((tab) => tab.id)).toEqual(['a', opened.id])
+  })
+
+  it('leaves the connection of a merged tab that ran a statement', async () => {
+    apiStub.readTextFile.mockResolvedValue({ contents: 'SELECT 1', encoding: 'utf8' })
+    useConnectionsStore().selectedId = 'c-new'
+    const tabs = useTabsStore()
+    const { restoring, answer } = pendingRestore()
+    const opened = tabs.add({ query: 'SELECT 1', filePath: '/data/a.sql' })
+    useQueryStore().stateFor(opened.id).lastRunAt = 1
+    answer({
+      tabs: [{ id: 'a', query: 'SELECT 1', filePath: '/data/a.sql', connectionId: 'c-old' }],
+      activeTabId: null,
+    })
+    await restoring
+
+    expect(tabs.tabs.map((tab) => tab.id)).toEqual([opened.id])
+    expect(opened.connectionId).toBe('c-new')
+  })
+
+  it('makes the merged tab active when it took the place of the last active tab', async () => {
+    apiStub.readTextFile.mockResolvedValue({ contents: 'SELECT 1', encoding: 'utf8' })
+    const tabs = useTabsStore()
+    const { restoring, answer } = pendingRestore()
+    const opened = tabs.add({ query: 'SELECT 1', filePath: '/data/a.sql' })
+    // No tab is active when the read ends.
+    tabs.activeTabId = null
+    answer({
+      tabs: [{ id: 'a', query: 'SELECT 1', filePath: '/data/a.sql' }],
+      activeTabId: 'a',
+    })
+    await restoring
+    expect(tabs.activeTabId).toBe(opened.id)
+  })
+
+  it('gives no active tab when neither side names one', async () => {
+    const tabs = useTabsStore()
+    const { restoring, answer } = pendingRestore()
+    answer({ tabs: [], activeTabId: null })
+    await restoring
+    expect(tabs.activeTabId).toBeNull()
+  })
+
+  it('writes the tabs that opened during a read that failed', async () => {
+    apiStub.saveWorkspace.mockResolvedValue(undefined)
+    let fail: (reason: unknown) => void = () => {}
+    apiStub.getWorkspace.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        fail = reject
+      }),
+    )
+    const tabs = useTabsStore()
+    const restoring = tabs.restore()
+    const opened = tabs.add()
+    const waiting = tabs.persist()
+    fail(new Error('gone'))
+    await restoring
+    await waiting
+    await tabs.settled()
+    const written = apiStub.saveWorkspace.mock.calls[0]![0] as { tabs: { id: string }[] }
+    expect(written.tabs.map((tab) => tab.id)).toEqual([opened.id])
   })
 
   it('keeps a tab that opens while a workspace file it cannot read is read', async () => {

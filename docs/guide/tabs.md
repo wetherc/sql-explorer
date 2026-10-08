@@ -27,6 +27,9 @@ the saved text again, the mark goes away. A tab that had the mark at the last
 restart keeps it until the next save.
 
 Open tabs come back after a restart, with their names, statements and values.
+You can open a tab while the last session's tabs are still loading, and it
+stays open next to them. If you close the window before the loading ends, the
+application waits for it and saves the new tab too.
 
 ## History
 
@@ -45,6 +48,21 @@ Click **Save** or press `Ctrl`/`Cmd` + `S` (**Save to file** in the palette and
 the **File** menu) to write the tab's statement to a file. A tab that came from a file saves back to the same file. Saving a tab that
 has no file opens your operating system's save dialog, which starts in the files
 panel's first folder, and the tab then takes the file's name and keeps it.
+
+Opening a file that a tab already has open switches to that tab instead of
+opening a second copy. The check compares the file's path as the dialog or the
+files panel gives it, so a file that you reach through a symbolic link counts
+as a different file. If you open a file while the last session's tabs are still
+loading and one of those tabs has the same file, you end up with one tab, which
+follows these rules:
+
+- If you haven't edited the new tab, it takes the restored tab's text, name,
+  parameter values and connection, so unsaved changes from the last session
+  stay. A tab that already ran a statement keeps its own connection.
+- If you edited the new tab and the restored tab has no unsaved changes, the
+  new tab keeps your edits.
+- If both have unsaved changes, both tabs stay open, because one tab can't
+  keep both sets of changes.
 
 Opening or saving a file through a dialog gives the application access to that
 file only, so its folder doesn't join the files panel. To see the files beside

@@ -587,7 +587,7 @@ onMounted(async () => {
   // The listeners come before the reads. A report of a connection that the
   // backend sends during a slow read is otherwise lost, and the menu of the
   // system otherwise does nothing until the reads end.
-  await Promise.all([listenForStatus(), listenForMenu()])
+  await Promise.all([listenForStatus(), listenForMenu(), listenForClose()])
   // The reads run side by side, so a slow read, such as the read of a tab
   // file on a network share, does not delay the others.
   await Promise.all([
@@ -597,13 +597,21 @@ onMounted(async () => {
     restoreWorkspace(),
     showStorageProblems(),
   ])
+})
+
+/**
+ * Writes the tabs before the window closes. The listener comes before the
+ * read of the workspace, so a tab that opens during the read and a close in
+ * that time still reach the file.
+ */
+async function listenForClose(): Promise<void> {
   try {
     unlistenClose = await getCurrentWindow().onCloseRequested(flushPersist)
   } catch {
     // Outside the desktop host there is no window to close, and the write
     // after the pause still keeps the tabs.
   }
-})
+}
 
 async function listenForStatus(): Promise<void> {
   try {
@@ -639,8 +647,9 @@ async function loadConnections(): Promise<void> {
  * those paths, so it comes before the tabs compare their files with the disk.
  */
 async function restoreWorkspace(): Promise<void> {
-  await files.restoreRoots()
-  await tabs.restore()
+  // The store learns of the restore at once, so a close of the window during
+  // the read of the folders already waits for the tabs of the last session.
+  await tabs.restore(files.restoreRoots())
 }
 
 onBeforeUnmount(() => {
@@ -707,11 +716,15 @@ watch(
 )
 
 /**
- * Writes the tabs at once when a write waits for its pause. The window waits
- * for this before it closes, so the last keystrokes reach the disk.
+ * Writes the tabs at once when a write waits for its pause, and waits for
+ * the writes in the queue. The window waits for this before it closes, so
+ * the last keystrokes reach the disk. A write in the queue during the read
+ * of the workspace waits for that read, so a tab that opened in that time
+ * reaches the file as well.
  */
 async function flushPersist(): Promise<void> {
   if (persistTimer === null) {
+    await tabs.settled()
     return
   }
   clearTimeout(persistTimer)

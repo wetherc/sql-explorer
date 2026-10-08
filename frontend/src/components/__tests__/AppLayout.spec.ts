@@ -1207,6 +1207,36 @@ describe('AppLayout and the host window', () => {
     expect(unlistenClose).toHaveBeenCalled()
   })
 
+  it('writes a tab that opened during the read of the workspace when the window closes', async () => {
+    let answer: (value: unknown) => void = () => {}
+    apiStub.getWorkspace.mockReturnValue(
+      new Promise((resolve) => {
+        answer = resolve
+      }),
+    )
+    host.onCloseRequested.mockResolvedValue(vi.fn())
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+    const onClose = host.onCloseRequested.mock.calls[0]![0] as () => Promise<void>
+    const opened = useTabsStore().add({ query: 'SELECT 9' })
+    // The pause passes, so the write waits in the queue for the read.
+    await new Promise((resolve) => setTimeout(resolve, 300))
+
+    let closed = false
+    const closing = onClose().then(() => {
+      closed = true
+    })
+    await settle()
+    expect(closed).toBe(false)
+    expect(apiStub.saveWorkspace).not.toHaveBeenCalled()
+
+    answer({ tabs: [{ id: 'a', query: 'SELECT 1' }], activeTabId: 'a' })
+    await closing
+    const written = apiStub.saveWorkspace.mock.calls[0]![0] as { tabs: { id: string }[] }
+    expect(written.tabs.map((tab) => tab.id)).toEqual(['a', opened.id])
+    wrapper.unmount()
+  })
+
   it('runs without a host window', async () => {
     host.windowFails = true
     const wrapper = mountWithPlugins(AppLayout)
