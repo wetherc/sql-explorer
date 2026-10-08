@@ -767,6 +767,11 @@ describe('ResultsGrid', () => {
 
       await paused.find('[data-test="grid-paused-release"]').trigger('click')
       expect(paused.emitted('release')).toHaveLength(1)
+      await paused.find('[data-test="grid-paused-extend"]').trigger('click')
+      expect(paused.emitted('extend')).toHaveLength(1)
+      await paused.setProps({ pause: { connectionId: 'c1', blocking: [], atMost: false } })
+      await paused.find('[data-test="grid-paused-new-tab"]').trigger('click')
+      expect(paused.emitted('open-tab')).toEqual([['c1']])
 
       await paused.find('[data-test="grid-paused-export"]').trigger('click')
       await vi.advanceTimersByTimeAsync(0)
@@ -792,7 +797,7 @@ describe('ResultsGrid', () => {
       // A grid that leaves while paused stops its clocks too.
       await paused.setProps({ pausedUntil: 2_000_000 })
       paused.unmount()
-      expect(stopped).toHaveBeenCalledTimes(4)
+      expect(stopped).toHaveBeenCalledTimes(5)
       stopped.mockRestore()
     } finally {
       vi.useRealTimers()

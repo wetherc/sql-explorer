@@ -306,6 +306,22 @@ export interface KeptSet extends KeptInfo {
   set: number
   /** The identifier that `exportKept` and `releaseKept` take. */
   id: string
+  /** The number of the session of a paused read on the server, so the
+   *  window can ask whether that session blocks others. */
+  serverSession?: number
+  /** True when the pause of the read cannot be extended. */
+  pauseAtMost?: boolean
+  /** The seconds after which the server ends a session that waits in a
+   *  transaction, when the server has such a limit. */
+  serverIdleSecs?: number
+}
+
+/** The new time of a paused read after an extension. */
+export interface PauseExtension {
+  /** The seconds that are left of the pause. */
+  pausedSecs: number
+  /** True when the pause cannot be extended again. */
+  atMost: boolean
 }
 
 /**

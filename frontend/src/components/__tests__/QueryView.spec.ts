@@ -2017,6 +2017,20 @@ describe('QueryView edge paths', () => {
     expect(grid.props('kept')).toBeNull()
   })
 
+  it('extends a paused result and opens a new tab on its connection', async () => {
+    const grid = await pausedGrid()
+    apiStub.extendPause.mockResolvedValueOnce({ pausedSecs: 1200, atMost: false })
+    await grid.vm.$emit('extend')
+    await settle()
+    expect(apiStub.extendPause).toHaveBeenCalledWith('r1:0')
+    expect(grid.props('pause')).toMatchObject({ connectionId: 'c1', atMost: false })
+    const tabs = useTabsStore()
+    const before = tabs.tabs.length
+    await grid.vm.$emit('open-tab', 'c1')
+    expect(tabs.tabs.length).toBe(before + 1)
+    expect(tabs.activeTab?.connectionId).toBe('c1')
+  })
+
   it('ends the pause of a result after its export, and keeps it when the dialog closes', async () => {
     const grid = await pausedGrid()
     // The user closed the save dialog, so the read stays paused.

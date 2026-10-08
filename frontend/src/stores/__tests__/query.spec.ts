@@ -1500,6 +1500,134 @@ describe('kept results', () => {
     expect(pinned).toMatchObject({ pinned: true, keptId: undefined, pausedUntil: undefined })
   })
 
+  /** A paused run whose read names its session on the server. */
+  function pausedSession(request: string, extra: Record<string, unknown> = {}) {
+    apiStub.executeQuery.mockImplementationOnce(
+      streamed({
+        results: [{ rows: [[1]], truncated: true }],
+        kept: [
+          {
+            set: 0,
+            id: `${request}:0`,
+            origin: 'paused',
+            keptAt: 0,
+            pausedSecs: 600,
+            serverSession: 52,
+            ...extra,
+          },
+        ],
+      }),
+    )
+  }
+
+  it('checks each minute which sessions a paused read blocks', async () => {
+    vi.useFakeTimers()
+    try {
+      const queries = useQueryStore()
+      pausedSession('r1', { pauseAtMost: true, serverIdleSecs: 300 })
+      await queries.execute('t1', 'c1', 'SELECT 1')
+      const pane = queries.stateFor('t1').panes[0]!
+      expect(pane.pause).toEqual({
+        connectionId: 'c1',
+        serverSession: 52,
+        blocking: [],
+        atMost: true,
+        serverIdleSecs: 300,
+      })
+      const sessions = [{ waitingSession: 57, blockingSession: 52 }]
+      apiStub.blockingSessions.mockResolvedValueOnce({ sessions, openTransactions: [], notes: [] })
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(apiStub.blockingSessions).toHaveBeenCalledWith('c1', 52)
+      expect(pane.pause!.blocking).toEqual(sessions)
+      // A failed check keeps the last answer.
+      apiStub.blockingSessions.mockRejectedValueOnce(new Error('busy'))
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(pane.pause!.blocking).toEqual(sessions)
+      // The end of the pause stops the checks.
+      queries.endPause(pane, true)
+      expect(pane.pause).toBeUndefined()
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(apiStub.blockingSessions).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not check a paused read whose session is unknown', async () => {
+    vi.useFakeTimers()
+    try {
+      const queries = useQueryStore()
+      pausedRun('r1', 600)
+      await queries.execute('t1', 'c1', 'SELECT 1')
+      const pane = queries.stateFor('t1').panes[0]!
+      expect(pane.pause).toMatchObject({ connectionId: 'c1', atMost: false })
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(apiStub.blockingSessions).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('extends a paused read and moves the end of its pause', async () => {
+    vi.useFakeTimers({ now: 1_000_000 })
+    try {
+      const queries = useQueryStore()
+      apiStub.blockingSessions.mockResolvedValue({ sessions: [], openTransactions: [], notes: [] })
+      pausedSession('r1')
+      await queries.execute('t1', 'c1', 'SELECT 1')
+      const pane = queries.stateFor('t1').panes[0]!
+      apiStub.extendPause.mockResolvedValueOnce({ pausedSecs: 1200, atMost: true })
+      await queries.extendPause(pane)
+      expect(apiStub.extendPause).toHaveBeenCalledWith('r1:0')
+      expect(pane.pausedUntil).toBe(Date.now() + 1_200_000)
+      expect(pane.pause!.atMost).toBe(true)
+      // The old end no longer forgets the read.
+      await vi.advanceTimersByTimeAsync(600_000)
+      expect(pane.keptId).toBe('r1:0')
+      await vi.advanceTimersByTimeAsync(600_000)
+      expect(pane.keptId).toBeUndefined()
+      // A pane without a paused read asks for nothing.
+      await queries.extendPause(pane)
+      expect(apiStub.extendPause).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('forgets a paused read that the backend no longer has', async () => {
+    const queries = useQueryStore()
+    const report = vi.spyOn(useUiStore(), 'reportError')
+    pausedSession('r1')
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    const pane = queries.stateFor('t1').panes[0]!
+    apiStub.extendPause.mockRejectedValueOnce(new Error('gone'))
+    await queries.extendPause(pane)
+    expect(report).toHaveBeenCalled()
+    expect(pane.keptId).toBeUndefined()
+
+    // An answer for a pane that moved on changes nothing.
+    pausedSession('r2')
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    const next = queries.stateFor('t1').panes[0]!
+    let answer: (value: unknown) => void = () => undefined
+    apiStub.extendPause.mockReturnValueOnce(new Promise((resolve) => (answer = resolve)))
+    const extending = queries.extendPause(next)
+    queries.endPause(next, true)
+    answer({ pausedSecs: 1200, atMost: false })
+    await extending
+    expect(next.pause).toBeUndefined()
+    let fail: (error: unknown) => void = () => undefined
+    pausedSession('r3')
+    await queries.execute('t1', 'c1', 'SELECT 1')
+    const last = queries.stateFor('t1').panes[0]!
+    apiStub.extendPause.mockReturnValueOnce(new Promise((_, reject) => (fail = reject)))
+    const failing = queries.extendPause(last)
+    last.keptId = 'other'
+    fail(new Error('gone'))
+    await failing
+    expect(last.keptId).toBe('other')
+  })
+
   it('records the rows that the backend saved on this computer', async () => {
     apiStub.executeQuery.mockImplementationOnce(
       streamed({

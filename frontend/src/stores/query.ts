@@ -14,6 +14,7 @@ import { ResultTable, type ResultStreamHandlers } from '@/lib/results'
 import { MessageLevel, PlanMode } from '@/types/api'
 import { savedFile, type SavedFile } from '@/lib/runFile'
 import type {
+  BlockingSession,
   ChosenMessagesFile,
   ErrorPayload,
   ExecOptions,
@@ -88,6 +89,8 @@ export interface ResultPane {
    *  the set ends, while the server keeps its statement open. The export of
    *  all rows continues that read. */
   pausedUntil?: number
+  /** What the window knows of the paused read of the set. */
+  pause?: PauseState
   /** The statement, the values and the connection that made the result, or
    *  null for a plan. The export of every row runs this again, and not the
    *  text of the editor or the connection that the tab names now, which the
@@ -96,6 +99,32 @@ export interface ResultPane {
   /** The file that a run to a file wrote with the rows of this result. */
   savedFile?: SavedFile
 }
+
+/** What the window knows of a paused read, besides the end of its pause. */
+export interface PauseState {
+  /** The connection of the read, for the check of blocked sessions and for
+   *  a new tab. */
+  connectionId: string
+  /** The number of the session of the read on the server. */
+  serverSession?: number
+  /** The sessions that wait for a lock of the read, from the last check. */
+  blocking: BlockingSession[]
+  /** True when the pause cannot be extended. */
+  atMost: boolean
+  /** The seconds after which the server ends an idle transaction, when the
+   *  server has such a limit. */
+  serverIdleSecs?: number
+}
+
+/** The timers of one paused read. */
+interface PauseTimers {
+  end?: ReturnType<typeof setTimeout>
+  check?: ReturnType<typeof setInterval>
+}
+
+/** The time between two checks for the sessions that a paused read
+ *  blocks. */
+export const BLOCKING_CHECK_MS = 60_000
 
 /** What the export of every row needs to run a statement again. */
 export interface PaneRun {
@@ -232,6 +261,8 @@ export function totalRows(results: ResultTable[]): number {
 
 /** The tables of one run, and whether the tab of the run has closed. */
 interface Run {
+  /** The connection the run uses. */
+  connectionId: string
   fresh: ResultTable[]
   abandoned: boolean
   /** The rows of the run at the moment that its tab closed. */
@@ -350,18 +381,85 @@ export const useQueryStore = defineStore('query', () => {
         pane.keptId = entry.id
         pane.kept = { origin, keptAt, savedRows, savedBytes }
         if (entry.pausedSecs !== undefined) {
-          const limit = entry.pausedSecs * 1000
-          pane.pausedUntil = Date.now() + limit
-          // The backend ends the read at the same time, and the registry
-          // then forgets it.
-          setTimeout(() => {
-            if (pane.keptId === entry.id) {
-              endPause(pane)
-            }
-          }, limit)
+          // The checks change the blocked sessions later, so the state is
+          // reactive before the pane takes it.
+          const pause = reactive<PauseState>({
+            connectionId: run.connectionId,
+            serverSession: entry.serverSession,
+            blocking: [],
+            atMost: entry.pauseAtMost ?? false,
+            serverIdleSecs: entry.serverIdleSecs,
+          })
+          pane.pause = pause
+          schedulePauseEnd(pane, entry.pausedSecs)
+          watchBlocking(pane, pause)
         }
       } else {
         releaseKept([{ keptId: entry.id }])
+      }
+    }
+  }
+
+  /** The timers of each paused read, by the identifier of its pane. Vue
+   *  does not watch them. */
+  const pauseTimers = new Map<string, PauseTimers>()
+
+  /** The timers of the paused read of a pane, made on the first call. */
+  function timersOf(pane: ResultPane): PauseTimers {
+    let timers = pauseTimers.get(pane.id)
+    if (!timers) {
+      timers = {}
+      pauseTimers.set(pane.id, timers)
+    }
+    return timers
+  }
+
+  /** Sets the end of the pause of a pane `seconds` from now. The backend
+   *  ends the read at the same time, and the registry then forgets it. */
+  function schedulePauseEnd(pane: ResultPane, seconds: number): void {
+    const limit = seconds * 1000
+    pane.pausedUntil = Date.now() + limit
+    const timers = timersOf(pane)
+    clearTimeout(timers.end)
+    // The pane forgets the read when it stops the timers, so the timer
+    // fires only for the read it was set for.
+    timers.end = setTimeout(() => endPause(pane), limit)
+  }
+
+  /** Asks each minute which sessions wait for a lock of the paused read of
+   *  the pane. A failed check keeps the last answer, so a slow server does
+   *  not give a notice each minute. */
+  function watchBlocking(pane: ResultPane, pause: PauseState): void {
+    if (pause.serverSession === undefined) {
+      return
+    }
+    timersOf(pane).check = setInterval(() => {
+      api.blockingSessions(pause.connectionId, pause.serverSession).then(
+        (report) => {
+          pause.blocking = report.sessions
+        },
+        () => undefined,
+      )
+    }, BLOCKING_CHECK_MS)
+  }
+
+  /** Moves the end of the paused read of a pane by ten minutes. A read that
+   *  is gone gives an error, and the pane then forgets it. */
+  async function extendPause(pane: ResultPane): Promise<void> {
+    const keptId = pane.keptId
+    if (keptId === undefined || pane.pause === undefined) {
+      return
+    }
+    try {
+      const extension = await api.extendPause(keptId)
+      if (pane.keptId === keptId && pane.pause) {
+        pane.pause.atMost = extension.atMost
+        schedulePauseEnd(pane, extension.pausedSecs)
+      }
+    } catch (error) {
+      useUiStore().reportError(error)
+      if (pane.keptId === keptId) {
+        endPause(pane)
       }
     }
   }
@@ -399,6 +497,13 @@ export const useQueryStore = defineStore('query', () => {
     pane.keptId = undefined
     pane.kept = undefined
     pane.pausedUntil = undefined
+    pane.pause = undefined
+    const timers = pauseTimers.get(pane.id)
+    if (timers) {
+      clearTimeout(timers.end)
+      clearInterval(timers.check)
+      pauseTimers.delete(pane.id)
+    }
   }
 
   /** Gives the reason of each cut set that the run saved no file for to
@@ -488,7 +593,7 @@ export const useQueryStore = defineStore('query', () => {
     // The end of the run or its failure says when the session of the tab
     // closed, so the tab tells the user once.
     let sessionReset = false
-    const run: Run = { fresh: [], abandoned: false, rowsAtClose: 0 }
+    const run: Run = { connectionId, fresh: [], abandoned: false, rowsAtClose: 0 }
     runs.set(tabId, run)
 
     try {
@@ -1022,6 +1127,7 @@ export const useQueryStore = defineStore('query', () => {
     togglePin,
     closePane,
     endPause,
+    extendPause,
     saveAllMessages,
     stopSavingMessages,
     saveShownMessages,

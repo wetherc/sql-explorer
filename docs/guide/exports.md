@@ -196,10 +196,13 @@ you choose **Export all rows**, the export continues the same read into the
 file, so the statement doesn't run a second time and the server doesn't repeat
 its work. The option is off by default.
 
-A bar above a paused result says how long the pause has left and has two
+A bar above a paused result says how long the pause has left and has these
 buttons. **Export all rows** writes every row to a CSV, JSON or Excel file:
 first the rows that the grid shows, then the rest of the read. **Release** ends
-the statement and frees the tab. An export takes the paused read once, so after
+the statement and frees the tab. **+10 min** moves the end of the pause ten
+minutes later, and a pause can last 60 minutes at most in total. **Open a new
+tab on this connection** gives you a tab with a session of its own, so you can
+keep working while the query waits. An export takes the paused read once, so after
 the export, or after an export that fails, the result is no longer paused and
 a second export runs the query again. While the query is paused, the **Export
 all rows** entries of the grid's menu say **Continues the paused read**.
@@ -209,16 +212,31 @@ A paused query costs the server something for as long as it waits:
 - The statement stays open, with its connection and the memory that it uses on
   the server.
 - The server can keep locks on the rows that the statement read, so another
-  session that wants to change those rows can wait for them.
-- On PostgreSQL, the read waits inside a transaction. A server with
-  `idle_in_transaction_session_timeout` set below the pause limit ends the
-  session, and the export then fails with a message that says so.
-- On MySQL and MariaDB, the app raises `net_write_timeout` for the session while
-  the statement runs, so the server doesn't close the connection while nothing
-  reads from it, and sets the old value again afterwards.
+  session that wants to change those rows can wait for them. Once a minute the
+  app asks the server, on a separate background connection, which sessions
+  wait for a lock of the paused query. When some do, the bar shows **Blocking N
+  other sessions**, and the button opens the list of those sessions with their
+  statements and wait times.
+- On PostgreSQL, the read waits inside a transaction. When the server has
+  `idle_in_transaction_session_timeout` set below the pause limit, the app
+  releases the query at nine tenths of that time, before the server ends the
+  session. The bar then says so, for example "The server ends idle transactions
+  after 5 minutes", and **+10 min** can't extend the pause past that time. The app doesn't read
+  `transaction_timeout` of PostgreSQL 17, which counts from the start of the
+  transaction, so a server with that setting can still end the session during
+  a pause.
+- On MySQL and MariaDB, the app raises `net_write_timeout` for the session to 60
+  minutes and 60 seconds while the statement runs, so the server doesn't close
+  the connection while nothing reads from it, even after the pause is extended.
+  The app sets the old value again afterwards.
+- On SQL Server, a pending schema change such as `TRUNCATE TABLE` can lock the
+  names of the objects that the paused query reads. The list of blocked sessions
+  then names those objects by their lock resource (for example `OBJECT: 5:901578250:0`),
+  and a note says why.
 
 **Pause time limit** sets how long a query can stay paused, from 1 to 60
-minutes. The default is 10 minutes. When the time runs out, the app releases
+minutes. The default is 10 minutes. **+10 min** can extend a pause past that
+setting, up to 60 minutes in total. When the time runs out, the app releases
 the query on its own. The app also releases a paused query when you run the tab
 again (also when you pinned the result), close the tab, or disconnect.
 

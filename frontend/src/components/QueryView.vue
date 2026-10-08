@@ -375,9 +375,12 @@
                 :unsaved="pane.unsaved ?? null"
                 :run-ms="pane.elapsedMs"
                 :paused-until="pane.pausedUntil"
+                :pause="pane.pause"
                 @export="onExport"
                 @export-all="(format: ExportAllFormat) => onExportAll(pane, format)"
                 @release="queries.endPause(pane, true)"
+                @extend="queries.extendPause(pane)"
+                @open-tab="(connectionId: string) => tabs.add({ connectionId })"
                 @copied="onCopied"
                 @copy-failed="onCopyFailed"
               />

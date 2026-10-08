@@ -17,6 +17,7 @@ import type {
   ExportRequest,
   ExportSummary,
   KeptExportRequest,
+  PauseExtension,
   SavedResultsUsage,
   RunFileSummary,
   FolderEntry,
@@ -497,6 +498,12 @@ export const api = {
    *  that they used. */
   clearSavedResults(): Promise<SavedResultsUsage> {
     return invoke('clear_saved_results')
+  },
+
+  /** Moves the end of a paused read by ten minutes, up to the most time of
+   *  a pause. */
+  extendPause(keptId: string): Promise<PauseExtension> {
+    return invoke('extend_pause', { keptId })
   },
 
   /** Lets the backend forget a kept result that left the interface. */

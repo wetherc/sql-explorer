@@ -112,45 +112,16 @@
       </v-alert>
     </div>
     <div v-else-if="pausedUntil !== undefined" class="px-3 py-1">
-      <v-alert type="info" density="compact" variant="tonal" data-test="grid-paused">
-        Showing the first {{ rowTotal.toLocaleString() }} rows. The query is paused at the row
-        limit, so Export all rows can continue it without running it again. Until you export or
-        release it, the server keeps the statement open, which can keep locks on the rows it read.
-        It's released automatically in {{ pauseLeft(pausedUntil) }}.
-        <div class="d-flex ga-2 mt-2">
-          <v-menu location="bottom start">
-            <template #activator="{ props: activator }">
-              <v-btn
-                v-bind="activator"
-                size="small"
-                variant="tonal"
-                :disabled="exporting"
-                data-test="grid-paused-export"
-              >
-                Export all rows
-              </v-btn>
-            </template>
-            <v-list density="compact">
-              <v-list-item
-                v-for="entry in pausedExports"
-                :key="entry.format"
-                :title="entry.title"
-                data-test="grid-paused-export-item"
-                @click="emit('export-all', entry.format)"
-              />
-            </v-list>
-          </v-menu>
-          <v-btn
-            size="small"
-            variant="text"
-            :disabled="exporting"
-            data-test="grid-paused-release"
-            @click="emit('release')"
-          >
-            Release
-          </v-btn>
-        </div>
-      </v-alert>
+      <PausedBanner
+        :rows="rowTotal"
+        :paused-until="pausedUntil"
+        :pause="pause"
+        :exporting="exporting"
+        @export-all="(format: ExportAllFormat) => emit('export-all', format)"
+        @release="emit('release')"
+        @extend="emit('extend')"
+        @open-tab="(connectionId: string) => emit('open-tab', connectionId)"
+      />
     </div>
     <div v-else-if="truncated" class="px-3 py-1">
       <v-alert type="warning" density="compact" variant="tonal" data-test="grid-truncated">
@@ -367,6 +338,8 @@ import {
 } from 'vue'
 import type { ComponentPublicInstance } from 'vue'
 import PanelHeader from './PanelHeader.vue'
+import PausedBanner from './PausedBanner.vue'
+import type { PauseState } from '@/stores/query'
 import { compareSortKeys, formatCell, isNullCell, sortKey, truncate } from '@/lib/format'
 import type { SortKey } from '@/lib/format'
 import { toTabSeparated } from '@/lib/export'
@@ -414,9 +387,12 @@ const props = withDefaults(
     /** The moment, in milliseconds since the epoch, when the paused read of
      *  the result ends. */
     pausedUntil?: number
+    /** What the window knows of the paused read of the result. */
+    pause?: PauseState
   }>(),
   {
     pausedUntil: undefined,
+    pause: undefined,
     busy: false,
     exporting: false,
     kept: null,
@@ -480,46 +456,9 @@ const emit = defineEmits<{
   (event: 'copied', text: string): void
   (event: 'copy-failed', reason: string): void
   (event: 'release'): void
+  (event: 'extend'): void
+  (event: 'open-tab', connectionId: string): void
 }>()
-
-/** The formats that the export of a paused read offers. */
-const pausedExports: ReadonlyArray<{ format: ExportAllFormat; title: string }> = [
-  { format: 'csv', title: 'CSV' },
-  { format: 'json', title: 'JSON' },
-  { format: 'xlsx', title: 'Excel' },
-]
-
-/** The current time, which a paused read updates each second for the time
- *  left. */
-const now = ref(Date.now())
-let pauseClock: ReturnType<typeof setInterval> | null = null
-
-function stopPauseClock(): void {
-  if (pauseClock !== null) {
-    clearInterval(pauseClock)
-    pauseClock = null
-  }
-}
-
-watch(
-  () => props.pausedUntil,
-  (until) => {
-    stopPauseClock()
-    if (until !== undefined) {
-      now.value = Date.now()
-      pauseClock = setInterval(() => {
-        now.value = Date.now()
-      }, 1000)
-    }
-  },
-  { immediate: true },
-)
-
-/** The time left until the end of a pause, as minutes and seconds. */
-function pauseLeft(until: number): string {
-  const seconds = Math.max(0, Math.ceil((until - now.value) / 1000))
-  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
-}
 
 /** The height of one row, which the window of visible rows is built from. */
 const ROW_HEIGHT = 30
@@ -592,7 +531,6 @@ watch(scrollArea, (element, previous) => {
 })
 
 onBeforeUnmount(() => {
-  stopPauseClock()
   stopClock()
   sizeObserver?.disconnect()
   if (filterTimer !== null) {
