@@ -12,7 +12,7 @@ use crate::db::drivers::{
     rows_returned_message, size_text, system_roots, CancelHandle, DatabaseDriver, NumberValue,
     KEEPALIVE_IDLE, KEEPALIVE_INTERVAL,
 };
-use crate::db::sink::{RowSink, RunSummary, SinkControl};
+use crate::db::sink::{feed, RowSink, RunSummary, SinkControl};
 use crate::db::{
     AppColumn, ColumnInfo, Constraint, CreateQuery, Database, DriverCapabilities, ExecOptions,
     IndexInfo, Message, MessageLevel, ObjectType, Partition, PartitionList, PlanMode, QueryParams,
@@ -501,6 +501,14 @@ impl DatabaseDriver for PostgresDriver {
         Dialect::Postgres
     }
 
+    /// A cursor or a portal stops at the end of a fetch while the read is
+    /// paused, so the session waits idle in its transaction. Any other read
+    /// stops with the rest of its result in flight, and the server waits to
+    /// send it.
+    fn pauses_reads(&self) -> bool {
+        true
+    }
+
     fn create_query(
         &self,
         _database: Option<&str>,
@@ -562,10 +570,12 @@ impl DatabaseDriver for PostgresDriver {
         // A notice that arrived before this run belongs to no answer, so the
         // buffer starts empty.
         let _ = self.take_notices();
+        let pauses = sink.pause_point().is_some();
         let outcome = match params {
             Some(params) => self.stream_with_params(query, params, options, sink).await,
             None => self.stream_simple(query, options, sink).await,
         };
+        let outcome = outcome.map_err(|error| if pauses { after_pause(error) } else { error });
 
         // The notices of a failed statement go to the sink before the error,
         // because a RAISE NOTICE often tells why the statement failed.
@@ -1305,7 +1315,7 @@ impl PostgresDriver {
                             None => JsonValue::Null,
                         })
                         .collect();
-                    if sink.row(values)? == SinkControl::Stop {
+                    if feed(sink, values).await? == SinkControl::Stop {
                         truncated = true;
                         stopped = true;
                         if alone && !cancelled {
@@ -1379,12 +1389,13 @@ impl PostgresDriver {
         let begin = if in_block { "" } else { "BEGIN; " };
         let prefix = format!("{begin}DECLARE {name} NO SCROLL CURSOR FOR ");
         let need = options.max_rows.saturating_add(1);
+        let pause = sink.pause_point().map(|point| point.rows);
         let mut block = OpenBlock {
             client: &self.client,
             done: in_block,
         };
         let mut read = CursorRead::default();
-        let mut asked = need.min(FETCH_BATCH);
+        let mut asked = fetch_size(need, 0, pause);
         // The line break ends a comment at the end of the statement.
         let mut text = format!("{prefix}{statement}\n; FETCH {asked} FROM {name}");
         let mut shift = prefix.chars().count() as u32;
@@ -1405,7 +1416,7 @@ impl PostgresDriver {
             if fetched < asked as u64 || read.fetched >= need as u64 || read.stopped {
                 break;
             }
-            asked = (need - read.fetched as usize).min(FETCH_BATCH);
+            asked = fetch_size(need, read.fetched as usize, pause);
             text = format!("FETCH {asked} FROM {name}");
             shift = 0;
         }
@@ -1504,7 +1515,7 @@ impl PostgresDriver {
                 continue;
             }
             if count >= options.max_rows
-                || sink.row(row_to_json(&row, &settings))? == SinkControl::Stop
+                || feed(sink, row_to_json(&row, &settings)).await? == SinkControl::Stop
             {
                 truncated = true;
                 // The statement holds the rest of its result on the server.
@@ -1606,6 +1617,7 @@ async fn read_portal(
     sink: &mut dyn RowSink,
 ) -> Result<(usize, bool)> {
     let need = options.max_rows.saturating_add(1);
+    let pause = sink.pause_point().map(|point| point.rows);
     let portal = client.bind_raw(statement, bound).await?;
     if !columns.is_empty() {
         sink.begin_set(columns)?;
@@ -1614,7 +1626,7 @@ async fn read_portal(
     let mut count = 0usize;
     let mut truncated = false;
     loop {
-        let asked = (need - fetched).min(FETCH_BATCH);
+        let asked = fetch_size(need, fetched, pause);
         let rows = client.query_portal_raw(&portal, asked as i32).await?;
         pin_mut!(rows);
         while let Some(row) = rows.try_next().await? {
@@ -1623,7 +1635,7 @@ async fn read_portal(
                 continue;
             }
             if count >= options.max_rows
-                || sink.row(row_to_json(&row, settings))? == SinkControl::Stop
+                || feed(sink, row_to_json(&row, settings)).await? == SinkControl::Stop
             {
                 truncated = true;
                 continue;
@@ -1682,6 +1694,49 @@ static NEXT_CURSOR: AtomicU64 = AtomicU64::new(0);
 /// for. A run with a high row limit, such as an export, then reads in
 /// steps, and a sink that takes no more rows ends the read at the next step.
 const FETCH_BATCH: usize = 100_000;
+
+/// The rows that the next fetch of a cursor or a portal asks for, when
+/// `fetched` rows came before and the read needs `need` rows.
+///
+/// A read that can pause after `pause` rows first fetches up to one row past
+/// that place. The row that makes the read pause is then the last row of its
+/// fetch, so the server ends the fetch and waits with no statement in
+/// progress while the read is paused.
+fn fetch_size(need: usize, fetched: usize, pause: Option<usize>) -> usize {
+    let goal = match pause.map(|rows| rows.saturating_add(1).min(need)) {
+        Some(goal) if fetched < goal => goal,
+        _ => need,
+    };
+    (goal - fetched).min(FETCH_BATCH)
+}
+
+/// The error of a read that paused, when the server closed the session.
+/// A paused cursor or portal waits in a transaction, so a server with
+/// `idle_in_transaction_session_timeout` shorter than the pause ends the
+/// session with the error 25P03.
+const ENDED_WHILE_PAUSED: &str = "The server closed the session while the read was paused, so \
+     the rest of the rows are gone. A server setting such as \
+     idle_in_transaction_session_timeout can end a session that waits in a transaction. Run \
+     the query again to export all rows.";
+
+/// Gives a clear error for a read that paused, when the server closed the
+/// session or ended it for the time it waited in a transaction. Any other
+/// error stays as it is.
+fn after_pause(error: Error) -> Error {
+    let inner = match &error {
+        Error::Located { inner, .. } => inner.as_ref(),
+        other => other,
+    };
+    match inner {
+        Error::Postgres(failure)
+            if failure.is_closed()
+                || failure.code() == Some(&SqlState::IDLE_IN_TRANSACTION_SESSION_TIMEOUT) =>
+        {
+            Error::Connection(ENDED_WHILE_PAUSED.to_string())
+        }
+        _ => error,
+    }
+}
 
 /// True for a statement that only reads rows. [`only_reads`] accepts
 /// `SELECT`, `WITH` and `SHOW`. `VALUES` and `TABLE` also give rows, and a
@@ -1810,7 +1865,7 @@ impl CursorRead {
                             None => JsonValue::Null,
                         })
                         .collect();
-                    if sink.row(values)? == SinkControl::Stop {
+                    if feed(sink, values).await? == SinkControl::Stop {
                         self.truncated = true;
                         self.stopped = true;
                         continue;
@@ -3464,6 +3519,28 @@ mod live;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_read_that_can_pause_fetches_to_one_row_past_the_pause() {
+        // Without a pause, each fetch asks for a batch or the rest.
+        assert_eq!(fetch_size(11, 0, None), 11);
+        assert_eq!(fetch_size(usize::MAX, 0, None), FETCH_BATCH);
+        // The first fetches end one row past the pause.
+        assert_eq!(fetch_size(usize::MAX, 0, Some(100)), 101);
+        assert_eq!(fetch_size(usize::MAX, 0, Some(250_000)), FETCH_BATCH);
+        assert_eq!(fetch_size(usize::MAX, 200_000, Some(250_000)), 50_001);
+        // After the pause, the fetches go on in batches.
+        assert_eq!(fetch_size(usize::MAX, 101, Some(100)), FETCH_BATCH);
+        // A row limit below the pause ends the reads first.
+        assert_eq!(fetch_size(11, 0, Some(100)), 11);
+    }
+
+    #[test]
+    fn an_error_of_a_paused_read_that_is_not_a_closed_session_stays() {
+        let error = after_pause(Error::Invalid("bad".to_string()).at(1, 2));
+        assert!(matches!(error, Error::Located { .. }));
+        assert!(matches!(after_pause(Error::Cancelled), Error::Cancelled));
+    }
     use crate::db::sink::BufferSink;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};

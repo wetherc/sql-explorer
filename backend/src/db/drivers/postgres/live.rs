@@ -737,3 +737,153 @@ async fn live_a_read_past_the_row_limit_keeps_the_rows_that_its_function_inserts
     };
     live::with_cleanup(body, scratch.remove()).await;
 }
+
+/// A read of 1,000,000 numbers in order, from 1, through a cursor.
+const NUMBERS: &str = "SELECT n FROM generate_series(1, 1000000) AS n";
+
+/// Opens a driver on the server, or gives `None` when no server is set.
+async fn pg_driver() -> Option<Box<dyn DatabaseDriver>> {
+    let server = live::server("SQLX_LIVE_PG")?;
+    Some(server.open(DbType::Postgres, Some("postgres")).await)
+}
+
+/// Pauses a read on the session, exports every row in order, and runs a
+/// second statement on the session, which then has no open transaction.
+async fn exports_every_row(paused: live::Paused, total: i64) {
+    assert_eq!(live::numbers(&paused.grid), (1..=100).collect::<Vec<_>>());
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let rows = live::export_paused(&paused.read, usize::MAX).await.unwrap();
+    assert_eq!(live::numbers(&rows), (1..=total).collect::<Vec<_>>());
+    let mut driver = paused.session.driver.lock().await;
+    assert!(!driver.holds_open_transaction().await.unwrap());
+}
+
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL server"]
+async fn live_a_paused_cursor_exports_every_row_once() {
+    let Some(driver) = pg_driver().await else {
+        return;
+    };
+    let mut driver = driver;
+    let pid = live::run(driver.as_mut(), "SELECT pg_backend_pid()").await;
+    let pid = live::cell(&pid, 0, 0).unwrap();
+    let paused = live::pause_read(driver, NUMBERS, 100, Duration::from_secs(60)).await;
+    // The fetch ends at the row that made the read pause, so the session
+    // waits idle in its transaction.
+    let server = live::server("SQLX_LIVE_PG").unwrap();
+    let mut other = server.open(DbType::Postgres, Some("postgres")).await;
+    let states = live::run(
+        other.as_mut(),
+        &format!(
+            "SELECT count(*) FROM pg_stat_activity \
+             WHERE pid = {pid} AND state = 'idle in transaction'"
+        ),
+    )
+    .await;
+    assert_eq!(live::cell(&states, 0, 0).as_deref(), Some("1"));
+    exports_every_row(paused, 1_000_000).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL server"]
+async fn live_a_paused_portal_exports_every_row_once() {
+    let Some(driver) = pg_driver().await else {
+        return;
+    };
+    let params = vec![crate::db::QueryParam {
+        value: serde_json::json!(300_000),
+    }];
+    let paused = live::pause_read_with(
+        driver,
+        "SELECT n FROM generate_series(1, $1::int) AS n",
+        Some(params),
+        100,
+        Duration::from_secs(60),
+    )
+    .await;
+    exports_every_row(paused, 300_000).await;
+}
+
+/// Pauses a read in a block of the user, exports every row in order, and
+/// ends the block.
+async fn exports_in_a_block(setup: &str, query: &str) {
+    let Some(mut driver) = pg_driver().await else {
+        return;
+    };
+    live::run(driver.as_mut(), setup).await;
+    let paused = live::pause_read(driver, query, 100, Duration::from_secs(60)).await;
+    assert_eq!(live::numbers(&paused.grid), (1..=100).collect::<Vec<_>>());
+    let rows = live::export_paused(&paused.read, usize::MAX).await.unwrap();
+    assert_eq!(live::numbers(&rows), (1..=200_000).collect::<Vec<_>>());
+    live::run_after(&paused.session, "COMMIT").await;
+}
+
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL server"]
+async fn live_a_paused_cursor_in_a_block_of_the_user_exports_every_row_once() {
+    exports_in_a_block(
+        "BEGIN",
+        "SELECT n FROM generate_series(1, 200000) AS n ORDER BY n",
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL server"]
+async fn live_a_paused_walk_exports_every_row_once() {
+    // A read with FOR UPDATE inside a block of the user keeps the walk.
+    exports_in_a_block(
+        "BEGIN; CREATE TEMP TABLE walked AS SELECT n FROM generate_series(1, 200000) AS n",
+        "SELECT n FROM walked ORDER BY n FOR UPDATE",
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL server"]
+async fn live_a_released_cursor_frees_its_session() {
+    let Some(driver) = pg_driver().await else {
+        return;
+    };
+    let paused = live::pause_read(driver, NUMBERS, 100, Duration::from_secs(60)).await;
+    let session = paused.session.clone();
+    drop(paused);
+    let response = live::run_after(&session, "SELECT 2 AS two").await;
+    assert_eq!(live::cell(&response, 0, 0).as_deref(), Some("2"));
+}
+
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL server"]
+async fn live_the_end_of_the_pause_releases_the_cursor() {
+    let Some(driver) = pg_driver().await else {
+        return;
+    };
+    let paused = live::pause_read(driver, NUMBERS, 100, Duration::from_secs(1)).await;
+    let response = live::run_after(&paused.session, "SELECT 3 AS three").await;
+    assert_eq!(live::cell(&response, 0, 0).as_deref(), Some("3"));
+    assert!(live::export_paused(&paused.read, usize::MAX).await.is_err());
+}
+
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL server"]
+async fn live_a_session_that_the_server_ends_during_a_pause_gives_a_clear_error() {
+    let Some(mut driver) = pg_driver().await else {
+        return;
+    };
+    live::run(
+        driver.as_mut(),
+        "SET idle_in_transaction_session_timeout = '1s'",
+    )
+    .await;
+    let paused = live::pause_read(driver, NUMBERS, 100, Duration::from_secs(60)).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let error = live::export_paused(&paused.read, usize::MAX)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("closed the session while the read was paused"),
+        "{error}"
+    );
+}

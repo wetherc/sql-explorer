@@ -15,7 +15,7 @@
 use crate::commands::{create_text_of, open_driver};
 use crate::db::drivers::DatabaseDriver;
 use crate::db::sink::{BufferSink, PausePoint, RunSummary};
-use crate::db::{CreateQuery, ExecOptions, QueryResponse};
+use crate::db::{CreateQuery, ExecOptions, QueryParams, QueryResponse};
 use crate::pause::{spawn_read, PausedRead, PausingSink, SessionSlot, SharedSink};
 use crate::session::{Session, SessionPool};
 use crate::storage::{ConnectionOptions, DbType, SavedConnection, TlsMode};
@@ -213,6 +213,17 @@ pub async fn pause_read(
     rows: usize,
     limit: Duration,
 ) -> Paused {
+    pause_read_with(driver, query, None, rows, limit).await
+}
+
+/// Runs the query with bound values, as [`pause_read`] does.
+pub async fn pause_read_with(
+    driver: Box<dyn DatabaseDriver>,
+    query: &str,
+    params: Option<QueryParams>,
+    rows: usize,
+    limit: Duration,
+) -> Paused {
     let sessions = Arc::new(SessionPool::new(4));
     let session = sessions.insert("tab", Session::new(driver)).await;
     let slot = SessionSlot {
@@ -227,7 +238,14 @@ pub async fn pause_read(
         max_rows: usize::MAX,
         ..ExecOptions::default()
     };
-    let task = spawn_read(guard, query.to_string(), None, options, sink, slot.clone());
+    let task = spawn_read(
+        guard,
+        query.to_string(),
+        params,
+        options,
+        sink,
+        slot.clone(),
+    );
     let Ok(handoff) = control.handoff.await else {
         let (result, _) = task.await.expect("the read ends");
         panic!("the read ended without a pause: {:?}", result.err());
