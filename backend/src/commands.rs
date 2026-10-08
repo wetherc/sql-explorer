@@ -31,6 +31,7 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Runtime};
 use tokio_util::sync::CancellationToken;
 
+pub mod blocking;
 mod paused;
 pub mod run_file;
 pub mod run_messages;

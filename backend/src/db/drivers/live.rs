@@ -294,6 +294,93 @@ pub async fn run_after(session: &Session, sql: &str) -> QueryResponse {
     run(driver.as_mut(), sql).await
 }
 
+/// The statements of a test of the report of blocking sessions.
+pub struct LockScene<'a> {
+    /// Gives the number of the session in the first cell.
+    pub session_id: &'a str,
+    /// Opens a transaction and takes a lock in it.
+    pub lock: &'a str,
+    /// Waits for the lock.
+    pub wait: &'a str,
+    /// Ends the transaction of the lock.
+    pub release: &'a str,
+}
+
+/// The sessions of a lock scene, and the report that a third session read
+/// while one session waited for the lock of the other.
+pub struct LockedReport {
+    pub holder: u64,
+    pub waiter: u64,
+    pub report: crate::db::blocking::BlockingReport,
+}
+
+/// Runs a statement that opens or ends a transaction. MS SQL Server sends
+/// error 266 when a request changes the count of open transactions, and the
+/// change stays, so the error only goes to the output of the test.
+async fn run_in_transaction(driver: &mut dyn DatabaseDriver, sql: &str) {
+    if let Err(error) = driver
+        .execute_query(sql, None, &ExecOptions::default())
+        .await
+    {
+        eprintln!("{sql} gave: {error}");
+    }
+}
+
+/// Reads the number of the session of a driver.
+pub async fn session_number(driver: &mut dyn DatabaseDriver, sql: &str) -> u64 {
+    let response = run(driver, sql).await;
+    cell(&response, 0, 0)
+        .and_then(|text| text.parse().ok())
+        .expect("the query gives the number of the session")
+}
+
+/// Makes `holder` keep a lock that `waiter` waits for, and reads the report
+/// on `reporter` until it shows the wait, for up to 15 seconds. The lock
+/// then ends, and the wait with it. A report that never shows the wait goes
+/// back as the last one read.
+pub async fn report_during_wait(
+    mut holder: Box<dyn DatabaseDriver>,
+    mut waiter: Box<dyn DatabaseDriver>,
+    reporter: &mut dyn DatabaseDriver,
+    scene: &LockScene<'_>,
+) -> LockedReport {
+    let holder_id = session_number(holder.as_mut(), scene.session_id).await;
+    let waiter_id = session_number(waiter.as_mut(), scene.session_id).await;
+    run_in_transaction(holder.as_mut(), scene.lock).await;
+    let wait = scene.wait.to_string();
+    let waiting = tokio::spawn(async move {
+        let outcome = waiter
+            .execute_query(&wait, None, &ExecOptions::default())
+            .await;
+        (waiter, outcome)
+    });
+    let mut report = None;
+    for _ in 0..150 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let read = reporter
+            .blocking_sessions()
+            .await
+            .unwrap_or_else(|error| panic!("the report failed: {error}"));
+        if read
+            .sessions
+            .iter()
+            .any(|row| row.waiting_session == waiter_id)
+        {
+            report = Some(read);
+            break;
+        }
+        report = Some(read);
+    }
+    run_in_transaction(holder.as_mut(), scene.release).await;
+    let (_waiter, outcome) = waiting.await.expect("the wait ends");
+    outcome.unwrap_or_else(|error| panic!("the statement that waited failed: {error}"));
+    LockedReport {
+        holder: holder_id,
+        waiter: waiter_id,
+        report: report.expect("the loop reads a report"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

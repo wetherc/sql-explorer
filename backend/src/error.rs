@@ -82,6 +82,11 @@ pub struct ErrorPayload {
     /// tables, the open transaction and the `SET` options of the old one.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub session_reset: bool,
+    /// True when the statement stopped because it waited too long for a
+    /// lock of another session. The window then offers a list of the
+    /// sessions that block others.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub lock_wait: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -430,6 +435,7 @@ impl Error {
             column: None,
             reason: self.reason(),
             session_reset: false,
+            lock_wait: matches!(self, Error::LockWait(_)),
         }
     }
 
@@ -835,6 +841,18 @@ mod tests {
     fn a_lock_wait_without_a_server_detail_gives_the_server_text_alone() {
         let payload = Error::LockWait(Box::new(Error::Connection("gone".into()))).to_payload();
         assert_eq!(payload.detail.as_deref(), Some("gone"));
+    }
+
+    #[test]
+    fn a_lock_wait_marks_its_payload_also_at_a_place() {
+        let wait = || Error::LockWait(Box::new(Error::Connection("gone".into())));
+        assert!(wait().to_payload().lock_wait);
+        assert!(wait().at(1, 1).to_payload().lock_wait);
+        assert!(Error::SessionReset(Box::new(wait())).to_payload().lock_wait);
+        assert_eq!(serde_json::to_value(wait()).unwrap()["lockWait"], true);
+        // Another error leaves the field out.
+        let value = serde_json::to_value(Error::Timeout(5)).unwrap();
+        assert!(value.get("lockWait").is_none());
     }
 
     #[test]

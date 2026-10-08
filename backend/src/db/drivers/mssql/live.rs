@@ -465,3 +465,87 @@ async fn live_the_end_of_the_pause_releases_the_read() {
     assert_eq!(live::cell(&response, 0, 0).as_deref(), Some("3"));
     assert!(live::export_paused(&paused.read, usize::MAX).await.is_err());
 }
+
+#[tokio::test]
+#[ignore = "needs a live MS SQL Server"]
+async fn live_the_report_names_the_session_that_blocks_a_read() {
+    let Some((scratch, mut driver, server)) = Scratch::open("ms_block").await else {
+        return;
+    };
+    let name = scratch.name();
+    let body = async move {
+        live::run(
+            driver.as_mut(),
+            "CREATE TABLE dbo.LockProbe (id int PRIMARY KEY, v int);\n\
+             INSERT INTO dbo.LockProbe VALUES (1, 1);",
+        )
+        .await;
+        let holder = server.open(DbType::Mssql, Some(&name)).await;
+        let waiter = server.open(DbType::Mssql, Some(&name)).await;
+        let scene = live::LockScene {
+            session_id: "SELECT @@SPID",
+            lock: "BEGIN TRANSACTION; UPDATE dbo.LockProbe SET v = 2 WHERE id = 1;",
+            wait: "SELECT v FROM dbo.LockProbe WHERE id = 1",
+            release: "ROLLBACK",
+        };
+        let locked = live::report_during_wait(holder, waiter, driver.as_mut(), &scene).await;
+        let report = &locked.report;
+        let wait = report
+            .sessions
+            .iter()
+            .find(|row| row.waiting_session == locked.waiter)
+            .unwrap_or_else(|| panic!("no wait in {report:?}"));
+        assert_eq!(wait.blocking_session, locked.holder);
+        assert_eq!(wait.lock_mode.as_deref(), Some("S"));
+        let object = format!("[{name}].[dbo].[LockProbe]");
+        assert_eq!(wait.object.as_deref(), Some(object.as_str()));
+        assert!(wait
+            .blocking_statement
+            .as_deref()
+            .is_some_and(|text| text.contains("UPDATE dbo.LockProbe")));
+        assert!(
+            wait.waiting_statement
+                .as_deref()
+                .is_some_and(|text| text.contains("[LockProbe]")),
+            "{wait:?}"
+        );
+        assert_eq!(wait.blocking_status.as_deref(), Some("sleeping"));
+        assert!(report
+            .open_transactions
+            .iter()
+            .any(|row| row.session == locked.holder));
+        assert!(report.notes.is_empty());
+    };
+    live::with_cleanup(body, scratch.remove()).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a live MS SQL Server"]
+async fn live_a_login_without_server_state_gets_a_note() {
+    let Some(server) = live::server("SQLX_LIVE_MSSQL") else {
+        return;
+    };
+    let mut admin = server.open(DbType::Mssql, Some("master")).await;
+    let login = live::unique_name("nostate");
+    let password = "Live#NoState2026";
+    live::run(
+        admin.as_mut(),
+        &format!("CREATE LOGIN {login} WITH PASSWORD = '{password}', CHECK_POLICY = OFF"),
+    )
+    .await;
+    let limited = Server {
+        user: login.clone(),
+        password: password.to_string(),
+        ..server.clone()
+    };
+    let body = async move {
+        let mut driver = limited.open(DbType::Mssql, Some("master")).await;
+        let report = driver.blocking_sessions().await.unwrap();
+        assert!(report.sessions.is_empty());
+        assert!(report.notes[0].contains("VIEW SERVER STATE"), "{report:?}");
+    };
+    let cleanup = async move {
+        live::run(admin.as_mut(), &format!("DROP LOGIN {login}")).await;
+    };
+    live::with_cleanup(body, cleanup).await;
+}

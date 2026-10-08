@@ -77,6 +77,7 @@ fn main() {
             commands::test_connection,
             commands::disconnect,
             commands::list_active_connections,
+            commands::blocking::blocking_sessions,
             commands::execute_query,
             commands::run_file::choose_run_file,
             commands::run_file::run_to_file,

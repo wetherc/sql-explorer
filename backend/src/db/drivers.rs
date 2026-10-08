@@ -9,6 +9,7 @@ pub mod mysql;
 pub mod postgres;
 pub mod sqlite;
 
+use crate::db::blocking::BlockingReport;
 use crate::db::sink::{BufferSink, RowSink, RunSummary};
 use crate::db::{
     AppColumn, Constraint, ConstraintType, CreateQuery, Database, DriverCapabilities, ExecOptions,
@@ -84,6 +85,18 @@ pub trait DatabaseDriver: Send + Sync {
     /// own busy limit, and Athena has no locks of a session.
     async fn limit_lock_waits(&mut self, _limit: std::time::Duration) -> Result<()> {
         Ok(())
+    }
+
+    /// Reads the sessions of the server that wait for locks, the sessions
+    /// that keep those locks, and the other sessions that keep locks inside
+    /// an open transaction.
+    ///
+    /// The default refuses. SQLite and Athena have no table of the locks of
+    /// other sessions.
+    async fn blocking_sessions(&mut self) -> Result<BlockingReport> {
+        Err(Error::Unsupported(
+            "This database can't list the sessions that block others.".to_string(),
+        ))
     }
 
     /// Runs a script and sends each row to the sink as the read produces it.
@@ -1471,6 +1484,12 @@ mod tests {
             .execute_query("SELECT 1", None, &ExecOptions::default())
             .await
             .unwrap_err();
+        assert_eq!(error.category(), crate::error::ErrorCategory::Unsupported);
+    }
+
+    #[tokio::test]
+    async fn a_driver_without_lock_tables_refuses_the_report_of_blocking_sessions() {
+        let error = NoStreamDriver.blocking_sessions().await.unwrap_err();
         assert_eq!(error.category(), crate::error::ErrorCategory::Unsupported);
     }
 }

@@ -38,6 +38,8 @@ use tiberius::{
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
+mod blocking;
+
 type MssqlClient = Client<Compat<TcpStream>>;
 
 pub struct MssqlDriver {
@@ -1117,6 +1119,10 @@ impl DatabaseDriver for MssqlDriver {
         let mut stream = self.client.simple_query(statement).await?;
         while stream.try_next().await?.is_some() {}
         Ok(())
+    }
+
+    async fn blocking_sessions(&mut self) -> Result<crate::db::blocking::BlockingReport> {
+        self.blocking_report().await
     }
 
     async fn holds_open_transaction(&mut self) -> Result<bool> {
