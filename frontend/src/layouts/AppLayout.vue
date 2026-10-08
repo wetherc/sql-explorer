@@ -569,31 +569,28 @@ onMounted(async () => {
   window.addEventListener('keydown', onKeyDown)
   unholdHostMenu = holdBackHostMenu(window)
 
-  await connections.loadEngines()
-  await connections.load()
-  await history.load()
-  // The backend records the folders and the files that the user accepted,
-  // so the panel reads that record and shows those folders alone. The read
-  // also lets the backend admit those paths, so it comes before the tabs
-  // compare their files with the disk.
-  await files.restoreRoots()
-  await tabs.restore()
-  for (const info of Object.values(connections.active)) {
-    explorer.addRoot(info.connectionId)
-  }
-  try {
-    unlistenMenu = await api.onMenuCommand(runCommandById)
-  } catch (error) {
-    // The window still answers every key without the menu of the system.
-    ui.reportError(error)
-  }
-  await showStorageProblems()
+  // The listeners come before the reads. A report of a connection that the
+  // backend sends during a slow read is otherwise lost, and the menu of the
+  // system otherwise does nothing until the reads end.
+  await Promise.all([listenForStatus(), listenForMenu()])
+  // The reads run side by side, so a slow read, such as the read of a tab
+  // file on a network share, does not delay the others.
+  await Promise.all([
+    connections.loadEngines(),
+    history.load(),
+    loadConnections(),
+    restoreWorkspace(),
+    showStorageProblems(),
+  ])
   try {
     unlistenClose = await getCurrentWindow().onCloseRequested(flushPersist)
   } catch {
     // Outside the desktop host there is no window to close, and the write
     // after the pause still keeps the tabs.
   }
+})
+
+async function listenForStatus(): Promise<void> {
   try {
     unlisten = await api.onConnectionStatus((event) => connections.applyStatus(event))
   } catch (error) {
@@ -601,7 +598,35 @@ onMounted(async () => {
     // learns of a connection that dropped when it next uses that connection.
     ui.reportError(error)
   }
-})
+}
+
+async function listenForMenu(): Promise<void> {
+  try {
+    unlistenMenu = await api.onMenuCommand(runCommandById)
+  } catch (error) {
+    // The window still answers every key without the menu of the system.
+    ui.reportError(error)
+  }
+}
+
+/** Reads the connections, and gives the explorer a root for each open one. */
+async function loadConnections(): Promise<void> {
+  await connections.load()
+  for (const info of Object.values(connections.active)) {
+    explorer.addRoot(info.connectionId)
+  }
+}
+
+/**
+ * Puts the folders of the files panel and the tabs back. The backend records
+ * the folders and the files that the user accepted, so the panel reads that
+ * record and shows those folders alone. The read also lets the backend admit
+ * those paths, so it comes before the tabs compare their files with the disk.
+ */
+async function restoreWorkspace(): Promise<void> {
+  await files.restoreRoots()
+  await tabs.restore()
+}
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeyDown)

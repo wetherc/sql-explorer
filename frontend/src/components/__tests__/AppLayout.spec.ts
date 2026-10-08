@@ -91,6 +91,47 @@ describe('AppLayout', () => {
     wrapper.unmount()
   })
 
+  it('listens and shows the connections while a tab file is slow to read', async () => {
+    apiStub.listActiveConnections.mockResolvedValue([infoFixture()])
+    apiStub.getWorkspace.mockResolvedValue({
+      tabs: [{ id: 't1', title: 'a.sql', query: 'SELECT 1', filePath: '//share/a.sql' }],
+      activeTabId: 't1',
+    })
+    // The file on the share never answers.
+    apiStub.readTextFile.mockReturnValue(new Promise(() => {}))
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+
+    expect(apiStub.onMenuCommand).toHaveBeenCalled()
+    expect(apiStub.getHistory).toHaveBeenCalled()
+    expect(useExplorerStore().roots).toHaveLength(1)
+    const handler = apiStub.onConnectionStatus.mock.calls[0]?.[0] as (event: unknown) => void
+    handler({ connectionId: 'c1', health: ConnectionHealth.Reconnecting, message: null })
+    expect(useConnectionsStore().health.c1).toBe(ConnectionHealth.Reconnecting)
+    wrapper.unmount()
+  })
+
+  it('listens before it reads', async () => {
+    const calls: string[] = []
+    apiStub.onConnectionStatus.mockImplementation(async () => {
+      calls.push('onConnectionStatus')
+      return () => {}
+    })
+    apiStub.onMenuCommand.mockImplementation(async () => {
+      calls.push('onMenuCommand')
+      return () => {}
+    })
+    apiStub.getConnections.mockImplementation(async () => {
+      calls.push('getConnections')
+      return [connectionFixture()]
+    })
+    const wrapper = mountWithPlugins(AppLayout)
+    await settle()
+
+    expect(calls).toEqual(['onConnectionStatus', 'onMenuCommand', 'getConnections'])
+    wrapper.unmount()
+  })
+
   it('runs the command that the menu of the system names', async () => {
     const wrapper = mountWithPlugins(AppLayout)
     await settle()
