@@ -2256,17 +2256,28 @@ pub struct MenuCommandState {
 ///
 /// A state that names no item of the menu is dropped, so the interface can
 /// send the whole list without a check of its own.
+///
+/// The whole change runs in one task on the main thread. A call to the menu
+/// from an async thread waits for the main thread once for each call, and
+/// the walk of the menu makes several calls for each item.
 #[tauri::command]
 pub async fn set_menu_commands<R: Runtime>(
     app: AppHandle<R>,
     states: Vec<MenuCommandState>,
 ) -> Result<()> {
-    for state in states {
-        if !crate::menu::names_a_command(&state.id) {
-            continue;
-        }
-        crate::menu::set_command_enabled(&app, &state.id, state.enabled)?;
-    }
+    let states: Vec<(String, bool)> = states
+        .into_iter()
+        .filter(|state| crate::menu::names_a_command(&state.id))
+        .map(|state| (state.id, state.enabled))
+        .collect();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        let _ = sender.send(crate::menu::set_commands_enabled(&handle, &states));
+    })?;
+    receiver
+        .await
+        .map_err(|_| Error::Anyhow(anyhow::anyhow!("The menu didn't respond.")))??;
     Ok(())
 }
 
@@ -4403,6 +4414,31 @@ mod tests {
             .unwrap();
         let listed = get_connections(app.handle().clone()).await.unwrap();
         assert!(listed.iter().all(|saved| saved.id != record.id));
+    }
+
+    #[tokio::test]
+    async fn the_menu_commands_change_in_one_task() {
+        // A menu item of muda can only be made on the main thread of macOS,
+        // and a test runs on another thread, so the application of the test
+        // has no menu. The command then takes the states and changes nothing.
+        let app = app_with_store();
+        let states = vec![
+            MenuCommandState {
+                id: "query.save".into(),
+                enabled: false,
+            },
+            MenuCommandState {
+                id: "close_window".into(),
+                enabled: false,
+            },
+        ];
+        set_menu_commands(app.handle().clone(), states)
+            .await
+            .unwrap();
+        let changed =
+            crate::menu::set_commands_enabled(app.handle(), &[("tab.new".to_string(), false)])
+                .unwrap();
+        assert_eq!(changed, 0);
     }
 
     #[tokio::test]

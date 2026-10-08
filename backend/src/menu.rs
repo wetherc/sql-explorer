@@ -169,37 +169,44 @@ pub fn names_a_command(id: &str) -> bool {
     FILE_COMMANDS.iter().any(|command| command.id == id)
 }
 
-/// Turns one item of the menu on or off.
+/// Turns items of the menu on or off, in one walk of the menu.
 ///
 /// The state of a command lives in the interface, which tells the backend
-/// what changed. An item that the menu does not hold is left alone, so an
+/// what changed. Each pair names the identifier of a command and its new
+/// state. An item that the menu does not hold is left alone, so an
 /// identifier of a command that carries no item costs nothing.
 ///
-/// Returns true when the menu held the item.
-pub fn set_command_enabled<R: Runtime>(
+/// Each call to the menu from a thread other than the main thread waits for
+/// the main thread. The caller therefore runs this function on the main
+/// thread, where each call to the menu runs at once.
+///
+/// Returns the number of items that the menu held.
+pub fn set_commands_enabled<R: Runtime>(
     app: &AppHandle<R>,
-    id: &str,
-    enabled: bool,
-) -> tauri::Result<bool> {
+    states: &[(String, bool)],
+) -> tauri::Result<usize> {
     let Some(menu) = app.menu() else {
-        return Ok(false);
+        return Ok(0);
     };
+    let mut changed = 0;
     // The items of this application live one level down, in the File menu,
     // so the walk goes through the submenus.
     for entry in menu.items()? {
         let Some(submenu) = entry.as_submenu() else {
             continue;
         };
-        let Some(found) = submenu.get(id) else {
-            continue;
-        };
-        let Some(item) = found.as_menuitem() else {
-            continue;
-        };
-        item.set_enabled(enabled)?;
-        return Ok(true);
+        for (id, enabled) in states {
+            let Some(found) = submenu.get(id) else {
+                continue;
+            };
+            let Some(item) = found.as_menuitem() else {
+                continue;
+            };
+            item.set_enabled(*enabled)?;
+            changed += 1;
+        }
     }
-    Ok(false)
+    Ok(changed)
 }
 
 #[cfg(test)]
