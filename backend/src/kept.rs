@@ -16,13 +16,19 @@
 //! The registry has a bound on the number of entries and on their age, so an
 //! entry that the window never releases goes at the latest at that age. A
 //! disconnect of the connection releases each entry of the connection.
+//!
+//! The registry also keeps the count of the disk use of the spill files
+//! (see `crate::spill`). A new spill that needs room past the cap releases
+//! the oldest kept spill first.
 
 use crate::db::sink::RowSink;
 use crate::db::ExecOptions;
 use crate::error::Result;
+use crate::spill::DiskUse;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 /// The most kept results the registry contains. A new entry past this
@@ -39,18 +45,20 @@ pub const KEPT_RESULT_AGE: Duration = Duration::from_secs(12 * 60 * 60);
 ///
 /// Each variant reads its rows into a sink, in the order and with the
 /// columns of the set that the grid shows. A variant that owns a resource of
-/// its own frees it when the value drops. Two more sources fit this type:
+/// its own frees it when the value drops.
 ///
-/// - A paused read on the session of the tab, such as a server cursor that
-///   stopped at the row limit. Its read continues the cursor on that session,
-///   so the read takes the driver of the session. A new run on the session
-///   must release it first, because the run closes or replaces the cursor.
-/// - A spill file, where the sink of the run writes the rows past the limit
-///   to a local file. Its read reads the file, and its drop removes the file.
+/// One more source fits this type: a paused read on the session of the tab,
+/// such as a server cursor that stopped at the row limit. Its read continues
+/// the cursor on that session, so the read takes the driver of the session.
+/// A new run on the session must release it first, because the run closes or
+/// replaces the cursor.
 pub enum KeptSource {
     /// A finished Athena statement. Athena keeps the full result in S3, and
     /// the read takes its pages again through `GetQueryResults`.
     AthenaExecution(crate::db::drivers::athena::KeptExecution),
+    /// A file on the local disk with every row of the set. The read reads
+    /// the file, and the drop removes it.
+    SpillFile(crate::spill::SpillFile),
     /// A fixed list of rows, for the tests of the registry and the export.
     #[cfg(test)]
     Fixed {
@@ -72,6 +80,7 @@ impl KeptSource {
     pub async fn read(&self, options: &ExecOptions, sink: &mut dyn RowSink) -> Result<()> {
         match *self {
             KeptSource::AthenaExecution(ref execution) => execution.read(options, sink).await,
+            KeptSource::SpillFile(ref file) => file.read(options, sink).await,
             #[cfg(test)]
             KeptSource::Fixed {
                 ref columns,
@@ -93,6 +102,20 @@ impl KeptSource {
             KeptSource::Pending => std::future::pending().await,
             #[cfg(test)]
             KeptSource::Empty => Ok(()),
+        }
+    }
+
+    /// True for a spill file, which uses the local disk.
+    pub fn is_spill(&self) -> bool {
+        matches!(self, KeptSource::SpillFile(_))
+    }
+
+    /// The number of rows that a spill file contains. Other sources do not
+    /// know their number of rows.
+    pub fn saved_rows(&self) -> Option<u64> {
+        match self {
+            KeptSource::SpillFile(file) => Some(file.rows()),
+            _ => None,
         }
     }
 }
@@ -125,6 +148,10 @@ pub struct KeptSet {
     pub set: u32,
     /// The identifier that `export_kept` and `release_kept` take.
     pub id: String,
+    /// The number of rows that a spill file of the set contains, so the
+    /// grid can tell the user that every row is on this computer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saved_rows: Option<u64>,
 }
 
 /// The identifier of one kept set: the identifier of the request of the run
@@ -138,6 +165,13 @@ pub fn kept_id(request_id: &str, set: u32) -> String {
 #[derive(Default)]
 pub struct KeptResults {
     entries: Mutex<HashMap<String, Arc<KeptResult>>>,
+    /// The bytes of every spill file, also the files that a run still
+    /// writes.
+    disk: DiskUse,
+    /// The folder of the spill files. The start of the application sets
+    /// it after it removes the files of an earlier process, and a run
+    /// writes no spill file before that.
+    spill_folder: OnceLock<PathBuf>,
 }
 
 impl KeptResults {
@@ -170,10 +204,15 @@ impl KeptResults {
         let mut kept = Vec::with_capacity(sources.len());
         for (set, source) in sources {
             let id = kept_id(request_id, set);
+            let saved_rows = source.saved_rows();
             let mut entry = KeptResult::new(connection_id, source);
             entry.kept_at = now;
             entries.insert(id.clone(), Arc::new(entry));
-            kept.push(KeptSet { set, id });
+            kept.push(KeptSet {
+                set,
+                id,
+                saved_rows,
+            });
         }
         prune(&mut entries, now);
         kept
@@ -204,6 +243,38 @@ impl KeptResults {
         let before = entries.len();
         entries.retain(|_, entry| entry.connection_id != connection_id);
         before - entries.len()
+    }
+
+    /// Removes the oldest kept spill file, so a new spill gets its disk.
+    /// Returns false when the registry contains no spill file. The file
+    /// goes after the lock of the registry ends.
+    pub fn release_oldest_spill(&self) -> bool {
+        let oldest = {
+            let mut entries = self.entries();
+            let id = entries
+                .iter()
+                .filter(|(_, entry)| entry.source.is_spill())
+                .min_by_key(|(_, entry)| entry.kept_at)
+                .map(|(id, _)| id.clone());
+            id.and_then(|id| entries.remove(&id))
+        };
+        oldest.is_some()
+    }
+
+    /// The count of the disk use of the spill files.
+    pub fn disk_use(&self) -> DiskUse {
+        self.disk.clone()
+    }
+
+    /// Sets the folder of the spill files. A second call changes nothing.
+    pub fn set_spill_folder(&self, folder: PathBuf) {
+        let _ = self.spill_folder.set(folder);
+    }
+
+    /// The folder of the spill files, when the start of the application
+    /// prepared it.
+    pub fn spill_folder(&self) -> Option<PathBuf> {
+        self.spill_folder.get().cloned()
     }
 
     /// The number of kept results.
@@ -251,11 +322,13 @@ pub(crate) mod tests {
             vec![
                 KeptSet {
                     set: 0,
-                    id: "r1:0".into()
+                    id: "r1:0".into(),
+                    saved_rows: None,
                 },
                 KeptSet {
                     set: 2,
-                    id: "r1:2".into()
+                    id: "r1:2".into(),
+                    saved_rows: None,
                 },
             ]
         );
@@ -347,6 +420,80 @@ pub(crate) mod tests {
         let set = sink.into_response(RunSummary::default()).results.remove(0);
         assert_eq!(set.rows.len(), 1);
         assert!(set.truncated);
+    }
+
+    #[tokio::test]
+    async fn a_spill_file_gives_its_rows_and_its_count() {
+        let folder = tempfile::tempdir().unwrap();
+        let registry = KeptResults::default();
+        let file = crate::spill::tests::spill(folder.path(), &registry.disk_use(), 3);
+        let bytes = file.bytes();
+        assert_eq!(registry.disk_use().bytes(), bytes);
+        let kept = registry.keep("r1", "c1", vec![(0, KeptSource::SpillFile(file))]);
+        assert_eq!(kept[0].saved_rows, Some(3));
+        assert_eq!(
+            serde_json::to_value(&kept[0]).unwrap(),
+            json!({ "set": 0, "id": "r1:0", "savedRows": 3 })
+        );
+        let entry = registry.get("r1:0").unwrap();
+        assert!(entry.source.is_spill());
+        assert!(!fixed(1).is_spill());
+        assert_eq!(fixed(1).saved_rows(), None);
+
+        let mut sink = BufferSink::new(10);
+        entry
+            .source
+            .read(&ExecOptions::default(), &mut sink)
+            .await
+            .unwrap();
+        let set = sink.into_response(RunSummary::default()).results.remove(0);
+        assert_eq!(set.rows.len(), 3);
+
+        // The release removes the file when the last reader lets it go.
+        assert!(registry.release("r1:0"));
+        assert_eq!(registry.disk_use().bytes(), bytes);
+        drop(entry);
+        assert_eq!(registry.disk_use().bytes(), 0);
+        assert!(crate::spill::tests::wait_for_empty(folder.path()));
+    }
+
+    #[test]
+    fn the_oldest_spill_goes_first_and_other_sources_stay() {
+        let folder = tempfile::tempdir().unwrap();
+        let registry = KeptResults::default();
+        let disk = registry.disk_use();
+        let start = Instant::now();
+        let spill =
+            |rows| KeptSource::SpillFile(crate::spill::tests::spill(folder.path(), &disk, rows));
+        registry.keep_at("athena", "c1", vec![(0, fixed(1))], start);
+        registry.keep_at(
+            "old",
+            "c1",
+            vec![(0, spill(1))],
+            start + Duration::from_secs(1),
+        );
+        registry.keep_at(
+            "new",
+            "c1",
+            vec![(0, spill(2))],
+            start + Duration::from_secs(2),
+        );
+        assert!(registry.release_oldest_spill());
+        assert!(registry.get("old:0").is_none());
+        assert!(registry.get("new:0").is_some());
+        assert!(registry.release_oldest_spill());
+        assert!(!registry.release_oldest_spill());
+        assert!(registry.get("athena:0").is_some());
+        assert_eq!(disk.bytes(), 0);
+    }
+
+    #[test]
+    fn the_folder_of_the_spill_files_is_set_once() {
+        let registry = KeptResults::default();
+        assert_eq!(registry.spill_folder(), None);
+        registry.set_spill_folder(PathBuf::from("/first"));
+        registry.set_spill_folder(PathBuf::from("/second"));
+        assert_eq!(registry.spill_folder(), Some(PathBuf::from("/first")));
     }
 
     #[tokio::test]

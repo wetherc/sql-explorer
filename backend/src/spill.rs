@@ -20,17 +20,20 @@
 //! not stop the async threads that serve the other commands. The files stand
 //! in one folder under the cache folder of the application. The start of the
 //! application empties that folder, because a crash leaves its files there.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use crate::db::sink::{RowSink, SinkControl};
 use crate::db::{ColumnInfo, ExecOptions};
 use crate::error::{Error, Result};
+use crate::kept::KeptResults;
 use serde_json::Value as JsonValue;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use tempfile::NamedTempFile;
+
+mod sink;
+pub use sink::SpillSink;
 
 /// The name of the folder of the spill files, under the cache folder.
 pub const SPILL_FOLDER: &str = "spill";
@@ -158,6 +161,19 @@ pub fn prepare_folder(cache: &Path) -> Result<PathBuf> {
     }
     std::fs::create_dir_all(&folder)?;
     Ok(folder)
+}
+
+/// Prepares the folder of the spill files under the cache folder of the
+/// application, and gives it to the registry. A failure leaves the registry
+/// without a folder, and the runs then spill nothing.
+pub fn start_folder(cache: std::result::Result<PathBuf, tauri::Error>, kept: &KeptResults) {
+    match cache
+        .map_err(|error| Error::Storage(error.to_string()))
+        .and_then(|cache| prepare_folder(&cache))
+    {
+        Ok(folder) => kept.set_spill_folder(folder),
+        Err(error) => log::warn!("Full results can't be saved on this computer: {error}"),
+    }
 }
 
 /// The bytes of every spill file of the process, as a count that each writer
@@ -535,6 +551,16 @@ pub(crate) mod tests {
         let file = cache.path().join("file");
         std::fs::write(&file, b"x").unwrap();
         assert!(prepare_folder(&file).is_err());
+    }
+
+    #[test]
+    fn the_start_gives_the_folder_to_the_registry() {
+        let cache = tempfile::tempdir().unwrap();
+        let kept = KeptResults::default();
+        start_folder(Err(tauri::Error::UnknownPath), &kept);
+        assert_eq!(kept.spill_folder(), None);
+        start_folder(Ok(cache.path().to_path_buf()), &kept);
+        assert_eq!(kept.spill_folder(), Some(cache.path().join(SPILL_FOLDER)));
     }
 
     #[test]

@@ -1237,6 +1237,7 @@ mod tests {
         sink.announce_kept(vec![KeptSet {
             set: 1,
             id: "r1:1".into(),
+            saved_rows: None,
         }]);
         sink.finish(RunSummary::default()).unwrap();
 

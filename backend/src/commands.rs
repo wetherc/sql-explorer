@@ -17,6 +17,7 @@ use crate::history::HistoryEntry;
 use crate::script::{self, ScriptStatement};
 use crate::secrets::{self, SecretStore};
 use crate::session::{Session, DEFAULT_SESSION};
+use crate::spill::SpillSink;
 use crate::sql::ParamValues;
 use crate::state::{
     AppState, BackgroundRole, ConnectionHealth, ConnectionInfo, ConnectionStatusEvent,
@@ -1000,6 +1001,83 @@ pub struct ExecuteRequest {
     pub query_params: Option<ParamValues>,
     #[serde(default)]
     pub options: Option<ExecOptions>,
+    /// The spill of the full result sets to the local disk, when the user
+    /// turned it on.
+    #[serde(default)]
+    pub spill: Option<SpillRequest>,
+}
+
+/// What a run that keeps its full result sets on the local disk asks for.
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpillRequest {
+    /// The row limit of the read, which is the export row limit.
+    pub max_rows: usize,
+    /// The cap of the disk use of every spill file, in bytes.
+    pub max_bytes: u64,
+}
+
+/// The spill of one run and the folder of its files, when the run can
+/// spill.
+///
+/// Athena keeps its full result in S3, so a run there gets its kept result
+/// without a spill. A read limit at or below the grid limit leaves nothing
+/// to spill. A script of more than one statement does not spill, because the
+/// cap can stop the read with a `Stop`, and a `Stop` makes some drivers skip
+/// the statements after the one that stopped.
+fn spill_plan(
+    state: &AppState,
+    request: Option<SpillRequest>,
+    dialect: crate::sql::Dialect,
+    query: &str,
+    grid: &ExecOptions,
+) -> Option<(SpillRequest, std::path::PathBuf)> {
+    let request = request.filter(|request| {
+        dialect != crate::sql::Dialect::Athena
+            && request.max_rows > grid.max_rows
+            && crate::sql::split_statements(query, dialect).len() == 1
+    })?;
+    Some((request, state.kept.spill_folder()?))
+}
+
+/// The kept sources of a run that go to the registry. A spill file stays
+/// only after a run that ended well.
+fn sources_to_keep(
+    mut sources: Vec<(u32, crate::kept::KeptSource)>,
+    ended_well: bool,
+) -> Vec<(u32, crate::kept::KeptSource)> {
+    if !ended_well {
+        sources.retain(|(_, source)| !source.is_spill());
+    }
+    sources
+}
+
+/// Takes the driver of the session and runs the statement into the sink,
+/// under the Stop button of the request and the limits of the options.
+#[allow(clippy::too_many_arguments)]
+async fn run_into_sink(
+    state: &AppState,
+    request_id: &str,
+    session: &Session,
+    token: &CancellationToken,
+    ran: &str,
+    bound: Option<&QueryParams>,
+    options: &ExecOptions,
+    sink: &mut dyn crate::db::sink::RowSink,
+) -> Bounded<crate::db::sink::RunSummary> {
+    match driver_for_request(state, request_id, session, token).await {
+        Ok(mut guard) => {
+            run_bounded(
+                guard.execute_stream(ran, bound, options, sink),
+                token,
+                options.timeout_secs,
+                stop_grace(session),
+                session.cancel_handle.clone(),
+            )
+            .await
+        }
+        Err(error) => Bounded::Answered(Err(error)),
+    }
 }
 
 /// Runs a script and sends its rows to the window as binary chunks.
@@ -1021,6 +1099,7 @@ pub async fn execute_query<R: Runtime>(
         tab_id,
         query_params,
         options,
+        spill,
     } = request;
     let started = std::time::Instant::now();
     // The record goes in first, so a Stop while the session opens still
@@ -1045,28 +1124,59 @@ pub async fn execute_query<R: Runtime>(
         }
     };
 
-    let mut sink = ChunkSink::new(on_chunk, options.max_rows);
-    let outcome = match driver_for_request(&state, &request_id, &session, &token).await {
-        Ok(mut guard) => {
-            run_bounded(
-                guard.execute_stream(&ran, bound.as_ref(), &options, &mut sink),
+    let grid = ChunkSink::new(on_chunk, options.max_rows);
+    let (outcome, mut sink) = match spill_plan(&state, spill, open.dialect, &ran, &options) {
+        Some((spill, folder)) => {
+            // The driver reads up to the export row limit, and the grid
+            // gets the rows up to its own limit.
+            let read = ExecOptions {
+                max_rows: spill.max_rows,
+                ..options
+            };
+            let mut sink =
+                SpillSink::new(grid, options.max_rows, folder, spill.max_bytes, &state.kept);
+            let outcome = run_into_sink(
+                &state,
+                &request_id,
+                &session,
                 &token,
-                options.timeout_secs,
-                stop_grace(&session),
-                session.cancel_handle.clone(),
+                &ran,
+                bound.as_ref(),
+                &read,
+                &mut sink,
             )
-            .await
+            .await;
+            (outcome, sink.into_grid())
         }
-        Err(error) => Bounded::Answered(Err(error)),
+        None => {
+            let mut sink = grid;
+            let outcome = run_into_sink(
+                &state,
+                &request_id,
+                &session,
+                &token,
+                &ran,
+                bound.as_ref(),
+                &options,
+                &mut sink,
+            )
+            .await;
+            (outcome, sink)
+        }
     };
     let outcome = in_sent_text(outcome, &query, &ran);
 
     state.end_request(&request_id).await;
     // A set that the row limit cut can stay in the registry, also when a
     // later statement of the script failed, because the grid shows that set.
-    let kept = state
-        .kept
-        .keep(&request_id, &connection_id, sink.take_kept());
+    // A stop, a time limit or an error can end a set early, so a spill file
+    // stays only after a run that ended well, because its file can miss
+    // rows.
+    let sources = sources_to_keep(
+        sink.take_kept(),
+        matches!(outcome, Bounded::Answered(Ok(_))),
+    );
+    let kept = state.kept.keep(&request_id, &connection_id, sources);
     sink.announce_kept(kept);
     match finish_run(&state, &connection_id, &open, &key, &session, outcome).await {
         Ok(summary) => sink.finish(summary),
@@ -4960,6 +5070,7 @@ mod tests {
             tab_id: Some("t1".into()),
             query_params: None,
             options: None,
+            spill: None,
         }
     }
 
@@ -4997,6 +5108,214 @@ mod tests {
         assert!(matches!(&error, Error::NotConnected(id) if id == "missing"));
         assert_eq!(error.category(), crate::error::ErrorCategory::NotConnected);
         assert_eq!(*frame_types.lock().unwrap(), vec![FRAME_END]);
+    }
+
+    /// The messages that a test channel received.
+    type Messages = std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>;
+
+    /// A channel that keeps every message.
+    fn message_channel() -> (Channel<InvokeResponseBody>, Messages) {
+        let messages = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = messages.clone();
+        let channel = Channel::new(move |body| {
+            if let InvokeResponseBody::Raw(bytes) = body {
+                kept.lock().unwrap().push(bytes);
+            }
+            Ok(())
+        });
+        (channel, messages)
+    }
+
+    /// The JSON of the frame that ends the run, which is the last message.
+    fn end_frame(messages: &[Vec<u8>]) -> serde_json::Value {
+        let last = messages.last().unwrap();
+        assert_eq!(last[0], crate::db::columnar::FRAME_END);
+        serde_json::from_slice(&last[5..]).unwrap()
+    }
+
+    /// A run of one statement on SQLite that keeps its full result.
+    fn spill_request(query: &str, grid_rows: usize) -> ExecuteRequest {
+        ExecuteRequest {
+            options: Some(ExecOptions {
+                max_rows: grid_rows,
+                ..ExecOptions::default()
+            }),
+            spill: Some(SpillRequest {
+                max_rows: 1000,
+                max_bytes: u64::MAX,
+            }),
+            ..run_request("s1", query)
+        }
+    }
+
+    /// Numbers from 1 to `last`, in one statement.
+    fn numbers(last: usize, value: &str) -> String {
+        format!(
+            "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < {last}) \
+             SELECT {value} FROM n"
+        )
+    }
+
+    #[tokio::test]
+    async fn a_run_keeps_its_full_result_in_a_spill_file() {
+        use tauri::Manager;
+        let (_dir, descriptor) = temp_sqlite();
+        let (app, state) = state_with_sqlite(descriptor).await;
+        let folder = tempfile::tempdir().unwrap();
+        state.kept.set_spill_folder(folder.path().to_path_buf());
+        app.manage(state);
+        let state = app.state::<AppState>();
+
+        let (channel, messages) = message_channel();
+        execute_query(
+            app.handle().clone(),
+            spill_request(&numbers(50, "x"), 10),
+            app.state::<AppState>(),
+            channel,
+        )
+        .await
+        .unwrap();
+        let end = end_frame(&messages.lock().unwrap());
+        assert_eq!(
+            end["kept"],
+            serde_json::json!([{ "set": 0, "id": "r1:0", "savedRows": 50 }])
+        );
+        assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 1);
+
+        // The export reads the file, and the statement does not run again.
+        let kept = state.kept.get("r1:0").unwrap();
+        let path = folder.path().join("all.csv");
+        let summary = write_kept(
+            &state,
+            "e1",
+            &kept,
+            &path,
+            ExportFormat::Csv,
+            &export_options(1000, 30),
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.rows, 50);
+        assert!(!summary.truncated);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let expected: String = (1..=50).map(|n| format!("{n}\r\n")).collect();
+        assert_eq!(text, format!("{CSV_BOM}x\r\n{expected}"));
+
+        // A release removes the file.
+        drop(kept);
+        std::fs::remove_file(&path).unwrap();
+        assert!(state.kept.release("r1:0"));
+        assert!(crate::spill::tests::wait_for_empty(folder.path()));
+    }
+
+    #[tokio::test]
+    async fn a_run_that_fails_during_the_spill_keeps_no_file() {
+        use tauri::Manager;
+        let (_dir, descriptor) = temp_sqlite();
+        let (app, state) = state_with_sqlite(descriptor).await;
+        let folder = tempfile::tempdir().unwrap();
+        state.kept.set_spill_folder(folder.path().to_path_buf());
+        app.manage(state);
+
+        // Each row takes about 1000 bytes, so the file opens before the
+        // statement fails at row 400.
+        let value = "CASE WHEN x < 400 THEN hex(zeroblob(500)) ELSE abs(-9223372036854775808) END";
+        let (channel, messages) = message_channel();
+        let error = execute_query(
+            app.handle().clone(),
+            spill_request(&numbers(500, value), 10),
+            app.state::<AppState>(),
+            channel,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("overflow"));
+        assert_eq!(
+            end_frame(&messages.lock().unwrap())["kept"],
+            serde_json::json!([])
+        );
+        assert_eq!(app.state::<AppState>().kept.len(), 0);
+        assert!(crate::spill::tests::wait_for_empty(folder.path()));
+    }
+
+    #[test]
+    fn a_run_that_did_not_end_well_keeps_no_spill_file() {
+        let folder = tempfile::tempdir().unwrap();
+        let disk = crate::spill::DiskUse::default();
+        let sources = || {
+            vec![
+                (0, crate::kept::tests::fixed(1)),
+                (
+                    1,
+                    crate::kept::KeptSource::SpillFile(crate::spill::tests::spill(
+                        folder.path(),
+                        &disk,
+                        1,
+                    )),
+                ),
+            ]
+        };
+        assert_eq!(sources_to_keep(sources(), true).len(), 2);
+        let kept = sources_to_keep(sources(), false);
+        assert_eq!(kept.len(), 1);
+        assert!(!kept[0].1.is_spill());
+        assert_eq!(disk.bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_run_that_cannot_take_the_driver_reports_why() {
+        let (_dir, descriptor) = temp_sqlite();
+        let (app, state) = state_with_sqlite(descriptor).await;
+        let token = CancellationToken::new();
+        let (_, session, _) = session_for(app.handle(), &state, "s1", Some("t1"), &token)
+            .await
+            .unwrap();
+        token.cancel();
+        let mut sink = crate::db::sink::BufferSink::new(10);
+        let outcome = run_into_sink(
+            &state,
+            "r1",
+            &session,
+            &token,
+            "SELECT 1",
+            None,
+            &ExecOptions::default(),
+            &mut sink,
+        )
+        .await;
+        assert!(matches!(outcome, Bounded::Answered(Err(Error::Cancelled))));
+    }
+
+    #[tokio::test]
+    async fn only_a_run_of_one_statement_off_athena_spills() {
+        use crate::sql::Dialect;
+        let state = AppState::new(Arc::new(MemoryStore::default()));
+        let grid = ExecOptions {
+            max_rows: 10,
+            ..ExecOptions::default()
+        };
+        let request = Some(SpillRequest {
+            max_rows: 100,
+            max_bytes: 1,
+        });
+        let plan = |request, dialect, query: &str| {
+            spill_plan(&state, request, dialect, query, &grid).map(|(_, folder)| folder)
+        };
+        // No folder before the start prepares it.
+        assert_eq!(plan(request, Dialect::Sqlite, "SELECT 1"), None);
+        state.kept.set_spill_folder("/spill".into());
+        assert_eq!(
+            plan(request, Dialect::Sqlite, "SELECT 1"),
+            Some("/spill".into())
+        );
+        assert_eq!(plan(None, Dialect::Sqlite, "SELECT 1"), None);
+        assert_eq!(plan(request, Dialect::Athena, "SELECT 1"), None);
+        assert_eq!(plan(request, Dialect::Sqlite, "SELECT 1; SELECT 2"), None);
+        let low = Some(SpillRequest {
+            max_rows: 10,
+            max_bytes: 1,
+        });
+        assert_eq!(plan(low, Dialect::Sqlite, "SELECT 1"), None);
     }
 
     #[tokio::test]

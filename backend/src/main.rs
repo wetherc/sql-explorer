@@ -44,6 +44,16 @@ fn main() {
         .setup(|app| {
             spawn_session_reaper(app.handle().clone(), SESSION_REAP_INTERVAL);
 
+            // The spill files of an earlier process go before a run can
+            // write a new one. A folder with many files takes time to
+            // empty, so the work runs on a thread of its own.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                use tauri::Manager;
+                let kept = &handle.state::<AppState>().kept;
+                spill::start_folder(handle.path().app_cache_dir(), kept);
+            });
+
             // The menu of the operating system holds the commands of a file
             // beside the items the platform expects. A click sends the
             // identifier of the command to the window, which runs it.
