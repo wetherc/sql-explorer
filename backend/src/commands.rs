@@ -2284,30 +2284,13 @@ pub async fn read_text_file(path: String, state: tauri::State<'_, AppState>) -> 
     Ok(TextFile { contents, encoding })
 }
 
-/// Writes the text of one file that is a grant or inside the roots, in the
-/// encoding the window names, and gives the encoding it used. A request
-/// without an encoding writes UTF-8.
-#[tauri::command]
-pub async fn write_text_file(
-    path: String,
-    contents: String,
-    encoding: Option<files::TextEncoding>,
-    state: tauri::State<'_, AppState>,
-) -> Result<files::TextEncoding> {
-    let target = accepted_path(&path, &state).await?;
-    let encoding = encoding.unwrap_or(files::TextEncoding::Utf8);
-    off_thread(move || {
-        let used = files::write_text_as(&target, &contents, encoding)?;
-        log::info!("Wrote the file '{}'.", target.display());
-        Ok(used)
-    })
-    .await
-}
-
 /// What a request to save the statement of a tab carries.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveStatementRequest {
+    /// The file of the tab, when the tab has one.
+    #[serde(default)]
+    pub path: Option<String>,
     /// The file name that the save dialog suggests.
     pub default_name: String,
     /// The folder the dialog opens in, when the interface knows one.
@@ -2328,26 +2311,78 @@ pub struct SavedStatement {
     pub encoding: files::TextEncoding,
 }
 
-/// Asks the user for a path and writes the statement of a tab there.
+/// Writes the statement of a tab to its file, or asks the user for a path.
 ///
-/// The file becomes a grant, so the next save of the same tab reaches it
-/// through `write_text_file`. Returns the path and the encoding of the file,
-/// or `None` when the user closed the dialog.
+/// A tab whose file is a grant or inside a root writes that file at once. A
+/// tab without a file, or with a file outside every grant and root, opens
+/// the save dialog. A file is outside every grant and root when the user
+/// opened it from a folder in the files panel and then closed the folder. The dialog then
+/// starts at the name and the folder of that file, so the user confirms the
+/// same file. The file that the dialog gives becomes a grant, so the next
+/// save writes it at once. Returns the path and the encoding of the file, or
+/// `None` when the user closed the dialog.
 #[tauri::command]
 pub async fn save_statement_file<R: Runtime>(
     app: AppHandle<R>,
     request: SaveStatementRequest,
     state: tauri::State<'_, AppState>,
 ) -> Result<Option<SavedStatement>> {
-    let start_folder = request.default_folder.as_deref().map(std::path::Path::new);
-    let Some(path) = ask_save_path(&app, &request.default_name, "SQL", "sql", start_folder).await
-    else {
+    if let Some(known) = request.path.as_deref() {
+        if let Some(saved) =
+            write_accepted(known, &request.contents, request.encoding, &state).await?
+        {
+            log::info!("Wrote the file '{}'.", saved.path);
+            return Ok(Some(saved));
+        }
+    }
+    let (name, folder) = dialog_start(&request);
+    let Some(path) = ask_save_path(&app, &name, "SQL", "sql", folder.as_deref()).await else {
         return Ok(None);
     };
     let saved = write_statement(&path, &request.contents, request.encoding)?;
     accept_file(&app, &state, &path).await;
     log::info!("Wrote the file '{}'.", saved.path);
     Ok(Some(saved))
+}
+
+/// Writes the statement to a file that is a grant or inside a root. Gives
+/// `None` when the path is out of reach, so the caller asks the user for a
+/// path. The result names the path as the tab gave it, because the tab
+/// finds its file by that text.
+async fn write_accepted(
+    path: &str,
+    contents: &str,
+    encoding: Option<files::TextEncoding>,
+    state: &AppState,
+) -> Result<Option<SavedStatement>> {
+    let Ok(target) = accepted_path(path, state).await else {
+        return Ok(None);
+    };
+    let contents = contents.to_owned();
+    let mut saved = off_thread(move || write_statement(&target, &contents, encoding)).await?;
+    saved.path = path.to_owned();
+    Ok(Some(saved))
+}
+
+/// The file name that the save dialog suggests and the folder it opens in.
+/// A tab with a file suggests the name and the folder of that file.
+fn dialog_start(request: &SaveStatementRequest) -> (String, Option<std::path::PathBuf>) {
+    let known = request.path.as_deref().map(std::path::Path::new);
+    let name = known
+        .and_then(|path| path.file_name())
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| request.default_name.clone());
+    let folder = known
+        .and_then(|path| path.parent())
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(std::path::Path::to_path_buf)
+        .or_else(|| {
+            request
+                .default_folder
+                .as_ref()
+                .map(std::path::PathBuf::from)
+        });
+    (name, folder)
 }
 
 /// Writes the statement of a tab to a path that the user chose.
@@ -4504,6 +4539,78 @@ mod tests {
         assert!(!Arc::ptr_eq(&frail, &replaced));
         let default_after = open.default_session().await.unwrap();
         assert!(Arc::ptr_eq(&default_before, &default_after));
+    }
+
+    #[tokio::test]
+    async fn a_statement_goes_to_an_accepted_file_without_a_dialog() {
+        let app = app_with_store();
+        let state = state();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.sql");
+        std::fs::write(&file, "SELECT 1").unwrap();
+        let name = file.to_string_lossy().to_string();
+
+        // A file that the user did not accept stays out of reach, and the
+        // caller asks for a path.
+        assert_eq!(
+            write_accepted(&name, "SELECT 2", None, &state)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), b"SELECT 1");
+
+        accept_file(app.handle(), &state, &file).await;
+        let saved = write_accepted(&name, "SELECT 2", None, &state)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.path, name);
+        assert_eq!(saved.encoding, files::TextEncoding::Utf8);
+        assert_eq!(std::fs::read(&file).unwrap(), b"SELECT 2");
+    }
+
+    #[test]
+    fn the_save_dialog_starts_at_the_file_of_the_tab() {
+        let request = |value: serde_json::Value| -> SaveStatementRequest {
+            serde_json::from_value(value).unwrap()
+        };
+        let known = request(serde_json::json!({
+            "path": "/data/reports/daily.sql",
+            "defaultName": "Query 1.sql",
+            "defaultFolder": "/work",
+            "contents": "",
+        }));
+        assert_eq!(
+            dialog_start(&known),
+            (
+                "daily.sql".to_owned(),
+                Some(std::path::PathBuf::from("/data/reports"))
+            )
+        );
+
+        // A tab without a file uses the name and the folder of the request.
+        let fresh = request(serde_json::json!({
+            "defaultName": "Query 1.sql",
+            "defaultFolder": "/work",
+            "contents": "",
+        }));
+        assert_eq!(
+            dialog_start(&fresh),
+            (
+                "Query 1.sql".to_owned(),
+                Some(std::path::PathBuf::from("/work"))
+            )
+        );
+
+        // A bare file name gives no folder of its own.
+        let bare = request(serde_json::json!({
+            "path": "daily.sql",
+            "defaultName": "x.sql",
+            "defaultFolder": null,
+            "contents": "",
+        }));
+        assert_eq!(dialog_start(&bare), ("daily.sql".to_owned(), None));
     }
 
     #[test]

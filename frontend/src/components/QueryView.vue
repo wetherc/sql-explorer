@@ -1226,9 +1226,11 @@ function suggestedFileName(title: string): string {
 
 /**
  * Writes the statement of the tab to a file. A tab that came from the disk
- * goes back to the same file. A tab without a file reaches the save dialog
- * of the operating system, which opens in the first folder of the files
- * panel when the panel holds one.
+ * goes back to the same file. The backend asks for a path when the tab has
+ * no file path, and also when the file is outside every open folder and the
+ * user never chose it in a dialog, such as a file from a folder that the user
+ * closed. The save dialog then opens
+ * at that file, or in the first folder of the files panel for a new tab.
  */
 async function saveToFile(): Promise<void> {
   if (savingFile.value) {
@@ -1240,35 +1242,33 @@ async function saveToFile(): Promise<void> {
     // the text that the tab records as saved.
     const text = props.tab.query
     const path = props.tab.filePath
-    if (path) {
-      const asked = props.tab.encoding
-      const used = await api.writeTextFile(path, text, asked)
-      tabs.markClean(props.tab.id, text)
-      if (used !== asked) {
-        tabs.setEncoding(props.tab.id, used)
-      }
-      if (asked === 'windows1252' && used === 'utf8bom') {
-        ui.warn("Saved as UTF-8 because the text has characters that Windows-1252 can't store.")
-      } else {
-        ui.success(`Saved ${baseName(path)}.`)
-      }
-      return
-    }
+    // A new file is UTF-8. A file of the tab keeps its own encoding.
+    const asked = path ? props.tab.encoding : undefined
     const written = await api.saveStatementFile({
+      path,
       defaultName: suggestedFileName(props.tab.title),
       defaultFolder: files.roots[0]?.path ?? null,
       contents: text,
+      encoding: asked,
     })
     if (written === null) {
       return
     }
-    tabs.setFilePath(props.tab.id, written.path)
-    // The next save writes the encoding of the new file, and not the
-    // encoding of a file that the tab showed before.
-    tabs.setEncoding(props.tab.id, written.encoding)
-    tabs.rename(props.tab.id, baseName(written.path))
+    if (written.path !== path) {
+      tabs.setFilePath(props.tab.id, written.path)
+      tabs.rename(props.tab.id, baseName(written.path))
+    }
+    // A new file takes the encoding the backend wrote, and a file of the tab
+    // records an encoding that differs from the one it asked for.
+    if (written.encoding !== asked) {
+      tabs.setEncoding(props.tab.id, written.encoding)
+    }
     tabs.markClean(props.tab.id, text)
-    ui.success(`Saved ${baseName(written.path)}.`)
+    if (asked === 'windows1252' && written.encoding === 'utf8bom') {
+      ui.warn("Saved as UTF-8 because the text has characters that Windows-1252 can't store.")
+    } else {
+      ui.success(`Saved ${baseName(written.path)}.`)
+    }
   } catch (error) {
     ui.reportError(error)
   } finally {

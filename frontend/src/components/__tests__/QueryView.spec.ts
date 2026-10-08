@@ -1135,7 +1135,7 @@ describe('QueryView', () => {
   })
 
   it('writes the statement back to the file that the tab came from', async () => {
-    apiStub.writeTextFile.mockResolvedValue('utf8')
+    apiStub.saveStatementFile.mockResolvedValue({ path: '/data/report.sql', encoding: 'utf8' })
     const wrapper = await mountView('SELECT 1', '/data/report.sql')
     const tabs = useTabsStore()
     tabs.tabs = [
@@ -1155,17 +1155,49 @@ describe('QueryView', () => {
     await wrapper.find('[data-test="save-file-button"]').trigger('click')
     await settle()
 
-    expect(apiStub.writeTextFile).toHaveBeenCalledWith('/data/report.sql', 'SELECT 1', 'utf8')
-    expect(apiStub.saveStatementFile).not.toHaveBeenCalled()
-    expect(tabs.tabs[0]?.dirty).toBe(false)
+    expect(apiStub.saveStatementFile).toHaveBeenCalledWith(
+      expect.objectContaining({ path: '/data/report.sql', contents: 'SELECT 1', encoding: 'utf8' }),
+    )
+    expect(tabs.tabs[0]).toMatchObject({ filePath: '/data/report.sql', dirty: false })
     expect(useUiStore().notices.some((notice) => notice.level === 'success')).toBe(true)
+  })
+
+  it('follows the file that the user chose when the file of the tab was out of reach', async () => {
+    // The backend opens the save dialog for a file outside every open folder,
+    // and the user can choose another name there.
+    apiStub.saveStatementFile.mockResolvedValue({ path: '/data/copy.sql', encoding: 'utf8' })
+    const wrapper = await mountView('SELECT 1', '/data/report.sql')
+    const tabs = useTabsStore()
+    tabs.tabs = [
+      {
+        id: 't1',
+        title: 'report.sql',
+        query: 'SELECT 1',
+        connectionId: 'c1',
+        dirty: true,
+        savedQueryId: null,
+        params: [],
+        filePath: '/data/report.sql',
+        encoding: 'utf8' as const,
+      },
+    ]
+
+    await wrapper.find('[data-test="save-file-button"]').trigger('click')
+    await settle()
+
+    expect(tabs.tabs[0]).toMatchObject({
+      filePath: '/data/copy.sql',
+      title: 'copy.sql',
+      dirty: false,
+    })
+    expect(lastNotice()?.message).toBe('Saved copy.sql.')
   })
 
   it('keeps the mark of a tab that changed while the write ran', async () => {
     let finish: () => void = () => {}
-    apiStub.writeTextFile.mockReturnValue(
-      new Promise<void>((resolve) => {
-        finish = resolve
+    apiStub.saveStatementFile.mockReturnValue(
+      new Promise((resolve) => {
+        finish = () => resolve({ path: '/data/report.sql', encoding: 'utf8' })
       }),
     )
     const wrapper = await mountView('SELECT 1', '/data/report.sql')
@@ -1189,7 +1221,9 @@ describe('QueryView', () => {
     finish()
     await settle()
 
-    expect(apiStub.writeTextFile).toHaveBeenCalledWith('/data/report.sql', 'SELECT 1', 'utf8')
+    expect(apiStub.saveStatementFile).toHaveBeenCalledWith(
+      expect.objectContaining({ path: '/data/report.sql', contents: 'SELECT 1' }),
+    )
     expect(tabs.tabs[0]?.dirty).toBe(true)
     tabs.setQuery('t1', 'SELECT 1')
     expect(tabs.tabs[0]?.dirty).toBe(false)
@@ -1220,9 +1254,11 @@ describe('QueryView', () => {
     await settle()
 
     expect(apiStub.saveStatementFile).toHaveBeenCalledWith({
+      path: null,
       defaultName: 'Query 1.sql',
       defaultFolder: '/data',
       contents: 'SELECT 1',
+      encoding: undefined,
     })
     // The new file is UTF-8, so the next save writes UTF-8.
     expect(tabs.tabs[0]).toMatchObject({
@@ -1264,7 +1300,11 @@ describe('QueryView', () => {
   })
 
   it('reports a write that the disk refused', async () => {
-    apiStub.writeTextFile.mockRejectedValue({ category: 'io', message: 'read only', detail: null })
+    apiStub.saveStatementFile.mockRejectedValue({
+      category: 'io',
+      message: 'read only',
+      detail: null,
+    })
     const wrapper = await mountView('SELECT 1', '/data/report.sql')
 
     await wrapper.find('[data-test="save-file-button"]').trigger('click')
@@ -1273,25 +1313,25 @@ describe('QueryView', () => {
     expect(useUiStore().notices.some((notice) => notice.level === 'error')).toBe(true)
 
     // The button works again once the first write ends.
-    apiStub.writeTextFile.mockResolvedValue('utf8')
+    apiStub.saveStatementFile.mockResolvedValue({ path: '/data/report.sql', encoding: 'utf8' })
     await wrapper.find('[data-test="save-file-button"]').trigger('click')
     await settle()
-    expect(apiStub.writeTextFile).toHaveBeenCalledTimes(2)
+    expect(apiStub.saveStatementFile).toHaveBeenCalledTimes(2)
   })
 
   it('starts one write at a time', async () => {
     let finish: () => void = () => {}
-    apiStub.writeTextFile.mockImplementation(
+    apiStub.saveStatementFile.mockImplementation(
       () =>
-        new Promise<void>((resolve) => {
-          finish = () => resolve()
+        new Promise((resolve) => {
+          finish = () => resolve(null)
         }),
     )
     const wrapper = await mountView('SELECT 1', '/data/report.sql')
 
     await wrapper.find('[data-test="save-file-button"]').trigger('click')
     await wrapper.vm.saveToFile()
-    expect(apiStub.writeTextFile).toHaveBeenCalledTimes(1)
+    expect(apiStub.saveStatementFile).toHaveBeenCalledTimes(1)
 
     finish()
     await settle()
@@ -1361,12 +1401,14 @@ describe('QueryView', () => {
   })
 
   it('writes the file when a command of the shell asks', async () => {
-    apiStub.writeTextFile.mockResolvedValue('utf8')
+    apiStub.saveStatementFile.mockResolvedValue({ path: '/data/report.sql', encoding: 'utf8' })
     await mountView('SELECT 1', '/data/report.sql')
 
     tabActions('t1')?.save()
     await settle()
-    expect(apiStub.writeTextFile).toHaveBeenCalledWith('/data/report.sql', 'SELECT 1', 'utf8')
+    expect(apiStub.saveStatementFile).toHaveBeenCalledWith(
+      expect.objectContaining({ path: '/data/report.sql', contents: 'SELECT 1' }),
+    )
   })
 
   it('forgets its actions when the tab goes away', async () => {
@@ -1657,7 +1699,7 @@ describe('QueryView edge paths', () => {
   })
 
   it('records the encoding the backend used and says when it changed', async () => {
-    apiStub.writeTextFile.mockResolvedValue('utf8bom')
+    apiStub.saveStatementFile.mockResolvedValue({ path: '/data/old.sql', encoding: 'utf8bom' })
     const wrapper = await mountView('SELECT 1', '/data/old.sql', 'windows1252')
     const tabs = useTabsStore()
     tabs.tabs = [
@@ -1677,12 +1719,13 @@ describe('QueryView edge paths', () => {
 
     await wrapper.find('[data-test="save-file-button"]').trigger('click')
     await settle()
-    expect(apiStub.writeTextFile).toHaveBeenCalledWith('/data/old.sql', 'SELECT 1', 'windows1252')
+    expect(apiStub.saveStatementFile).toHaveBeenCalledWith(
+      expect.objectContaining({ path: '/data/old.sql', encoding: 'windows1252' }),
+    )
     expect(tabs.tabs[0]?.encoding).toBe('utf8bom')
     expect(lastNotice()?.message).toContain("Windows-1252 can't store")
 
     // The same encoding back changes nothing on the tab.
-    apiStub.writeTextFile.mockResolvedValue('utf8bom')
     await wrapper.find('[data-test="save-file-button"]').trigger('click')
     await settle()
     expect(lastNotice()?.message).toBe('Saved old.sql.')

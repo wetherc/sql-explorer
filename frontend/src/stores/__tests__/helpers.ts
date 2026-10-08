@@ -46,7 +46,6 @@ export function makeApiStub() {
     closeFolder: vi.fn(),
     listFolder: vi.fn(),
     readTextFile: vi.fn(),
-    writeTextFile: vi.fn(),
     openStatementFile: vi.fn(),
     saveStatementFile: vi.fn(),
     saveTextFile: vi.fn(),

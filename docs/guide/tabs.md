@@ -52,6 +52,11 @@ it, open the folder from the **File** menu. The panel doesn't show hidden
 entries, and the application neither reads nor writes them inside an open
 folder.
 
+If you open a file from a folder and then close the folder, the application
+loses write access to that file, but the tab still shows it after a restart.
+**Save** then opens the save dialog at that file's name and folder. Confirm it once, and the following
+saves write the file directly.
+
 The files panel doesn't watch the disk. A folder reads its entries again each
 time you expand it, and the **Refresh** button at the top of the panel reads each
 top folder again. If another program writes a file, the tab keeps its old

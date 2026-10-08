@@ -17,7 +17,6 @@ import type {
   MenuCommandState,
   ObjectType,
   OpenedFile,
-  TextEncoding,
   TextFile,
   SaveFileRequest,
   SaveStatementRequest,
@@ -376,19 +375,13 @@ export const api = {
     return invoke('read_text_file', { path })
   },
 
-  /** Writes the text of one file inside a folder that the user opened, in
-   *  the encoding given. Gives back the encoding that the backend used,
-   *  which is UTF-8 with a mark when the given encoding cannot store the
-   *  text. */
-  writeTextFile(path: string, contents: string, encoding?: TextEncoding): Promise<TextEncoding> {
-    return invoke('write_text_file', { path, contents, encoding })
-  },
-
-  /** Asks the user for a path and writes the statement of a tab there, in
-   *  UTF-8 when the request gives no encoding. Text that Windows-1252 can't
-   *  store is written as UTF-8 with a mark. The folder of that file becomes a root, so a later save reaches
-   *  it. Gives back the path and the encoding of the file, or null when the
-   *  user closed the dialog. */
+  /** Writes the statement of a tab. A request with a path that the user
+   *  accepted, through a dialog or an open folder, writes that file at once.
+   *  Any other request opens the save dialog, which starts at the file of the
+   *  request when it has one, and the chosen file becomes accepted. The file
+   *  is in UTF-8 when the request gives no encoding. Text that Windows-1252
+   *  can't store is written as UTF-8 with a mark. Gives back the path and the
+   *  encoding of the file, or null when the user closed the dialog. */
   saveStatementFile(request: SaveStatementRequest): Promise<SavedStatement | null> {
     return invoke('save_statement_file', { request })
   },

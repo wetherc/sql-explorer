@@ -279,6 +279,8 @@ export interface SaveFileRequest {
 
 /** What a request to save the statement of a tab carries. */
 export interface SaveStatementRequest {
+  /** The file of the tab, when the tab has one. */
+  path?: string | null
   /** The file name that the save dialog suggests. */
   defaultName: string
   /** The folder the dialog opens in, when the panel contains one. */

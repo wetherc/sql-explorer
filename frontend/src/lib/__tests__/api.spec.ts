@@ -153,18 +153,6 @@ describe('api', () => {
     })
     expect(invoke).toHaveBeenCalledWith('read_text_file', { path: '/data/a.sql' })
 
-    await api.writeTextFile('/data/a.sql', 'SELECT 1')
-    expect(invoke).toHaveBeenCalledWith('write_text_file', {
-      path: '/data/a.sql',
-      contents: 'SELECT 1',
-    })
-    await api.writeTextFile('/data/a.sql', 'SELECT 1', 'utf16le')
-    expect(invoke).toHaveBeenCalledWith('write_text_file', {
-      path: '/data/a.sql',
-      contents: 'SELECT 1',
-      encoding: 'utf16le',
-    })
-
     await api.saveTextFile({
       defaultName: 'a.csv',
       filterLabel: 'CSV',
