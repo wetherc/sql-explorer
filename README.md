@@ -14,7 +14,8 @@ The website is at <https://sql-explorer.tbmh.org/>.
 ## Screenshots
 
 Every picture below shows sample connections and sample rows. No user and no
-row in them is real.
+row in them is real. The `pnpm screenshots` command makes the pictures again,
+as [Documentation pictures](#documentation-pictures) describes.
 
 ### Connections
 
@@ -81,8 +82,7 @@ stands in the settings.
 ![The history and the statements that ran](docs/screenshots/history.png)
 
 The panel holds every statement that ran, with its connection, its time and
-its result. A second tab holds the statements that the user saved. Both
-persist across a restart.
+its result. The history persists across a restart.
 
 ![The palette of commands](docs/screenshots/palette.png)
 
@@ -359,6 +359,29 @@ rustup component add llvm-tools-preview
 cargo install cargo-llvm-cov
 ```
 
+### Documentation pictures
+
+```sh
+pnpm screenshots            # every picture
+pnpm screenshots grid plan  # the named pictures only
+```
+
+The command writes the pictures in `docs/screenshots/` that are not in the
+`linux/` folder. It serves the interface with Vite and opens it in Google
+Chrome through Playwright. A sample backend in `frontend/shots/browser/` takes
+the place of the Rust half, so the pictures show the sample servers and rows
+of `fixtures.ts`. Each scene in `frontend/shots/scenes.ts` drives the
+interface to one picture. The command also writes a WebP copy of each picture
+that the website shows. It needs Google Chrome and `cwebp`
+(`brew install webp`).
+
+The sample backend throws an error for a command name that has no handler in
+the `commands` table of `backend.ts`, and for a statement whose text matches
+no entry of `RUNS` in `fixtures.ts`. The interface shows that error as a
+notice. The command then stops before it writes the picture, so a picture
+never shows that notice. The Linux pictures come from a real build and the command does
+not make them.
+
 ### Tests against a live server
 
 The unit tests need no server. SQLite runs in memory, and the other drivers are
@@ -432,7 +455,7 @@ backend/              The Rust half
     db/sink.rs        The receiver of the rows of a run: a response or a file
     error.rs          The error type and the payload the interface receives
     files.rs          The query files, their folders and their encodings
-    history.rs        The records of the history and the saved statements
+    history.rs        The records of the history
     jsonfile.rs       The JSON files of the settings, written safely
     main.rs           The start of the application
     menu.rs           The File menu of the operating system
@@ -442,7 +465,7 @@ backend/              The Rust half
     sql.rs            Quoting rules, the statement splitter and the parameters
     state.rs          The open connections and the statements that run
     storage.rs        The connection record and its options
-    store.rs          The settings, the history and the saved statements
+    store.rs          The settings and the history
     xlsx.rs           The writer of Excel files
   live/               The Docker servers and the fixtures of the live tests
   vendor/             The patched copies of tiberius and tokio-postgres
@@ -454,6 +477,8 @@ frontend/             The Vue half
     plugins/          The set-up of Vuetify, Monaco and the icons
     stores/           The state of the interface
     types/            The types of the data that the backend sends
+  shots/              The script that takes the pictures of the documentation
+    browser/          The sample backend that the pictures show
 docs/                 The GitHub Pages site
   guide/              The user guide, which the app bundles and the site publishes
 tests/fixtures/       Test data that the frontend and the backend both read

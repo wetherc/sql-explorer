@@ -18,7 +18,8 @@
     "lint": "pnpm --filter frontend format:check && pnpm --filter frontend lint && pnpm --filter frontend typecheck && cd backend && cargo clippy --all-targets -- -D warnings && cargo fmt --check",
     "format": "pnpm --filter frontend format && cd backend && cargo fmt",
     "verify": "pnpm lint && pnpm test",
-    "prepare": "git config core.hooksPath .githooks || true"
+    "prepare": "git config core.hooksPath .githooks || true",
+    "screenshots": "pnpm --filter frontend screenshots"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.4"

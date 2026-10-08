@@ -20,19 +20,21 @@ export default mergeConfig(
       coverage: {
         provider: 'v8',
         reporter: ['text-summary', 'json', 'html'],
-        include: ['src/**/*.{ts,vue}'],
+        include: ['src/**/*.{ts,vue}', 'shots/browser/**/*.ts'],
         exclude: [
           // Entry points and plugin wiring hold no branches of their own.
           'src/main.ts',
+          'shots/browser/main.ts',
           'src/plugins/**',
           'src/env.d.ts',
           'src/**/*.d.ts',
           // The test helpers are part of the suite, not of the application.
           'src/**/__tests__/**',
+          'shots/**/__tests__/**',
         ],
         thresholds: {
           // Every module that carries logic is covered completely.
-          'src/{lib,stores,types}/**/*.ts': {
+          '{src/{lib,stores,types},shots/browser}/**/*.ts': {
             lines: 100,
             branches: 100,
             functions: 100,
