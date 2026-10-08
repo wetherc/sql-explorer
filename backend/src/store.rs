@@ -1,11 +1,11 @@
-//! The files that hold the settings, the history and the saved queries.
+//! The files of the settings and of the history.
 //!
 //! Every read is tolerant: one record that cannot be understood is written
 //! to the log, left out and reported to the window, so a single damaged
 //! entry does not stop the whole list from loading.
 
 use crate::error::{Error, Result};
-use crate::history::{push_entry, trim_history, HistoryEntry, SavedQuery};
+use crate::history::{push_entry, trim_history, HistoryEntry};
 use crate::jsonfile;
 use crate::storage::SavedConnection;
 use serde::de::DeserializeOwned;
@@ -15,7 +15,9 @@ use tauri::{AppHandle, Runtime};
 
 /// The file that holds the saved connections.
 pub const CONNECTIONS_FILE: &str = "connections.json";
-/// The file that holds the history and the saved queries.
+/// The file of the history. The file can also contain saved statements under
+/// the key `saved`. No command reads or changes that key, so a write of the
+/// history leaves those entries in place.
 pub const QUERIES_FILE: &str = "queries.json";
 /// The file that holds the open tabs.
 pub const WORKSPACE_FILE: &str = "workspace.json";
@@ -59,7 +61,6 @@ fn get_value<R: Runtime>(app: &AppHandle<R>, file: &str, key: &str) -> Result<Op
 }
 
 const HISTORY_KEY: &str = "history";
-const SAVED_KEY: &str = "saved";
 const WORKSPACE_KEY: &str = "workspace";
 const ROOTS_KEY: &str = "roots";
 const GRANTS_KEY: &str = "files";
@@ -189,39 +190,6 @@ pub fn clear_history<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
     )
 }
 
-pub fn read_saved_queries<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<SavedQuery>> {
-    let mut queries: Vec<SavedQuery> =
-        parse_list(QUERIES_FILE, get_value(app, QUERIES_FILE, SAVED_KEY)?);
-    queries.sort_by_key(|query| query.name.to_lowercase());
-    Ok(queries)
-}
-
-pub fn write_saved_query<R: Runtime>(app: &AppHandle<R>, query: &SavedQuery) -> Result<()> {
-    if query.id.trim().is_empty() {
-        return Err(Error::Configuration(
-            "A saved statement needs an ID.".to_string(),
-        ));
-    }
-    edit_list(
-        app,
-        QUERIES_FILE,
-        SAVED_KEY,
-        |queries: &mut Vec<SavedQuery>| match queries.iter_mut().find(|item| item.id == query.id) {
-            Some(existing) => *existing = query.clone(),
-            None => queries.push(query.clone()),
-        },
-    )
-}
-
-pub fn delete_saved_query<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<()> {
-    edit_list(
-        app,
-        QUERIES_FILE,
-        SAVED_KEY,
-        |queries: &mut Vec<SavedQuery>| queries.retain(|item| item.id != id),
-    )
-}
-
 /// Reads the folders that the user accepted in an earlier session.
 ///
 /// This file belongs to the backend. No command writes it with a path that
@@ -269,7 +237,6 @@ pub fn storage_problems<R: Runtime>(app: &AppHandle<R>) -> Vec<String> {
     let reads = [
         read_connections(app).err(),
         read_history(app).err(),
-        read_saved_queries(app).err(),
         read_workspace(app).err(),
         read_file_roots(app).err(),
         read_file_grants(app).err(),
@@ -378,17 +345,6 @@ mod tests {
         }
     }
 
-    fn saved(id: &str, name: &str) -> SavedQuery {
-        SavedQuery {
-            id: id.to_string(),
-            name: name.to_string(),
-            query: "SELECT 1".to_string(),
-            connection_id: None,
-            folder: None,
-            updated_at: "2026-01-01T00:00:00Z".to_string(),
-        }
-    }
-
     #[test]
     fn the_history_takes_each_entry_and_clears() {
         let app = app_with_store();
@@ -406,21 +362,19 @@ mod tests {
     }
 
     #[test]
-    fn a_saved_query_is_added_replaced_and_deleted() {
+    fn a_write_of_the_history_keeps_the_other_keys_of_its_file() {
         let app = app_with_store();
-        write_saved_query(app.handle(), &saved("a", "Beta")).unwrap();
-        write_saved_query(app.handle(), &saved("b", "Alpha")).unwrap();
-        write_saved_query(app.handle(), &saved("a", "Gamma")).unwrap();
-        let names: Vec<String> = read_saved_queries(app.handle())
-            .unwrap()
-            .into_iter()
-            .map(|query| query.name)
-            .collect();
-        assert_eq!(names, ["Alpha", "Gamma"]);
+        let path = settings_path(app.handle(), QUERIES_FILE).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let saved = serde_json::json!([{ "id": "a", "name": "Daily", "query": "SELECT 1" }]);
+        std::fs::write(&path, serde_json::json!({ "saved": saved }).to_string()).unwrap();
 
-        delete_saved_query(app.handle(), "b").unwrap();
-        assert_eq!(read_saved_queries(app.handle()).unwrap().len(), 1);
-        assert!(write_saved_query(app.handle(), &saved(" ", "Blank")).is_err());
+        add_history(app.handle(), entry("1", "SELECT 1")).unwrap();
+        clear_history(app.handle()).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let values: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(values["saved"], saved);
     }
 
     #[test]

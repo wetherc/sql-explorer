@@ -128,20 +128,6 @@
           />
         </template>
       </v-tooltip>
-
-      <v-tooltip location="bottom" text="Save query…">
-        <template #activator="{ props: tip }">
-          <v-btn
-            v-bind="tip"
-            size="small"
-            variant="text"
-            icon="mdi-bookmark-outline"
-            aria-label="Save query…"
-            data-test="save-query-button"
-            @click="savingQuery = true"
-          />
-        </template>
-      </v-tooltip>
     </div>
 
     <!-- The bar names the parameters that the statement holds, so the
@@ -523,21 +509,6 @@
       @confirm="confirmConnection"
       @cancel="pendingConnection = null"
     />
-
-    <AppDialog v-model="savingQuery" max-width="480">
-      <v-card>
-        <v-card-title>Save query</v-card-title>
-        <v-card-text class="d-flex flex-column ga-3">
-          <v-text-field v-model="saveName" label="Name" autofocus data-test="save-query-name" />
-          <v-text-field v-model="saveFolder" label="Folder" placeholder="Saved queries" />
-        </v-card-text>
-        <v-card-actions>
-          <v-spacer />
-          <v-btn text="Cancel" @click="savingQuery = false" />
-          <v-btn color="primary" text="Save" data-test="save-query-confirm" @click="confirmSave" />
-        </v-card-actions>
-      </v-card>
-    </AppDialog>
   </div>
 </template>
 
@@ -558,7 +529,6 @@ import { formatClockTime, formatRowCount } from '@/lib/format'
 import { useConnectionsStore } from '@/stores/connections'
 import { useExplorerStore } from '@/stores/explorer'
 import { baseName, useFilesStore } from '@/stores/files'
-import { useHistoryStore } from '@/stores/history'
 import { MIN_EDITOR_SIZE, useLayoutStore } from '@/stores/layout'
 import { newQueryState, useQueryStore } from '@/stores/query'
 import { useSettingsStore } from '@/stores/settings'
@@ -589,7 +559,6 @@ const queries = useQueryStore()
 const connections = useConnectionsStore()
 const explorer = useExplorerStore()
 const files = useFilesStore()
-const history = useHistoryStore()
 const layout = useLayoutStore()
 const settings = useSettingsStore()
 const ui = useUiStore()
@@ -606,11 +575,8 @@ const editorSize = computed(() => layout.layout.editorSize)
 const resultsCollapsed = computed(() => layout.layout.resultsCollapsed)
 /** True while the results panel stands below the editor and not beside it. */
 const resultsBelow = computed(() => layout.layout.resultsOrientation === 'below')
-const savingQuery = ref(false)
 /** True while a write to the disk is on its way. */
 const savingFile = ref(false)
-const saveName = ref('')
-const saveFolder = ref('')
 const askingTable = ref(false)
 const askingPlan = ref(false)
 const askingParams = ref(false)
@@ -1275,38 +1241,6 @@ async function saveToFile(): Promise<void> {
     savingFile.value = false
   }
 }
-
-async function confirmSave(): Promise<void> {
-  const text = props.tab.query
-  const saved = await history.save({
-    id: props.tab.savedQueryId ?? undefined,
-    name: saveName.value,
-    query: text,
-    connectionId: props.tab.connectionId,
-    folder: saveFolder.value,
-  })
-  if (saved) {
-    tabs.setSavedQuery(props.tab.id, saved.id)
-    // A tab of a file keeps the name of the file and its unsaved mark, because
-    // the save to the library does not write the file.
-    if (props.tab.filePath === null) {
-      tabs.rename(props.tab.id, saved.name)
-      tabs.markClean(props.tab.id, text)
-    }
-    savingQuery.value = false
-  }
-}
-
-watch(savingQuery, (open) => {
-  if (!open) {
-    return
-  }
-  saveName.value = props.tab.title
-  // A statement that is already saved keeps the folder it stands in, so a
-  // second save does not move it to the top level.
-  const held = history.savedQueries.find((query) => query.id === props.tab.savedQueryId)
-  saveFolder.value = held?.folder ?? ''
-})
 
 // The shell holds the keys, and the editor of this tab holds the text, so
 // the view of each tab records what it can do under its own identifier.

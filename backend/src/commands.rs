@@ -12,7 +12,7 @@ use crate::db::{
 };
 use crate::error::{Error, Result};
 use crate::files;
-use crate::history::{HistoryEntry, SavedQuery};
+use crate::history::HistoryEntry;
 use crate::script::{self, ScriptStatement};
 use crate::secrets::{self, SecretStore};
 use crate::session::{Session, DEFAULT_SESSION};
@@ -1901,21 +1901,6 @@ pub async fn add_history_entry<R: Runtime>(app: AppHandle<R>, entry: HistoryEntr
 #[tauri::command]
 pub async fn clear_history<R: Runtime>(app: AppHandle<R>) -> Result<()> {
     off_thread(move || store::clear_history(&app)).await
-}
-
-#[tauri::command]
-pub async fn get_saved_queries<R: Runtime>(app: AppHandle<R>) -> Result<Vec<SavedQuery>> {
-    off_thread(move || store::read_saved_queries(&app)).await
-}
-
-#[tauri::command]
-pub async fn save_query<R: Runtime>(app: AppHandle<R>, query: SavedQuery) -> Result<()> {
-    off_thread(move || store::write_saved_query(&app, &query)).await
-}
-
-#[tauri::command]
-pub async fn delete_saved_query<R: Runtime>(app: AppHandle<R>, id: String) -> Result<()> {
-    off_thread(move || store::delete_saved_query(&app, &id)).await
 }
 
 // --- The open tabs ---

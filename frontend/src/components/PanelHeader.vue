@@ -1,11 +1,5 @@
 <template>
   <div class="panel-header">
-    <!-- A row for a control that changes what the panel shows, above the row
-         that filters it. Most panels leave this row out. -->
-    <div v-if="$slots.switch" class="panel-header-row px-2 pt-1">
-      <slot name="switch" />
-    </div>
-
     <div class="panel-header-row d-flex align-center ga-1 px-2 py-1">
       <v-text-field
         v-if="filter !== undefined"

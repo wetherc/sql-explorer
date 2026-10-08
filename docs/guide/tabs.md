@@ -77,18 +77,9 @@ The application doesn't open a file that looks binary, such as an image. A file
 counts as binary when its first 8 KB contain a zero byte, except UTF-16 text
 with a byte order mark.
 
-## Saved statements
-
-The **Save query…** button beside **Save** keeps the tab's statement in the
-library, under a name and folder that you choose. The library is the **Saved
-queries** list in the history panel, and clicking an entry opens its statement
-in a new tab.
-
-Both the history and the library persist across restarts.
-
 ## Damaged settings files
 
-The application keeps its connections, history, saved queries, open tabs and
+The application keeps its connections, history, open tabs and
 files-panel folders in JSON files. When one of those files can't be read, the application renames it to
 `<name>.corrupt-<number>` beside the original, starts with an empty file in
 its place, and shows a notice that names the kept copy. You can open the copy

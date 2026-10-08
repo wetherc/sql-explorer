@@ -3,7 +3,7 @@ import { computed, ref } from 'vue'
 import { api } from '@/lib/api'
 import { createId } from './connections'
 import { useUiStore } from './ui'
-import type { HistoryEntry, SavedQuery } from '@/types/api'
+import type { HistoryEntry } from '@/types/api'
 
 /**
  * The number of history entries the list keeps. The backend file keeps the
@@ -48,7 +48,6 @@ export const useHistoryStore = defineStore('history', () => {
   const ui = useUiStore()
 
   const entries = ref<HistoryEntry[]>([])
-  const savedQueries = ref<SavedQuery[]>([])
   const filter = ref('')
   const loading = ref(false)
 
@@ -64,31 +63,10 @@ export const useHistoryStore = defineStore('history', () => {
     )
   })
 
-  const visibleSavedQueries = computed(() => {
-    const needle = filter.value.trim().toLowerCase()
-    if (needle === '') {
-      return savedQueries.value
-    }
-    return savedQueries.value.filter(
-      (query) =>
-        query.name.toLowerCase().includes(needle) || query.query.toLowerCase().includes(needle),
-    )
-  })
-
-  /** The folders that hold the saved statements. */
-  const folders = computed(() => {
-    const names = new Set<string>()
-    for (const query of savedQueries.value) {
-      names.add(query.folder?.trim() || 'Saved queries')
-    }
-    return [...names].sort((left, right) => left.localeCompare(right))
-  })
-
   async function load(): Promise<void> {
     loading.value = true
     try {
       entries.value = await api.getHistory()
-      savedQueries.value = await api.getSavedQueries()
     } catch (error) {
       ui.reportError(error)
     } finally {
@@ -143,57 +121,13 @@ export const useHistoryStore = defineStore('history', () => {
     }
   }
 
-  async function save(query: {
-    id?: string
-    name: string
-    query: string
-    connectionId?: string | null
-    folder?: string | null
-  }): Promise<SavedQuery | null> {
-    if (!query.name.trim()) {
-      ui.warn('Enter a name for the saved statement.')
-      return null
-    }
-    const record: SavedQuery = {
-      id: query.id ?? createId(),
-      name: query.name.trim(),
-      query: query.query,
-      connectionId: query.connectionId ?? null,
-      folder: query.folder?.trim() || null,
-      updatedAt: new Date().toISOString(),
-    }
-    try {
-      await api.saveQuery(record)
-      savedQueries.value = await api.getSavedQueries()
-      ui.success(`Saved statement '${record.name}'.`)
-      return record
-    } catch (error) {
-      ui.reportError(error)
-      return null
-    }
-  }
-
-  async function remove(id: string): Promise<void> {
-    try {
-      await api.deleteSavedQuery(id)
-      savedQueries.value = savedQueries.value.filter((query) => query.id !== id)
-    } catch (error) {
-      ui.reportError(error)
-    }
-  }
-
   return {
     entries,
-    savedQueries,
     filter,
     loading,
     visibleEntries,
-    visibleSavedQueries,
-    folders,
     load,
     record,
     clear,
-    save,
-    remove,
   }
 })

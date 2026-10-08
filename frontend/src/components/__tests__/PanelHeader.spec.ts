@@ -56,15 +56,4 @@ describe('PanelHeader', () => {
     expect(wrapper.find('[data-test="lead"]').exists()).toBe(true)
     expect(wrapper.find('[data-test="action"]').exists()).toBe(true)
   })
-
-  it('holds no switch row unless one is given', () => {
-    const bare = mountWithPlugins(PanelHeader)
-    expect(bare.findAll('.panel-header-row')).toHaveLength(1)
-
-    const withSwitch = mountWithPlugins(PanelHeader, {
-      slots: { switch: () => h('button', { 'data-test': 'switch' }, 'History') },
-    })
-    expect(withSwitch.findAll('.panel-header-row')).toHaveLength(2)
-    expect(withSwitch.find('[data-test="switch"]').exists()).toBe(true)
-  })
 })

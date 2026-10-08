@@ -28,7 +28,6 @@ import type {
   QueryResponse,
   RoutineRef,
   SavedConnection,
-  SavedQuery,
   SchemaRef,
   SchemaSnapshot,
   ScriptStatement,
@@ -318,18 +317,6 @@ export const api = {
 
   clearHistory(): Promise<void> {
     return invoke('clear_history')
-  },
-
-  getSavedQueries(): Promise<SavedQuery[]> {
-    return invoke('get_saved_queries')
-  },
-
-  saveQuery(query: SavedQuery): Promise<void> {
-    return invoke('save_query', { query })
-  },
-
-  deleteSavedQuery(id: string): Promise<void> {
-    return invoke('delete_saved_query', { id })
   },
 
   getWorkspace(): Promise<unknown> {

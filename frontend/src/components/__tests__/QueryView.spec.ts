@@ -17,7 +17,6 @@ const QueryView = (await import('@/components/QueryView.vue')).default
 const { mountWithPlugins, settle } = await import('./mount')
 const { useConnectionsStore } = await import('@/stores/connections')
 const { useFilesStore } = await import('@/stores/files')
-const { useHistoryStore } = await import('@/stores/history')
 const { useLayoutStore } = await import('@/stores/layout')
 const { useQueryStore } = await import('@/stores/query')
 const { useTabsStore } = await import('@/stores/tabs')
@@ -105,7 +104,6 @@ async function mountView(
         query,
         connectionId: 'c1',
         dirty: false,
-        savedQueryId: null,
         params: [],
         filePath,
         encoding,
@@ -127,7 +125,6 @@ describe('QueryView', () => {
     apiStub.getConnections.mockResolvedValue([connectionFixture()])
     apiStub.listActiveConnections.mockResolvedValue([infoFixture()])
     apiStub.addHistoryEntry.mockResolvedValue([])
-    apiStub.getSavedQueries.mockResolvedValue([])
     // Most statements of these tests hold no parameter.
     apiStub.queryParameters.mockResolvedValue([])
   })
@@ -142,7 +139,6 @@ describe('QueryView', () => {
           query: 'SELECT 1',
           connectionId: 'gone',
           dirty: false,
-          savedQueryId: null,
           params: [],
           filePath: null,
           encoding: 'utf8' as const,
@@ -277,7 +273,6 @@ describe('QueryView', () => {
           query: 'SELECT :id',
           connectionId: 'c1',
           dirty: false,
-          savedQueryId: null,
           params: [{ name: 'id', valueType: 'number', text: '7' }],
         },
       },
@@ -467,7 +462,6 @@ describe('QueryView', () => {
           query: 'SELECT * FROM t WHERE a = :id AND b = :city',
           connectionId: 'c1',
           dirty: false,
-          savedQueryId: null,
           params: [{ name: 'id', valueType: 'number', text: '7' }],
         },
       },
@@ -607,7 +601,6 @@ describe('QueryView', () => {
           query: 'SELECT :id',
           connectionId: 'c1',
           dirty: false,
-          savedQueryId: null,
           params: [{ name: 'id', valueType: 'text', text: 'a' }],
         },
       },
@@ -689,7 +682,6 @@ describe('QueryView', () => {
           query: 'SELECT 1',
           connectionId: null,
           dirty: false,
-          savedQueryId: null,
           params: [],
           filePath: null,
           encoding: 'utf8' as const,
@@ -910,7 +902,6 @@ describe('QueryView', () => {
           query: 'SELECT 1',
           connectionId: null,
           dirty: false,
-          savedQueryId: null,
           params: [],
           filePath: null,
           encoding: 'utf8' as const,
@@ -934,7 +925,6 @@ describe('QueryView', () => {
         query: 'SELECT 1',
         connectionId: 'c1',
         dirty: false,
-        savedQueryId: null,
         params: [],
         filePath: null,
         encoding: 'utf8' as const,
@@ -954,7 +944,6 @@ describe('QueryView', () => {
         query: 'SELECT 1',
         connectionId: 'c1',
         dirty: false,
-        savedQueryId: null,
         params: [],
         filePath: null,
         encoding: 'utf8' as const,
@@ -975,7 +964,6 @@ describe('QueryView', () => {
         query: 'SELECT 1',
         connectionId: 'c1',
         dirty: false,
-        savedQueryId: null,
         params: [],
         filePath: null,
         encoding: 'utf8' as const,
@@ -1084,56 +1072,6 @@ describe('QueryView', () => {
     expect(useUiStore().notices.some((notice) => notice.level === 'success')).toBe(true)
   })
 
-  it('saves the statement under a name', async () => {
-    apiStub.saveQuery.mockResolvedValue(undefined)
-    const wrapper = await mountView()
-    const tabs = useTabsStore()
-    tabs.tabs = [
-      {
-        id: 't1',
-        title: 'Query 1',
-        query: 'SELECT 1',
-        connectionId: 'c1',
-        dirty: true,
-        savedQueryId: null,
-        params: [],
-        filePath: null,
-        encoding: 'utf8' as const,
-      },
-    ]
-
-    await wrapper.find('[data-test="save-query-button"]').trigger('click')
-    await settle()
-
-    const name = document.querySelector('[data-test="save-query-name"] input') as HTMLInputElement
-    name.value = 'Daily count'
-    name.dispatchEvent(new Event('input'))
-    await settle()
-
-    const confirm = document.querySelector('[data-test="save-query-confirm"]') as HTMLElement
-    confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    await settle()
-
-    expect(apiStub.saveQuery).toHaveBeenCalledWith(
-      expect.objectContaining({ name: 'Daily count', query: 'SELECT 1' }),
-    )
-    expect(tabs.tabs[0]?.title).toBe('Daily count')
-    expect(tabs.tabs[0]?.dirty).toBe(false)
-  })
-
-  it('keeps the dialog open when the statement could not be saved', async () => {
-    apiStub.saveQuery.mockRejectedValue({ category: 'storage', message: 'no', detail: null })
-    const wrapper = await mountView()
-
-    await wrapper.find('[data-test="save-query-button"]').trigger('click')
-    await settle()
-    const confirm = document.querySelector('[data-test="save-query-confirm"]') as HTMLElement
-    confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    await settle()
-
-    expect(useUiStore().notices.some((notice) => notice.level === 'error')).toBe(true)
-  })
-
   it('writes the statement back to the file that the tab came from', async () => {
     apiStub.saveStatementFile.mockResolvedValue({ path: '/data/report.sql', encoding: 'utf8' })
     const wrapper = await mountView('SELECT 1', '/data/report.sql')
@@ -1145,7 +1083,6 @@ describe('QueryView', () => {
         query: 'SELECT 1',
         connectionId: 'c1',
         dirty: true,
-        savedQueryId: null,
         params: [],
         filePath: '/data/report.sql',
         encoding: 'utf8' as const,
@@ -1175,7 +1112,6 @@ describe('QueryView', () => {
         query: 'SELECT 1',
         connectionId: 'c1',
         dirty: true,
-        savedQueryId: null,
         params: [],
         filePath: '/data/report.sql',
         encoding: 'utf8' as const,
@@ -1209,7 +1145,6 @@ describe('QueryView', () => {
         query: 'SELECT 1',
         connectionId: 'c1',
         dirty: true,
-        savedQueryId: null,
         params: [],
         filePath: '/data/report.sql',
         encoding: 'utf8' as const,
@@ -1241,7 +1176,6 @@ describe('QueryView', () => {
         query: 'SELECT 1',
         connectionId: 'c1',
         dirty: true,
-        savedQueryId: null,
         params: [],
         filePath: null,
         encoding: 'windows1252' as const,
@@ -1280,7 +1214,6 @@ describe('QueryView', () => {
         query: 'SELECT 1',
         connectionId: 'c1',
         dirty: true,
-        savedQueryId: null,
         params: [],
         filePath: null,
         encoding: 'utf8' as const,
@@ -1449,7 +1382,6 @@ describe('QueryView', () => {
           query: 'SELECT 1',
           connectionId: null,
           dirty: false,
-          savedQueryId: null,
           params: [],
           filePath: null,
           encoding: 'utf8' as const,
@@ -1473,83 +1405,8 @@ describe('QueryView details', () => {
     apiStub.getConnections.mockResolvedValue([connectionFixture()])
     apiStub.listActiveConnections.mockResolvedValue([infoFixture()])
     apiStub.addHistoryEntry.mockResolvedValue([])
-    apiStub.getSavedQueries.mockResolvedValue([])
     // Most statements of these tests hold no parameter.
     apiStub.queryParameters.mockResolvedValue([])
-  })
-
-  it('closes the save dialog without saving', async () => {
-    const wrapper = await mountView()
-    await wrapper.find('[data-test="save-query-button"]').trigger('click')
-    await settle()
-
-    const cancel = [...document.querySelectorAll('.v-card-actions .v-btn')].find((button) =>
-      button.textContent?.includes('Cancel'),
-    )
-    cancel?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    await settle()
-    expect(apiStub.saveQuery).not.toHaveBeenCalled()
-  })
-
-  it('keeps the folder the user typed for a saved statement', async () => {
-    apiStub.saveQuery.mockResolvedValue(undefined)
-    const wrapper = await mountView()
-    await wrapper.find('[data-test="save-query-button"]').trigger('click')
-    await settle()
-
-    const folder = wrapper
-      .findAllComponents({ name: 'VTextField' })
-      .find((item) => item.props('label') === 'Folder')
-    await folder?.vm.$emit('update:modelValue', 'Reports')
-
-    const confirm = document.querySelector('[data-test="save-query-confirm"]') as HTMLElement
-    confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    await settle()
-
-    expect(apiStub.saveQuery).toHaveBeenCalledWith(expect.objectContaining({ folder: 'Reports' }))
-  })
-
-  it('keeps the folder of a statement that is already saved', async () => {
-    apiStub.getSavedQueries.mockResolvedValue([
-      {
-        id: 's1',
-        name: 'Query 1',
-        query: 'SELECT 1',
-        connectionId: 'c1',
-        folder: 'Reports',
-        updatedAt: '2026-01-01T00:00:00.000Z',
-      },
-    ])
-    apiStub.saveQuery.mockResolvedValue(undefined)
-    const wrapper = mountWithPlugins(QueryView, {
-      props: {
-        tab: {
-          id: 't1',
-          title: 'Query 1',
-          query: 'SELECT 1',
-          connectionId: 'c1',
-          dirty: false,
-          savedQueryId: 's1',
-          params: [],
-          filePath: null,
-          encoding: 'utf8' as const,
-        },
-      },
-    })
-    await useConnectionsStore().load()
-    await useHistoryStore().load()
-    await settle()
-
-    await wrapper.find('[data-test="save-query-button"]').trigger('click')
-    await settle()
-
-    const confirm = document.querySelector('[data-test="save-query-confirm"]') as HTMLElement
-    confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    await settle()
-
-    // The folder of the record stands in the dialog, so the second save
-    // leaves the statement where it is.
-    expect(apiStub.saveQuery).toHaveBeenCalledWith(expect.objectContaining({ folder: 'Reports' }))
   })
 
   it('falls back to the MS SQL Server dialect for a tab without a connection', async () => {
@@ -1561,7 +1418,6 @@ describe('QueryView details', () => {
           query: '',
           connectionId: null,
           dirty: false,
-          savedQueryId: null,
           params: [],
           filePath: null,
           encoding: 'utf8' as const,
@@ -1581,7 +1437,6 @@ describe('QueryView details', () => {
           query: '',
           connectionId: 'ghost',
           dirty: false,
-          savedQueryId: null,
           params: [],
           filePath: null,
           encoding: 'utf8' as const,
@@ -1627,10 +1482,8 @@ describe('QueryView edge paths', () => {
     apiStub.getConnections.mockResolvedValue([connectionFixture()])
     apiStub.listActiveConnections.mockResolvedValue([infoFixture()])
     apiStub.addHistoryEntry.mockResolvedValue([])
-    apiStub.getSavedQueries.mockResolvedValue([])
     // Most statements of these tests hold no parameter.
     apiStub.queryParameters.mockResolvedValue([])
-    apiStub.saveQuery.mockResolvedValue(undefined)
   })
 
   it('shows a failure that carries no cause', async () => {
@@ -1662,42 +1515,6 @@ describe('QueryView edge paths', () => {
     )
   })
 
-  it('records the saved query on the tab and keeps the name of a file tab', async () => {
-    apiStub.saveQuery.mockResolvedValue(undefined)
-    apiStub.getSavedQueries.mockResolvedValue([])
-    const wrapper = await mountView('SELECT 1', '/data/report.sql')
-    const tabs = useTabsStore()
-    tabs.tabs = [
-      {
-        id: 't1',
-        title: 'report.sql',
-        query: 'SELECT 1',
-        connectionId: 'c1',
-        dirty: true,
-        savedQueryId: null,
-        params: [],
-        filePath: '/data/report.sql',
-        encoding: 'utf8',
-      },
-    ]
-    await wrapper.setProps({ tab: tabs.tabs[0] })
-
-    await wrapper.find('[data-test="save-query-button"]').trigger('click')
-    await settle()
-    const name = document.querySelector('[data-test="save-query-name"] input') as HTMLInputElement
-    name.value = 'Daily'
-    name.dispatchEvent(new Event('input'))
-    await settle()
-    const confirm = document.querySelector('[data-test="save-query-confirm"]') as HTMLElement
-    confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    await settle()
-
-    const saved = vi.mocked(apiStub.saveQuery).mock.calls[0]![0]
-    expect(tabs.tabs[0]?.savedQueryId).toBe(saved.id)
-    expect(tabs.tabs[0]?.title).toBe('report.sql')
-    expect(tabs.tabs[0]?.dirty).toBe(true)
-  })
-
   it('records the encoding the backend used and says when it changed', async () => {
     apiStub.saveStatementFile.mockResolvedValue({ path: '/data/old.sql', encoding: 'utf8bom' })
     const wrapper = await mountView('SELECT 1', '/data/old.sql', 'windows1252')
@@ -1709,7 +1526,6 @@ describe('QueryView edge paths', () => {
         query: 'SELECT 1',
         connectionId: 'c1',
         dirty: true,
-        savedQueryId: null,
         params: [],
         filePath: '/data/old.sql',
         encoding: 'windows1252',
@@ -1729,30 +1545,6 @@ describe('QueryView edge paths', () => {
     await wrapper.find('[data-test="save-file-button"]').trigger('click')
     await settle()
     expect(lastNotice()?.message).toBe('Saved old.sql.')
-  })
-
-  it('saves again under the identifier the tab came from', async () => {
-    const wrapper = mountWithPlugins(QueryView, {
-      props: {
-        tab: {
-          id: 't11',
-          title: 'Daily',
-          query: 'SELECT 1',
-          connectionId: 'c1',
-          dirty: true,
-          savedQueryId: 'q7',
-        },
-      },
-    })
-    await wrapper.vm.$nextTick()
-
-    await wrapper.find('[data-test="save-query-button"]').trigger('click')
-    await settle()
-    const confirm = document.querySelector('[data-test="save-query-confirm"]') as HTMLElement
-    confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    await settle()
-
-    expect(apiStub.saveQuery).toHaveBeenCalledWith(expect.objectContaining({ id: 'q7' }))
   })
 
   it('stays on the result that is open when a second statement runs', async () => {
@@ -2388,18 +2180,5 @@ describe('QueryView edge paths', () => {
     await wrapper.findComponent({ name: 'ResultsGrid' }).vm.$emit('export', 'csv', exported())
     await settle()
     expect(useUiStore().notices.some((notice) => notice.level === 'success')).toBe(false)
-  })
-
-  it('closes the save dialog when the overlay reports it', async () => {
-    const wrapper = await mountView()
-    await wrapper.find('[data-test="save-query-button"]').trigger('click')
-    await settle()
-
-    const dialog = wrapper
-      .findAllComponents({ name: 'VDialog' })
-      .find((item) => item.props('modelValue'))!
-    await dialog.vm.$emit('update:modelValue', false)
-    await settle()
-    expect(dialog.props('modelValue')).toBe(false)
   })
 })

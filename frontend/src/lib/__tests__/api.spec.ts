@@ -122,12 +122,6 @@ describe('api', () => {
     await api.clearHistory()
     expect(invoke).toHaveBeenCalledWith('clear_history')
 
-    await api.getSavedQueries()
-    expect(invoke).toHaveBeenCalledWith('get_saved_queries')
-
-    await api.deleteSavedQuery('q1')
-    expect(invoke).toHaveBeenCalledWith('delete_saved_query', { id: 'q1' })
-
     await api.getWorkspace()
     expect(invoke).toHaveBeenCalledWith('get_workspace')
 
@@ -206,10 +200,6 @@ describe('api', () => {
     }
     await api.addHistoryEntry(entry)
     expect(invoke).toHaveBeenCalledWith('add_history_entry', { entry })
-
-    const query = { id: 'q1', name: 'n', query: 'SELECT 1', updatedAt: 'now' }
-    await api.saveQuery(query)
-    expect(invoke).toHaveBeenCalledWith('save_query', { query })
 
     await api.openStatementFile()
     expect(invoke).toHaveBeenCalledWith('open_statement_file')

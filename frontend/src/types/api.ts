@@ -536,15 +536,6 @@ export interface HistoryEntry {
   error?: string | null
 }
 
-export interface SavedQuery {
-  id: string
-  name: string
-  query: string
-  connectionId?: string | null
-  folder?: string | null
-  updatedAt: string
-}
-
 export const ErrorCategory = {
   NotConnected: 'notConnected',
   Connection: 'connection',

@@ -27,7 +27,6 @@ describe('parseWorkspace', () => {
           title: 'One',
           connectionId: 'c1',
           dirty: true,
-          savedQueryId: 'q1',
           params: [{ name: 'id', valueType: 'number', text: '7' }],
           filePath: '/data/one.sql',
           encoding: 'utf16le',
@@ -46,7 +45,6 @@ describe('parseWorkspace', () => {
       query: 'SELECT 1',
       connectionId: 'c1',
       dirty: true,
-      savedQueryId: 'q1',
       params: [{ name: 'id', valueType: 'number', text: '7' }],
       filePath: '/data/one.sql',
       encoding: 'utf16le',
@@ -57,7 +55,6 @@ describe('parseWorkspace', () => {
       query: 'SELECT 2',
       connectionId: null,
       dirty: false,
-      savedQueryId: null,
       params: [],
       filePath: null,
       encoding: 'utf8',
@@ -324,7 +321,6 @@ describe('tabs store', () => {
           query: 'SELECT 1',
           connectionId: 'c1',
           dirty: false,
-          savedQueryId: null,
           params: [],
           filePath: null,
           encoding: 'utf8',
@@ -369,24 +365,20 @@ describe('tabs store', () => {
     expect(ui.notices).toHaveLength(2)
   })
 
-  it('links a tab to its saved query and records its encoding', () => {
+  it('records the encoding of a tab', () => {
     const tabs = useTabsStore()
-    const tab = tabs.add({ savedQueryId: 'q1', encoding: 'windows1252' })
-    expect(tab.savedQueryId).toBe('q1')
+    const tab = tabs.add({ encoding: 'windows1252' })
     expect(tab.encoding).toBe('windows1252')
-    expect(tabs.add().savedQueryId).toBeNull()
+    expect(tabs.add().encoding).toBe('utf8')
 
     const before = tabs.revision
-    tabs.setSavedQuery(tab.id, 'q2')
     tabs.setEncoding(tab.id, 'utf8bom')
-    expect(tabs.tabs[0]?.savedQueryId).toBe('q2')
     expect(tabs.tabs[0]?.encoding).toBe('utf8bom')
-    expect(tabs.revision).toBe(before + 2)
+    expect(tabs.revision).toBe(before + 1)
 
     // A tab that is not there is left alone.
-    tabs.setSavedQuery('gone', 'q3')
     tabs.setEncoding('gone', 'utf8')
-    expect(tabs.revision).toBe(before + 2)
+    expect(tabs.revision).toBe(before + 1)
   })
 
   it('continues the titles after the highest restored one', async () => {

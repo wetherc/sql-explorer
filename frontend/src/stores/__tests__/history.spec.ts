@@ -23,25 +23,18 @@ function entry(id: string, query: string, connectionName = 'Server') {
   }
 }
 
-function saved(id: string, name: string, query = 'SELECT 1', folder: string | null = null) {
-  return { id, name, query, connectionId: null, folder, updatedAt: '2026-08-10T00:00:00Z' }
-}
-
 describe('history store', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     Object.values(apiStub).forEach((fn) => fn.mockReset())
     apiStub.getHistory.mockResolvedValue([])
-    apiStub.getSavedQueries.mockResolvedValue([])
   })
 
-  it('reads the history and the saved statements', async () => {
+  it('reads the history', async () => {
     apiStub.getHistory.mockResolvedValue([entry('h1', 'SELECT 1')])
-    apiStub.getSavedQueries.mockResolvedValue([saved('q1', 'Daily')])
     const history = useHistoryStore()
     await history.load()
     expect(history.entries).toHaveLength(1)
-    expect(history.savedQueries).toHaveLength(1)
     expect(history.loading).toBe(false)
   })
 
@@ -69,33 +62,6 @@ describe('history store', () => {
 
     history.filter = '   '
     expect(history.visibleEntries).toHaveLength(2)
-  })
-
-  it('filters the saved statements by name and by text', async () => {
-    apiStub.getSavedQueries.mockResolvedValue([
-      saved('q1', 'Daily count', 'SELECT COUNT(*)'),
-      saved('q2', 'Orders', 'SELECT * FROM orders'),
-    ])
-    const history = useHistoryStore()
-    await history.load()
-    expect(history.visibleSavedQueries).toHaveLength(2)
-
-    history.filter = 'daily'
-    expect(history.visibleSavedQueries.map((item) => item.id)).toEqual(['q1'])
-
-    history.filter = 'orders'
-    expect(history.visibleSavedQueries.map((item) => item.id)).toEqual(['q2'])
-  })
-
-  it('groups the saved statements by their folder', async () => {
-    apiStub.getSavedQueries.mockResolvedValue([
-      saved('q1', 'A', 'SELECT 1', 'Reports'),
-      saved('q2', 'B'),
-      saved('q3', 'C', 'SELECT 1', '  '),
-    ])
-    const history = useHistoryStore()
-    await history.load()
-    expect(history.folders).toEqual(['Reports', 'Saved queries'])
   })
 
   it('writes one execution to the history', async () => {
@@ -235,66 +201,6 @@ describe('history store', () => {
     apiStub.clearHistory.mockRejectedValue({ category: 'storage', message: 'no', detail: null })
     const history = useHistoryStore()
     await history.clear()
-    expect(useUiStore().notices[0]?.level).toBe('error')
-  })
-
-  it('refuses to save a statement without a name', async () => {
-    const history = useHistoryStore()
-    expect(await history.save({ name: '  ', query: 'SELECT 1' })).toBeNull()
-    expect(apiStub.saveQuery).not.toHaveBeenCalled()
-    expect(useUiStore().notices[0]?.level).toBe('warning')
-  })
-
-  it('saves a statement under a name and a folder', async () => {
-    apiStub.saveQuery.mockResolvedValue(undefined)
-    apiStub.getSavedQueries.mockResolvedValue([saved('q1', 'Daily')])
-    const history = useHistoryStore()
-    const record = await history.save({
-      name: ' Daily ',
-      query: 'SELECT 1',
-      connectionId: 'c1',
-      folder: ' Reports ',
-    })
-    expect(record?.name).toBe('Daily')
-    expect(record?.folder).toBe('Reports')
-    expect(history.savedQueries).toHaveLength(1)
-    expect(useUiStore().notices[0]?.level).toBe('success')
-  })
-
-  it('keeps the identifier of a statement it saves again', async () => {
-    apiStub.saveQuery.mockResolvedValue(undefined)
-    const history = useHistoryStore()
-    const record = await history.save({ id: 'q1', name: 'Daily', query: 'SELECT 2' })
-    expect(record?.id).toBe('q1')
-  })
-
-  it('leaves the folder empty when none is given', async () => {
-    apiStub.saveQuery.mockResolvedValue(undefined)
-    const history = useHistoryStore()
-    const record = await history.save({ name: 'Daily', query: 'SELECT 1' })
-    expect(record?.folder).toBeNull()
-    expect(record?.connectionId).toBeNull()
-  })
-
-  it('reports a failure to save a statement', async () => {
-    apiStub.saveQuery.mockRejectedValue({ category: 'storage', message: 'no', detail: null })
-    const history = useHistoryStore()
-    expect(await history.save({ name: 'Daily', query: 'SELECT 1' })).toBeNull()
-  })
-
-  it('removes a saved statement', async () => {
-    apiStub.getSavedQueries.mockResolvedValue([saved('q1', 'A'), saved('q2', 'B')])
-    apiStub.deleteSavedQuery.mockResolvedValue(undefined)
-    const history = useHistoryStore()
-    await history.load()
-    await history.remove('q1')
-    expect(history.savedQueries.map((item) => item.id)).toEqual(['q2'])
-  })
-
-  it('reports a failure to remove a saved statement', async () => {
-    apiStub.deleteSavedQuery.mockRejectedValue({ category: 'storage', message: 'no', detail: null })
-    const history = useHistoryStore()
-    await history.remove('q1')
     expect(useUiStore().notices[0]?.level).toBe('error')
   })
 })

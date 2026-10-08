@@ -49,7 +49,6 @@ describe('AppLayout', () => {
     apiStub.getConnections.mockResolvedValue([connectionFixture()])
     apiStub.listActiveConnections.mockResolvedValue([])
     apiStub.getHistory.mockResolvedValue([])
-    apiStub.getSavedQueries.mockResolvedValue([])
     apiStub.getWorkspace.mockResolvedValue({ tabs: [], activeTabId: null })
     apiStub.saveWorkspace.mockResolvedValue(undefined)
     apiStub.fileRoots.mockResolvedValue([])
@@ -634,7 +633,6 @@ describe('AppLayout settings dialog', () => {
     apiStub.getConnections.mockResolvedValue([])
     apiStub.listActiveConnections.mockResolvedValue([])
     apiStub.getHistory.mockResolvedValue([])
-    apiStub.getSavedQueries.mockResolvedValue([])
     apiStub.getWorkspace.mockResolvedValue({ tabs: [], activeTabId: null })
     apiStub.saveWorkspace.mockResolvedValue(undefined)
     apiStub.fileRoots.mockResolvedValue([])
@@ -669,7 +667,6 @@ describe('AppLayout dialog state', () => {
     apiStub.getConnections.mockResolvedValue([])
     apiStub.listActiveConnections.mockResolvedValue([])
     apiStub.getHistory.mockResolvedValue([])
-    apiStub.getSavedQueries.mockResolvedValue([])
     apiStub.getWorkspace.mockResolvedValue({ tabs: [], activeTabId: null })
     apiStub.saveWorkspace.mockResolvedValue(undefined)
     apiStub.fileRoots.mockResolvedValue([])
@@ -755,7 +752,6 @@ describe('AppLayout keys', () => {
     apiStub.getConnections.mockResolvedValue([connectionFixture()])
     apiStub.listActiveConnections.mockResolvedValue([])
     apiStub.getHistory.mockResolvedValue([])
-    apiStub.getSavedQueries.mockResolvedValue([])
     apiStub.getWorkspace.mockResolvedValue({ tabs: [], activeTabId: null })
     apiStub.saveWorkspace.mockResolvedValue(undefined)
     apiStub.fileRoots.mockResolvedValue([])
@@ -947,7 +943,6 @@ describe('AppLayout keys', () => {
         query: 'SELECT 1',
         connectionId: null,
         dirty: false,
-        savedQueryId: null,
         params: [],
         filePath: null,
       },
@@ -1062,7 +1057,6 @@ describe('AppLayout and the host window', () => {
     apiStub.getConnections.mockResolvedValue([])
     apiStub.listActiveConnections.mockResolvedValue([])
     apiStub.getHistory.mockResolvedValue([])
-    apiStub.getSavedQueries.mockResolvedValue([])
     apiStub.getWorkspace.mockResolvedValue({ tabs: [], activeTabId: null })
     apiStub.saveWorkspace.mockResolvedValue(undefined)
     apiStub.fileRoots.mockResolvedValue([])

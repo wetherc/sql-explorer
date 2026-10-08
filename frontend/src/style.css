@@ -247,13 +247,6 @@ body.app-resizing .v-main {
   padding: 4px 8px;
 }
 
-/* A group of buttons that switch one value, such as the two lists of the
-   history panel, stands at the height of a small button. */
-.v-btn-group.v-btn-toggle {
-  height: 28px;
-  border-radius: 6px;
-}
-
 /* The tabs of the editor and of the results. The library gives a tab a row of
    48 pixels with text of 14. */
 .v-tabs {

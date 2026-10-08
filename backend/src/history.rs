@@ -1,5 +1,4 @@
-//! The records the application keeps about the statements the user ran and
-//! the statements the user saved.
+//! The records the application keeps about the statements the user ran.
 
 use serde::{Deserialize, Serialize};
 
@@ -28,20 +27,6 @@ pub struct HistoryEntry {
     pub succeeded: bool,
     #[serde(default)]
     pub error: Option<String>,
-}
-
-/// One statement the user saved under a name.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct SavedQuery {
-    pub id: String,
-    pub name: String,
-    pub query: String,
-    #[serde(default)]
-    pub connection_id: Option<String>,
-    #[serde(default)]
-    pub folder: Option<String>,
-    pub updated_at: String,
 }
 
 /// Adds an entry to the front of the history and drops the entries above
@@ -180,24 +165,5 @@ mod tests {
         let text = serde_json::to_string(&failed).unwrap();
         assert!(text.contains("connectionId"));
         assert_eq!(serde_json::from_str::<HistoryEntry>(&text).unwrap(), failed);
-    }
-
-    #[test]
-    fn a_saved_query_round_trips_through_json() {
-        let query = SavedQuery {
-            id: "q1".into(),
-            name: "Daily count".into(),
-            query: "SELECT COUNT(*) FROM t".into(),
-            connection_id: Some("c1".into()),
-            folder: Some("Reports".into()),
-            updated_at: "2026-08-10T00:00:00Z".into(),
-        };
-        let text = serde_json::to_string(&query).unwrap();
-        assert_eq!(serde_json::from_str::<SavedQuery>(&text).unwrap(), query);
-
-        let minimal: SavedQuery =
-            serde_json::from_str(r#"{"id":"a","name":"b","query":"c","updatedAt":"d"}"#).unwrap();
-        assert_eq!(minimal.connection_id, None);
-        assert_eq!(minimal.folder, None);
     }
 }

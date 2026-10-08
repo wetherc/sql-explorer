@@ -22,30 +22,17 @@ const entry = {
   error: null,
 }
 
-const savedQuery = {
-  id: 'q1',
-  name: 'Daily count',
-  query: 'SELECT COUNT(*) FROM orders',
-  connectionId: 'c1',
-  folder: null,
-  updatedAt: '2026-08-10T00:00:00Z',
-}
-
 describe('HistoryPanel', () => {
   beforeEach(() => {
     Object.values(apiStub).forEach((fn) => fn.mockReset())
     apiStub.getConnections.mockResolvedValue([connectionFixture()])
     apiStub.listActiveConnections.mockResolvedValue([infoFixture()])
     apiStub.getHistory.mockResolvedValue([])
-    apiStub.getSavedQueries.mockResolvedValue([])
   })
 
-  it('says so when nothing has run and nothing is saved', async () => {
+  it('says so when nothing has run', () => {
     const wrapper = mountWithPlugins(HistoryPanel)
     expect(wrapper.text()).toContain('No history yet')
-
-    await wrapper.find('[data-test="mode-saved"]').trigger('click')
-    expect(wrapper.text()).toContain('No saved queries')
   })
 
   it('lists the statements that ran, with the facts of each one', async () => {
@@ -104,6 +91,7 @@ describe('HistoryPanel', () => {
 
     await wrapper.find('[data-test="clear-history"]').trigger('click')
     await settle()
+    expect(document.body.textContent).toContain('This removes every statement from the history.')
     // The history is emptied only once the user answers the question.
     expect(apiStub.clearHistory).not.toHaveBeenCalled()
 
@@ -111,52 +99,6 @@ describe('HistoryPanel', () => {
     confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     await settle()
     expect(apiStub.clearHistory).toHaveBeenCalled()
-  })
-
-  it('lists the saved statements and opens one under its own name', async () => {
-    apiStub.getSavedQueries.mockResolvedValue([savedQuery])
-    const wrapper = mountWithPlugins(HistoryPanel)
-    await useConnectionsStore().load()
-    await useHistoryStore().load()
-    await wrapper.find('[data-test="mode-saved"]').trigger('click')
-    await wrapper.vm.$nextTick()
-
-    await wrapper.find('[data-test="saved-entry"]').trigger('click')
-    const tabs = useTabsStore()
-    expect(tabs.tabs[0]?.title).toBe('Daily count')
-    expect(tabs.tabs[0]?.connectionId).toBe('c1')
-  })
-
-  it('opens a saved statement on the selected connection when it names none', async () => {
-    apiStub.getSavedQueries.mockResolvedValue([{ ...savedQuery, connectionId: null }])
-    const wrapper = mountWithPlugins(HistoryPanel)
-    const connections = useConnectionsStore()
-    await connections.load()
-    connections.select('c1')
-    await useHistoryStore().load()
-    await wrapper.find('[data-test="mode-saved"]').trigger('click')
-    await wrapper.vm.$nextTick()
-
-    await wrapper.find('[data-test="saved-entry"]').trigger('click')
-    expect(useTabsStore().tabs[0]?.connectionId).toBe('c1')
-  })
-
-  it('removes a saved statement', async () => {
-    apiStub.getSavedQueries.mockResolvedValue([savedQuery])
-    apiStub.deleteSavedQuery.mockResolvedValue(undefined)
-    const wrapper = mountWithPlugins(HistoryPanel)
-    await useHistoryStore().load()
-    await wrapper.find('[data-test="mode-saved"]').trigger('click')
-    await wrapper.vm.$nextTick()
-
-    await wrapper.find('[data-test="delete-saved"]').trigger('click')
-    await settle()
-    expect(apiStub.deleteSavedQuery).not.toHaveBeenCalled()
-
-    const confirm = document.querySelector('[data-test="confirm-accept"]') as HTMLElement
-    confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    await settle()
-    expect(apiStub.deleteSavedQuery).toHaveBeenCalledWith('q1')
   })
 
   it('keeps only the entries that match the filter', async () => {
@@ -206,23 +148,6 @@ describe('HistoryPanel asking before it takes something away', () => {
     expect(rows.length).toBeLessThan(50)
     expect(rows[0]?.text()).toContain('SELECT 0')
   })
-
-  it('keeps a saved statement when the question is refused', async () => {
-    apiStub.getSavedQueries.mockResolvedValue([savedQuery])
-    const wrapper = mountWithPlugins(HistoryPanel)
-    await useHistoryStore().load()
-    await wrapper.find('[data-test="mode-saved"]').trigger('click')
-    await wrapper.vm.$nextTick()
-
-    await wrapper.find('[data-test="delete-saved"]').trigger('click')
-    await settle()
-    expect(document.body.textContent).toContain('Daily count')
-    const cancel = document.querySelector('[data-test="confirm-cancel"]') as HTMLElement
-    cancel.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    await settle()
-
-    expect(apiStub.deleteSavedQuery).not.toHaveBeenCalled()
-  })
 })
 
 describe('HistoryPanel height', () => {
@@ -231,7 +156,6 @@ describe('HistoryPanel height', () => {
     apiStub.getConnections.mockResolvedValue([connectionFixture()])
     apiStub.listActiveConnections.mockResolvedValue([infoFixture()])
     apiStub.getHistory.mockResolvedValue([entry])
-    apiStub.getSavedQueries.mockResolvedValue([])
   })
 
   it('follows the height of its body, and works without a watcher of it', async () => {
@@ -291,7 +215,6 @@ describe('HistoryPanel states', () => {
     apiStub.getConnections.mockResolvedValue([connectionFixture()])
     apiStub.listActiveConnections.mockResolvedValue([infoFixture()])
     apiStub.getHistory.mockResolvedValue([])
-    apiStub.getSavedQueries.mockResolvedValue([])
   })
 
   it('shows the reason of a failed statement in words', async () => {
@@ -328,7 +251,6 @@ describe('HistoryPanel states', () => {
 
   it('says when the filter hides every entry, and clears the filter', async () => {
     apiStub.getHistory.mockResolvedValue([entry])
-    apiStub.getSavedQueries.mockResolvedValue([savedQuery])
     const wrapper = mountWithPlugins(HistoryPanel)
     const history = useHistoryStore()
     await history.load()
@@ -338,14 +260,6 @@ describe('HistoryPanel states', () => {
     await wrapper.vm.$nextTick()
     expect(wrapper.text()).toContain('No matches')
     await wrapper.find('[data-test="history-clear-filter"]').trigger('click')
-    expect(history.filter).toBe('')
-
-    history.filter = 'nothing like this'
-    await wrapper.find('[data-test="mode-saved"]').trigger('click')
-    await new Promise((resolve) => setTimeout(resolve, 400))
-    await wrapper.vm.$nextTick()
-    expect(wrapper.text()).toContain('No matches')
-    await wrapper.find('[data-test="saved-clear-filter"]').trigger('click')
     expect(history.filter).toBe('')
   })
 })

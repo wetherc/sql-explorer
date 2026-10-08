@@ -16,8 +16,6 @@ export interface QueryTab {
   connectionId: string | null
   /** True when the text differs from the text the tab last saved or read. */
   dirty: boolean
-  /** The saved statement this tab came from, when it came from one. */
-  savedQueryId: string | null
   /** The values the user gave for the named parameters of the statement. */
   params: ParamValue[]
   /** The file on the disk this tab came from, when it came from one. */
@@ -52,7 +50,6 @@ export function parseWorkspace(value: unknown): Workspace {
       query: tab.query as string,
       connectionId: typeof tab.connectionId === 'string' ? tab.connectionId : null,
       dirty: tab.dirty === true,
-      savedQueryId: typeof tab.savedQueryId === 'string' ? tab.savedQueryId : null,
       params: parseParamValues(tab.params),
       filePath: typeof tab.filePath === 'string' && tab.filePath !== '' ? tab.filePath : null,
       encoding: TEXT_ENCODINGS.includes(tab.encoding as TextEncoding)
@@ -112,7 +109,6 @@ export const useTabsStore = defineStore('tabs', () => {
       query?: string
       title?: string
       filePath?: string | null
-      savedQueryId?: string | null
       encoding?: TextEncoding
     } = {},
   ): QueryTab {
@@ -122,7 +118,6 @@ export const useTabsStore = defineStore('tabs', () => {
       query: options.query ?? '',
       connectionId: options.connectionId ?? connections.selectedId,
       dirty: false,
-      savedQueryId: options.savedQueryId ?? null,
       params: [],
       filePath: options.filePath ?? null,
       encoding: options.encoding ?? 'utf8',
@@ -232,16 +227,6 @@ export const useTabsStore = defineStore('tabs', () => {
     }
   }
 
-  /** Links a tab to the saved query it was saved as, so the next save
-   *  replaces that entry. */
-  function setSavedQuery(id: string, savedQueryId: string | null): void {
-    const tab = tabs.value.find((item) => item.id === id)
-    if (tab) {
-      tab.savedQueryId = savedQueryId
-      changed()
-    }
-  }
-
   /** Records the encoding that the file of a tab has on the disk. */
   function setEncoding(id: string, encoding: TextEncoding): void {
     const tab = tabs.value.find((item) => item.id === id)
@@ -260,7 +245,6 @@ export const useTabsStore = defineStore('tabs', () => {
         query: tab.query,
         connectionId: tab.connectionId,
         dirty: tab.dirty,
-        savedQueryId: tab.savedQueryId,
         params: tab.params,
         filePath: tab.filePath,
         encoding: tab.encoding,
@@ -371,7 +355,6 @@ export const useTabsStore = defineStore('tabs', () => {
     activeTab,
     hasTabs,
     setFilePath,
-    setSavedQuery,
     setEncoding,
     tabForFile,
     add,
