@@ -4647,10 +4647,12 @@ mod tests {
     async fn an_error_at_the_finish_of_the_writer_reaches_the_run() {
         use crate::db::sink::RowSink;
         let folder = tempfile::tempdir().unwrap();
-        // A folder with a file in it stands at the path, so the rename fails.
+        // A folder with a file in it comes to stand at the path after the
+        // create, so the rename fails. Windows refuses a folder at the path
+        // before the create, so the folder comes after it.
         let path = folder.path().join("taken.csv");
-        std::fs::create_dir_all(path.join("inside")).unwrap();
         let mut sink = FileSink::create(&path, ExportFormat::Csv).await.unwrap();
+        std::fs::create_dir_all(path.join("inside")).unwrap();
         sink.begin_set(vec![ColumnInfo::new("id", "int")]).unwrap();
         sink.end_set(false).unwrap();
         assert!(matches!(sink.finish().await, Err(Error::Io(_))));

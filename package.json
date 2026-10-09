@@ -13,7 +13,7 @@
     "test:backend": "cd backend && cargo test && cargo test --manifest-path vendor/tiberius/Cargo.toml --no-default-features --features tds73 --lib && cargo test --manifest-path vendor/tokio-postgres/Cargo.toml --lib",
     "test:unit": "pnpm --filter frontend test:unit",
     "test:coverage": "pnpm --filter frontend test:coverage",
-    "test:coverage:backend": "cd backend && cargo llvm-cov --summary-only --ignore-filename-regex '/live(\\.rs|/)'",
+    "test:coverage:backend": "cd backend && cargo llvm-cov --summary-only --ignore-filename-regex '[/\\\\]live(\\.rs|[/\\\\])'",
     "test:live": "sh backend/live/run.sh",
     "lint": "pnpm --filter frontend format:check && pnpm --filter frontend lint && pnpm --filter frontend typecheck && cd backend && cargo clippy --all-targets -- -D warnings && cargo fmt --check",
     "format": "pnpm --filter frontend format && cd backend && cargo fmt",

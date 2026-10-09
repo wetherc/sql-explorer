@@ -949,6 +949,7 @@ fn name_kerberos_wait<T>(opened: Result<T>, waiting_for_kerberos: bool) -> Resul
 /// word this in different ways. An error that does not come from GSSAPI is
 /// never such a failure, so a server fault with similar words does not
 /// match.
+#[cfg(unix)]
 fn names_an_unreachable_kdc(error: &tiberius::error::Error) -> bool {
     let tiberius::error::Error::Gssapi(text) = error else {
         return false;
@@ -962,6 +963,13 @@ fn names_an_unreachable_kdc(error: &tiberius::error::Error) -> bool {
     ]
     .iter()
     .any(|mark| lower.contains(mark))
+}
+
+/// Windows Integrated Security uses SSPI and not GSSAPI, so no error names an
+/// unreachable KDC in the words of GSSAPI.
+#[cfg(not(unix))]
+fn names_an_unreachable_kdc(_error: &tiberius::error::Error) -> bool {
+    false
 }
 
 /// Names the reason a login failed. Kerberos reports a missing ticket in
@@ -4548,9 +4556,16 @@ mod tests {
             error.category(),
             crate::error::ErrorCategory::Authentication
         );
+        #[cfg(not(windows))]
         assert!(error
             .to_string()
             .contains("Couldn't run the Azure CLI at /nowhere/az. Check the Azure CLI path."));
+        // Windows runs the CLI through `cmd`, which starts and then reports
+        // that the program is missing.
+        #[cfg(windows)]
+        assert!(error
+            .to_string()
+            .starts_with("The Azure CLI couldn't get a token."));
     }
 
     #[test]
@@ -4727,6 +4742,7 @@ mod tests {
         assert_eq!(name_kerberos_wait(Ok(7), true).unwrap(), 7);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_gssapi_error_that_names_no_reachable_kdc_gets_the_hint() {
         use tiberius::error::Error as TiberiusError;

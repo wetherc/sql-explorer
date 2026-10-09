@@ -101,9 +101,10 @@ command -v cargo-llvm-cov >/dev/null 2>&1 || fail 'cargo-llvm-cov is not install
 # The live tests have #[ignore], so the gate never runs them. The regex
 # keeps their files (src/db/drivers/live.rs and src/db/drivers/*/live.rs) out
 # of the report. Without it, their lines count as lines that no test runs.
+# A path on Windows has backslashes, so the regex matches each separator.
 (cd backend && cargo llvm-cov --summary-only --fail-under-lines "$BACKEND_MIN_LINES" \
     --fail-under-functions "$BACKEND_MIN_FUNCTIONS" \
-    --ignore-filename-regex '/live(\.rs|/)') ||
+    --ignore-filename-regex '[/\\]live(\.rs|[/\\])') ||
     fail 'a backend test failed, or the coverage is too low'
 (cd backend && cargo test --manifest-path vendor/tiberius/Cargo.toml --no-default-features --features tds73 --lib) || fail 'a test of the vendored tiberius failed'
 (cd backend && cargo test --manifest-path vendor/tokio-postgres/Cargo.toml --lib) || fail 'a test of the vendored tokio-postgres failed'

@@ -691,9 +691,9 @@ pub(crate) mod tests {
     fn a_path_that_is_gone_needs_no_removal() {
         let cache = tempfile::tempdir().unwrap();
         assert!(remove_path(&cache.path().join("gone")).is_ok());
-        let file = cache.path().join("file");
-        std::fs::write(&file, b"x").unwrap();
-        assert!(remove_path(&file.join("below")).is_err());
+        // A name with a NUL byte gives an error other than NotFound on every
+        // system. A path below a file gives NotFound on Windows.
+        assert!(remove_path(&cache.path().join("bad\0name")).is_err());
     }
 
     #[test]

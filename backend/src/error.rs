@@ -270,6 +270,7 @@ fn mssql_category(error: &tiberius::error::Error) -> ErrorCategory {
         // that with this error.
         MsError::Canceled => ErrorCategory::Cancelled,
         MsError::Io { .. } | MsError::Tls(_) | MsError::Routing { .. } => ErrorCategory::Connection,
+        #[cfg(unix)]
         MsError::Gssapi(_) => ErrorCategory::Authentication,
         MsError::Server(token) if token.code() == MSSQL_LOGIN_FAILED => {
             ErrorCategory::Authentication
@@ -1026,6 +1027,7 @@ mod tests {
         for error in connection {
             assert_eq!(Error::Tiberius(error).category(), ErrorCategory::Connection);
         }
+        #[cfg(unix)]
         assert_eq!(
             Error::Tiberius(MsError::Gssapi("no ticket".into())).category(),
             ErrorCategory::Authentication
